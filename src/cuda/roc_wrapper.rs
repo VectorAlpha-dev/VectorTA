@@ -84,7 +84,7 @@ pub struct CudaRoc {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaRocPolicy,
-    // device limits used for chunking & clamping
+    
     max_grid_x: u32,
     max_threads_per_block: u32,
 }
@@ -94,7 +94,7 @@ impl CudaRoc {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
 
-        // Query device limits before moving Device into Context
+        
         let max_grid_x =
             device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let max_threads_per_block =
@@ -103,7 +103,7 @@ impl CudaRoc {
         let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/roc_kernel.ptx"));
-        // Use explicit O4 JIT (most optimized) and let the driver pick SASS for current device.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -149,7 +149,7 @@ impl CudaRoc {
         }
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn roc_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -162,7 +162,7 @@ impl CudaRoc {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort) with overflow-checked sizes
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let in_bytes = prices_f32
@@ -186,7 +186,7 @@ impl CudaRoc {
             .ok_or_else(|| CudaRocError::InvalidInput("byte size overflow".into()))?;
         Self::will_fit(total_bytes, headroom)?;
 
-        // Stream-ordered async copies/allocations (enable overlap)
+        
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(prices_f32, &self.stream)?
         };
@@ -227,7 +227,7 @@ impl CudaRoc {
             return Ok(());
         }
 
-        // Block size heuristic for memory-bound kernels; clamp to device limit
+        
         let block_x = self
             .policy
             .batch_block_x
@@ -236,7 +236,7 @@ impl CudaRoc {
 
         let mut launched = 0usize;
         while launched < n_combos {
-            // Respect hardware grid.x limit (typically >> 65k on cc >= 3.0)
+            
             let this_chunk = (n_combos - launched).min(self.max_grid_x as usize);
             let grid_x = this_chunk as u32;
             if grid_x == 0 || grid_x > self.max_grid_x {
@@ -257,7 +257,7 @@ impl CudaRoc {
                 .get_function("roc_batch_f32")
                 .map_err(|_| CudaRocError::MissingKernelSymbol { name: "roc_batch_f32" })?;
             unsafe {
-                // Typed device-pointer arithmetic (in elements)
+                
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
                 let mut series_len_i = len as i32;
@@ -288,7 +288,7 @@ impl CudaRoc {
         }
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn roc_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -311,7 +311,7 @@ impl CudaRoc {
             return Err(CudaRocError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -331,7 +331,7 @@ impl CudaRoc {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate with checked arithmetic
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let in_bytes = expected
@@ -427,7 +427,7 @@ impl CudaRoc {
         }
     }
 
-    // ---------- Helpers ----------
+    
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &RocBatchRange,
@@ -436,7 +436,7 @@ impl CudaRoc {
         if len == 0 {
             return Err(CudaRocError::InvalidInput("empty prices".into()));
         }
-        // expand grid (mirror CPU semantics; map errors to InvalidInput)
+        
         let combos = crate::indicators::roc::expand_grid(sweep)
             .map_err(|e| CudaRocError::InvalidInput(e.to_string()))?;
 
@@ -462,7 +462,7 @@ impl CudaRoc {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -471,7 +471,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
-    const PARAM_SWEEP: usize = 250; // 2..=251
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();

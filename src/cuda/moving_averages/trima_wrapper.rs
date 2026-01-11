@@ -22,9 +22,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
-// Must match CUDA kernel defaults
-const TRIMA_TS: u32 = 128; // threads per block (x) for tiled many-series/time-major
-const TRIMA_TT: u32 = 64; // time tile length for tiled many-series
+
+const TRIMA_TS: u32 = 128; 
+const TRIMA_TT: u32 = 64; 
 
 #[derive(Debug, Error)]
 pub enum CudaTrimaError {
@@ -61,7 +61,7 @@ impl DeviceArrayF32Trima {
     pub fn len(&self) -> usize { self.rows * self.cols }
 }
 
-// -------- Kernel selection policy (ALMA/CWMA-style minimal surface) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -91,7 +91,7 @@ impl Default for CudaTrimaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -125,7 +125,7 @@ impl CudaTrima {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/trima_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate optimization; then fall back
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -197,7 +197,7 @@ impl CudaTrima {
         }
     }
 
-    // Policy controls/inspection
+    
     pub fn set_policy(&mut self, policy: CudaTrimaPolicy) {
         self.policy = policy;
     }
@@ -389,7 +389,7 @@ impl CudaTrima {
             ));
         }
 
-        // Try tiled symbol first; if missing or smem insufficient, fall back to legacy 1-D
+        
         let sizeof_f32 = std::mem::size_of::<f32>();
         let mut func: Function;
         let grid_x: u32;
@@ -454,7 +454,7 @@ impl CudaTrima {
         }
         self.maybe_log_batch_debug();
 
-        // Chunk grid.y to <= 65_535
+        
         const MAX_GRID_Y: usize = 65_535;
         let mut launched = 0usize;
         while launched < n_combos {
@@ -463,7 +463,7 @@ impl CudaTrima {
 
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                // Offset periods/warms/out by launched
+                
                 let periods_ptr = d_periods.as_device_ptr().add(launched);
                 let mut periods_ptr = periods_ptr.as_raw();
                 let warms_ptr = d_warms.as_device_ptr().add(launched);
@@ -529,7 +529,7 @@ impl CudaTrima {
             let mut dev: DeviceBuffer<f32> =
                 DeviceBuffer::uninitialized_async(data.len(), &self.stream)?;
             dev.async_copy_from(data, &self.stream)?;
-            // Synchronize to ensure copy completes before unregister
+            
             self.stream.synchronize()?;
             let r2 = cu::cuMemHostUnregister(ptr);
             if r2 != cu::CUresult::CUDA_SUCCESS {
@@ -563,8 +563,8 @@ impl CudaTrima {
             ));
         }
 
-        // Policy: prefer tiled for larger problems if it fits. The tiled kernel is compiled
-        // with fixed TRIMA_TS/TRIMA_TT; do not vary tile sizes at runtime.
+        
+        
         let mut use_tiled = matches!(
             self.policy.many_series,
             ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::Tiled { .. }
@@ -574,7 +574,7 @@ impl CudaTrima {
         }
         if let ManySeriesKernelPolicy::Tiled { tile_s, tile_t } = self.policy.many_series {
             if tile_s != TRIMA_TS || tile_t != TRIMA_TT {
-                // Kernel indexing uses TRIMA_TS/TRIMA_TT constants; mismatched runtime tiles would be incorrect.
+                
                 use_tiled = false;
             }
         }
@@ -582,7 +582,7 @@ impl CudaTrima {
         let tile_s: u32 = TRIMA_TS;
         let tile_t: u32 = TRIMA_TT;
 
-        // Require at least one tile in each dimension to benefit
+        
         if cols < tile_s as usize || rows < tile_t as usize {
             use_tiled = false;
         }
@@ -641,7 +641,7 @@ impl CudaTrima {
                     return Ok(());
                 }
                 Err(_e) => {
-                    // Fall back to the 1D kernel if the tiled launch fails (e.g. insufficient shared memory).
+                    
                 }
             }
         }
@@ -724,7 +724,7 @@ impl CudaTrima {
         let n_combos = periods.len();
         let max_period = periods.iter().copied().max().unwrap_or(0);
 
-        // VRAM check (overflow-safe): prices + periods + warms + output, with ~64MB headroom
+        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaTrimaError::InvalidInput("size overflow in VRAM estimate".into()))?;
@@ -773,7 +773,7 @@ impl CudaTrima {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32Trima, CudaTrimaError> {
-        // VRAM check: prices + weights + first_valids + out with ~64MB headroom
+        
         let prices_bytes = cols * rows * std::mem::size_of::<f32>();
         let weights_bytes = period * std::mem::size_of::<f32>();
         let first_valids_bytes = cols * std::mem::size_of::<i32>();
@@ -871,7 +871,7 @@ impl CudaTrima {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

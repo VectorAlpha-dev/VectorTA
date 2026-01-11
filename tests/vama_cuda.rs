@@ -1,18 +1,18 @@
-// Integration tests for CUDA VAMA kernels
 
-use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+
+use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
     vama_batch_with_kernel, VamaBatchRange,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVama;
+use vector_ta::cuda::moving_averages::CudaVama;
 #[cfg(feature = "cuda")]
-use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
     vama_with_kernel, VamaInput, VamaParams,
 };
 
@@ -53,8 +53,8 @@ fn vama_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let cuda = CudaVama::new(0).expect("CudaVama::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    // CPU reference on FP32-rounded inputs to match CUDA math and avoid
-    // max/min window tie-break divergences from extra FP64 precision.
+    
+    
     let data32_as_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
     let cpu = vama_batch_with_kernel(&data32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let gpu_handle = cuda
@@ -114,7 +114,7 @@ fn vama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         smooth_period: Some(5),
     };
 
-    // CPU baseline per series (row-major from time-major)
+    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series in 0..num_series {
         let mut series_data = vec![f64::NAN; series_len];
@@ -128,7 +128,7 @@ fn vama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    // GPU result (time-major FP32)
+    
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaVama::new(0).expect("CudaVama::new");
     let handle = cuda

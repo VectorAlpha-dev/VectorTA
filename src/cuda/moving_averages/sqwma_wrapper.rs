@@ -48,7 +48,7 @@ pub struct CudaSqwma {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    // Cached device attributes for launch sizing
+    
     sm_count: i32,
     max_grid_x: u32,
     _warp_size: i32,
@@ -61,14 +61,14 @@ impl CudaSqwma {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Cache basic device attributes for launch heuristics
+        
         let sm_count = device.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)?;
         let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
         let warp_size = device.get_attribute(cust::device::DeviceAttribute::WarpSize)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
 
-        // Prefer higher JIT opt level first, then fallback for compatibility
+        
         let module = match Module::from_ptx(
             ptx,
             &[
@@ -282,7 +282,7 @@ impl CudaSqwma {
             .checked_add(periods_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
+        let headroom = 64 * 1024 * 1024; 
 
         Self::will_fit_checked(required, headroom)?;
 
@@ -337,7 +337,7 @@ impl CudaSqwma {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
+        let headroom = 64 * 1024 * 1024; 
 
         Self::will_fit_checked(required, headroom)?;
 
@@ -374,7 +374,7 @@ impl CudaSqwma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSqwmaError> {
-        // keep API-compatible even though max_period no longer affects shared mem
+        
         let _ = max_period;
 
         let func = self
@@ -385,7 +385,7 @@ impl CudaSqwma {
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
+        let shared_bytes: u32 = 0; 
 
         if grid_x > self.max_grid_x {
             return Err(CudaSqwmaError::LaunchConfigTooLarge {
@@ -435,7 +435,7 @@ impl CudaSqwma {
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes: u32 = 0; // optimized kernels do not use dynamic shared memory
+        let shared_bytes: u32 = 0; 
 
         if grid_x > self.max_grid_x {
             return Err(CudaSqwmaError::LaunchConfigTooLarge {
@@ -468,7 +468,7 @@ impl CudaSqwma {
         Ok(())
     }
 
-    // === Launch sizing helpers (kept simple; no gating; defaults match kernel) ===
+    
     #[inline]
     fn out_per_thread() -> u32 {
         if let Ok(s) = std::env::var("SQWMA_OUT_PER_THREAD") {
@@ -483,7 +483,7 @@ impl CudaSqwma {
     fn block_x() -> u32 {
         if let Ok(s) = std::env::var("SQWMA_BLOCK_X") {
             if let Ok(v) = s.parse::<u32>() {
-                // clamp to multiples of 32, within [32, 1024]
+                
                 let v = (v / 32).max(1).min(32) * 32;
                 return v as u32;
             }
@@ -501,7 +501,7 @@ impl CudaSqwma {
         } else {
             ((series_len as u64) + tile - 1) / tile
         };
-        // target many resident blocks per SM to hide latency
+        
         let target = (self.sm_count.max(1) as u32) * 32;
         let gx = std::cmp::max(
             1,
@@ -623,7 +623,7 @@ impl CudaSqwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -804,7 +804,7 @@ fn expand_grid_sqwma(range: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, CudaSq
         }
         return Ok(v);
     }
-    // Descend
+    
     let mut v = Vec::new();
     let mut cur = start;
     loop {

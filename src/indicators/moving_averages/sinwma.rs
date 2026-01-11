@@ -250,7 +250,7 @@ pub fn sinwma_into_slice(
 ) -> Result<(), SinWmaError> {
     let (data, weights, period, first, chosen) = sinwma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(SinWmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -258,10 +258,10 @@ pub fn sinwma_into_slice(
         });
     }
 
-    // Compute SINWMA values directly into dst
+    
     sinwma_compute_into(data, &weights, period, first, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -287,7 +287,7 @@ fn sinwma_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // weights
         AVec<f64>,
@@ -1707,7 +1707,7 @@ mod tests {
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={})",
@@ -1715,7 +1715,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={})",
@@ -1723,7 +1723,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={})",
@@ -1736,7 +1736,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_sinwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1751,10 +1751,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: generate period first, then data of appropriate length
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
-                // Data must be at least as long as period
+                
                 prop::collection::vec(
                     (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
                     period..=500,
@@ -1771,11 +1771,11 @@ mod tests {
 				let SinWmaOutput { values: out } = sinwma_with_kernel(&input, kernel).unwrap();
 				let SinWmaOutput { values: ref_out } = sinwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Output length matches input length
+				
 				prop_assert_eq!(out.len(), data.len(), "Output length should match input length");
 
-				// Property 2: NaN values in warmup period
-				// SINWMA has warmup of period - 1 samples
+				
+				
 				let warmup_end = period - 1;
 				for i in 0..warmup_end.min(data.len()) {
 					prop_assert!(
@@ -1787,23 +1787,23 @@ mod tests {
 					);
 				}
 
-				// Property 3: Values after warmup are within window bounds
+				
 				for i in warmup_end..data.len() {
 					let y = out[i];
 
-					// Skip if NaN (shouldn't happen after warmup but be safe)
+					
 					if y.is_nan() {
 						continue;
 					}
 
-					// Get the window that contributed to this output
+					
 					let window_start = i + 1 - period;
 					let window = &data[window_start..=i];
 
 					let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
 					let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-					// Allow small tolerance for floating point
+					
 					let tolerance = 1e-9 + (hi - lo).abs() * 1e-12;
 					prop_assert!(
 						y >= lo - tolerance && y <= hi + tolerance,
@@ -1817,7 +1817,7 @@ mod tests {
 					);
 				}
 
-				// Property 4: Constant input produces constant output
+				
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && !data.is_empty() {
 					for i in warmup_end..data.len() {
 						if !out[i].is_nan() {
@@ -1833,10 +1833,10 @@ mod tests {
 					}
 				}
 
-				// Property 5: Period=1 special case
+				
 				if period == 1 {
-					// With period=1, sine weight is sin(π/2) = 1.0, normalized to 1.0
-					// So output should equal input after warmup (which is 0 for period=1)
+					
+					
 					for i in 0..data.len() {
 						if !out[i].is_nan() && !data[i].is_nan() {
 							prop_assert!(
@@ -1851,14 +1851,14 @@ mod tests {
 					}
 				}
 
-				// Property 6: Kernel consistency
-				// Since AVX2/AVX512 currently forward to scalar, all should match exactly
+				
+				
 				for i in 0..data.len() {
 					if out[i].is_nan() && ref_out[i].is_nan() {
 						continue;
 					}
 
-					// Check for exact bit-level equality since they use same implementation
+					
 					let y_bits = out[i].to_bits();
 					let r_bits = ref_out[i].to_bits();
 
@@ -1874,11 +1874,11 @@ mod tests {
 					);
 				}
 
-				// Property 7: Verify sine weights properties
-				// The sine weights should sum to 1.0 after normalization
-				// We can indirectly verify this by checking that the output is a weighted average
-				// For a window of all positive values, output should be positive
-				// For a window of all negative values, output should be negative
+				
+				
+				
+				
+				
 				for i in warmup_end..data.len() {
 					if out[i].is_nan() {
 						continue;
@@ -1911,10 +1911,10 @@ mod tests {
 					}
 				}
 
-				// Property 8: Verify center-weighted behavior
-				// SINWMA uses sine weights that form a bell curve peaking in the middle
-				// The weights follow sin((k+1)π/(period+1)) for k=0 to period-1
-				// This means the output should be biased toward middle values of the window
+				
+				
+				
+				
 				if data.len() >= period * 2 {
 					for i in (warmup_end + period)..data.len().min(warmup_end + period * 3) {
 						if out[i].is_nan() {
@@ -1924,33 +1924,33 @@ mod tests {
 						let window_start = i + 1 - period;
 						let window = &data[window_start..=i];
 
-						// Only test if window has significant variation
+						
 						let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
 						let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 						let range = window_max - window_min;
 
 						if range > 1.0 {
-							// Get values from different parts of the window
+							
 							let middle_idx = period / 2;
 							let middle_value = window[middle_idx];
 							let first_value = window[0];
 							let last_value = window[period - 1];
 
-							// For a clearly ascending or descending pattern through the window,
-							// the output should be closer to the middle than to the extremes
+							
+							
 							let clearly_ascending = first_value < middle_value && middle_value < last_value
 								&& (last_value - first_value) > range * 0.8;
 							let clearly_descending = first_value > middle_value && middle_value > last_value
 								&& (first_value - last_value) > range * 0.8;
 
 							if clearly_ascending || clearly_descending {
-								// Output should be closer to middle than to either extreme
+								
 								let dist_to_middle = (out[i] - middle_value).abs();
 								let dist_to_first = (out[i] - first_value).abs();
 								let dist_to_last = (out[i] - last_value).abs();
 
-								// The output should be closer to the middle value than to the extremes
-								// Allow some tolerance since weights don't completely ignore edges
+								
+								
 								prop_assert!(
 									dist_to_middle < dist_to_first.min(dist_to_last) * 1.2,
 									"[{}] idx {}: SINWMA output {} should be closer to middle {} than to extremes [{}, {}] (period={})",
@@ -2045,7 +2045,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2053,12 +2053,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase coverage
+        
         let test_configs = vec![
-            (5, 15, 5),   // Small periods
-            (10, 30, 10), // Medium periods
-            (20, 50, 15), // Large periods
-            (2, 10, 2),   // Edge case: very small periods
+            (5, 15, 5),   
+            (10, 30, 10), 
+            (20, 50, 15), 
+            (2, 10, 2),   
         ];
 
         for (start, end, step) in test_configs {
@@ -2067,9 +2067,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2079,7 +2079,7 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2087,7 +2087,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2095,7 +2095,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2108,7 +2108,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2368,10 +2368,10 @@ pub fn sinwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = SinWmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     sinwma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2381,17 +2381,17 @@ pub fn sinwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sinwma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sinwma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2407,16 +2407,16 @@ pub fn sinwma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to sinwma_into"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
@@ -2426,18 +2426,18 @@ pub fn sinwma_into(
         };
         let input = SinWmaInput::from_slice(data, params);
 
-        // Check for aliasing (same memory location)
+        
         if in_ptr == out_ptr {
-            // Need temporary buffer for in-place operation
+            
             let mut temp = vec![0.0; len];
             sinwma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy result back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct computation into output buffer
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             sinwma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2488,7 +2488,7 @@ pub fn sinwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Keep the old API for backward compatibility
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sinwma_batch_js(
@@ -2501,7 +2501,7 @@ pub fn sinwma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     sinwma_batch_with_kernel(data, &sweep, Kernel::Auto)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2563,7 +2563,7 @@ pub fn sinwma_batch_into(
         let cols = len;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-        // Map batch kernel -> base kernel and compute directly into `out`
+        
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,

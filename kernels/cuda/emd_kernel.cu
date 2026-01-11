@@ -1,21 +1,21 @@
-// EMD kernels — FP32, shared-memory rings for ub/lb, compensated sums.
-// SM 8.9+ friendly, no FP64 in the hot loop.
-//
-// Requires: dynamic shared memory (2 * 50 * blockDim.x * sizeof(float)) and
-//            setting MAX_DYNAMIC_SHARED_SIZE_BYTES >= requested size before launch.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
-#include <math.h>        // cospif/sincospif, sqrtf
+#include <math.h>        
 
 #ifndef EMD_NAN
 #define EMD_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// ---- small helpers ----
+
 struct KahanF {
     float sum;
     float c;
@@ -30,22 +30,22 @@ struct KahanF {
     __device__ __forceinline__ float value() const { return sum + c; }
 };
 
-// Clamp cosine away from exact 0 to avoid gamma singularities
+
 __device__ __forceinline__ float clampcos(float x) {
     const float eps = 1e-6f;
     return fmaxf(fminf(x, 1.0f - eps), -1.0f + eps);
 }
 
-// ---------- One series × many params (batch) ----------
+
 extern "C" __global__ void emd_batch_f32(
-    const float* __restrict__ prices,    // length = series_len
-    const int*   __restrict__ periods,   // len = n_combos
-    const float* __restrict__ deltas,    // len = n_combos
-    const float* __restrict__ fractions, // len = n_combos
+    const float* __restrict__ prices,    
+    const int*   __restrict__ periods,   
+    const float* __restrict__ deltas,    
+    const float* __restrict__ fractions, 
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ ub_out,          // flattened [combo * series_len + t]
+    float* __restrict__ ub_out,          
     float* __restrict__ mb_out,
     float* __restrict__ lb_out)
 {
@@ -57,7 +57,7 @@ extern "C" __global__ void emd_batch_f32(
     float* __restrict__ mb_row = mb_out + base;
     float* __restrict__ lb_row = lb_out + base;
 
-    // Warmup NaN prefixes to match scalar semantics
+    
     const int fv = first_valid;
     const int per_up_low = 50;
     const int period = periods[combo];
@@ -69,12 +69,12 @@ extern "C" __global__ void emd_batch_f32(
         ub_row[i0] = EMD_NAN;
         lb_row[i0] = EMD_NAN;
     }
-    // Defer middleband warmup fill until after loop since we use mb_row as scratch
+    
 
     const float delta     = deltas[combo];
     const float fraction  = fractions[combo];
 
-    // Coefficients in FP32 (cospif expects arguments in units of π)
+    
     const float beta  = cospif(2.0f / (float)period);
     const float cos4  = clampcos(cospif(4.0f * delta / (float)period));
     const float gamma = 1.0f / cos4;
@@ -85,10 +85,10 @@ extern "C" __global__ void emd_batch_f32(
     const float   inv_up_low = 1.0f / (float)per_up_low;
     const float   inv_mid    = 1.0f / (float)per_mid;
 
-    // Shared memory rings for ub/lb, per-thread slab of length 50
+    
     extern __shared__ float smem[];
-    float* __restrict__ ring_sp_all = smem;                                  // [blockDim.x * 50]
-    float* __restrict__ ring_sv_all = smem + (size_t)blockDim.x * per_up_low; // [blockDim.x * 50]
+    float* __restrict__ ring_sp_all = smem;                                  
+    float* __restrict__ ring_sv_all = smem + (size_t)blockDim.x * per_up_low; 
     const int ring_base = threadIdx.x * per_up_low;
 
     KahanF sum_up;  sum_up.init();
@@ -126,7 +126,7 @@ extern "C" __global__ void emd_batch_f32(
         const float sp = peak_curr   * fraction;
         const float sv = valley_curr * fraction;
 
-        // ub/lb 50-sample rings in shared memory
+        
         if (count + 1 > per_up_low) {
             sum_up.sub(ring_sp_all[ring_base + idx50]);
             sum_low.sub(ring_sv_all[ring_base + idx50]);
@@ -137,16 +137,16 @@ extern "C" __global__ void emd_batch_f32(
         sum_low.add(sv);
         idx50++; if (idx50 == per_up_low) idx50 = 0;
 
-        // middle window (2*period) uses mb_row as scratch like original
+        
         sum_mid.add(bp_curr);
         if (count + 1 > per_mid) {
             sum_mid.sub(mb_row[i - per_mid]);
         }
 
-        // Scratch write (raw) first for middle-ring
+        
         mb_row[i] = bp_curr;
 
-        // Outputs (only once windows are mature)
+        
         if (count + 1 >= per_up_low) {
             ub_row[i] = sum_up.value()  * inv_up_low;
             lb_row[i] = sum_low.value() * inv_up_low;
@@ -160,21 +160,21 @@ extern "C" __global__ void emd_batch_f32(
         peak_prev = peak_curr; valley_prev = valley_curr;
         ++count;
     }
-    // Restore NaN prefix for middleband now that computation is done
+    
     for (int i0 = 0; i0 < warm_mid; ++i0) {
         mb_row[i0] = EMD_NAN;
     }
 }
 
-// ---------- Many series × one param (time-major) ----------
+
 extern "C" __global__ void emd_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm, // time-major: [t * cols + s]
-    int cols,                            // number of series
-    int rows,                            // series_len (time)
+    const float* __restrict__ prices_tm, 
+    int cols,                            
+    int rows,                            
     int period,
     float delta,
     float fraction,
-    const int* __restrict__ first_valids, // len = cols
+    const int* __restrict__ first_valids, 
     float* __restrict__ ub_tm,
     float* __restrict__ mb_tm,
     float* __restrict__ lb_tm)
@@ -196,9 +196,9 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
         ub_col[(size_t)t * cols] = EMD_NAN;
         lb_col[(size_t)t * cols] = EMD_NAN;
     }
-    // Defer middleband prefix NaN fill until after loop
+    
 
-    // Coefficients in FP32
+    
     const float beta  = cospif(2.0f / (float)period);
     const float cos4  = clampcos(cospif(4.0f * delta / (float)period));
     const float gamma = 1.0f / cos4;
@@ -265,7 +265,7 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
             sum_mid.sub(mb_col[(size_t)(t - per_mid) * cols]);
         }
 
-        // scratch write for middle ring
+        
         mb_col[(size_t)t * cols] = bp_curr;
 
         if (count + 1 >= per_up_low) {
@@ -281,7 +281,7 @@ extern "C" __global__ void emd_many_series_one_param_time_major_f32(
         peak_prev = peak_curr; valley_prev = valley_curr;
         ++count;
     }
-    // Restore NaN prefix for middleband
+    
     for (int t0 = 0; t0 < warm_mid; ++t0) {
         mb_col[(size_t)t0 * cols] = EMD_NAN;
     }

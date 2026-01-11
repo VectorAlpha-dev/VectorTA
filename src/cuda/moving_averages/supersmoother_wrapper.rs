@@ -61,7 +61,7 @@ impl CudaSuperSmoother {
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_kernel.ptx"));
 
-        // Prefer aggressive JIT with target taken from current context; allow optional maxreg override.
+        
         let mut jit_opts: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -209,10 +209,10 @@ impl CudaSuperSmoother {
             .get_function("supersmoother_batch_f32")
             .map_err(|_| CudaSuperSmootherError::MissingKernelSymbol { name: "supersmoother_batch_f32" })?;
 
-        // Prefer L1 (no dynamic shared memory in kernel)
+        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Ask CUDA for a good block size; fallback to 256
+        
         let (_min_grid, block_x) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .unwrap_or((0, 256));
@@ -221,7 +221,7 @@ impl CudaSuperSmoother {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Simple launch config validation against device caps
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
@@ -281,7 +281,7 @@ impl CudaSuperSmoother {
             &mut d_out,
         )?;
 
-        // Ensure producer stream is done so CAI v3 can omit stream field safely
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -495,7 +495,7 @@ impl CudaSuperSmoother {
         Ok(dev.buf.copy_to(out_tm)?)
     }
 
-    // -------- Optional fast-paths: device-resident input & pinned host I/O --------
+    
     /// Run batch with prices already on the device (avoids HtoD copy of inputs).
     pub fn supersmoother_batch_from_device_prices(
         &self,
@@ -593,7 +593,7 @@ impl CudaSuperSmoother {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

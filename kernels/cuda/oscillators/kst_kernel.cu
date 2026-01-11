@@ -1,8 +1,8 @@
-// CUDA kernels for Know Sure Thing (KST)
-// Optimized: FP32 + compensated sums, FMA, fast qNaN, signal first-sample fix.
-// Entry points unchanged:
-// - kst_batch_f32
-// - kst_many_series_one_param_f32
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -11,20 +11,20 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-////////////////////////////////////////////////////////////////////////////////
-// Numerics helpers
+//////////////////////////////////////////////////////////////////////////////
 
-// Cheap quiet-NaN: bitcast canonical qNaN (0x7fffffff) instead of nanf("").
-// Avoids string parsing and function call overhead.
+
+
+
 static __device__ __forceinline__ float kst_qnan() {
   return __int_as_float(0x7fffffff);
 }
 
-// Compensated accumulator (Kahan-BabuÅ¡ka-Neumaier).
-// Adds with small extra cost, markedly better precision in FP32.
+
+
 struct CompSum {
   float sum;
-  float c; // compensation
+  float c; 
   __device__ __forceinline__ void init() { sum = 0.f; c = 0.f; }
   __device__ __forceinline__ void add(float x) {
     float y = x - c;
@@ -35,19 +35,19 @@ struct CompSum {
   __device__ __forceinline__ float val() const { return sum; }
 };
 
-// ROC (%) = (curr/prev - 1) * 100, safe for zeros/non-finites
-// Use FMA form: fmaf(curr, 100/prev, -100) when valid.
-// Semantics: return 0 if prev==0 or non-finite inputs (your policy).
+
+
+
 __device__ __forceinline__ float kst_safe_roc(float curr, float prev) {
-  if (prev != 0.0f && isfinite(curr) && isfinite(prev)) {  // CUDA device isfinite() OK
+  if (prev != 0.0f && isfinite(curr) && isfinite(prev)) {  
     const float inv100_prev = 100.0f / prev;
     return __fmaf_rn(curr, inv100_prev, -100.0f);
   }
   return 0.0f;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Kernel: one series Ã— many parameter combos (rows=combinations)
+//////////////////////////////////////////////////////////////////////////////
+
 
 extern "C" __global__
 void kst_batch_f32(const float* __restrict__ prices,
@@ -99,7 +99,7 @@ void kst_batch_f32(const float* __restrict__ prices,
     float* __restrict__ line_row   = out_line   + combo * series_len;
     float* __restrict__ signal_row = out_signal + combo * series_len;
 
-    // NaN prefixes
+    
     const int nan_end_line = (warm_line < series_len ? warm_line : series_len);
     for (int i = 0; i < nan_end_line; ++i) line_row[i] = nn;
     const int nan_end_sig = (warm_sig < series_len ? warm_sig : series_len);
@@ -133,22 +133,22 @@ void kst_batch_f32(const float* __restrict__ prices,
       }
 
       if (i >= warm_line) {
-        // k = sum1*(1/s1) + sum2*(2/s2) + sum3*(3/s3) + sum4*(4/s4)
+        
         float k = __fmaf_rn(sum4.val(), w4,
                   __fmaf_rn(sum3.val(), w3,
                   __fmaf_rn(sum2.val(), w2, sum1.val() * inv1)));
 
         line_row[i] = k;
 
-        // --- Signal rolling sum with bugfix (see note below) ---
-        // 1) Always add current k
+        
+        
         ssum.add(k);
-        // 2) Subtract the element leaving the window *only if it exists*.
-        //    i - sig is a valid K index only when >= warm_line.
+        
+        
         if (sig > 0 && (i - sig) >= warm_line) {
           ssum.add(-line_row[i - sig]);
         }
-        // 3) Emit signal when i >= warm_sig (first valid window completed).
+        
         if (i >= warm_sig) {
           signal_row[i] = ssum.val() * invSig;
         }
@@ -157,8 +157,8 @@ void kst_batch_f32(const float* __restrict__ prices,
   }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-// Kernel: many series (time-major) Ã— one parameter set
+//////////////////////////////////////////////////////////////////////////////
+
 
 extern "C" __global__
 void kst_many_series_one_param_f32(const float* __restrict__ prices_tm,
@@ -248,7 +248,7 @@ void kst_many_series_one_param_f32(const float* __restrict__ prices_tm,
                   __fmaf_rn(sum2.val(), w2, sum1.val() * inv1)));
         out_line_tm[idx] = k;
 
-        // Rolling signal with same bugfix logic:
+        
         ssum.add(k);
         if (sig > 0 && (t - sig) >= warm_line) {
           ssum.add(-out_line_tm[(t - sig) * num_series + s]);

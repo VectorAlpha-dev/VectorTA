@@ -248,7 +248,7 @@ impl CudaCvi {
         let n_combos = periods.len();
 
         // Fail fast if the full output + inputs cannot fit (chunking won't help d_out size)
-        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let headroom = 64 * 1024 * 1024; 
         let need = Self::bytes_required_batch(n_combos, len)
             .ok_or_else(|| CudaCviError::InvalidInput("size overflow".into()))?;
         if !Self::will_fit(need, headroom) {
@@ -256,7 +256,7 @@ impl CudaCvi {
             return Err(CudaCviError::OutOfMemory { required: need, free, headroom });
         }
 
-        // Host params
+        
         let h_periods: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
         let h_alphas: Vec<f32> = periods
             .iter()
@@ -267,20 +267,20 @@ impl CudaCvi {
             .map(|&p| (first_valid + (2 * p - 1)) as i32)
             .collect();
 
-        // Device buffers
+        
         let mut d_high_opt = Some(DeviceBuffer::from_slice(high)?);
         let mut d_low_opt = Some(DeviceBuffer::from_slice(low)?);
         let d_periods = DeviceBuffer::from_slice(&h_periods)?;
         let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
         let d_warms = DeviceBuffer::from_slice(&h_warms)?;
 
-        // Can we use the range-based kernel and build range on device?
+        
         let has_cvi_from_range = self.module.get_function("cvi_batch_from_range_f32").is_ok();
         let has_range_kernel = self.module.get_function("range_from_high_low_f32").is_ok();
         let mut d_range_opt: Option<DeviceBuffer<f32>> = None;
         if has_cvi_from_range {
             if has_range_kernel {
-                // Build range on device: range[t] = high[t] - low[t]
+                
                 let mut d_range: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
                 let range_func = self
                     .module
@@ -311,31 +311,31 @@ impl CudaCvi {
                     ];
                     self.stream.launch(&range_func, grid, block, 0, args)?;
                 }
-                // Free high/low early once range exists
+                
                 d_high_opt = None;
                 d_low_opt = None;
                 d_range_opt = Some(d_range);
             } else {
-                // Fallback: host precompute range and copy
+                
                 let mut r = vec![0f32; len];
                 for i in 0..len {
                     r[i] = high[i] - low[i];
                 }
                 let dev = DeviceBuffer::from_slice(&r)?;
                 d_range_opt = Some(dev);
-                // Inputs no longer needed once range is available
+                
                 d_high_opt = None;
                 d_low_opt = None;
             }
         }
 
-        // Output buffer (full size; we already checked it fits)
+        
         let total = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaCviError::InvalidInput("n_combos*len overflow".into()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
-        // Choose kernel once
+        
         let func = if has_cvi_from_range {
             self.module
                 .get_function("cvi_batch_from_range_f32")
@@ -346,13 +346,13 @@ impl CudaCvi {
                 .map_err(|_| CudaCviError::MissingKernelSymbol { name: "cvi_batch_f32" })?
         };
 
-        // Keep chunking purely as launch heuristic (not memory workaround)
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
         let chunk = {
-            let max_blocks: usize = 16_384; // cap grids to reasonable size
+            let max_blocks: usize = 16_384; 
             (n_combos).min(max_blocks * (block_x as usize))
         };
 
@@ -424,7 +424,7 @@ impl CudaCvi {
             launched += cur;
         }
 
-        // Synchronize producing stream so consumers via CAI v3 need no stream key
+        
         self.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -478,7 +478,7 @@ impl CudaCvi {
             BatchKernelPolicy::Auto => 256,
         };
         let chunk = {
-            let max_blocks: usize = 16_384; // cap grids to reasonable size
+            let max_blocks: usize = 16_384; 
             (rows).min(max_blocks * (block_x as usize))
         };
 
@@ -583,7 +583,7 @@ impl CudaCvi {
         let total = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaCviError::InvalidInput("rows*cols overflow".into()))?;
-        // Approximate required VRAM: 2×inputs + first_valids + outputs
+        
         let f32b = std::mem::size_of::<f32>();
         let i32b = std::mem::size_of::<i32>();
         let need = total
@@ -638,7 +638,7 @@ impl CudaCvi {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        // synchronize producing stream for CAI v3 consumers
+        
         self.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -649,7 +649,7 @@ impl CudaCvi {
     }
 }
 
-// ---------------- Bench profiles ----------------
+
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
@@ -657,7 +657,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const DEV_BATCH_LEN: usize = 65_536;
-    const DEV_BATCH_PERIOD_SWEEP: (usize, usize, usize) = (2, 8192, 2); // 4096 combos
+    const DEV_BATCH_PERIOD_SWEEP: (usize, usize, usize) = (2, 8192, 2); 
 
     fn synth_hl_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -865,8 +865,8 @@ pub mod benches {
     }
 
     fn bytes_one_series_many_params(len: usize, rows: usize) -> usize {
-        // Inputs (high+low or range) + params + outputs + 64MB headroom.
-        let in_bytes = len * std::mem::size_of::<f32>(); // range
+        
+        let in_bytes = len * std::mem::size_of::<f32>(); 
         let param_bytes = rows
             * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
         let out_bytes = rows * len * std::mem::size_of::<f32>();

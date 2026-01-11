@@ -97,7 +97,7 @@ impl CudaAvsl {
     }
 
     fn expand_grid(range: &AvslBatchRange) -> Vec<AvslParams> {
-        // Keep in sync with avsl.rs expand_grid_avsl
+        
         fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
             if st == 0 || s == e { return vec![s]; }
             if s < e { return (s..=e).step_by(st.max(1)).collect(); }
@@ -201,7 +201,7 @@ impl CudaAvsl {
             .get_function("avsl_batch_f32")
             .map_err(|_| CudaAvslError::MissingKernelSymbol { name: "avsl_batch_f32" })?;
 
-        // Block size: suggest from CUDA, allow override via AVSL_BLOCK_X
+        
         let block_x: u32 = match std::env::var("AVSL_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min, suggested) = func
@@ -215,7 +215,7 @@ impl CudaAvsl {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Validate launch sizes
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -262,7 +262,7 @@ impl CudaAvsl {
     ) -> Result<(DeviceArrayF32, Vec<AvslParams>), CudaAvslError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(close_f32, low_f32, volume_f32, sweep)?;
 
-        // VRAM estimate
+        
         let rows = combos.len();
         let el_f32 = std::mem::size_of::<f32>();
         let el_i32 = std::mem::size_of::<i32>();
@@ -277,7 +277,7 @@ impl CudaAvsl {
             .unwrap_or(64 * 1024 * 1024);
         Self::will_fit(bytes_required, headroom)?;
 
-        // Host-side combos → arrays
+        
         let fast: Vec<i32> = combos
             .iter()
             .map(|c| c.fast_period.unwrap() as i32)
@@ -291,7 +291,7 @@ impl CudaAvsl {
             .map(|c| c.multiplier.unwrap() as f32)
             .collect();
 
-        // Async path with pinned host buffers
+        
         let h_close = LockedBuffer::from_slice(close_f32).map_err(CudaAvslError::Cuda)?;
         let h_low = LockedBuffer::from_slice(low_f32).map_err(CudaAvslError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(volume_f32).map_err(CudaAvslError::Cuda)?;
@@ -344,7 +344,7 @@ impl CudaAvsl {
         ))
     }
 
-    // ----- Many-series, one param (time-major) -----
+    
     fn prepare_many_series_inputs(
         close_tm_f32: &[f32],
         low_tm_f32: &[f32],
@@ -364,7 +364,7 @@ impl CudaAvsl {
         if fast == 0 || slow == 0 {
             return Err(CudaAvslError::InvalidInput("period must be >=1".into()));
         }
-        // first_valid per series = max first-valid across close/low/vol for that column
+        
         let mut firsts = vec![0i32; cols];
         for c in 0..cols {
             let mut fa: Option<usize> = None;
@@ -429,7 +429,7 @@ impl CudaAvsl {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Validate launch sizes
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -485,7 +485,7 @@ impl CudaAvsl {
             params,
         )?;
 
-        // Rough VRAM check
+        
         let bytes = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>() * 4))
@@ -539,7 +539,7 @@ impl CudaAvsl {
     }
 }
 
-// ---------- Bench Profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -648,7 +648,7 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
 
-        // Match wrapper's block selection once in prep.
+        
         let block_x: u32 = match std::env::var("AVSL_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let func = cuda.module.get_function("avsl_batch_f32").expect("avsl_batch_f32");

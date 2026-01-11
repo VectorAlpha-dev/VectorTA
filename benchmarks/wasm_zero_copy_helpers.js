@@ -8,7 +8,7 @@
 export class AlmaZeroCopy {
     constructor(wasm) {
         this.wasm = wasm;
-        // Access memory through the __wasm export
+        
         this.memory = wasm.__wasm ? wasm.__wasm.memory : wasm.memory;
     }
 
@@ -52,15 +52,15 @@ export class AlmaZeroCopy {
         const { period = 9, offset = 0.85, sigma = 6.0 } = params;
         const len = inputData.length;
 
-        // Allocate input and output buffers
+        
         const input = this.allocBuffer(len);
         const output = this.allocBuffer(len);
 
         try {
-            // Copy data to WASM memory
+            
             input.view.set(inputData);
 
-            // Run computation
+            
             const result = this.wasm.alma_into(
                 input.ptr,
                 output.ptr,
@@ -74,10 +74,10 @@ export class AlmaZeroCopy {
                 throw new Error('ALMA computation failed');
             }
 
-            // Return view to output (caller must copy if needed)
+            
             return output.view;
         } catch (error) {
-            // Clean up on error
+            
             this.freeBuffer(input.ptr, len);
             this.freeBuffer(output.ptr, len);
             throw error;
@@ -94,15 +94,15 @@ export class AlmaZeroCopy {
         const { period = 9, offset = 0.85, sigma = 6.0 } = params;
         const len = inputData.length;
 
-        // Allocate buffers
+        
         const input = this.allocBuffer(len);
         const output = this.allocBuffer(len);
 
         try {
-            // Copy data to WASM memory
+            
             input.view.set(inputData);
 
-            // Run computation
+            
             const result = this.wasm.alma_into(
                 input.ptr,
                 output.ptr,
@@ -116,23 +116,23 @@ export class AlmaZeroCopy {
                 throw new Error('ALMA computation failed');
             }
 
-            // Create a new view in case memory grew
+            
             const currentOutputView = new Float64Array(
                 this.wasm.__wasm.memory.buffer,
                 output.ptr,
                 len
             );
             
-            // Copy result before freeing
+            
             const resultCopy = new Float64Array(currentOutputView);
             
-            // Free buffers
+            
             this.freeBuffer(input.ptr, len);
             this.freeBuffer(output.ptr, len);
             
             return resultCopy;
         } catch (error) {
-            // Clean up on error
+            
             this.freeBuffer(input.ptr, len);
             this.freeBuffer(output.ptr, len);
             throw error;
@@ -140,9 +140,9 @@ export class AlmaZeroCopy {
     }
 }
 
-// Note: AlmaContext API has been deprecated.
-// For weight reuse patterns, use the AlmaBenchmarkHelper class below
-// which demonstrates the recommended approach using the Fast/Unsafe API.
+
+
+
 
 /**
  * Benchmark helper that reuses buffers
@@ -150,15 +150,15 @@ export class AlmaZeroCopy {
 export class AlmaBenchmarkHelper {
     constructor(wasm, dataSize) {
         this.wasm = wasm;
-        // Access memory through the __wasm export
+        
         this.memory = wasm.__wasm ? wasm.__wasm.memory : wasm.memory;
         this.dataSize = dataSize;
         
-        // Pre-allocate buffers
+        
         this.inputPtr = this.wasm.alma_alloc(dataSize);
         this.outputPtr = this.wasm.alma_alloc(dataSize);
         
-        // Create views
+        
         this.inputView = new Float64Array(this.memory.buffer, this.inputPtr, dataSize);
         this.outputView = new Float64Array(this.memory.buffer, this.outputPtr, dataSize);
     }
@@ -171,10 +171,10 @@ export class AlmaBenchmarkHelper {
     run(data, params = {}) {
         const { period = 9, offset = 0.85, sigma = 6.0 } = params;
         
-        // Copy data to pre-allocated buffer
+        
         this.inputView.set(data);
         
-        // Run computation
+        
         const result = this.wasm.alma_into(
             this.inputPtr,
             this.outputPtr,
@@ -188,7 +188,7 @@ export class AlmaBenchmarkHelper {
             throw new Error('ALMA computation failed');
         }
         
-        // Return view (no copy)
+        
         return this.outputView;
     }
 

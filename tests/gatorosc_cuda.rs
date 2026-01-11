@@ -1,17 +1,17 @@
-// CUDA integration tests for Gator Oscillator (GATOR)
 
-use my_project::indicators::gatorosc::{
+
+use vector_ta::indicators::gatorosc::{
     gatorosc_batch_with_kernel, gatorosc_with_kernel, GatorOscBatchRange, GatorOscInput,
     GatorOscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
+use vector_ta::cuda::oscillators::gatorosc_wrapper::CudaGatorOsc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -104,8 +104,8 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 2048usize; // time
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -116,7 +116,7 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
 
     let (jl, js, tl, ts, ll, ls) = (13usize, 8usize, 8usize, 5usize, 5usize, 3usize);
 
-    // CPU baseline per series
+    
     let mut cpu_u = vec![f64::NAN; cols * rows];
     let mut cpu_l = vec![f64::NAN; cols * rows];
     let mut cpu_uc = vec![f64::NAN; cols * rows];
@@ -144,7 +144,7 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    // GPU
+    
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaGatorOsc::new(0).expect("CudaGatorOsc::new");
     let dev = cuda

@@ -1,16 +1,16 @@
-// Integration tests for CUDA Alligator kernels
 
-use my_project::indicators::alligator::{
+
+use vector_ta::indicators::alligator::{
     alligator_batch_with_kernel, AlligatorBatchRange, AlligatorBuilder, AlligatorParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaAlligator;
+use vector_ta::cuda::CudaAlligator;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -112,7 +112,7 @@ fn alligator_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let params = AlligatorParams::default();
 
-    // CPU reference in time-major form
+    
     let mut jaw_tm = vec![f64::NAN; cols * rows];
     let mut teeth_tm = vec![f64::NAN; cols * rows];
     let mut lips_tm = vec![f64::NAN; cols * rows];

@@ -300,7 +300,7 @@ impl CudaDonchian {
         let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(1);
         let levels = rmq_levels_for_max_period(max_period);
 
-        // VRAM estimate: inputs + periods + outputs + RMQ scratch
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let bytes_in = len.checked_mul(2).and_then(|v| v.checked_mul(sz_f32)).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (inputs)".into()))?;
         let bytes_periods = combos.len().checked_mul(std::mem::size_of::<i32>()).ok_or_else(|| CudaDonchianError::InvalidInput("size overflow (periods)".into()))?;
@@ -313,7 +313,7 @@ impl CudaDonchian {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        // Device buffers (common)
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -323,10 +323,10 @@ impl CudaDonchian {
         let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
 
-        // RMQ is always used for batch path
+        
         let stride = len;
 
-        // scratch buffers sized only to required levels
+        
         let mut d_st_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
         let mut d_st_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
         let mut d_st_nan: DeviceBuffer<u8> = unsafe { DeviceBuffer::uninitialized_async(levels * stride, &self.stream) }?;
@@ -351,7 +351,7 @@ impl CudaDonchian {
         unsafe { (*(self as *const _ as *mut CudaDonchian)).last_batch = Some(BatchKernelSelected::Rmq { build_bx, query_bx }); }
 
         unsafe {
-            // level 0 copies
+            
             let mut high_in = d_high.as_device_ptr().as_raw();
             let mut low_in  = d_low.as_device_ptr().as_raw();
             let mut out_hi0 = as_raw_offset(&d_st_high, 0);
@@ -384,7 +384,7 @@ impl CudaDonchian {
             self.stream.launch(&init_nan_u8, build_grid, build_block, 0, &mut args_nm0)?;
         }
 
-        // Build higher levels only up to `levels`
+        
         for k in 1..levels {
             let offset = 1 << (k - 1);
             unsafe {
@@ -393,7 +393,7 @@ impl CudaDonchian {
                 let prev_elems = (k - 1) * stride;
                 let curr_elems = k * stride;
 
-                // MAX
+                
                 let mut prev = as_raw_offset(&d_st_high, prev_elems);
                 let mut curr = as_raw_offset(&d_st_high, curr_elems);
                 let mut args: &mut [*mut c_void] = &mut [
@@ -404,7 +404,7 @@ impl CudaDonchian {
                 ];
                 self.stream.launch(&build_max, build_grid, build_block, 0, &mut args)?;
 
-                // MIN
+                
                 prev = as_raw_offset(&d_st_low, prev_elems);
                 curr = as_raw_offset(&d_st_low, curr_elems);
                 let mut args2: &mut [*mut c_void] = &mut [
@@ -415,7 +415,7 @@ impl CudaDonchian {
                 ];
                 self.stream.launch(&build_min, build_grid, build_block, 0, &mut args2)?;
 
-                // OR (u8)
+                
                 let mut prev_b = as_raw_offset(&d_st_nan, prev_elems);
                 let mut curr_b = as_raw_offset(&d_st_nan, curr_elems);
                 let mut args3: &mut [*mut c_void] = &mut [
@@ -428,7 +428,7 @@ impl CudaDonchian {
             }
         }
 
-        // Query pass
+        
         unsafe {
             let mut periods  = d_periods.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
@@ -502,7 +502,7 @@ impl CudaDonchian {
             return Err(CudaDonchianError::InvalidInput("invalid period".into()));
         }
 
-        // Build first_valid per series (column) respecting NaN-gating on either input
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -606,7 +606,7 @@ impl CudaDonchian {
 
  
 
-// ---- Helpers for RMQ levels and sizing ----
+
 #[inline]
 fn floor_log2_usize(x: usize) -> u32 {
     debug_assert!(x > 0);
@@ -638,20 +638,20 @@ fn as_raw_offset<T: cust::memory::DeviceCopy>(buf: &DeviceBuffer<T>, elems_offse
     buf.as_device_ptr().as_raw() + (elems_offset * std::mem::size_of::<T>()) as u64
 }
 
-// ------------------------ Benches ------------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::indicators::donchian::DonchianBatchRange;
 
-    const ONE_SERIES_LEN: usize = 200_000; // keep moderate due to naive window scan
+    const ONE_SERIES_LEN: usize = 200_000; 
     const PARAM_SWEEP: usize = 64;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes  = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        let max_period = 10 + PARAM_SWEEP - 1; // matches prep sweep
+        let max_period = 10 + PARAM_SWEEP - 1; 
         let levels = super::rmq_levels_for_max_period(max_period);
         let rmq_bytes = super::bytes_rmq_tables(ONE_SERIES_LEN, levels);
         in_bytes + out_bytes + rmq_bytes + 64 * 1024 * 1024
@@ -718,7 +718,7 @@ pub mod benches {
         for i in 0..ONE_SERIES_LEN {
             low[i] = 0.7 * high[i] + 0.1 * (i as f32).sin();
         }
-        // put NaNs at start for warmup semantics
+        
         for i in 0..32 {
             high[i] = f32::NAN;
             low[i] = f32::NAN;
@@ -727,7 +727,7 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
 
-        // Expand combos and build RMQ once (prep is outside measurement loop)
+        
         let (combos, first_valid, len) =
             CudaDonchian::prepare_batch_inputs(&high, &low, &sweep).expect("prep inputs");
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -735,11 +735,11 @@ pub mod benches {
         let levels = rmq_levels_for_max_period(max_period);
         let stride = len;
 
-        // Upload base inputs for RMQ build
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
 
-        // RMQ tables (levels x len)
+        
         let mut d_st_high: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(levels * stride, &cuda.stream) }
                 .expect("d_st_high");
@@ -777,7 +777,7 @@ pub mod benches {
         let build_block: BlockSize = (build_bx, 1, 1).into();
 
         unsafe {
-            // level 0 copies
+            
             let mut high_in = d_high.as_device_ptr().as_raw();
             let mut low_in = d_low.as_device_ptr().as_raw();
             let mut out_hi0 = as_raw_offset(&d_st_high, 0);
@@ -824,7 +824,7 @@ pub mod benches {
                 let prev_elems = (k - 1) * stride;
                 let curr_elems = k * stride;
 
-                // MAX
+                
                 let mut prev = as_raw_offset(&d_st_high, prev_elems);
                 let mut curr = as_raw_offset(&d_st_high, curr_elems);
                 let mut args: &mut [*mut c_void] = &mut [
@@ -837,7 +837,7 @@ pub mod benches {
                     .launch(&build_max, build_grid, build_block, 0, &mut args)
                     .expect("rmq build max");
 
-                // MIN
+                
                 prev = as_raw_offset(&d_st_low, prev_elems);
                 curr = as_raw_offset(&d_st_low, curr_elems);
                 let mut args2: &mut [*mut c_void] = &mut [
@@ -850,7 +850,7 @@ pub mod benches {
                     .launch(&build_min, build_grid, build_block, 0, &mut args2)
                     .expect("rmq build min");
 
-                // OR
+                
                 let mut prev_b = as_raw_offset(&d_st_nan, prev_elems);
                 let mut curr_b = as_raw_offset(&d_st_nan, curr_elems);
                 let mut args3: &mut [*mut c_void] = &mut [
@@ -865,7 +865,7 @@ pub mod benches {
             }
         }
 
-        // Params + outputs for query kernel
+        
         let d_periods =
             unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }.expect("d_periods");
         let mut d_upper: DeviceBuffer<f32> =
@@ -878,7 +878,7 @@ pub mod benches {
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
                 .expect("d_lower");
 
-        // Query launch config (matches wrapper defaults)
+        
         let query_bx: u32 = 256;
         let query_grid_x: u32 = ((combos.len() as u32) + query_bx - 1) / query_bx;
         let query_grid: GridSize = (query_grid_x.max(1), 1, 1).into();

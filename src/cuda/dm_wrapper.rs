@@ -166,7 +166,7 @@ impl CudaDm {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -292,7 +292,7 @@ impl CudaDm {
             let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            // Validate against device maximum threads per block
+            
             let max_threads = Device::get_attribute(Device::get_device(self.device_id)?, DeviceAttribute::MaxThreadsPerBlock)? as u32;
             if block_x > max_threads {
                 return Err(CudaDmError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
@@ -332,7 +332,7 @@ impl CudaDm {
         let elems = cols.checked_mul(rows).ok_or_else(|| CudaDmError::InvalidInput("size overflow (cols*rows)".into()))?;
         if high_tm.len() != elems || low_tm.len() != elems { return Err(CudaDmError::InvalidInput("matrix shape mismatch".into())); }
 
-        // Per-series first_valid detection
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -407,7 +407,7 @@ impl CudaDm {
         }
         let pair =
             self.dm_many_series_one_param_time_major_dev(high_tm, low_tm, cols, rows, period)?;
-        // Single blocking D→H copy per output – no extra pinned stage.
+        
         pair.plus.buf.copy_to(plus_tm_out)?;
         pair.minus.buf.copy_to(minus_tm_out)?;
         Ok(())
@@ -476,7 +476,7 @@ impl CudaDm {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -653,7 +653,7 @@ pub mod benches {
         let d_minus_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_minus_tm");
 
-        // Match wrapper block_x selection once in prep.
+        
         let mut func = cuda
             .module
             .get_function("dm_many_series_one_param_time_major_f32")

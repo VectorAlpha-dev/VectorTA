@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 let wasm;
 let testData;
 
-// Helper function to extract sine and lead from new flattened format
+
 function extractMswResults(result) {
     const sine = result.values.slice(0, result.cols);
     const lead = result.values.slice(result.cols);
@@ -31,14 +31,14 @@ function extractMswResults(result) {
 }
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -48,7 +48,7 @@ test.before(async () => {
 });
 
 test('MSW partial params', () => {
-    // Test with default parameters - mirrors check_msw_partial_params
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.msw_js(close, 5);
@@ -57,7 +57,7 @@ test('MSW partial params', () => {
     assert.strictEqual(result.cols, close.length, 'Columns should match input length');
     assert.strictEqual(result.values.length, 2 * close.length, 'Values should contain sine and lead');
     
-    // Extract sine and lead from flattened format
+    
     const sine = result.values.slice(0, close.length);
     const lead = result.values.slice(close.length);
     assert.strictEqual(sine.length, close.length);
@@ -65,7 +65,7 @@ test('MSW partial params', () => {
 });
 
 test('MSW accuracy', async () => {
-    // Test MSW matches expected values from Rust tests - mirrors check_msw_accuracy
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.msw;
     const period = expected.defaultParams.period;
@@ -76,29 +76,29 @@ test('MSW accuracy', async () => {
     assert.strictEqual(sine.length, close.length);
     assert.strictEqual(lead.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5Sine = Array.from(sine.slice(-5));
     const last5Lead = Array.from(lead.slice(-5));
     
     assertArrayClose(
         last5Sine,
         expected.last5Sine,
-        1e-1,  // MSW uses 1e-1 tolerance in Rust tests
+        1e-1,  
         "MSW sine last 5 values mismatch"
     );
     assertArrayClose(
         last5Lead,
         expected.last5Lead,
-        1e-1,  // MSW uses 1e-1 tolerance in Rust tests
+        1e-1,  
         "MSW lead last 5 values mismatch"
     );
 });
 
 test('MSW default candles', () => {
-    // Test MSW with default parameters - mirrors check_msw_default_candles
+    
     const close = new Float64Array(testData.close);
     
-    // Default params: period=5
+    
     const result = wasm.msw_js(close, 5);
     const { sine, lead } = extractMswResults(result);
     assert.strictEqual(sine.length, close.length);
@@ -106,7 +106,7 @@ test('MSW default candles', () => {
 });
 
 test('MSW zero period', () => {
-    // Test MSW fails with zero period - mirrors check_msw_zero_period
+    
     const data = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -115,7 +115,7 @@ test('MSW zero period', () => {
 });
 
 test('MSW period exceeds length', () => {
-    // Test MSW fails when period exceeds data length - mirrors check_msw_period_exceeds_length
+    
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -124,7 +124,7 @@ test('MSW period exceeds length', () => {
 });
 
 test('MSW very small dataset', () => {
-    // Test MSW fails with insufficient data - mirrors check_msw_very_small_dataset
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -133,7 +133,7 @@ test('MSW very small dataset', () => {
 });
 
 test('MSW empty input', () => {
-    // Test MSW fails with empty input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -142,7 +142,7 @@ test('MSW empty input', () => {
 });
 
 test('MSW NaN handling', () => {
-    // Test MSW handles NaN values correctly - mirrors check_msw_nan_handling
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.msw;
     const period = expected.defaultParams.period;
@@ -152,14 +152,14 @@ test('MSW NaN handling', () => {
     assert.strictEqual(sine.length, close.length);
     assert.strictEqual(lead.length, close.length);
     
-    // First `period-1` values should be NaN
-    const expectedWarmup = expected.warmupPeriod;  // for period=5, warmup is 4
+    
+    const expectedWarmup = expected.warmupPeriod;  
     assertAllNaN(Array.from(sine.slice(0, expectedWarmup)), "Expected NaN in sine warmup period");
     assertAllNaN(Array.from(lead.slice(0, expectedWarmup)), "Expected NaN in lead warmup period");
     
-    // After warmup period, no NaN values should exist
+    
     if (sine.length > expectedWarmup) {
-        const nonNanStart = Math.max(expectedWarmup, 240);  // Skip initial NaN values in data
+        const nonNanStart = Math.max(expectedWarmup, 240);  
         if (sine.length > nonNanStart) {
             for (let i = nonNanStart; i < sine.length; i++) {
                 assert(!isNaN(sine[i]), `Found unexpected NaN in sine at index ${i}`);
@@ -170,7 +170,7 @@ test('MSW NaN handling', () => {
 });
 
 test('MSW all NaN input', () => {
-    // Test MSW with all NaN values
+    
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
@@ -180,7 +180,7 @@ test('MSW all NaN input', () => {
 });
 
 test('MSW mixed NaN input', () => {
-    // Test MSW with mixed NaN values
+    
     const mixedData = new Float64Array([NaN, NaN, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0]);
     const period = 3;
     
@@ -189,14 +189,14 @@ test('MSW mixed NaN input', () => {
     assert.strictEqual(sine.length, mixedData.length);
     assert.strictEqual(lead.length, mixedData.length);
     
-    // First values should be NaN due to input NaN and warmup
+    
     assert(isNaN(sine[0]));
     assert(isNaN(sine[1]));
     assert(isNaN(lead[0]));
     assert(isNaN(lead[1]));
     
-    // After warmup from first valid value, should have real values
-    // First valid value is at index 2, so warmup ends at index 2 + period - 1 = 4
+    
+    
     for (let i = 4; i < sine.length; i++) {
         assert(!isNaN(sine[i]), `Unexpected NaN in sine at index ${i}`);
         assert(!isNaN(lead[i]), `Unexpected NaN in lead at index ${i}`);
@@ -204,7 +204,7 @@ test('MSW mixed NaN input', () => {
 });
 
 test('MSW simple predictable pattern', () => {
-    // Test MSW with a simple pattern
+    
     const simpleData = new Float64Array([1, 2, 3, 4, 5, 4, 3, 2, 1, 2, 3, 4, 5]);
     const period = 5;
     
@@ -213,18 +213,18 @@ test('MSW simple predictable pattern', () => {
     assert.strictEqual(sine.length, simpleData.length);
     assert.strictEqual(lead.length, simpleData.length);
     
-    // Check warmup period
+    
     for (let i = 0; i < period - 1; i++) {
         assert(isNaN(sine[i]), `Expected NaN in sine at index ${i}`);
         assert(isNaN(lead[i]), `Expected NaN in lead at index ${i}`);
     }
     
-    // After warmup, all values should be valid
+    
     for (let i = period - 1; i < sine.length; i++) {
         assert(!isNaN(sine[i]), `Unexpected NaN in sine at index ${i}`);
         assert(!isNaN(lead[i]), `Unexpected NaN in lead at index ${i}`);
         
-        // Sine values should be between -1 and 1
+        
         assert(sine[i] >= -1.0 && sine[i] <= 1.0, 
                `Sine value ${sine[i]} at index ${i} is out of range [-1, 1]`);
         assert(lead[i] >= -1.0 && lead[i] <= 1.0, 
@@ -232,8 +232,8 @@ test('MSW simple predictable pattern', () => {
     }
 });
 
-// Note: MSW batch is not yet implemented in WASM bindings
-// The following batch tests are commented out until batch functionality is added
+
+
 
 /*
 test('MSW batch single parameter', () => {
@@ -355,8 +355,8 @@ test('MSW batch edge cases', () => {
 });
 */
 
-// Note: MSW zero-copy API functions (msw_alloc, msw_free) are not yet implemented in WASM bindings
-// The following tests are commented out until these functions are added
+
+
 
 /*
 test('MSW zero-copy API', () => {
@@ -477,9 +477,9 @@ test('MSW zero-copy error handling', () => {
 });
 */
 
-// This test works with msw_into_flat which is available
+
 test('MSW SIMD128 consistency', () => {
-    // This test verifies SIMD128 produces same results as scalar
+    
     const testCases = [
         { size: 10, period: 3 },
         { size: 50, period: 5 },
@@ -496,17 +496,17 @@ test('MSW SIMD128 consistency', () => {
         const result = wasm.msw_js(data, testCase.period);
         const { sine, lead } = extractMswResults(result);
         
-        // Basic sanity checks
+        
         assert.strictEqual(sine.length, data.length);
         assert.strictEqual(lead.length, data.length);
         
-        // Check warmup period
+        
         for (let i = 0; i < testCase.period - 1; i++) {
             assert(isNaN(sine[i]), `Expected NaN at sine warmup index ${i} for size=${testCase.size}`);
             assert(isNaN(lead[i]), `Expected NaN at lead warmup index ${i} for size=${testCase.size}`);
         }
         
-        // Check values exist after warmup and are in valid range
+        
         let sineSum = 0;
         let leadSum = 0;
         let count = 0;
@@ -514,7 +514,7 @@ test('MSW SIMD128 consistency', () => {
             assert(!isNaN(sine[i]), `Unexpected NaN in sine at index ${i} for size=${testCase.size}`);
             assert(!isNaN(lead[i]), `Unexpected NaN in lead at index ${i} for size=${testCase.size}`);
             
-            // MSW outputs should be in range [-1, 1]
+            
             assert(sine[i] >= -1.0 && sine[i] <= 1.0,
                    `Sine value ${sine[i]} out of range at index ${i}`);
             assert(lead[i] >= -1.0 && lead[i] <= 1.0,
@@ -525,7 +525,7 @@ test('MSW SIMD128 consistency', () => {
             count++;
         }
         
-        // Verify averages are reasonable
+        
         const avgSine = sineSum / count;
         const avgLead = leadSum / count;
         assert(Math.abs(avgSine) < 1.0, `Average sine ${avgSine} seems unreasonable`);

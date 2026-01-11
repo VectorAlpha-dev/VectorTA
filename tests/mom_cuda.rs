@@ -1,14 +1,14 @@
-// CUDA integration tests for Momentum (MOM)
 
-use my_project::indicators::mom::{mom_with_kernel, MomBatchRange, MomInput, MomParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::mom::{mom_with_kernel, MomBatchRange, MomInput, MomParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::mom_wrapper::CudaMom;
+use vector_ta::cuda::oscillators::mom_wrapper::CudaMom;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -40,10 +40,10 @@ fn mom_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = MomBatchRange { period: (2, 64, 3) };
 
-    // CPU
-    let cpu = my_project::indicators::mom::mom_batch_slice(&data, &sweep, Kernel::ScalarBatch)?;
+    
+    let cpu = vector_ta::indicators::mom::mom_batch_slice(&data, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU
+    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaMom::new(0).expect("CudaMom::new");
     let dev = cuda
@@ -74,19 +74,19 @@ fn mom_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 11usize; // series
-    let rows = 2048usize; // time
+    let cols = 11usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            // stagger first_valid per series
+            
             let x = (t as f64) + (s as f64) * 0.2;
             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -103,7 +103,7 @@ fn mom_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaMom::new(0).expect("CudaMom::new");
     let dev = cuda

@@ -1,11 +1,11 @@
-// CUDA kernels for Moving Average Adaptive Q (MAAQ) — optimized.
-//
-// Changes vs. original:
-//  - Sequential loops are executed by thread 0 only (fixes UB and removes wasted work).
-//  - Removed redundant shared-memory zero-initialization.
-//  - Reduced global loads in the hot loop by carrying prev_input.
-//  - Use FMA-friendly polynomial form for sc = (fast*er + slow)^2.
-//  - Keep identical warmup/NaN behavior per the original kernels.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,10 +13,10 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
-#include <math_constants.h>  // CUDART_NAN_F
+#include <math_constants.h>  
 
-// Helper: polynomial evaluation for sc = (fast*er + slow)^2
-// Let a = fast^2, b = 2*fast*slow, c = slow^2, then sc = a*er^2 + b*er + c.
+
+
 static __forceinline__ __device__
 float sc_from_er_poly(float er, float a, float b, float c) {
     float er2 = er * er;
@@ -50,46 +50,46 @@ void maaq_batch_f32(const float* __restrict__ prices,
     const int warm = first + period - 1;
     if (warm >= series_len) return;
 
-    extern __shared__ float diffs[];  // ring buffer of size >= period (host provides max_period)
+    extern __shared__ float diffs[];  
 
     const int base_out = combo * series_len;
     const float nan_f = CUDART_NAN_F;
     const float anchor = prices[first];
     const float EPS = 1.0e-12f;
 
-    // Only one thread performs the sequential work to avoid races / UB.
+    
     if (threadIdx.x == 0) {
-        // Prefix: NaNs up to first-1
+        
         for (int idx = 0; idx < first; ++idx) {
             out[base_out + idx] = nan_f;
         }
-        // Warmup: copy prices[first..warm]
+        
         for (int idx = first; idx <= warm; ++idx) {
             out[base_out + idx] = prices[idx];
         }
         if (warm + 1 >= series_len) return;
 
-        // Initialize the rolling |Δ| buffer and vol_sum over the last (period-1) deltas.
+        
         float vol_sum = 0.0f;
         for (int j = 1; j < period; ++j) {
             const int cur = first + j;
             const float diff = fabsf(prices[cur] - prices[cur - 1]);
-            diffs[j] = diff;         // j in [1..period-1]
+            diffs[j] = diff;         
             vol_sum += diff;
         }
 
-        // First filtered output at i0 = warm+1
+        
         const int i0 = warm + 1;
-        float prev = prices[warm];          // previous MAAQ output
-        float prev_input = prices[warm];    // P[t-1], tracked to avoid reloading
+        float prev = prices[warm];          
+        float prev_input = prices[warm];    
 
         const float newest = prices[i0];
         const float newest_diff = fabsf(newest - prev_input);
-        diffs[0] = newest_diff;             // complete the ring buffer
+        diffs[0] = newest_diff;             
         vol_sum += newest_diff;
         prev_input = newest;
 
-        // Precompute polynomial coefficients for sc
+        
         const float a = fast_sc * fast_sc;
         const float b = 2.0f * fast_sc * slow_sc;
         const float c = slow_sc * slow_sc;
@@ -102,14 +102,14 @@ void maaq_batch_f32(const float* __restrict__ prices,
         prev = fmaf(sc, newest - prev, prev);
         out[base_out + i0] = prev;
 
-        // Sliding loop
-        int head = 1;  // points to the oldest delta to evict next
+        
+        int head = 1;  
         for (int t = i0 + 1; t < series_len; ++t) {
-            // Update vol_sum: remove oldest, add newest |Δ|
+            
             vol_sum -= diffs[head];
 
             const float cur_price = prices[t];
-            const float nd = fabsf(cur_price - prev_input);  // only one new global load
+            const float nd = fabsf(cur_price - prev_input);  
             diffs[head] = nd;
             vol_sum += nd;
             prev_input = cur_price;
@@ -140,7 +140,7 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series_idx >= num_series) return;
     if (period <= 0 || series_len <= 0) return;
 
-    extern __shared__ float diffs[];  // size >= period
+    extern __shared__ float diffs[];  
 
     int first = first_valids[series_idx];
     if (first < 0) first = 0;
@@ -154,17 +154,17 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     const float EPS = 1.0e-12f;
 
     if (threadIdx.x == 0) {
-        // Per original kernel: NaNs for [0 .. warm-1]
+        
         for (int t = 0; t < warm; ++t) {
             out_tm[t * stride + series_idx] = nan_f;
         }
 
         const int warm_idx = warm * stride + series_idx;
-        out_tm[warm_idx] = prices_tm[warm_idx];  // warm
+        out_tm[warm_idx] = prices_tm[warm_idx];  
 
         if (warm + 1 >= series_len) return;
 
-        // Initialize rolling |Δ|
+        
         float vol_sum = 0.0f;
         for (int j = 1; j < period; ++j) {
             const int cur = first + j;
@@ -177,8 +177,8 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const int i0 = warm + 1;
         const int prev_idx = warm * stride + series_idx;
-        float prev       = prices_tm[prev_idx];    // previous MAAQ output
-        float prev_input = prices_tm[prev_idx];    // previous input
+        float prev       = prices_tm[prev_idx];    
+        float prev_input = prices_tm[prev_idx];    
 
         const int cur_idx = i0 * stride + series_idx;
         const float newest = prices_tm[cur_idx];
@@ -189,7 +189,7 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const float anchor = prices_tm[first * stride + series_idx];
 
-        // Precompute polynomial coefficients for sc
+        
         const float a = fast_sc * fast_sc;
         const float b = 2.0f * fast_sc * slow_sc;
         const float c = slow_sc * slow_sc;

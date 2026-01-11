@@ -285,7 +285,7 @@ impl CudaCorrelationCycle {
         ((gx, gy, 1).into(), (tx, ty, 1).into(), (tx, ty))
     }
 
-    // -------- Host precompute (cos/sin weights and normalization constants) --------
+    
     fn compute_trig_weights_and_consts(period: usize) -> (Vec<f32>, Vec<f32>, f32, f32, f32, f32) {
         let mut wcos = vec![0f32; period];
         let mut wsin = vec![0f32; period];
@@ -388,7 +388,7 @@ impl CudaCorrelationCycle {
         out
     }
 
-    // -------- Public: Batch (one series x many params) --------
+    
     pub fn correlation_cycle_batch_dev(
         &mut self,
         data_f32: &[f32],
@@ -424,7 +424,7 @@ impl CudaCorrelationCycle {
             return Err(CudaCorrelationCycleError::InvalidInput("period=0".into()));
         }
 
-        // Host precompute weights and constants
+        
         let mut periods_i32 = vec![0i32; n_combos];
         let mut thresholds_f32 = vec![0f32; n_combos];
         let mut sum_cos = vec![0f32; n_combos];
@@ -448,7 +448,7 @@ impl CudaCorrelationCycle {
             sqrt_t4[i] = st4;
         }
 
-        // VRAM estimate: inputs + params + weights + 4 outputs + headroom
+        
         let total_out_elems = n_combos
             .checked_mul(series_len)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
@@ -457,14 +457,14 @@ impl CudaCorrelationCycle {
         let prices_bytes = series_len
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("series_len bytes overflow".into()))?;
-        // periods_i32 (i32) + thresholds/sum_cos/sum_sin/sqrt_t2/sqrt_t4 (5×f32) per combo
+        
         let per_combo_meta = i32_bytes
             .checked_add(5usize.checked_mul(f32_bytes).ok_or_else(|| CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into()))?)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("meta bytes overflow".into()))?;
         let meta_bytes = n_combos
             .checked_mul(per_combo_meta)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("params bytes overflow".into()))?;
-        // cos_flat + sin_flat: 2 * n_combos * max_period * sizeof(f32)
+        
         let weight_elems = n_combos
             .checked_mul(max_period)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("n_combos*max_period overflow".into()))?;
@@ -474,7 +474,7 @@ impl CudaCorrelationCycle {
         let params_bytes = meta_bytes
             .checked_add(weight_bytes)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("params bytes overflow".into()))?;
-        // 4 outputs (real/imag/angle/state), each f32
+        
         let outputs_bytes = total_out_elems
             .checked_mul(4)
             .and_then(|v| v.checked_mul(f32_bytes))
@@ -489,7 +489,7 @@ impl CudaCorrelationCycle {
             return Err(CudaCorrelationCycleError::OutOfMemory { required, free, headroom });
         }
 
-        // Upload
+        
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
         let d_cos = DeviceBuffer::from_slice(&cos_flat)?;
         let d_sin = DeviceBuffer::from_slice(&sin_flat)?;
@@ -505,7 +505,7 @@ impl CudaCorrelationCycle {
         let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
         let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
-        // Kernel selection
+        
         let (grid, block, bx) = match self.policy.batch {
             BatchKernelPolicy::Auto | BatchKernelPolicy::Plain { .. } => {
                 self.pick_launch_1d(series_len, Some(256))
@@ -514,14 +514,14 @@ impl CudaCorrelationCycle {
         self.last_batch = Some(BatchKernelSelected::Plain { block_x: bx });
         self.maybe_log_batch_debug();
 
-        // RIA pass
+        
         let func_ria = self
             .module
             .get_function("correlation_cycle_batch_f32_ria")
             .map_err(|_| CudaCorrelationCycleError::MissingKernelSymbol { name: "correlation_cycle_batch_f32_ria" })?;
-        let smem = (max_period * 2 * std::mem::size_of::<f32>()) as u32; // wcos + wsin
+        let smem = (max_period * 2 * std::mem::size_of::<f32>()) as u32; 
         let stream = &self.stream;
-        // Chunk grid.y to ≤ 65_535
+        
         let mut processed = 0usize;
         while processed < n_combos {
             let chunk = (n_combos - processed).min(65_535);
@@ -551,7 +551,7 @@ impl CudaCorrelationCycle {
                     out_angle_ptr
                 ))?;
             }
-            // State pass for this chunk
+            
             let func_state = self
                 .module
                 .get_function("correlation_cycle_state_batch_f32")
@@ -598,7 +598,7 @@ impl CudaCorrelationCycle {
         })
     }
 
-    // -------- Public: Many-series one param (time-major) --------
+    
     pub fn correlation_cycle_many_series_one_param_time_major_dev(
         &mut self,
         prices_tm_f32: &[f32],
@@ -623,7 +623,7 @@ impl CudaCorrelationCycle {
             ));
         }
 
-        // first_valid per series (host)
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0usize;
@@ -640,22 +640,22 @@ impl CudaCorrelationCycle {
         }
         let (wcos, wsin, sum_c, sum_s, st2, st4) = Self::compute_trig_weights_and_consts(period);
 
-        // VRAM estimate
+        
         let elems = expected;
         let f32_bytes = std::mem::size_of::<f32>();
         let prices_bytes = elems
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("prices bytes overflow".into()))?;
-        // wcos + wsin: 2 * period * sizeof(f32)
+        
         let weights_bytes = period
             .checked_mul(2)
             .and_then(|v| v.checked_mul(f32_bytes))
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("weights bytes overflow".into()))?;
-        // first_valids (i32 per series)
+        
         let first_valid_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaCorrelationCycleError::InvalidInput("first_valid bytes overflow".into()))?;
-        // 4 outputs: real/imag/angle/state
+        
         let outputs_bytes = elems
             .checked_mul(4)
             .and_then(|v| v.checked_mul(f32_bytes))
@@ -671,7 +671,7 @@ impl CudaCorrelationCycle {
             return Err(CudaCorrelationCycleError::OutOfMemory { required, free, headroom });
         }
 
-        // Upload
+        
         let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let d_wcos = DeviceBuffer::from_slice(&wcos)?;
@@ -681,7 +681,7 @@ impl CudaCorrelationCycle {
         let mut d_angle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_state: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        // Kernel selection
+        
         let (grid, block, (tx, ty)) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::Tiled2D { .. } => {
                 self.pick_launch_2d(cols, rows, Some((128, 4)))
@@ -690,7 +690,7 @@ impl CudaCorrelationCycle {
         self.last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
         self.maybe_log_many_debug();
 
-        // RIA pass
+        
         let func_ria = self
             .module
             .get_function("correlation_cycle_many_series_one_param_f32_ria")
@@ -711,7 +711,7 @@ impl CudaCorrelationCycle {
             .map_err(CudaCorrelationCycleError::from)?;
         }
 
-        // State pass
+        
         let func_state = self
             .module
             .get_function("correlation_cycle_state_many_series_one_param_f32")
@@ -755,7 +755,7 @@ impl CudaCorrelationCycle {
     }
 }
 
-// ---------- Benches (wrapper-owned) ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

@@ -1,16 +1,16 @@
-// Integration tests for CUDA StochF kernels
 
-use my_project::indicators::stochf::{
+
+use vector_ta::indicators::stochf::{
     stochf_batch_with_kernel, StochfBatchRange, StochfInput, StochfParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaStochf;
+use vector_ta::cuda::CudaStochf;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -36,7 +36,7 @@ fn stochf_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let len = 8192usize;
-    // Synthesize a plausible H/L/C
+    
     let mut close = vec![f64::NAN; len];
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
@@ -124,7 +124,7 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let fd = 3usize;
     let mt = 0usize;
 
-    // CPU baseline per series
+    
     let mut cpu_k_tm = vec![f64::NAN; cols * rows];
     let mut cpu_d_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -147,7 +147,7 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
                 fastd_matype: Some(mt),
             },
         );
-        let out = my_project::indicators::stochf::stochf(&input)?;
+        let out = vector_ta::indicators::stochf::stochf(&input)?;
         for t in 0..rows {
             let idx = t * cols + s;
             cpu_k_tm[idx] = out.k[t];
@@ -185,7 +185,7 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     k_dev_tm.buf.copy_to(&mut gk_tm)?;
     d_dev_tm.buf.copy_to(&mut gd_tm)?;
 
-    let tol = 1e-3; // small float32 tolerance
+    let tol = 1e-3; 
     for idx in 0..gk_tm.len() {
         assert!(
             approx_eq(cpu_k_tm[idx], gk_tm[idx] as f64, tol),

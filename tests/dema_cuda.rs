@@ -1,11 +1,11 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaDema;
-use my_project::indicators::moving_averages::dema::{dema_batch_slice, DemaBatchRange, DemaParams};
-use my_project::utilities::enums::Kernel;
+use vector_ta::cuda::moving_averages::CudaDema;
+use vector_ta::indicators::moving_averages::dema::{dema_batch_slice, DemaBatchRange, DemaParams};
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];
@@ -48,8 +48,8 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], combos: &[DemaParams], len: usize, fir
                 );
             } else {
                 let diff = (expected - actual).abs();
-                // Tighter tolerance: benefits from FMA delta form in kernel
-                let tol = 5e-6 + expected.abs() * 5e-6; // ~5 ppm relative + small absolute floor
+                
+                let tol = 5e-6 + expected.abs() * 5e-6; 
                 assert!(
                     diff <= tol,
                     "row {}, col {} expected {} got {} diff {} (tol {})",
@@ -122,7 +122,7 @@ fn dema_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_flat = vec![0f32; cpu_out.len()];
     cuda.dema_batch_into_host_f32(&data_f32, &sweep, &mut gpu_flat)
         .expect("dema_cuda_batch_into_host_f32");
-    // Sanity: output length should match rows*cols
+    
     assert_eq!(gpu_flat.len(), combos_cpu.len() * len);
 
     let gpu_flat_f64: Vec<f64> = gpu_flat.iter().map(|&v| v as f64).collect();
@@ -149,13 +149,13 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    // Time-major layout: rows = series_len, cols = num_series
+    
     let cols = 8usize;
     let rows = 1536usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (4 + s)..rows {
-            // vary phase per-series slightly; keep some NaNs at the head
+            
             let x = (t as f64) + (s as f64) * 0.25;
             price_tm[t * cols + s] = (x * 0.00237).sin() + (x * 0.00071).cos() * 0.5 + 0.00021 * x;
         }
@@ -163,7 +163,7 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 24usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -173,11 +173,11 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         let params = DemaParams {
             period: Some(period),
         };
-        let input = my_project::indicators::moving_averages::dema::DemaInput {
-            data: my_project::indicators::moving_averages::dema::DemaData::Slice(&series),
+        let input = vector_ta::indicators::moving_averages::dema::DemaInput {
+            data: vector_ta::indicators::moving_averages::dema::DemaData::Slice(&series),
             params,
         };
-        let out = my_project::indicators::moving_averages::dema::dema_with_kernel(
+        let out = vector_ta::indicators::moving_averages::dema::dema_with_kernel(
             &input,
             Kernel::Scalar,
         )?;
@@ -205,7 +205,7 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut gpu_tm = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_tm)?;
 
-    // Tolerance similar to batch test; allow small FP32 rounding
+    
     let tol = 5e-6;
     for idx in 0..gpu_tm.len() {
         let c = cpu_tm[idx];

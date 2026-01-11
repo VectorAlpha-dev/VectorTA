@@ -1,8 +1,8 @@
-// ---- Directional Indicator (DI) kernels, DS-optimized, no FP64 in hot path ----
-// Matches scalar warmup/NaN rules exactly.
-//
-// Build: regular -O3, no special flags required
-// (avoid --use_fast_math if you need bit-for-bit determinism w.r.t. CPU)
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,7 +12,7 @@
 #include <math.h>
 #include <stdint.h>
 
-// ---------------------- Warp / block reductions (float) -----------------------
+
 static __forceinline__ __device__ float warp_reduce_sum(float v) {
     unsigned mask = 0xFFFFFFFFu;
     #pragma unroll
@@ -37,16 +37,16 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         block_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
         block_sum = warp_reduce_sum(block_sum);
     }
-    return block_sum; // valid in lane 0 of warp 0
+    return block_sum; 
 }
 
-// ---------------------- Double-single helpers (dual-fp32) ---------------------
-// Represent value ~ hi + lo. We use error-free transforms:
-//   TwoProductFMA(a,b):  a*b = x + y, with x = fl(a*b), y exact residual via FMA
-//   TwoSum(a,b):         a+b = s + e, with s = fl(a+b), e exact residual
-// This allows an accurate update s := keep*s + inc without FP64.
-// Refs: Ogita-Rump-Oishi (TwoProductFMA/TwoSum), Dekker/Knuth (error-free sums).
-// FMA is correctly rounded in CUDA: fmaf(a,b,c) ~= nearest(a*b + c).
+
+
+
+
+
+
+
 
 struct ds {
     float hi;
@@ -61,45 +61,45 @@ static __forceinline__ __device__ float ds_value(const ds& v) {
     return v.hi + v.lo;
 }
 
-// Error-free product: a*b = x + y, x = fl(a*b), y = exact residual via FMA
+
 static __forceinline__ __device__ void twoProductFMA(float a, float b, float &x, float &y) {
     x = a * b;
     y = fmaf(a, b, -x);
 }
 
-// Error-free sum: a + b = s + e (Knuth TwoSum)
+
 static __forceinline__ __device__ void twoSum(float a, float b, float &s, float &e) {
     s = a + b;
     float z = s - a;
     e = (a - (s - z)) + (b - z);
 }
 
-// RMA step in DS: s := keep*s + inc   (s is hi+lo)
+
 static __forceinline__ __device__ void ds_rma_update(ds &s, float keep, float inc) {
-    // product part: p = keep*s
+    
     float p_hi, p_err;
     twoProductFMA(s.hi, keep, p_hi, p_err);
-    float t_lo = s.lo * keep;               // low part product (rounded)
+    float t_lo = s.lo * keep;               
 
-    // sum with new increment: p_hi + inc = sh + e_sum
+    
     float sh, e_sum;
     twoSum(p_hi, inc, sh, e_sum);
 
-    // accumulate all low-order contributions and renormalize
+    
     float slo = e_sum + (p_err + t_lo);
     float new_hi = sh + slo;
     s.lo = slo - (new_hi - sh);
     s.hi = new_hi;
 }
 
-// ----------------- One-series × many-params (from precomputed) ----------------
-// up, dn, tr: length = series_len, zeros before first_valid+1.
-// periods & warm_indices: length n_combos. plus_out/minus_out: [n_combos * series_len].
-//
-// Changes vs. baseline:
-// * use DS accumulators (no FP64) for the sequential Wilder RMA
-// * initialize only [0 .. warm-1] to NaN (avoid writing the entire row)
-// * support grid-stride over combos
+
+
+
+
+
+
+
+
 extern "C" __global__
 void di_batch_from_precomputed_f32(const float* __restrict__ up,
                                    const float* __restrict__ dn,
@@ -118,15 +118,15 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
         if (period <= 0 || warm < 0 || warm >= series_len) continue;
 
         const float invp = 1.0f / (float)period;
-        const float keep = 1.0f - invp; // Wilder keep factor
+        const float keep = 1.0f - invp; 
 
         const int base = combo * series_len;
 
-        // Compute start/stop; ensure there are enough samples
+        
         const int start = first_valid + 1;
-        const int stop  = first_valid + period; // exclusive
+        const int stop  = first_valid + period; 
         if (stop > series_len) {
-            // Not enough samples: initialize full row to NaN cooperatively
+            
             for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
                 plus_out [base + i] = NAN;
                 minus_out[base + i] = NAN;
@@ -135,14 +135,14 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
             continue;
         }
 
-        // Initialize only [0 .. warm-1] to NaN (they won't be overwritten)
+        
         for (int i = threadIdx.x; i < warm; i += blockDim.x) {
             plus_out [base + i] = NAN;
             minus_out[base + i] = NAN;
         }
         __syncthreads();
 
-        // Accumulate initial window sums over t in [first_valid+1 .. first_valid+period-1]
+        
         float lp = 0.0f, lm = 0.0f, lt = 0.0f;
         for (int t = start + threadIdx.x; t < stop; t += blockDim.x) {
             lp += up[t];
@@ -154,7 +154,7 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
         float st = block_reduce_sum(lt);
 
         if (threadIdx.x == 0) {
-            // DS state seeded from initial sums
+            
             ds cur_p = ds_make(sp);
             ds cur_m = ds_make(sm);
             ds cur_t = ds_make(st);
@@ -164,7 +164,7 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
             plus_out [base + warm] = ds_value(cur_p) * scale;
             minus_out[base + warm] = ds_value(cur_m) * scale;
 
-            // Sequential Wilder RMA (DS update, one division per step via 'scale')
+            
             for (int t = warm + 1; t < series_len; ++t) {
                 ds_rma_update(cur_p, keep, up[t]);
                 ds_rma_update(cur_m, keep, dn[t]);
@@ -180,13 +180,13 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
     }
 }
 
-// ---------------------- Many-series × one-param (time-major) ------------------
-// Time-major inputs: X_tm[t * num_series + s]; outputs also time-major.
-// Each warp advances one series sequentially.
-//
-// Changes vs. baseline:
-// * DS accumulators (no FP64), pointer-increment addressing in the sequential loop
-// * initialize only [0 .. warm-1] to NaN when there are enough samples
+
+
+
+
+
+
+
 extern "C" __global__
 void di_many_series_one_param_f32(const float* __restrict__ high_tm,
                                   const float* __restrict__ low_tm,
@@ -215,7 +215,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) {
-            // Initialize full column to NaN cooperatively
+            
             for (int t = lane; t < series_len; t += warpSize) {
                 plus_tm [t * stride + s] = NAN;
                 minus_tm[t * stride + s] = NAN;
@@ -224,7 +224,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
 
         const int start = first_valid + 1;
-        const int stop  = first_valid + period; // exclusive
+        const int stop  = first_valid + period; 
         if (stop > series_len) {
             for (int t = lane; t < series_len; t += warpSize) {
                 plus_tm [t * stride + s] = NAN;
@@ -234,13 +234,13 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
         const int warm = stop - 1;
 
-        // Initialize only [0 .. warm-1] to NaN cooperatively
+        
         for (int t = lane; t < warm; t += warpSize) {
             plus_tm [t * stride + s] = NAN;
             minus_tm[t * stride + s] = NAN;
         }
 
-        // Seed sums across initial window using lanes
+        
         float lp = 0.0f, lm = 0.0f, lt = 0.0f;
         for (int t = start + lane; t < stop; t += warpSize) {
             const float ch = high_tm[t * stride + s];
@@ -261,7 +261,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
             if (lc > tr) tr = lc;
             lt += tr;
         }
-        // Warp reduce
+        
         lp = warp_reduce_sum(lp);
         lm = warp_reduce_sum(lm);
         lt = warp_reduce_sum(lt);
@@ -276,7 +276,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
             plus_tm [warm * stride + s] = ds_value(cur_p) * scale;
             minus_tm[warm * stride + s] = ds_value(cur_m) * scale;
 
-            // Pointer-increment addressing for the sequential loop
+            
             int t  = warm + 1;
             const float* h_ptr  = high_tm  + t * stride + s;
             const float* l_ptr  = low_tm   + t * stride + s;

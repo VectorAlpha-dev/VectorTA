@@ -46,8 +46,8 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// Note: AVec<f64> already implements Send since f64 is Send
-// No wrapper types needed
+
+
 
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
@@ -204,7 +204,7 @@ pub enum AdxrError {
     AllValuesNaN,
     #[error("adxr: Invalid period: period = {period}, data length = {data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    // Keep message text stable for existing tests that expect "Not enough data"
+    
     #[error("adxr: Not enough data: needed = {needed}, valid = {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("adxr: Output length mismatch: expected = {expected}, got = {got}")]
@@ -227,8 +227,8 @@ pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput,
 
     let len = close.len();
 
-    // ADXR needs warmup period of first + 2 * period
-    // (ADX appears at first + 2*period, then ADXR averages current and period-ago ADX)
+    
+    
     let warmup_period = first + 2 * period;
     let mut out = alloc_with_nan_prefix(len, warmup_period);
     unsafe {
@@ -246,7 +246,7 @@ pub fn adxr_with_kernel(input: &AdxrInput, kernel: Kernel) -> Result<AdxrOutput,
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
+                
                 adxr_scalar(high, low, close, period, first, &mut out)
             }
             _ => unreachable!(),
@@ -1953,7 +1953,7 @@ mod tests {
                             );
                         }
 
-                        // Different kernels should produce very similar results
+                        
                         if !y.is_nan() && !r.is_nan() {
                             let diff = (y - r).abs();
                             prop_assert!(
@@ -1969,9 +1969,9 @@ mod tests {
                     }
                 }
 
-                // Market-specific validations
+                
                 if market_type == 2 && out.len() > warmup_period + period {
-                    // Zero volatility: ADXR should converge toward 0
+                    
                     let last_values = &out[out.len().saturating_sub(10)..];
                     let non_nan_values: Vec<f64> = last_values
                         .iter()
@@ -1990,19 +1990,19 @@ mod tests {
                     }
                 }
 
-                // Special case: period = 2 (minimum valid)
+                
                 if period == 2 {
-                    // Just verify it doesn't crash and produces valid output
+                    
                     prop_assert!(out.len() == close_data.len());
                 }
 
-                // Constant data test
+                
                 let is_constant = close_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && high_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if is_constant && out.len() > warmup_period {
-                    // With constant prices, ADXR should stabilize
+                    
                     let stable_values = &out[warmup_period..];
                     let non_nan: Vec<f64> = stable_values
                         .iter()
@@ -2011,7 +2011,7 @@ mod tests {
                         .collect();
 
                     if non_nan.len() > 10 {
-                        // Check that values are stabilizing (low standard deviation)
+                        
                         let mean = non_nan.iter().sum::<f64>() / non_nan.len() as f64;
                         let variance = non_nan.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                             / non_nan.len() as f64;
@@ -2083,7 +2083,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2), // period_start, period_end, period_step
+            (2, 10, 2), 
             (5, 25, 5),
             (10, 20, 2),
             (14, 50, 6),
@@ -2168,13 +2168,13 @@ mod tests {
 
     #[test]
     fn test_adxr_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Small but non-trivial synthetic HLC series
+        
         let len = 256usize;
         let mut high = vec![0.0f64; len];
         let mut low = vec![0.0f64; len];
         let mut close = vec![0.0f64; len];
         for i in 0..len {
-            // Trend + oscillation; ensure high >= close >= low
+            
             let base = 100.0 + (i as f64) * 0.1 + (i as f64 * 0.07).sin();
             low[i] = base - 1.0;
             close[i] = base - 0.3;
@@ -2183,10 +2183,10 @@ mod tests {
 
         let input = AdxrInput::from_slices(&high, &low, &close, AdxrParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = adxr(&input)?.values;
 
-        // Preallocate output and compute via into API
+        
         let mut out = vec![0.0f64; len];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2194,7 +2194,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, call the slice version directly for parity check
+            
             adxr_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2225,7 +2225,7 @@ pub fn adxr_py<'py>(
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    // Validate input lengths
+    
     if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
         return Err(PyValueError::new_err(format!(
             "HLC data length mismatch: high={}, low={}, close={}",
@@ -2235,7 +2235,7 @@ pub fn adxr_py<'py>(
         )));
     }
 
-    // Validate kernel before entering allow_threads
+    
     let kern = validate_kernel(kernel, false)?;
 
     let params = AdxrParams {
@@ -2243,12 +2243,12 @@ pub fn adxr_py<'py>(
     };
     let adxr_in = AdxrInput::from_slices(high_slice, low_slice, close_slice, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| adxr_with_kernel(&adxr_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2318,11 +2318,11 @@ pub fn adxr_batch_py<'py>(
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
-    // Pre-allocate NumPy array and fill it in-place without extra copies.
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    // Resolve to non-batch kernel before releasing the GIL.
+    
     let k = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
     let simd = match k {
         Kernel::Auto => match detect_best_batch_kernel() {
@@ -2333,7 +2333,7 @@ pub fn adxr_batch_py<'py>(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        other => other, // allow explicit non-batch for tests
+        other => other, 
     };
 
     let combos = py
@@ -2353,7 +2353,7 @@ pub fn adxr_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "adxr_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, period_range, device_id=0))]
@@ -2417,7 +2417,7 @@ pub fn adxr_cuda_many_series_one_param_dev_py<'py>(
     Ok(AdxrDeviceArrayF32Py { inner: Some(inner), _ctx: ctx_arc, device_id: dev_id })
 }
 
-// Python wrapper that keeps the CUDA context alive for returned VRAM handles
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "AdxrDeviceArrayF32", unsendable)]
 pub struct AdxrDeviceArrayF32Py {

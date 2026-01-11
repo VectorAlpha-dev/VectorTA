@@ -1,16 +1,16 @@
-// Integration tests for CUDA SMA kernels
 
-use my_project::indicators::moving_averages::sma::{
+
+use vector_ta::indicators::moving_averages::sma::{
     sma_batch_with_kernel, SmaBatchRange, SmaBuilder, SmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaSma;
+use vector_ta::cuda::moving_averages::CudaSma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

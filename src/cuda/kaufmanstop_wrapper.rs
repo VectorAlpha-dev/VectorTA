@@ -216,14 +216,14 @@ impl CudaKaufmanstop {
         Ok(())
     }
 
-    // -------------- Batch: one series × many params --------------
+    
     pub fn kaufmanstop_batch_dev(
         &self,
         high: &[f32],
         low: &[f32],
         sweep: &KaufmanstopBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<KaufmanstopParams>), CudaKaufmanstopError> {
-        // Validate inputs
+        
         if high.is_empty() || low.is_empty() || high.len() != low.len() {
             return Err(CudaKaufmanstopError::InvalidInput(
                 "high/low must be same non-zero length".into(),
@@ -231,14 +231,14 @@ impl CudaKaufmanstop {
         }
         let len = high.len();
 
-        // First valid index (both high & low finite) — matches scalar
+        
         let first = high
             .iter()
             .zip(low.iter())
             .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
             .ok_or_else(|| CudaKaufmanstopError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand parameter sweep
+        
         let combos = expand_grid_wrapper(sweep)
             .map_err(|e| CudaKaufmanstopError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
@@ -247,7 +247,7 @@ impl CudaKaufmanstop {
             ));
         }
 
-        // Validate periods
+        
         for prm in &combos {
             let p = prm.period.unwrap_or(0);
             if p == 0 || p > len {
@@ -260,7 +260,7 @@ impl CudaKaufmanstop {
             }
         }
 
-        // VRAM check: base + full output must fit (MA slab is tiled)
+        
         let head = Self::headroom_bytes();
         let base_bytes = 2usize
             .checked_mul(len)
@@ -282,19 +282,19 @@ impl CudaKaufmanstop {
             })?;
         Self::will_fit(required, head)?;
 
-        // Upload base series once
+        
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(combos.len() * len) }?;
 
-        // Build range (high - low) with NaN propagation on host
+        
         let mut range = vec![f32::NAN; len];
         for i in first..len {
             let (h, l) = (high[i], low[i]);
             range[i] = if h.is_nan() || l.is_nan() { f32::NAN } else { h - l };
         }
 
-        // Main kernel (one series → many params)
+        
         let mut ks_many_params_fn: Function = self
             .module
             .get_function("kaufmanstop_one_series_many_params_time_major_f32")
@@ -302,7 +302,7 @@ impl CudaKaufmanstop {
                 name: "kaufmanstop_one_series_many_params_time_major_f32",
             })?;
 
-        // Robust default block geometry
+        
         let bx_default: u32 = match ks_many_params_fn
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
         {
@@ -319,7 +319,7 @@ impl CudaKaufmanstop {
             }
         };
 
-        // Determine a safe param tile size so the MA slab fits with headroom
+        
         let per_param_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaKaufmanstopError::InvalidInput("per_param_bytes overflow".into()))?;
@@ -331,21 +331,21 @@ impl CudaKaufmanstop {
         };
         max_tile_params = max_tile_params.min(combos.len()).max(1);
 
-        // Selector for MA(range)
+        
         let selector = CudaMaSelector::new(self.device_id as usize);
 
-        // Process params in contiguous tiles, additionally splitting by direction to keep
-        // base_is_low uniform per launch (kernel expects a single base selector).
+        
+        
         let mut p0 = 0usize;
         while p0 < combos.len() {
-            // Establish direction for this sub-tile
+            
             let dir_long = combos[p0]
                 .direction
                 .as_deref()
                 .unwrap_or("long")
                 .eq_ignore_ascii_case("long");
 
-            // Extend tile with same direction (contiguous segment)
+            
             let mut p1 = p0;
             let mut taken = 0usize;
             while p1 < combos.len() && taken < max_tile_params {
@@ -363,7 +363,7 @@ impl CudaKaufmanstop {
             let tile = &combos[p0..p1];
             let tile_n = tile.len();
 
-            // Prepare warm indices and multipliers for this tile
+            
             let mut warm_ps = Vec::<i32>::with_capacity(tile_n);
             let mut signed_mults = Vec::<f32>::with_capacity(tile_n);
             for prm in tile.iter() {
@@ -375,8 +375,8 @@ impl CudaKaufmanstop {
             let d_warm = DeviceBuffer::from_slice(&warm_ps)?;
             let d_signed = DeviceBuffer::from_slice(&signed_mults)?;
 
-            // MA slab for the tile: prefer a single batched MA sweep when possible.
-            // This avoids O(tile_n) MA launches and avoids device->host->device staging.
+            
+            
             let ma_type0 = tile[0].ma_type.as_deref().unwrap_or("sma");
             let same_ma_type = tile.iter().all(|p| {
                 p.ma_type
@@ -428,13 +428,13 @@ impl CudaKaufmanstop {
                 }
             }
 
-            // Launch the tile kernel
+            
             use cust::device::DeviceAttribute;
             let max_threads = Device::get_device(self.device_id)?
                 .get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
             let mut bx = bx_default.max(32).min(max_threads.max(32));
             let mut by = prefer_by(tile_n).max(1);
-            // Ensure bx*by does not exceed max threads per block (CUDA limit).
+            
             let max_by = (max_threads / bx).max(1);
             if by > max_by {
                 by = max_by;
@@ -478,7 +478,7 @@ impl CudaKaufmanstop {
             };
 
             if let Err(_e) = launch_res {
-                // Fallback: per-parameter AXPY row kernel (preserves correctness)
+                
                 let mut axpy_fn: Function = self
                     .module
                     .get_function("kaufmanstop_axpy_row_f32")
@@ -542,18 +542,18 @@ impl CudaKaufmanstop {
                         ];
                         self.stream.launch(&axpy_fn, grid_base, block_base, 0, args)?;
                     }
-                    // Keep conservative ordering to avoid lifetime hazards
+                    
                     self.stream.synchronize()?;
                 }
             }
 
-            // Keep ordering conservative: ensure kernels complete before freeing per-tile buffers.
+            
             self.stream.synchronize()?;
 
             p0 = p1;
         }
 
-        // Ensure all tiles are complete
+        
         self.stream.synchronize()?;
 
         Ok((
@@ -566,7 +566,7 @@ impl CudaKaufmanstop {
         ))
     }
 
-    // -------------- Many-series: time-major, one param --------------
+    
     pub fn kaufmanstop_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -594,7 +594,7 @@ impl CudaKaufmanstop {
         let base_is_low = if is_long { 1i32 } else { 0i32 };
         let ma_type = params.ma_type.as_deref().unwrap_or("sma");
 
-        // Per-series first valid (both high & low must be non-NaN at t)
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -619,7 +619,7 @@ impl CudaKaufmanstop {
             first_valids[s] = fv as i32;
         }
 
-        // Build range (high - low) time-major with NaN propagation
+        
         let mut range_tm = vec![f32::NAN; cols * rows];
         for idx in 0..(cols * rows) {
             let h = high_tm[idx];
@@ -631,17 +631,17 @@ impl CudaKaufmanstop {
             };
         }
 
-        // Compute MA(range) on device. For now, use the selector in single-parameter
-        // time-major mode by flattening; only a subset of MAs expose time-major kernels
-        // through their wrappers. To keep behavior broad, compute per-series via selector
-        // but write directly to the final output with our AXPY kernel.
-        // However, to reduce kernel launches, if ma_type == "sma", use the SMA wrapper's
-        // native many-series path.
+        
+        
+        
+        
+        
+        
         let total = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaKaufmanstopError::InvalidInput("rows*cols overflow".into()))?;
 
-        // VRAM check: 2×inputs + first_valids + outputs + MA slab (approximate)
+        
         let head = Self::headroom_bytes();
         let bytes_series = total
             .checked_mul(std::mem::size_of::<f32>())
@@ -660,7 +660,7 @@ impl CudaKaufmanstop {
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
 
-        // Try native SMA many-series path; otherwise, fall back to per-series selector
+        
         let ma_tm_dev: DeviceBuffer<f32> = if ma_type.eq_ignore_ascii_case("sma") {
             use crate::cuda::moving_averages::sma_wrapper::CudaSma;
             use crate::indicators::moving_averages::sma::SmaParams as SParams;
@@ -678,12 +678,12 @@ impl CudaKaufmanstop {
                 })?;
             ma_dev.buf
         } else {
-            // Generic (slower) fallback: compute each series via selector and copy into a device buffer
+            
             let selector = CudaMaSelector::new(self.device_id as usize);
             let mut d_ma = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
-            // Prepare a host pinned buffer for staging each row
+            
             for s in 0..cols {
-                // Gather one series contiguous
+                
                 let mut series = vec![f32::NAN; rows];
                 for t in 0..rows {
                     series[t] = range_tm[t * cols + s];
@@ -695,9 +695,9 @@ impl CudaKaufmanstop {
                     })?;
                 debug_assert_eq!(ma_dev.rows, 1);
                 debug_assert_eq!(ma_dev.cols, rows);
-                // Copy into device buffer at column s (time-major)
-                // We need to scatter to strided positions; use a small kernel-free host copy via staging
-                // by pulling to pinned host and then writing into the strided layout.
+                
+                
+                
                 let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(rows) }?;
                 unsafe {
                     ma_dev
@@ -705,33 +705,33 @@ impl CudaKaufmanstop {
                         .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)?;
                 }
                 self.stream.synchronize()?;
-                // Scatter into d_ma via host-side strided copy (one series at a time)
-                // Note: For large matrices, a dedicated scatter kernel would be better.
+                
+                
                 let mut host_scatter = vec![0f32; rows];
                 host_scatter.copy_from_slice(pinned.as_slice());
-                // Write into device at strided positions by building a temp time-major column
-                // and copying as a contiguous slice per series by transposing logic.
-                // Here we just copy to host and then to device slice with the same layout.
+                
+                
+                
                 for t in 0..rows {
                     let idx = t * cols + s;
-                    // SAFETY: writing via staging host buffer; final upload after loop
-                    // We'll accumulate into a full host buffer and upload once at the end.
+                    
+                    
                     range_tm[idx] = host_scatter[t];
                 }
             }
-            // Upload the filled time-major MA matrix
+            
             d_ma.copy_from(&range_tm)?;
             d_ma
         };
 
-        // Launch many-series AXPY kernel
+        
         let mut func: Function = self
             .module
             .get_function("kaufmanstop_many_series_one_param_time_major_f32")
             .map_err(|_| CudaKaufmanstopError::MissingKernelSymbol {
                 name: "kaufmanstop_many_series_one_param_time_major_f32",
             })?;
-        // 2‑D grid: x=series tiles, y=time tiles (avoids per‑element div/mod)
+        
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
                 let (_min_grid, suggested) = func
@@ -741,7 +741,7 @@ impl CudaKaufmanstop {
             }
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
         };
-        let block_y: u32 = 1; // keep y simple; kernel strides by gridDim.y over time
+        let block_y: u32 = 1; 
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let time_tile: u32 = 256;
         let grid_y = ((rows as u32) + time_tile - 1) / time_tile;
@@ -784,7 +784,7 @@ impl CudaKaufmanstop {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -796,7 +796,7 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // Output + MA slab (same shape as output)
+        
         in_bytes + (2 * out_bytes) + 64 * 1024 * 1024
     }
 
@@ -871,21 +871,21 @@ pub mod benches {
             ma_type: ("sma".to_string(), "sma".to_string(), 0.0),
         };
 
-        // First valid index (matches scalar/CPU wrapper)
+        
         let first = high
             .iter()
             .zip(low.iter())
             .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
             .unwrap_or(0);
 
-        // Build range (high-low) on host with NaN propagation
+        
         let mut range = vec![f32::NAN; ONE_SERIES_LEN];
         for i in first..ONE_SERIES_LEN {
             let (h, l) = (high[i], low[i]);
             range[i] = if h.is_nan() || l.is_nan() { f32::NAN } else { h - l };
         }
 
-        // Expand combos once and build warm/mult arrays.
+        
         let combos = expand_grid_wrapper(&sweep).expect("expand_grid_wrapper");
         let params = combos.len();
         let mut warm_ps: Vec<i32> = Vec::with_capacity(params);
@@ -894,11 +894,11 @@ pub mod benches {
             let period = prm.period.unwrap();
             let mult = prm.mult.unwrap() as f32;
             warm_ps.push((first + period - 1) as i32);
-            // Wrapper uses negative mult for long direction.
+            
             signed_mults.push(-mult);
         }
 
-        // Precompute MA(range) slab on device once (SMA period sweep).
+        
         let selector = CudaMaSelector::new(0);
         let ma_dev = selector
             .ma_sweep_to_device("sma", CudaMaData::SliceF32(&range), sweep.period.0, sweep.period.1, sweep.period.2 as usize)
@@ -912,7 +912,7 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(params * ONE_SERIES_LEN) }.expect("d_out");
 
-        // Kernel launch geometry (matches wrapper defaults).
+        
         let bx = 256u32;
         let by = 4u32;
         let grid_x = ((ONE_SERIES_LEN as u32) + bx - 1) / bx;
@@ -931,7 +931,7 @@ pub mod benches {
             d_signed,
             len: ONE_SERIES_LEN,
             params,
-            base_is_low: 1i32, // "long"
+            base_is_low: 1i32, 
             grid,
             block,
             shmem,

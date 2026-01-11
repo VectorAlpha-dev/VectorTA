@@ -287,7 +287,7 @@ pub fn wilders_into(input: &WildersInput, out: &mut [f64]) -> Result<(), Wilders
     wilders_into_slice(out, input, Kernel::Auto)
 }
 
-// --- Scalar calculation (core logic) ---
+
 
 #[inline]
 pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
@@ -301,14 +301,14 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
 
     let wma_start = first_valid + period - 1;
 
-    // SAFETY: callers ensure indices are valid; pre-warmup prefix is already painted (NaN).
-    // We only write from wma_start..len.
+    
+    
     unsafe {
-        // Initial sum over the first `period` finite values starting at `first_valid`.
+        
         let mut sum = 0.0f64;
         let mut p = data.as_ptr().add(first_valid);
 
-        // Unroll by 4 for good codegen and fewer bounds checks.
+        
         let chunks4 = period / 4;
         for _ in 0..chunks4 {
             sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3);
@@ -322,12 +322,12 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
             _ => core::hint::unreachable_unchecked(),
         }
 
-        // First output after warmup: simple average
+        
         let inv_n = 1.0 / (period as f64);
         let mut y = sum * inv_n;
         *out.get_unchecked_mut(wma_start) = y;
 
-        // Fast path: period == 1 → identity after warmup
+        
         if period == 1 {
             let mut i = wma_start + 1;
             while i < len {
@@ -338,7 +338,7 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
         }
 
         let alpha = inv_n;
-        // Slight unroll-by-2 for the dependency chain to trim loop overhead.
+        
         let mut i = wma_start + 1;
         let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
         while i < end_even {
@@ -359,7 +359,7 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
     }
 }
 
-// --- Zero-copy helper for WASM ---
+
 
 /// Write directly to output slice - no allocations
 pub fn wilders_into_slice(
@@ -398,7 +398,7 @@ pub fn wilders_into_slice(
         });
     }
 
-    // Check that all values in the initial window are finite
+    
     for i in 0..period {
         if !data[first + i].is_finite() {
             return Err(WildersError::NotEnoughValidData {
@@ -428,7 +428,7 @@ pub fn wilders_into_slice(
         }
     }
 
-    // Fill warmup with NaN
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -437,7 +437,7 @@ pub fn wilders_into_slice(
     Ok(())
 }
 
-// --- AVX2 and AVX512 (vectorized warmup sum; scalar recurrence) ---
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -454,7 +454,7 @@ pub unsafe fn wilders_avx2(data: &[f64], period: usize, first_valid: usize, out:
 
     let wma_start = first_valid + period - 1;
 
-    // 4‑lane accumulation for initial window
+    
     let mut vacc = _mm256_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
     let chunks4 = period / 4;
@@ -463,7 +463,7 @@ pub unsafe fn wilders_avx2(data: &[f64], period: usize, first_valid: usize, out:
         vacc = _mm256_add_pd(vacc, v);
         p = p.add(4);
     }
-    // Reduce to scalar
+    
     let hi = _mm256_extractf128_pd(vacc, 1);
     let lo = _mm256_castpd256_pd128(vacc);
     let v2 = _mm_add_pd(lo, hi);
@@ -543,7 +543,7 @@ pub unsafe fn wilders_avx512_short(
 
     let wma_start = first_valid + period - 1;
 
-    // 8‑wide accumulation for initial window
+    
     let mut vacc = _mm512_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
     let chunks8 = period / 8;
@@ -552,7 +552,7 @@ pub unsafe fn wilders_avx512_short(
         vacc = _mm512_add_pd(vacc, v);
         p = p.add(8);
     }
-    // Reduce 512→256→128→scalar
+    
     let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
     let vlo256 = _mm512_castpd512_pd256(vacc);
     let v256 = _mm256_add_pd(vlo256, vhi256);
@@ -630,7 +630,7 @@ pub unsafe fn wilders_avx512_long(
 
     let wma_start = first_valid + period - 1;
 
-    // For longer periods, unroll by 16 doubles per iter using 2 accumulators
+    
     let mut vacc0 = _mm512_setzero_pd();
     let mut vacc1 = _mm512_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
@@ -644,7 +644,7 @@ pub unsafe fn wilders_avx512_long(
     }
     let mut vacc = _mm512_add_pd(vacc0, vacc1);
 
-    // Handle leftover 8‑wide chunk
+    
     let rem = period - (chunks16 * 16);
     if rem >= 8 {
         let v = _mm512_loadu_pd(p);
@@ -652,7 +652,7 @@ pub unsafe fn wilders_avx512_long(
         p = p.add(8);
     }
 
-    // Reduce to scalar
+    
     let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
     let vlo256 = _mm512_castpd512_pd256(vacc);
     let v256 = _mm256_add_pd(vlo256, vhi256);
@@ -710,7 +710,7 @@ pub unsafe fn wilders_avx512_long(
     }
 }
 
-// --- Streaming (WildersStream) ---
+
 
 /// Streaming Wilder's MA with O(1) warm-up and FMA recurrence.
 /// Requires a contiguous run of `period` finite values before the first output.
@@ -1604,7 +1604,7 @@ mod tests {
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1612,7 +1612,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1620,7 +1620,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1633,7 +1633,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_wilders_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1692,17 +1692,17 @@ mod tests {
                 let WildersOutput { values: ref_out } =
                     wilders_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period handling - first period-1 values should be NaN
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_valid + period - 1;
                 for i in 0..warmup.min(out.len()) {
                     prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
                 }
 
-                // Property 3: Finite values after warmup
+                
                 for i in warmup..out.len() {
                     if data[i].is_finite() {
                         prop_assert!(
@@ -1713,8 +1713,8 @@ mod tests {
                     }
                 }
 
-                // Property 4: Bounded by min/max of input data
-                // Wilder's MA is a weighted average, so output should be within data bounds
+                
+                
                 if warmup < out.len() {
                     let data_min = data[first_valid..]
                         .iter()
@@ -1739,7 +1739,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Period=1 should equal input values
+                
                 if period == 1 && warmup < out.len() {
                     for i in warmup..out.len() {
                         prop_assert!(
@@ -1752,7 +1752,7 @@ mod tests {
                     }
                 }
 
-                // Property 6: Constant input produces constant output
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < out.len() {
                     let constant_val = data[first_valid];
                     for i in warmup..out.len() {
@@ -1765,9 +1765,9 @@ mod tests {
                     }
                 }
 
-                // Property 7: Exponential decay property
-                // Wilder's uses formula: new_val = (data[i] - prev_val) * alpha + prev_val
-                // where alpha = 1.0 / period
+                
+                
+                
                 if warmup + 1 < out.len() {
                     let alpha = 1.0 / (period as f64);
                     for i in (warmup + 1)..out.len() {
@@ -1782,8 +1782,8 @@ mod tests {
                     }
                 }
 
-                // Property 8: First value after warmup equals simple average
-                // Wilder's MA initializes with the simple average of the first period values
+                
+                
                 if warmup < out.len() && warmup >= period - 1 {
                     let sum: f64 = data[first_valid..first_valid + period].iter().sum();
                     let expected_first = sum / (period as f64);
@@ -1796,7 +1796,7 @@ mod tests {
                     );
                 }
 
-                // Property 9: Kernel consistency - all kernels should produce same results
+                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1851,31 +1851,31 @@ mod tests {
         check_wilders_property
     );
 
-    // Test invalid kernel batch separately (doesn't need kernel variants)
+    
     #[test]
     fn test_wilders_invalid_kernel_batch() {
         let _ = check_wilders_invalid_kernel_batch();
     }
 
-    // Test that NaN in initial window is caught and doesn't poison the series
+    
     #[test]
     fn test_wilders_nan_poisoning_prevented() {
-        // Create data with NaN in position 2 (within initial window for period=5)
+        
         let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let params = WildersParams { period: Some(5) };
         let input = WildersInput::from_slice(&data, params);
 
-        // This should fail with NotEnoughValidData, not produce a poisoned series
+        
         let result = wilders(&input);
         assert!(result.is_err(), "Should fail with NaN in initial window");
 
-        // Now test with clean data to ensure normal operation works
+        
         let clean_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let clean_params = WildersParams { period: Some(5) };
         let clean_input = WildersInput::from_slice(&clean_data, clean_params);
         let clean_result = wilders(&clean_input).unwrap();
 
-        // Check that values after warmup are finite (not NaN-poisoned)
+        
         for i in 5..clean_result.values.len() {
             assert!(
                 clean_result.values[i].is_finite(),
@@ -1901,7 +1901,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Last five expected Wilder’s values for period = 5
+        
         let expected = [
             59302.18156619092,
             59277.94525295273,
@@ -1924,7 +1924,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1932,19 +1932,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase detection coverage
+        
         let batch_configs = vec![
-            (2, 10, 1),    // Small range with step 1
-            (5, 25, 5),    // Default start with step 5
-            (10, 30, 10),  // Medium range with larger step
-            (14, 50, 7),   // RSI period range with step 7
-            (20, 100, 20), // Large range with large step
-            (50, 200, 50), // Very large periods
-            (2, 6, 2),     // Very small range to test edge cases
+            (2, 10, 1),    
+            (5, 25, 5),    
+            (10, 30, 10),  
+            (14, 50, 7),   
+            (20, 100, 20), 
+            (50, 200, 50), 
+            (2, 6, 2),     
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip configurations that would exceed data length
+            
             if start > c.close.len() {
                 continue;
             }
@@ -1954,9 +1954,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1966,7 +1966,7 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1974,7 +1974,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1982,7 +1982,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1995,7 +1995,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2233,7 +2233,7 @@ impl WildersDeviceArrayF32Py {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let d = PyDict::new(py);
-        // 2D row-major FP32: (rows, cols)
+        
         d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
@@ -2244,13 +2244,13 @@ impl WildersDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Wrapper synchronizes its stream before returning, so omit 'stream' per CAI v3.
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
+        
         let dev = self
             .inner
             .as_ref()
@@ -2259,11 +2259,11 @@ impl WildersDeviceArrayF32Py {
         (2, dev)
     }
 
-    // DLPack v1.x producer with legacy fallback.
-    // - If max_version >= (1, 0), return a capsule named "dltensor_versioned"; otherwise legacy "dltensor".
-    // - Strides are in elements and non-NULL for ndim>0; byte_offset=0 for contiguous.
-    // - Data pointer is NULL when size==0.
-    // - Stream semantics: producer work is synchronized, so we do not insert events.
+    
+    
+    
+    
+    
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -2275,7 +2275,7 @@ impl WildersDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2296,7 +2296,7 @@ impl WildersDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let inner = self
             .inner
             .take()
@@ -2372,7 +2372,7 @@ pub fn wilders_into(
         let input = WildersInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing - compute into temp buffer first
+            
             let mut temp = vec![0.0; len];
             wilders_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2413,7 +2413,7 @@ pub fn wilders_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
         period: config.period_range,
     };
 
-    // Resolve Kernel::Auto to actual kernel before calling batch_inner
+    
     let kernel = match Kernel::Auto {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2451,7 +2451,7 @@ pub fn wilders_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     wilders_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2486,7 +2486,7 @@ pub fn wilders_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Resolve Kernel::Auto to actual kernel before calling batch_inner_into
+        
         let kernel = match Kernel::Auto {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,

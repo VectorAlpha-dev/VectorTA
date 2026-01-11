@@ -53,7 +53,7 @@ use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
 
-// --- Data Representation
+
 
 #[derive(Debug, Clone)]
 pub enum ApoData<'a> {
@@ -74,7 +74,7 @@ impl<'a> AsRef<[f64]> for ApoInput<'a> {
     }
 }
 
-// --- Structs and Params
+
 
 #[derive(Debug, Clone)]
 pub struct ApoOutput {
@@ -133,7 +133,7 @@ impl<'a> ApoInput<'a> {
     }
 }
 
-// --- Error Types
+
 
 #[derive(Debug, Error)]
 pub enum ApoError {
@@ -155,7 +155,7 @@ pub enum ApoError {
     InvalidKernelForBatch(Kernel),
 }
 
-// --- Builder API
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct ApoBuilder {
@@ -220,7 +220,7 @@ impl ApoBuilder {
     }
 }
 
-// --- Main Indicator Function
+
 
 #[inline]
 pub fn apo(input: &ApoInput) -> Result<ApoOutput, ApoError> {
@@ -1799,7 +1799,7 @@ mod tests {
                 let len = long_period * 2..400;
                 (
                     prop::collection::vec(
-                        // Generate realistic price data
+                        
                         (10f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
@@ -1809,7 +1809,7 @@ mod tests {
                 )
             });
 
-        // Strategy 2: Constant data (APO should stay near 0)
+        
         let constant_data_strat = (3usize..=20, 10usize..=50)
             .prop_filter("short < long", |(s, l)| s < l)
             .prop_flat_map(|(short_period, long_period)| {
@@ -1822,7 +1822,7 @@ mod tests {
                 )
             });
 
-        // Strategy 3: Trending data (monotonic increase/decrease)
+        
         let trending_data_strat = (3usize..=20, 10usize..=50)
             .prop_filter("short < long", |(s, l)| s < l)
             .prop_flat_map(|(short_period, long_period)| {
@@ -1841,7 +1841,7 @@ mod tests {
                 )
             });
 
-        // Combine all strategies
+        
         let strat = prop_oneof![random_data_strat, constant_data_strat, trending_data_strat,];
 
         proptest::test_runner::TestRunner::default()
@@ -1857,10 +1857,10 @@ mod tests {
 
                 let ApoOutput { values: out } = result.unwrap();
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: First valid value should be 0.0 (both EMAs start with same value)
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 if first_valid < data.len() {
                     prop_assert!(
@@ -1871,7 +1871,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: All values after warmup should be finite
+                
                 for i in first_valid..out.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1881,9 +1881,9 @@ mod tests {
                     );
                 }
 
-                // Property 4: Values should be bounded reasonably
-                // APO is the difference between two EMAs, both bounded by data range
-                // In practice, APO magnitude is much smaller than data range
+                
+                
+                
                 let data_min = data
                     .iter()
                     .filter(|x| x.is_finite())
@@ -1894,7 +1894,7 @@ mod tests {
                     .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                 let data_range = data_max - data_min;
 
-                // Tighter bound: APO typically doesn't exceed 30% of data range
+                
                 let apo_bound = data_range * 0.3;
 
                 for i in first_valid..out.len() {
@@ -1907,10 +1907,10 @@ mod tests {
                     );
                 }
 
-                // Property 5: Data-type specific validations
+                
                 match data_type {
                     "constant" => {
-                        // For constant data, APO should remain very close to 0
+                        
                         for i in first_valid..out.len() {
                             prop_assert!(
                                 out[i].abs() < 1e-9,
@@ -1921,16 +1921,16 @@ mod tests {
                         }
                     }
                     "trending" => {
-                        // For monotonically increasing data, APO should generally be positive after initial warmup
-                        // (short EMA responds faster, stays above long EMA)
+                        
+                        
                         if data.len() > long_period * 2 {
                             let check_start = first_valid + long_period;
                             let check_end = out.len();
                             if check_start < check_end {
-                                // Check if data is increasing or decreasing
+                                
                                 let is_increasing = data[first_valid] < data[data.len() - 1];
 
-                                // Count positive vs negative values in the latter part
+                                
                                 let positive_count = out[check_start..check_end]
                                     .iter()
                                     .filter(|&&v| v > 0.0)
@@ -1938,7 +1938,7 @@ mod tests {
                                 let total_count = check_end - check_start;
 
                                 if is_increasing {
-                                    // For uptrend, expect mostly positive APO values
+                                    
                                     prop_assert!(
 										positive_count > total_count / 2,
 										"APO should be mostly positive for uptrend, got {} positive out of {}",
@@ -1946,7 +1946,7 @@ mod tests {
 										total_count
 									);
                                 } else {
-                                    // For downtrend, expect mostly negative APO values
+                                    
                                     prop_assert!(
 										positive_count < total_count / 2,
 										"APO should be mostly negative for downtrend, got {} positive out of {}",
@@ -1957,18 +1957,18 @@ mod tests {
                             }
                         }
                     }
-                    _ => {} // Random data, no specific pattern expected
+                    _ => {} 
                 }
 
-                // Property 6: Manual calculation verification for first few values
+                
                 if data.len() >= 3 && first_valid + 2 < data.len() {
                     let alpha_short = 2.0 / (short_period as f64 + 1.0);
                     let alpha_long = 2.0 / (long_period as f64 + 1.0);
 
-                    // First value after warmup
+                    
                     let mut short_ema = data[first_valid];
                     let mut long_ema = data[first_valid];
-                    let expected_first = 0.0; // Both EMAs start equal
+                    let expected_first = 0.0; 
                     prop_assert!(
                         (out[first_valid] - expected_first).abs() < 1e-9,
                         "First value mismatch: expected {}, got {}",
@@ -1976,7 +1976,7 @@ mod tests {
                         out[first_valid]
                     );
 
-                    // Second value
+                    
                     if first_valid + 1 < data.len() {
                         let price = data[first_valid + 1];
                         short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
@@ -1990,7 +1990,7 @@ mod tests {
                         );
                     }
 
-                    // Third value
+                    
                     if first_valid + 2 < data.len() {
                         let price = data[first_valid + 2];
                         short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
@@ -2005,14 +2005,14 @@ mod tests {
                     }
                 }
 
-                // Property 7: Kernel consistency - all kernels should produce the same result
+                
                 let ref_output = apo_with_kernel(&input, Kernel::Scalar);
                 prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
                 let ApoOutput { values: ref_out } = ref_output.unwrap();
 
                 for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if !val.is_finite() || !ref_val.is_finite() {
-                        // Both should be NaN at the same positions
+                        
                         prop_assert_eq!(
                             val.is_nan(),
                             ref_val.is_nan(),
@@ -2022,7 +2022,7 @@ mod tests {
                             ref_val
                         );
                     } else {
-                        // Values should be nearly identical (allowing for small floating-point differences)
+                        
                         let diff = (val - ref_val).abs();
                         let ulp_diff = val.to_bits().abs_diff(ref_val.to_bits());
                         prop_assert!(
@@ -2037,13 +2037,13 @@ mod tests {
                     }
                 }
 
-                // Property 8: Period relationship
+                
                 prop_assert!(
                     short_period < long_period,
                     "Short period must be less than long period"
                 );
 
-                // Property 9: Streaming consistency
+                
                 let mut stream = ApoStream::try_new(params).unwrap();
                 let mut stream_values = Vec::new();
                 for &price in &data {
@@ -2054,7 +2054,7 @@ mod tests {
                     }
                 }
 
-                // Compare streaming vs batch (allowing for floating-point differences)
+                
                 for i in first_valid..out.len() {
                     if out[i].is_finite() && stream_values[i].is_finite() {
                         let diff = (out[i] - stream_values[i]).abs();
@@ -2152,14 +2152,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step)
-            (2, 10, 2, 15, 30, 5),   // Small to medium periods
-            (5, 25, 5, 30, 50, 10),  // Medium periods
-            (10, 20, 5, 25, 45, 10), // Common trading periods
-            (12, 12, 0, 26, 26, 0),  // Static periods (default-like)
-            (3, 9, 3, 10, 20, 5),    // Small range sweep
+            
+            (2, 10, 2, 15, 30, 5),   
+            (5, 25, 5, 30, 50, 10),  
+            (10, 20, 5, 25, 45, 10), 
+            (12, 12, 0, 26, 26, 0),  
+            (3, 9, 3, 10, 20, 5),    
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in
@@ -2181,7 +2181,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2278,12 +2278,12 @@ mod tests {
         };
         let input = ApoInput::from_slice(&data, params);
 
-        // Force scalar kernel (which will use SIMD128 on WASM)
+        
         let scalar_output = apo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-        // Create a pure scalar version for comparison
+        
         let mut pure_scalar_output = vec![f64::NAN; data.len()];
-        let first = 0; // APO starts from first data point
+        let first = 0; 
         unsafe {
             apo_scalar(
                 &data,
@@ -2294,7 +2294,7 @@ mod tests {
             );
         }
 
-        // Compare results
+        
         assert_eq!(scalar_output.values.len(), pure_scalar_output.len());
         for (i, (simd_val, scalar_val)) in scalar_output
             .values
@@ -2317,9 +2317,9 @@ mod tests {
     }
 }
 
-// ================================================================================================
-// Python Bindings
-// ================================================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "apo")]
@@ -2342,7 +2342,7 @@ pub fn apo_py<'py>(
     };
     let apo_in = ApoInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| apo_with_kernel(&apo_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2403,16 +2403,16 @@ pub fn apo_batch_py<'py>(
     }
     let rows = combos.len();
     let cols = slice_in.len();
-    // Checked arithmetic for total elements
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
-    // Pre-allocate uninitialized NumPy array
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Warm-prefix init using helper on a MaybeUninit overlay
+    
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
@@ -2423,7 +2423,7 @@ pub fn apo_batch_py<'py>(
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Heavy work without the GIL, zero-copy into NumPy buffer
+    
     let combos = py
         .allow_threads(|| {
             let k = match kern {
@@ -2460,7 +2460,7 @@ pub fn apo_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context as CudaContext;
 #[cfg(all(feature = "python", feature = "cuda"))]

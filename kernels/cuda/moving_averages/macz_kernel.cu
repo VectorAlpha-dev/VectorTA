@@ -1,21 +1,21 @@
-// CUDA kernels for MAC-Z (ZVWAP + MACD/Stddev + optional Laguerre smoothing)
-//
-// Design:
-// - Batch (one series × many params): two-pass tiled implementation for the
-//   common use_lag==false case.
-//   - Pass 1 computes macz_tmp (MAC-Z values per row × time) in parallel across
-//     time (2D grid: time tiles × rows).
-//   - Pass 2 computes histogram from macz_tmp, preserving exact NaN parity with
-//     the scalar path (hist[t] = macz[t] - SMA(macz, sig) when window has no NaN).
-//   - The legacy single-pass per-row serial kernel is kept for reference and for
-//     the optional Laguerre path (use_lag==true).
-// - Many-series × one-param (time-major): one thread per column (series),
-//   same logic with per-column prefix sums.
-//
-// Numeric:
-// - FP32 IO, FP64 accumulators for means/variances.
-// - Warmup/NaN handling mirrors src/indicators/macz.rs: warm = first + max(slow,lz,lsd) - 1
-//   and histogram warm = warm + sig - 1. Any NaN in contributing windows yields NaN.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -24,7 +24,7 @@ static __device__ inline float f32_nan() {
     return __int_as_float(0x7fffffff);
 }
 
-// Helpers to read prefix ranges safely
+
 static __device__ inline int window_has_nan(const int* __restrict__ pref_nan, int t1, int t0) {
     return (pref_nan[t1] - pref_nan[t0]) != 0;
 }
@@ -33,32 +33,32 @@ static __device__ inline double window_sum(const double* __restrict__ pref, int 
     return pref[t1] - pref[t0];
 }
 
-// -------------------- Batch (tiled, two-pass) --------------------
 
-// Pass 1: compute macz_tmp[t] for every row × time (use_lag==false).
+
+
 extern "C" __global__ void macz_batch_macz_tmp_f32(
-    // inputs
+    
     const float* __restrict__ close,
-    const float* __restrict__ volume, // may be nullptr if use_sma_for_vwap
+    const float* __restrict__ volume, 
     const double* __restrict__ pref_close_sum,
     const double* __restrict__ pref_close_sumsq,
     const int* __restrict__ pref_close_nan,
-    const double* __restrict__ pref_vol_sum,   // optional when volume != nullptr
-    const double* __restrict__ pref_pv_sum,    // optional when volume != nullptr
-    const int* __restrict__ pref_vol_nan,      // optional when volume != nullptr
-    // params per row
+    const double* __restrict__ pref_vol_sum,   
+    const double* __restrict__ pref_pv_sum,    
+    const int* __restrict__ pref_vol_nan,      
+    
     const int* __restrict__ fasts,
     const int* __restrict__ slows,
     const int* __restrict__ lzs,
     const int* __restrict__ lsds,
     const float* __restrict__ a_s,
     const float* __restrict__ b_s,
-    // meta
+    
     int len,
     int first_valid,
     int n_rows,
-    int use_sma_for_vwap, // 1 if volume==nullptr and VWAP should default to SMA(close, lz)
-    // outputs
+    int use_sma_for_vwap, 
+    
     float* __restrict__ macz_tmp
 ) {
     const int t = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -79,13 +79,13 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         return;
     }
 
-    // Compute mean for VWAP window and zvwap
+    
     double mean_vwap = NAN;
     {
         const int t1 = t + 1;
         const int t0 = t + 1 - lz;
         if (!use_sma_for_vwap && volume != nullptr) {
-            // Require no NaNs in close or vol windows
+            
             if (!window_has_nan(pref_close_nan, t1, t0) && !window_has_nan(pref_vol_nan, t1, t0)) {
                 const double vol_sum = window_sum(pref_vol_sum, t1, t0);
                 if (vol_sum > 0.0) {
@@ -94,7 +94,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
                 }
             }
         } else {
-            // Fallback: VWAP := SMA(close, lz)
+            
             if (!window_has_nan(pref_close_nan, t1, t0)) {
                 const double ssum = window_sum(pref_close_sum, t1, t0);
                 mean_vwap = ssum / (double)lz;
@@ -102,7 +102,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    // zvwap: population stdev of close over lz around mean_vwap
+    
     double z = NAN;
     if (!isnan(mean_vwap)) {
         const int t1 = t + 1;
@@ -123,7 +123,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    // MACD using SMA(fast) - SMA(slow)
+    
     double macd = NAN;
     {
         const int t1s = t + 1;
@@ -137,7 +137,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    // Stddev on source over lsd (population)
+    
     double sd = NAN;
     {
         const int t1d = t + 1;
@@ -159,20 +159,20 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
     macz_tmp[row_off + t] = macz_raw;
 }
 
-// Pass 2: compute histogram from macz_tmp, preserving NaN parity.
+
 extern "C" __global__ void macz_batch_hist_from_macz_f32(
-    // inputs
+    
     const float* __restrict__ macz_tmp,
-    // params per row
+    
     const int* __restrict__ slows,
     const int* __restrict__ sigs,
     const int* __restrict__ lzs,
     const int* __restrict__ lsds,
-    // meta
+    
     int len,
     int first_valid,
     int n_rows,
-    // outputs
+    
     float* __restrict__ out_hist
 ) {
     const int t = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -192,7 +192,7 @@ extern "C" __global__ void macz_batch_hist_from_macz_f32(
         return;
     }
 
-    // sum macz from t-g+1 .. t; NaN if any NaN in window
+    
     double sum = 0.0;
     bool any_nan = false;
     const int start = t + 1 - g;
@@ -209,19 +209,19 @@ extern "C" __global__ void macz_batch_hist_from_macz_f32(
     }
 }
 
-// -------------------- Batch (legacy, single-pass) --------------------
+
 
 extern "C" __global__ void macz_batch_f32(
-    // inputs
+    
     const float* __restrict__ close,
-    const float* __restrict__ volume, // may be nullptr if use_sma_for_vwap
+    const float* __restrict__ volume, 
     const double* __restrict__ pref_close_sum,
     const double* __restrict__ pref_close_sumsq,
     const int* __restrict__ pref_close_nan,
-    const double* __restrict__ pref_vol_sum,   // optional when volume != nullptr
-    const double* __restrict__ pref_pv_sum,    // optional when volume != nullptr
-    const int* __restrict__ pref_vol_nan,      // optional when volume != nullptr
-    // params per row
+    const double* __restrict__ pref_vol_sum,   
+    const double* __restrict__ pref_pv_sum,    
+    const int* __restrict__ pref_vol_nan,      
+    
     const int* __restrict__ fasts,
     const int* __restrict__ slows,
     const int* __restrict__ sigs,
@@ -229,15 +229,15 @@ extern "C" __global__ void macz_batch_f32(
     const int* __restrict__ lsds,
     const float* __restrict__ a_s,
     const float* __restrict__ b_s,
-    const int* __restrict__ use_lag_s, // 0/1
+    const int* __restrict__ use_lag_s, 
     const float* __restrict__ gammas,
-    // meta
+    
     int len,
     int first_valid,
     int n_rows,
-    int use_sma_for_vwap, // 1 if volume==nullptr and VWAP should default to SMA(close, lz)
-    // outputs
-    float* __restrict__ macz_tmp, // per-row temporary MACZ (post-laguerre if enabled)
+    int use_sma_for_vwap, 
+    
+    float* __restrict__ macz_tmp, 
     float* __restrict__ out_hist
 ) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -257,23 +257,23 @@ extern "C" __global__ void macz_batch_f32(
     const int warm_hist = warm_m + g - 1;
     const int row_off = row * len;
 
-    // Initialize outputs with NaN
+    
     for (int i = 0; i < len; ++i) {
         macz_tmp[row_off + i] = f32_nan();
         out_hist[row_off + i] = f32_nan();
     }
 
-    // Laguerre state (if enabled)
+    
     double l0 = 0.0, l1 = 0.0, l2 = 0.0, l3 = 0.0;
 
     for (int t = warm_m; t < len; ++t) {
-        // Compute mean for VWAP window and zvwap
+        
         double mean_vwap = NAN;
         if (t >= first_valid + lz - 1) {
             const int t1 = t + 1;
             const int t0 = t + 1 - lz;
             if (!use_sma_for_vwap && volume != nullptr) {
-                // Require no NaNs in close or vol windows
+                
                 if (!window_has_nan(pref_close_nan, t1, t0) && !window_has_nan(pref_vol_nan, t1, t0)) {
                     const double vol_sum = window_sum(pref_vol_sum, t1, t0);
                     if (vol_sum > 0.0) {
@@ -282,7 +282,7 @@ extern "C" __global__ void macz_batch_f32(
                     }
                 }
             } else {
-                // Fallback: VWAP := SMA(close, lz)
+                
                 if (!window_has_nan(pref_close_nan, t1, t0)) {
                     const double ssum = window_sum(pref_close_sum, t1, t0);
                     mean_vwap = ssum / (double)lz;
@@ -290,7 +290,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        // zvwap: population stdev of close over lz around mean_vwap
+        
         double z = NAN;
         if (!isnan(mean_vwap)) {
             const int t1 = t + 1;
@@ -311,7 +311,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        // MACD using SMA(fast) - SMA(slow)
+        
         double macd = NAN;
         if (t >= first_valid + s - 1) {
             const int t1s = t + 1;
@@ -325,7 +325,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        // Stddev on source over lsd (population)
+        
         double sd = NAN;
         if (t >= first_valid + lsd - 1) {
             const int t1d = t + 1;
@@ -363,10 +363,10 @@ extern "C" __global__ void macz_batch_f32(
 
         macz_tmp[row_off + t] = macz_val;
 
-        // Histogram = macz - SMA(macz, g) beginning at warm_hist. Maintain NaN parity by
-        // explicitly checking the window has no NaNs.
+        
+        
         if (t >= warm_hist) {
-            // sum macz from t-g+1 .. t; fail to NaN if any NaN encountered
+            
             double sum = 0.0;
             bool any_nan = false;
             const int start = t + 1 - g;
@@ -385,18 +385,18 @@ extern "C" __global__ void macz_batch_f32(
 }
 
 extern "C" __global__ void macz_many_series_one_param_time_major_f32(
-    // inputs TM
+    
     const float* __restrict__ close_tm,
-    const float* __restrict__ volume_tm, // may be nullptr if use_sma_for_vwap
-    const double* __restrict__ pref_close_sum_tm,   // concatenated per column, len (rows+1)*cols
-    const double* __restrict__ pref_close_sumsq_tm, // same
-    const int* __restrict__ pref_close_nan_tm,      // same
-    const double* __restrict__ pref_vol_sum_tm,     // same (optional)
-    const double* __restrict__ pref_pv_sum_tm,      // same (optional)
-    const int* __restrict__ pref_vol_nan_tm,        // same (optional)
+    const float* __restrict__ volume_tm, 
+    const double* __restrict__ pref_close_sum_tm,   
+    const double* __restrict__ pref_close_sumsq_tm, 
+    const int* __restrict__ pref_close_nan_tm,      
+    const double* __restrict__ pref_vol_sum_tm,     
+    const double* __restrict__ pref_pv_sum_tm,      
+    const int* __restrict__ pref_vol_nan_tm,        
     int cols,
     int rows,
-    // params (single)
+    
     int fast,
     int slow,
     int sig,
@@ -408,11 +408,11 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
     float gamma_f,
     const int* __restrict__ first_valids,
     int use_sma_for_vwap,
-    // outputs TM
+    
     float* __restrict__ macz_tm,
     float* __restrict__ hist_tm
 ) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // column index
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
     const int off_pref = s * (rows + 1);
 
@@ -435,7 +435,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
     const double gamma = (double)gamma_f;
 
     for (int t = warm_m; t < rows; ++t) {
-        // VWAP mean
+        
         double mean_vwap = NAN;
         if (t >= fv + lz - 1) {
             const int t1 = t + 1;
@@ -455,7 +455,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        // zvwap
+        
         double z = NAN;
         if (!isnan(mean_vwap)) {
             const int t1 = t + 1, t0 = t + 1 - lz;
@@ -473,7 +473,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        // MACD SMA(fast)-SMA(slow)
+        
         double macd = NAN;
         if (t >= fv + slow - 1) {
             const int t1s = t + 1, t0s = t + 1 - slow;
@@ -485,7 +485,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        // Stddev over lsd
+        
         double sd = NAN;
         if (t >= fv + lsd - 1) {
             const int t1d = t + 1, t0d = t + 1 - lsd;

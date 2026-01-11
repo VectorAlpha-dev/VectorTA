@@ -81,7 +81,7 @@ pub struct CudaQqe {
 }
 
 impl CudaQqe {
-    // warp-friendly clamp/alignment for block sizes (32..=1024)
+    
     #[inline]
     fn warp_align(x: u32) -> u32 {
         let clamped = x.clamp(32, 1024);
@@ -181,7 +181,7 @@ impl CudaQqe {
         }
     }
 
-    // ---- Helpers ----
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -305,7 +305,7 @@ impl CudaQqe {
         out
     }
 
-    // ---- Batch: one series × many params ----
+    
     pub fn qqe_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -321,7 +321,7 @@ impl CudaQqe {
         }
         let len = prices_f32.len();
 
-        // Validate: need at least rsi+ema-1 samples after first_valid
+        
         let mut worst_needed = 0usize;
         for c in &combos {
             let need = c.rsi_period.unwrap() + c.smoothing_factor.unwrap();
@@ -342,7 +342,7 @@ impl CudaQqe {
             ));
         }
 
-        // VRAM: prices + params + outputs (2 * rows * len)
+        
         let rows = combos.len();
         let bytes_prices = len
             .checked_mul(4)
@@ -368,7 +368,7 @@ impl CudaQqe {
         let rsi_i32: Vec<i32> = combos.iter().map(|c| c.rsi_period.unwrap() as i32).collect();
         let ema_i32: Vec<i32> = combos.iter().map(|c| c.smoothing_factor.unwrap() as i32).collect();
         let fast_f32: Vec<f32> = combos.iter().map(|c| c.fast_factor.unwrap() as f32).collect();
-        // async param uploads to avoid implicit syncs
+        
         let d_rsi: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &self.stream) }?;
         let d_ema: DeviceBuffer<i32> =
@@ -378,13 +378,13 @@ impl CudaQqe {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
-        // Kernel launch: grid = (grid_x=1, grid_y=chunk_rows), block.x warp-aligned
+        
         let mut block_x = match self.policy_batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
         block_x = Self::warp_align(block_x);
-        // Cache function lookup
+        
         let func = self
             .module
             .get_function("qqe_batch_f32")
@@ -441,7 +441,7 @@ impl CudaQqe {
         
     }
 
-    // ---- Many-series: time-major, one param ----
+    
     pub fn qqe_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -449,7 +449,7 @@ impl CudaQqe {
         rows: usize,
         params: &QqeParams,
     ) -> Result<DeviceArrayF32, CudaQqeError> {
-        // dims and input already validated above
+        
         if cols == 0 || rows == 0 {
             return Err(CudaQqeError::InvalidInput("cols/rows must be > 0".into()));
         }
@@ -465,13 +465,13 @@ impl CudaQqe {
             return Err(CudaQqeError::InvalidInput("invalid rsi/ema period".into()));
         }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
             for t in 0..rows {
                 let v = prices_tm_f32[t * cols + s];
-                // de-duped
+                
                 if v.is_finite() {
                     fv = Some(t);
                     break;
@@ -514,7 +514,7 @@ impl CudaQqe {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
-        // Heuristic + warp alignment for block size: kernel uses block.x to prefill warmup
+        
         let warm_max = (0..cols)
             .map(|s| {
                 (first_valids[s] as usize)
@@ -536,7 +536,7 @@ impl CudaQqe {
             }
         };
         block_x = Self::warp_align(block_x);
-        // Cache function lookup
+        
         let func = self
             .module
             .get_function("qqe_many_series_one_param_time_major_f32")
@@ -564,7 +564,7 @@ impl CudaQqe {
                 &mut first_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            // Critical: grid.x must be 1; one block per series along Y
+            
             let grid_dims = (1u32, cols as u32, 1u32);
             let block_dims = (block_x, 1u32, 1u32);
             Self::validate_launch(self, grid_dims, block_dims)?;
@@ -593,7 +593,7 @@ impl CudaQqe {
     }
 }
 
-// -------- Benches --------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};

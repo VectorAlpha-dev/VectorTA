@@ -11,7 +11,7 @@
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::aso::{AsoBatchRange, AsoParams};
-use crate::indicators::willr::build_willr_gpu_tables; // reuse min/max sparse tables
+use crate::indicators::willr::build_willr_gpu_tables; 
 use cust::context::{CacheConfig, Context};
 use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
@@ -23,7 +23,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::Arc;
-// Low-level CUDA driver syscalls for per-kernel attributes
+
 use cust::sys;
 
 #[derive(Debug)]

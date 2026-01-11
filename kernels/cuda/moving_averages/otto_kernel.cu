@@ -1,8 +1,8 @@
-// CUDA kernels for OTTO (Optimized Trend Tracker Oscillator)
-//
-// Category: Recurrence/IIR with per-row sequential scan.
-// Implements the common case where MA type = VAR (VIDYA on LOTT).
-// For other MA types, the host wrapper may fall back to a multi-stage pipeline.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -17,23 +17,23 @@ static __device__ __forceinline__ float nzf(float x) {
 
 extern "C" __global__
 void otto_batch_f32(
-    const float* __restrict__ prices,     // len = series_len
-    const float* __restrict__ cabs,       // len = series_len (abs CMO(9) on price)
-    const int*   __restrict__ ott_periods,// len = n_combos
-    const float* __restrict__ ott_percents,// len = n_combos
-    const int*   __restrict__ fast_vidyas,// len = n_combos
-    const int*   __restrict__ slow_vidyas,// len = n_combos
-    const float* __restrict__ cocos,      // len = n_combos (correcting_constant)
+    const float* __restrict__ prices,     
+    const float* __restrict__ cabs,       
+    const int*   __restrict__ ott_periods,
+    const float* __restrict__ ott_percents,
+    const int*   __restrict__ fast_vidyas,
+    const int*   __restrict__ slow_vidyas,
+    const float* __restrict__ cocos,      
     int series_len,
     int n_combos,
     int /*first_valid (reserved)*/,
-    float* __restrict__ hott_out,         // len = n_combos * series_len
-    float* __restrict__ lott_out          // len = n_combos * series_len
+    float* __restrict__ hott_out,         
+    float* __restrict__ lott_out          
 ) {
     const int combo = blockIdx.x;
     if (combo >= n_combos || threadIdx.x != 0) return;
 
-    // Load per-row params
+    
     const int slow = max(__ldg(slow_vidyas + combo), 1);
     const int fast = max(__ldg(fast_vidyas + combo), 1);
     const int p1 = max(slow / 2, 1);
@@ -56,9 +56,9 @@ void otto_batch_f32(
     float* __restrict__ hott_row = hott_out + combo * series_len;
     float* __restrict__ lott_row = lott_out + combo * series_len;
 
-    // VIDYA tracks for source
+    
     float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
-    // For VAR(LOTT): CMO(9) on lott diffs
+    
     const int CMO_P = 9;
     float ring_up[CMO_P];
     float ring_dn[CMO_P];
@@ -76,22 +76,22 @@ void otto_batch_f32(
         const float x = nzf(__ldg(prices + i));
         const float c_abs = __ldg(cabs + i);
 
-        // Adaptive alphas
+        
         const float a1 = a1_base * c_abs;
         const float a2 = a2_base * c_abs;
         const float a3 = a3_base * c_abs;
 
-        // VIDYA on source
+        
         v1 = fmaf(a1, x, (1.0f - a1) * v1);
         v2 = fmaf(a2, x, (1.0f - a2) * v2);
         v3 = fmaf(a3, x, (1.0f - a3) * v3);
 
-        // LOTT = v1 / ((v2 - v3) + coco)
+        
         const float denom_l = (v2 - v3) + coco;
         const float lott = denom_l != 0.0f ? (v1 / denom_l) : 0.0f;
         lott_row[i] = lott;
 
-        // CMO(9) on LOTT diffs (VIDYA on LOTT)
+        
         if (i > 0) {
             const float d = lott - prev_lott;
             if (i >= CMO_P) {
@@ -138,9 +138,9 @@ void otto_batch_f32(
 
 extern "C" __global__
 void otto_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, // time-major [t * rows + s]
-    int cols,                            // series_len (time)
-    int rows,                            // num_series
+    const float* __restrict__ prices_tm, 
+    int cols,                            
+    int rows,                            
     int ott_period,
     float ott_percent_f,
     int fast_vidya,
@@ -165,7 +165,7 @@ void otto_many_series_one_param_f32(
     const float scale_up = (200.0f + ott_percent) / 200.0f;
     const float scale_dn = (200.0f - ott_percent) / 200.0f;
 
-    // Precompute c_abs on price locally (CMO 9)
+    
     const int CMO_P = 9;
     float ring_up_p[CMO_P];
     float ring_dn_p[CMO_P];
@@ -176,7 +176,7 @@ void otto_many_series_one_param_f32(
     float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
     float prev_price = 0.0f;
 
-    // For VAR(LOTT)
+    
     float ring_up_l[CMO_P];
     float ring_dn_l[CMO_P];
     #pragma unroll

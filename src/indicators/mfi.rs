@@ -1234,12 +1234,12 @@ pub fn mfi_py<'py>(
     };
     let input = MfiInput::from_slices(typical_slice, volume_slice, params);
 
-    // GOOD: Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| mfi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1249,7 +1249,7 @@ pub struct MfiStreamPy {
     inner: MfiStream,
 }
 
-// ================= CUDA Python VRAM handle (CAI v3 + DLPack v1.x) =================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct MfiDeviceArrayF32Py {
@@ -1375,23 +1375,23 @@ pub fn mfi_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // Calculate dimensions
+    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = tp.len();
 
-    // Allocate NumPy array upfront for zero-copy
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute directly into NumPy buffer
+    
     let combos = py
         .allow_threads(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
-            // Map batch -> compute kernel as in ALMA
+            
             let simd = match k {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1403,7 +1403,7 @@ pub fn mfi_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    // Zero-copy reshape NumPy array
+    
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
@@ -1416,7 +1416,7 @@ pub fn mfi_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python Bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mfi_cuda_batch_dev")]
 #[pyo3(signature = (typical_price, volume, period_range, device_id=0))]
@@ -1508,9 +1508,9 @@ pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result
 
     mfi_compute_into(typical_price, volume, period, first_valid_idx, chosen, dst);
 
-    // Fill warmup with NaN
+    
     let warmup_period = first_valid_idx + period - 1;
-    // Use the same quiet-NaN bit pattern as alloc_with_nan_prefix for exact parity.
+    
     let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_period] {
         *v = nan_q;
@@ -1537,7 +1537,7 @@ pub fn mfi_js(typical_price: &[f64], volume: &[f64], period: usize) -> Result<Ve
     };
     let input = MfiInput::from_slices(typical_price, volume, params);
 
-    // Get result from the main function which already uses proper allocation
+    
     let result = mfi_with_kernel(&input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1565,9 +1565,9 @@ pub fn mfi_into(
         };
         let input = MfiInput::from_slices(typical_price, volume, params);
 
-        // Check for aliasing with either input
+        
         if typical_price_ptr == out_ptr || volume_ptr == out_ptr {
-            // Use main function which handles allocation properly
+            
             let result = mfi_with_kernel(&input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
@@ -1671,7 +1671,7 @@ pub fn mfi_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("mfi_batch_into: rows*cols overflow"))?;
 
-        // Destination must be rows * cols
+        
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         mfi_batch_inner_into(tp, vol, &sweep, detect_best_kernel(), false, out)
@@ -1691,26 +1691,26 @@ mod tests {
 
     #[test]
     fn test_mfi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare deterministic synthetic data (length 256)
+        
         let n = 256usize;
         let mut tp = Vec::with_capacity(n);
         let mut vol = Vec::with_capacity(n);
         for i in 0..n {
             let i_f = i as f64;
-            // Mildly varying typical price with small oscillation
+            
             let price = 100.0 + 0.123 * i_f + ((i % 7) as f64 - 3.0) * 0.05;
             tp.push(price);
-            // Positive, varying volume
+            
             vol.push(1_000.0 + ((i * 37) % 113) as f64);
         }
 
-        // Default params (period = 14)
+        
         let input = MfiInput::from_slices(&tp, &vol, MfiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = mfi(&input)?.values;
 
-        // Preallocate output buffer and call into API
+        
         let mut out = vec![0.0f64; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1718,12 +1718,12 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm feature builds, use the slice variant to preserve parity
+            
             mfi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
-        // Equality helper: NaN == NaN, finite requires exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1810,7 +1810,7 @@ mod tests {
         let input_low = [0.5, 1.5, 2.5];
         let input_close = [0.8, 1.8, 2.8];
         let input_volume = [100.0, 200.0, 300.0];
-        // Calculate typical price (HLC3)
+        
         let typical_price: Vec<f64> = input_high
             .iter()
             .zip(&input_low)
@@ -1830,7 +1830,7 @@ mod tests {
         let input_low = [0.5];
         let input_close = [0.8];
         let input_volume = [100.0];
-        // Calculate typical price (HLC3)
+        
         let typical_price = [(input_high[0] + input_low[0] + input_close[0]) / 3.0];
         let params = MfiParams { period: Some(14) };
         let input = MfiInput::from_slices(&typical_price, &input_volume, params);
@@ -1847,7 +1847,7 @@ mod tests {
         let first_input = MfiInput::from_candles(&candles, "hlc3", first_params);
         let first_result = mfi_with_kernel(&first_input, kernel)?;
         let second_params = MfiParams { period: Some(7) };
-        // Use the output from first run as typical price for second run
+        
         let typical_price_values: Vec<f64> = first_result.values.clone();
         let volume_values: Vec<f64> = vec![10_000.0; first_result.values.len()];
         let second_input =
@@ -1865,17 +1865,17 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            MfiParams::default(),            // period: 14
-            MfiParams { period: Some(2) },   // minimum
-            MfiParams { period: Some(5) },   // small
-            MfiParams { period: Some(7) },   // small
-            MfiParams { period: Some(10) },  // medium
-            MfiParams { period: Some(14) },  // default explicit
-            MfiParams { period: Some(20) },  // medium-large
-            MfiParams { period: Some(30) },  // large
-            MfiParams { period: Some(50) },  // very large
-            MfiParams { period: Some(100) }, // extra large
-            MfiParams { period: Some(200) }, // maximum reasonable
+            MfiParams::default(),            
+            MfiParams { period: Some(2) },   
+            MfiParams { period: Some(5) },   
+            MfiParams { period: Some(7) },   
+            MfiParams { period: Some(10) },  
+            MfiParams { period: Some(14) },  
+            MfiParams { period: Some(20) },  
+            MfiParams { period: Some(30) },  
+            MfiParams { period: Some(50) },  
+            MfiParams { period: Some(100) }, 
+            MfiParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1947,24 +1947,24 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic data and parameters
-        let strat = (2usize..=50) // Period range for MFI
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
-                // Generate data length from period to 400
+                
                 (period..=400).prop_flat_map(move |data_len| {
-					// Choose data generation type
+					
 					prop_oneof![
-						// 60% normal data with realistic price movements
+						
 						6 => (
-							// Generate base price
+							
 							(10.0f64..10000.0f64),
-							// Generate volatility
+							
 							(0.01f64..0.2f64),
-							// Generate volume multiplier
+							
 							(1000.0f64..1_000_000.0f64),
-							// Generate random changes for price walk
+							
 							prop::collection::vec(-1.0f64..1.0f64, data_len),
-							// Generate random volume factors
+							
 							prop::collection::vec(0.0f64..1.0f64, data_len),
 						).prop_map(move |(base_price, volatility, volume_mult, changes, vol_factors)| {
 							let mut typical_price = Vec::with_capacity(data_len);
@@ -1972,13 +1972,13 @@ mod tests {
 							let mut price = base_price;
 
 							for i in 0..data_len {
-								// Random walk for price using pre-generated random values
+								
 								let change = changes[i] * volatility;
 								price *= 1.0 + change;
-								price = price.max(0.01); // Ensure positive prices
+								price = price.max(0.01); 
 								typical_price.push(price);
 
-								// Correlated volume (higher volume on bigger moves)
+								
 								let vol = volume_mult * (0.5 + vol_factors[i] + change.abs() * 2.0);
 								volume.push(vol.max(0.0));
 							}
@@ -1986,7 +1986,7 @@ mod tests {
 							(typical_price, volume, period)
 						}),
 
-						// 15% constant price data
+						
 						15 => prop::collection::vec(100.0f64..1000.0f64, 1..=1)
 							.prop_map(move |prices| {
 								let price = prices[0];
@@ -1995,7 +1995,7 @@ mod tests {
 								(typical_price, volume, period)
 							}),
 
-						// 15% trending data with volume correlation
+						
 						15 => prop::bool::ANY.prop_map(move |uptrend| {
 							let mut typical_price = Vec::with_capacity(data_len);
 							let mut volume = Vec::with_capacity(data_len);
@@ -2003,22 +2003,22 @@ mod tests {
 
 							for i in 0..data_len {
 								let trend_factor = if uptrend {
-									1.0 + (i as f64 / data_len as f64) * 2.0  // Up to 3x increase
+									1.0 + (i as f64 / data_len as f64) * 2.0  
 								} else {
-									1.0 - (i as f64 / data_len as f64) * 0.7  // Up to 30% decrease
+									1.0 - (i as f64 / data_len as f64) * 0.7  
 								};
 								typical_price.push(start_price * trend_factor);
-								// Higher volume on trend moves
+								
 								volume.push(10000.0 * (1.0 + i as f64 / data_len as f64) * 2.0);
 							}
 
 							(typical_price, volume, period)
 						}),
 
-						// 10% edge cases (zero/small volumes)
+						
 						1 => Just((
 							(0..data_len).map(|i| 100.0 + (i as f64)).collect::<Vec<_>>(),
-							vec![0.0; data_len],  // Zero volume
+							vec![0.0; data_len],  
 							period
 						)),
 					]
@@ -2033,24 +2033,24 @@ mod tests {
                 };
                 let input = MfiInput::from_slices(&typical_price, &volume, params.clone());
 
-                // Get output from kernel under test
+                
                 let MfiOutput { values: out } = mfi_with_kernel(&input, kernel)?;
 
-                // Get reference output from scalar kernel
+                
                 let MfiOutput { values: ref_out } = mfi_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(out.len(), typical_price.len(), "Output length mismatch");
 
-                // Find first valid index
+                
                 let first_valid_idx = (0..typical_price.len())
                     .find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan())
                     .unwrap_or(0);
 
                 let expected_warmup = first_valid_idx + period - 1;
 
-                // Property 2: Exact warmup period verification
-                // First non-NaN should appear at exactly first_valid_idx + period - 1
+                
+                
                 for i in 0..out.len() {
                     if i < expected_warmup {
                         prop_assert!(
@@ -2060,7 +2060,7 @@ mod tests {
                             out[i]
                         );
                     } else if i == expected_warmup {
-                        // First non-NaN value
+                        
                         prop_assert!(
                             !out[i].is_nan(),
                             "Expected first non-NaN at index {} but got NaN",
@@ -2069,7 +2069,7 @@ mod tests {
                     }
                 }
 
-                // Property 3: MFI values are bounded [0, 100]
+                
                 for (i, &val) in out.iter().enumerate().skip(expected_warmup) {
                     if !val.is_nan() {
                         prop_assert!(
@@ -2081,15 +2081,15 @@ mod tests {
                     }
                 }
 
-                // Property 4: Constant prices should produce MFI = 0
-                // (no price change means no money flow)
+                
+                
                 let is_constant = typical_price
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() < 1e-10);
                 if is_constant && expected_warmup < out.len() {
                     for i in expected_warmup..out.len() {
                         if !out[i].is_nan() {
-                            // MFI is 0 when no price change (no flow)
+                            
                             prop_assert!(
                                 out[i].abs() < 1e-3,
                                 "Constant price MFI should be ~0, got {} at index {}",
@@ -2100,12 +2100,12 @@ mod tests {
                     }
                 }
 
-                // Property 5: Zero volume handling (FIXED)
+                
                 let all_zero_volume = volume.iter().all(|&v| v.abs() < 1e-14);
                 if all_zero_volume && expected_warmup < out.len() {
                     for i in expected_warmup..out.len() {
                         if !out[i].is_nan() {
-                            // When volume is 0, flow is 0, so MFI should be 0
+                            
                             prop_assert!(
                                 out[i].abs() < 1e-3,
                                 "Zero volume MFI should be 0, got {} at index {}",
@@ -2116,19 +2116,19 @@ mod tests {
                     }
                 }
 
-                // Property 6: Volume-weighted trend behavior (FIXED)
-                // Verify that MFI reflects the volume-weighted money flow direction
-                // MFI at index i is calculated from data points (i - period + 1) to i
+                
+                
+                
                 if expected_warmup + period < typical_price.len() {
-                    // Pick an MFI value to check after warmup
+                    
                     let check_idx = expected_warmup + period;
 
-                    // Calculate the window that this MFI value is based on
-                    // MFI at check_idx uses the last 'period' data points
+                    
+                    
                     let window_start = check_idx - period + 1;
                     let window_end = check_idx;
 
-                    // Count up vs down moves with volume weighting in the CORRECT window
+                    
                     let mut up_volume = 0.0;
                     let mut down_volume = 0.0;
 
@@ -2136,14 +2136,14 @@ mod tests {
                         if i > 0 && i < typical_price.len() {
                             let price_change = typical_price[i] - typical_price[i - 1];
                             if price_change > 0.0 {
-                                up_volume += volume[i] * typical_price[i]; // Money flow
+                                up_volume += volume[i] * typical_price[i]; 
                             } else if price_change < 0.0 {
-                                down_volume += volume[i] * typical_price[i]; // Money flow
+                                down_volume += volume[i] * typical_price[i]; 
                             }
                         }
                     }
 
-                    // If significantly more up money flow, MFI should be > 50
+                    
                     if up_volume > down_volume * 2.0 && check_idx < out.len() {
                         let mfi_val = out[check_idx];
                         if !mfi_val.is_nan() && (up_volume + down_volume) > 1e-10 {
@@ -2157,7 +2157,7 @@ mod tests {
                         }
                     }
 
-                    // If significantly more down money flow, MFI should be < 50
+                    
                     if down_volume > up_volume * 2.0 && check_idx < out.len() {
                         let mfi_val = out[check_idx];
                         if !mfi_val.is_nan() && (up_volume + down_volume) > 1e-10 {
@@ -2172,18 +2172,18 @@ mod tests {
                     }
                 }
 
-                // Property 7: Mathematical formula verification (FIXED)
-                // Manually calculate MFI and verify it matches the implementation
-                // MFI = 100 * (positive_money_flow / (positive_money_flow + negative_money_flow))
+                
+                
+                
                 if expected_warmup + 5 < typical_price.len() {
                     let verify_idx = expected_warmup + 5;
 
-                    // Manually calculate MFI at verify_idx
-                    // The MFI at index i includes the last 'period' data points: (i - period + 1) to i
+                    
+                    
                     let mut pos_sum = 0.0;
                     let mut neg_sum = 0.0;
 
-                    // Start from the second point in the window since we need a previous price
+                    
                     let window_start = verify_idx - period + 1;
 
                     for i in window_start..=verify_idx {
@@ -2196,7 +2196,7 @@ mod tests {
                             } else if price_diff < 0.0 {
                                 neg_sum += money_flow;
                             }
-                            // If price_diff == 0, no flow is added (implementation behavior)
+                            
                         }
                     }
 
@@ -2221,44 +2221,44 @@ mod tests {
                     }
                 }
 
-                // Property 8: Volume weighting verification (COMPLETELY REWRITTEN)
-                // Test that volume amplifies price movements in MFI calculation
+                
+                
                 if period >= 5 && period <= 20 {
-                    // Reasonable period range for this test
-                    // Create two datasets with identical monotonic price increases
-                    let test_len = period * 3; // Enough for warmup and testing
+                    
+                    
+                    let test_len = period * 3; 
                     let mut prices = Vec::with_capacity(test_len);
                     let mut increasing_vol = Vec::with_capacity(test_len);
                     let mut decreasing_vol = Vec::with_capacity(test_len);
 
-                    // Create steadily increasing prices
+                    
                     for i in 0..test_len {
-                        prices.push(100.0 + i as f64); // Monotonic increase
-                                                       // Increasing volume amplifies up-moves
+                        prices.push(100.0 + i as f64); 
+                                                       
                         increasing_vol.push(1000.0 * (1.0 + i as f64));
-                        // Decreasing volume dampens up-moves
+                        
                         decreasing_vol.push(1000.0 * (test_len as f64 - i as f64));
                     }
 
-                    // Calculate MFI with increasing volume (amplifies upward movement)
+                    
                     let input_inc = MfiInput::from_slices(&prices, &increasing_vol, params.clone());
                     let MfiOutput { values: out_inc } = mfi_with_kernel(&input_inc, kernel)?;
 
-                    // Calculate MFI with decreasing volume (dampens upward movement)
+                    
                     let input_dec = MfiInput::from_slices(&prices, &decreasing_vol, params.clone());
                     let MfiOutput { values: out_dec } = mfi_with_kernel(&input_dec, kernel)?;
 
-                    // Check MFI values after warmup
-                    // With monotonic price increases:
-                    // - Increasing volume should produce higher MFI (more recent moves have more weight)
-                    // - Decreasing volume should produce lower MFI (more recent moves have less weight)
-                    let check_idx = period * 2; // Well past warmup
+                    
+                    
+                    
+                    
+                    let check_idx = period * 2; 
                     if check_idx < out_inc.len() {
                         let mfi_inc = out_inc[check_idx];
                         let mfi_dec = out_dec[check_idx];
 
                         if !mfi_inc.is_nan() && !mfi_dec.is_nan() {
-                            // Both should be high (> 90) since all moves are upward
+                            
                             prop_assert!(
                                 mfi_inc > 90.0,
                                 "MFI with increasing volume on uptrend should be > 90, got {}",
@@ -2270,7 +2270,7 @@ mod tests {
                                 mfi_dec
                             );
 
-                            // Increasing volume should produce higher MFI than decreasing
+                            
                             prop_assert!(
 								mfi_inc > mfi_dec,
 								"MFI with increasing volume ({}) should be > MFI with decreasing volume ({}) on uptrend",
@@ -2281,12 +2281,12 @@ mod tests {
                     }
                 }
 
-                // Property 9: Kernel consistency (critical)
+                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Both should be NaN or both should be finite
+                    
                     if y.is_nan() || r.is_nan() {
                         prop_assert_eq!(
                             y.is_nan(),
@@ -2299,7 +2299,7 @@ mod tests {
                         continue;
                     }
 
-                    // Check ULP difference for finite values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2372,8 +2372,8 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // The following block assumes you have a known correct output for your default test file
-        // If you want to check real values, insert expected_last_five_mfi as needed:
+        
+        
         let expected = [
             38.13874339324763,
             37.44139770113819,
@@ -2399,13 +2399,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (10, 50, 10), // Wide medium range
-            (7, 21, 7),   // Weekly periods
-            (14, 14, 0),  // Single period (default)
+            (2, 10, 2),   
+            (5, 25, 5),   
+            (30, 60, 15), 
+            (2, 5, 1),    
+            (10, 50, 10), 
+            (7, 21, 7),   
+            (14, 14, 0),  
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {

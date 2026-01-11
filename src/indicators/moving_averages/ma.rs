@@ -90,7 +90,7 @@ use crate::utilities::enums::Kernel;
 use std::error::Error;
 use thiserror::Error;
 
-// Import _with_kernel functions
+
 use crate::indicators::alma::alma_with_kernel;
 use crate::indicators::cwma::cwma_with_kernel;
 use crate::indicators::dema::dema_with_kernel;
@@ -1041,7 +1041,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "buff_averages" => {
-            // BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
         }
 
@@ -1109,7 +1109,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "ehlers_pma" => {
-            // EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
+            
             return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
         }
 
@@ -1135,7 +1135,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "frama" => {
-            // Frama requires high/low data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
@@ -1182,12 +1182,12 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "tradjema" => {
-            // TradjemaData requires high/low/close data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
         }
 
         "uma" => {
-            // UMA requires volume data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
@@ -1213,7 +1213,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "volume_adjusted_ma" => {
-            // VolumeAdjustedMa requires volume data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume {
                 indicator: "volume_adjusted_ma",
             }
@@ -2022,7 +2022,7 @@ pub fn ma_with_kernel<'a>(
         }
 
         "buff_averages" => {
-            // BuffAverages requires volume data and returns dual outputs, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
         }
 
@@ -2090,7 +2090,7 @@ pub fn ma_with_kernel<'a>(
         }
 
         "ehlers_pma" => {
-            // EhlersPma returns dual outputs (predict/trigger), not suitable for simple MA selector
+            
             return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
         }
 
@@ -2116,7 +2116,7 @@ pub fn ma_with_kernel<'a>(
         }
 
         "frama" => {
-            // Frama requires high/low data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
@@ -2163,12 +2163,12 @@ pub fn ma_with_kernel<'a>(
         }
 
         "tradjema" => {
-            // TradjemaData requires high/low/close data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
         }
 
         "uma" => {
-            // UMA requires volume data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
@@ -2194,7 +2194,7 @@ pub fn ma_with_kernel<'a>(
         }
 
         "volume_adjusted_ma" => {
-            // VolumeAdjustedMa requires volume data, not suitable for simple MA selector
+            
             return Err(MaError::RequiresVolume {
                 indicator: "volume_adjusted_ma",
             }
@@ -2225,14 +2225,14 @@ pub fn ma_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
-            // Try the requested MA type first
+            
             match ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern) {
                 Ok(result) => Ok(result),
                 Err(e) => {
-                    // If it's an unknown MA type error, default to SMA
+                    
                     if e.to_string().contains("Unknown moving average type") {
                         ma_with_kernel("sma", MaData::Slice(slice_in), period, kern).map_err(
                             |e| -> Box<dyn Error + Send + Sync> {
@@ -2243,7 +2243,7 @@ pub fn ma_py<'py>(
                             },
                         )
                     } else {
-                        // For other errors, propagate them
+                        
                         Err(Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             e.to_string(),
@@ -2254,23 +2254,23 @@ pub fn ma_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "ma")]
 pub fn ma_js(data: &[f64], ma_type: &str, period: usize) -> Result<Vec<f64>, JsValue> {
-    // Try the requested MA type first
+    
     match ma(ma_type, MaData::Slice(data), period) {
         Ok(result) => Ok(result),
         Err(e) => {
-            // If it's an unknown MA type error, default to SMA
+            
             if e.to_string().contains("Unknown moving average type") {
                 ma("sma", MaData::Slice(data), period)
                     .map_err(|e| JsValue::from_str(&e.to_string()))
             } else {
-                // For other errors, propagate them
+                
                 Err(JsValue::from_str(&e.to_string()))
             }
         }
@@ -2347,8 +2347,8 @@ mod tests {
                 ma_type
             );
 
-            // Check candles_result for NaN values after warmup
-            // MAMA has a warmup of 10, most others vary
+            
+            
             let skip_amount = if ma_type == "mama" { 10 } else { 960 };
             for (i, &value) in candles_result.iter().enumerate().skip(skip_amount) {
                 assert!(
@@ -2359,9 +2359,9 @@ mod tests {
                 );
             }
 
-            // Skip the double-processing test for MAMA since it's an adaptive algorithm
-            // that doesn't handle NaN inputs well and running MAMA on MAMA output
-            // isn't a meaningful operation
+            
+            
+            
             if ma_type != "mama" {
                 let slice_result = ma(ma_type, MaData::Slice(&candles_result), 60)
                     .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));

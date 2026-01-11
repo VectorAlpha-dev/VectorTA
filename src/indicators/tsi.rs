@@ -417,18 +417,18 @@ fn tsi_compute_into_inline(
 
             let am = momentum.abs();
 
-            // Inline EMA updates (loop-jammed)
+            
             ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
             ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
             ema_long_den = long_alpha * am + long_1minus * ema_long_den;
             ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
         }
-        // else: skip NaN/inf without touching prev or EMA state
+        
         idx += 1;
     }
 
-    // Output phase
+    
     while idx < n {
         let cur = data[idx];
         if cur.is_finite() {
@@ -437,14 +437,14 @@ fn tsi_compute_into_inline(
 
             let am = momentum.abs();
 
-            // Inline EMA updates (numerator + denominator)
+            
             ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
             ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
             ema_long_den = long_alpha * am + long_1minus * ema_long_den;
             ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
 
-            // Compute TSI; avoid divide-by-zero and clamp to [-100, 100]
+            
             let den = ema_short_den;
             let val = if den == 0.0 {
                 f64::NAN
@@ -453,7 +453,7 @@ fn tsi_compute_into_inline(
             };
             out[idx] = val;
         } else {
-            out[idx] = f64::NAN; // preserve NaN gaps in output
+            out[idx] = f64::NAN; 
         }
         idx += 1;
     }
@@ -471,20 +471,20 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
     let warmup_end = first + long + short;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
 
-    // Use classic kernel for default parameters with scalar kernel
+    
     let resolved_kernel = match kernel {
-        // SIMD is currently stubbed; keep Auto on the fastest scalar path.
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
     if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
-        // Use optimized classic kernel for default parameters
+        
         unsafe {
             tsi_scalar_classic(data, long, short, first, &mut out)?;
         }
     } else {
-        // Use inline scalar kernel for general periods
+        
         tsi_compute_into_inline(data, long, short, first, &mut out)?;
     }
     Ok(TsiOutput { values: out })
@@ -494,26 +494,26 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
 pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result<(), TsiError> {
     let (data, long, short, first) = tsi_prepare(input)?;
     let warmup_end = first + long + short;
-    // Caller's buffer may not have NaNs set, so set them
+    
     let end = warmup_end.min(dst.len());
     for v in &mut dst[..end] {
         *v = f64::NAN;
     }
 
-    // Use classic kernel for default parameters with scalar kernel
+    
     let resolved_kernel = match kern {
-        // SIMD is currently stubbed; keep Auto on the fastest scalar path.
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
     if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
-        // Use optimized classic kernel for default parameters
+        
         unsafe {
             tsi_scalar_classic(data, long, short, first, dst)?;
         }
     } else {
-        // Use inline scalar kernel for general periods
+        
         tsi_compute_into_inline(data, long, short, first, dst)?;
     }
     Ok(())
@@ -527,7 +527,7 @@ pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
-    // Validate length matches input
+    
     let data_len = input.as_ref().len();
     if out.len() != data_len {
         return Err(TsiError::OutputLengthMismatch {
@@ -538,7 +538,7 @@ pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
     tsi_into_slice(out, input, Kernel::Auto)
 }
 
-// Keep these stubs for compatibility but have them use the streaming version
+
 #[inline]
 pub unsafe fn tsi_scalar(
     data: &[f64],
@@ -548,7 +548,7 @@ pub unsafe fn tsi_scalar(
 ) -> Result<TsiOutput, TsiError> {
     let warmup_end = first + long + short;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
-    // Use classic kernel for default parameters
+    
     if long == 25 && short == 13 {
         tsi_scalar_classic(data, long, short, first, &mut out)?;
     } else {
@@ -570,23 +570,23 @@ pub unsafe fn tsi_scalar_classic(
     let n = data.len();
     let warmup_end = first + long + short;
 
-    // Initialize output with NaN for warmup periods (already done by alloc_with_nan_prefix)
-    // out[..warmup_end.min(n)].fill(f64::NAN); // Already done by caller
+    
+    
 
     if first + 1 >= n {
         return Ok(());
     }
 
-    // EMA alpha factors
+    
     let long_alpha = 2.0 / (long as f64 + 1.0);
     let short_alpha = 2.0 / (short as f64 + 1.0);
     let long_1minus = 1.0 - long_alpha;
     let short_1minus = 1.0 - short_alpha;
 
-    // Initialize EMAs with first momentum value
+    
     let mut prev = data[first];
 
-    // Skip to first+1 to calculate first momentum
+    
     if first + 1 >= n || !data[first + 1].is_finite() {
         return Ok(());
     }
@@ -594,13 +594,13 @@ pub unsafe fn tsi_scalar_classic(
     let first_momentum = data[first + 1] - prev;
     prev = data[first + 1];
 
-    // Initialize all 4 EMAs with first momentum
+    
     let mut ema_long_num = first_momentum;
     let mut ema_short_num = first_momentum;
     let mut ema_long_den = first_momentum.abs();
     let mut ema_short_den = first_momentum.abs();
 
-    // Process remaining data with inline EMA calculations
+    
     for i in (first + 2)..n {
         let cur = data[i];
         if !cur.is_finite() {
@@ -611,19 +611,19 @@ pub unsafe fn tsi_scalar_classic(
         let momentum = cur - prev;
         prev = cur;
 
-        // Update long EMA for numerator (momentum)
+        
         ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
 
-        // Update short EMA for numerator (smoothed momentum)
+        
         ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
-        // Update long EMA for denominator (abs momentum)
+        
         ema_long_den = long_alpha * momentum.abs() + long_1minus * ema_long_den;
 
-        // Update short EMA for denominator (smoothed abs momentum)
+        
         ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
 
-        // Calculate TSI after warmup period
+        
         if i >= warmup_end {
             out[i] = if ema_short_den == 0.0 {
                 f64::NAN
@@ -644,7 +644,7 @@ pub unsafe fn tsi_avx2(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    // Stub, use streaming
+    
     tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -655,7 +655,7 @@ pub unsafe fn tsi_avx512(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    // Stub, dispatch short/long
+    
     if long <= 32 && short <= 32 {
         tsi_avx512_short(data, long, short, first)
     } else {
@@ -670,7 +670,7 @@ pub unsafe fn tsi_avx512_short(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    // Stub, use streaming
+    
     tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -681,40 +681,40 @@ pub unsafe fn tsi_avx512_long(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    // Stub, use streaming
+    
     tsi_scalar(data, long, short, first)
 }
 
-// Streaming variant
-// Decision: Streaming kernel uses inlined EMA updates with robust NaN handling,
-// warmup parity (long+short), and clamping to [-100, 100]; O(1) time/space.
+
+
+
 #[derive(Debug, Clone)]
 pub struct TsiStream {
-    // periods
+    
     long: usize,
     short: usize,
 
-    // precomputed EMA coefficients
+    
     alpha_l: f64,
     alpha_s: f64,
 
-    // state for momentum -> double EMA(num/den)
-    // Note: initialized lazily on first finite momentum
+    
+    
     ema_long_num: f64,
     ema_short_num: f64,
     ema_long_den: f64,
     ema_short_den: f64,
 
-    // last finite price seen
+    
     prev_price: f64,
     have_prev: bool,
 
-    // whether EMA chains are seeded (set to first momentum)
+    
     seeded: bool,
 
-    // number of valid momentum updates processed (including seed step)
+    
     warmup_ctr: usize,
-    warmup_needed: usize, // == long + short
+    warmup_needed: usize, 
 }
 impl TsiStream {
     #[inline]
@@ -730,7 +730,7 @@ impl TsiStream {
             });
         }
 
-        // α = 2 / (n + 1)  (EMA smoothing factor)
+        
         let alpha_l = 2.0 / (long as f64 + 1.0);
         let alpha_s = 2.0 / (short as f64 + 1.0);
 
@@ -757,51 +757,51 @@ impl TsiStream {
     /// - `Some(tsi)` otherwise, clamped to [-100, 100].
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Skip non-finite ticks without poisoning state (match offline gaps)
+        
         if !value.is_finite() {
             return None;
         }
 
-        // Need a previous finite price to form 1-bar momentum
+        
         if !self.have_prev {
             self.prev_price = value;
             self.have_prev = true;
             return None;
         }
 
-        // 1-bar momentum
+        
         let m = value - self.prev_price;
         self.prev_price = value;
         let am = m.abs();
 
         if !self.seeded {
-            // Seed all four EMA chains with the first valid momentum
+            
             self.ema_long_num = m;
             self.ema_short_num = m;
             self.ema_long_den = am;
             self.ema_short_den = am;
             self.seeded = true;
             self.warmup_ctr = 1;
-            return None; // seed step never outputs (match offline)
+            return None; 
         }
 
-        // --- inline EMA updates using single-multiply form: ema += α * (x - ema)
-        // numerator path (m then smoothed)
+        
+        
         self.ema_long_num += self.alpha_l * (m - self.ema_long_num);
         self.ema_short_num += self.alpha_s * (self.ema_long_num - self.ema_short_num);
 
-        // denominator path (|m| then smoothed)
+        
         self.ema_long_den += self.alpha_l * (am - self.ema_long_den);
         self.ema_short_den += self.alpha_s * (self.ema_long_den - self.ema_short_den);
 
         self.warmup_ctr += 1;
 
-        // Match offline warmup: need (long + short) momentum updates incl. seed
+        
         if self.warmup_ctr < self.warmup_needed {
             return None;
         }
 
-        // Avoid divide-by-zero; clamp to [-100, 100] like offline kernels
+        
         let den = self.ema_short_den;
         if den == 0.0 {
             return Some(f64::NAN);
@@ -812,7 +812,7 @@ impl TsiStream {
     }
 }
 
-// Batch/grid API
+
 #[derive(Clone, Debug)]
 pub struct TsiBatchRange {
     pub long_period: (usize, usize, usize),
@@ -879,7 +879,7 @@ pub fn tsi_batch_with_kernel(
     k: Kernel,
 ) -> Result<TsiBatchOutput, TsiError> {
     let kernel = match k {
-        // Batch SIMD kernels are present as stubs; keep Auto on scalarbatch.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -921,11 +921,11 @@ impl TsiBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, TsiError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TsiError> {
-        // Robust expansion rules:
-        // - step == 0: treat as static (single value)
-        // - start == end: single value
-        // - start < end and step > 0: increasing inclusive range
-        // - start > end and step > 0: decreasing inclusive range
+        
+        
+        
+        
+        
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -936,7 +936,7 @@ fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, TsiError> {
             }
             return Ok(vals);
         }
-        // start > end: build a decreasing sequence without underflow
+        
         let mut v = start;
         let mut out = Vec::new();
         loop {
@@ -1036,10 +1036,10 @@ fn tsi_batch_inner(
         return Err(TsiError::SizeOverflow);
     }
 
-    // Use uninitialized memory helpers like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + 1 + c.long_period.unwrap() + c.short_period.unwrap() - 1)
@@ -1087,7 +1087,7 @@ fn tsi_batch_inner(
         }
     }
 
-    // Convert uninitialized buffer to Vec like ALMA does
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1189,7 +1189,7 @@ pub unsafe fn tsi_row_scalar_into(
     first: usize,
     out_row: &mut [f64],
 ) -> Result<(), TsiError> {
-    // out_row length equals data.len(); NaN prefixes already set by init_matrix_prefixes
+    
     tsi_compute_into_inline(data, long, short, first, out_row)
 }
 
@@ -1417,15 +1417,15 @@ mod tests {
 
     #[test]
     fn test_tsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prefer existing repository CSV data for parity
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = TsiInput::from_candles(&candles, "close", TsiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = tsi(&input)?.values;
 
-        // Preallocate destination and call zero-allocation API
+        
         let mut out = vec![0.0; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1433,7 +1433,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // On WASM builds, native tsi_into is not emitted; use into_slice
+            
             tsi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1503,7 +1503,7 @@ mod tests {
                 long_period: Some(200),
                 short_period: Some(100),
             },
-            // Edge cases with extreme ratios
+            
             TsiParams {
                 long_period: Some(50),
                 short_period: Some(2),
@@ -1575,16 +1575,16 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with varying parameters
+        
         let strat = (2usize..=50).prop_flat_map(|long_period| {
             (
-                // Generate data with enough length for the periods
+                
                 prop::collection::vec(
                     (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                     (long_period + 30)..400,
                 ),
                 Just(long_period),
-                // Short period should be less than or equal to long period
+                
                 2usize..=long_period.min(25),
             )
         });
@@ -1601,7 +1601,7 @@ mod tests {
                 let TsiOutput { values: ref_out } =
                     tsi_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: TSI values must be in [-100, 100] range
+                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1613,39 +1613,39 @@ mod tests {
                     }
                 }
 
-                // Property 2: Warmup period handling
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-                // The first value should always be NaN (momentum needs previous value)
+                
                 prop_assert!(
                     out[0].is_nan(),
                     "Property 2: First value should always be NaN, got {}",
                     out[0]
                 );
 
-                // Check if the data has any variation (not all constant)
+                
                 let has_variation = data.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-10);
 
                 if has_variation {
-                    // TSI produces values earlier than theoretical warmup due to EMA behavior
-                    // Just verify we eventually get consistent non-NaN values
+                    
+                    
                     let first_non_nan = out.iter().position(|x| !x.is_nan());
 
                     if let Some(idx) = first_non_nan {
-                        // Verify first non-NaN appears after some minimal warmup
+                        
                         prop_assert!(
-                            idx >= 1, // At least after first (momentum needs previous)
+                            idx >= 1, 
                             "Property 2: First non-NaN too early at idx {}",
                             idx
                         );
 
-                        // Check that after sufficient data, values are consistently non-NaN
-                        // BUT: TSI correctly returns NaN for constant prices (momentum = 0)
-                        // So we need to check if the data has actual price movement
+                        
+                        
+                        
                         let sufficient_data =
                             (first_valid + long_period + short_period).min(out.len());
                         if sufficient_data < out.len() {
-                            // Check if there's meaningful price movement in the data
+                            
                             let mut has_movement = false;
                             for i in 1..data.len() {
                                 if (data[i] - data[i - 1]).abs() > 1e-10 {
@@ -1654,10 +1654,10 @@ mod tests {
                                 }
                             }
 
-                            // Only check for non-NaN values if there's actual price movement
+                            
                             if has_movement {
                                 let last_quarter_start = out.len() - (out.len() / 4).max(1);
-                                // Allow some NaN values for edge cases, but not all
+                                
                                 let nan_count = out[last_quarter_start..]
                                     .iter()
                                     .filter(|v| v.is_nan())
@@ -1673,7 +1673,7 @@ mod tests {
                     }
                 }
 
-                // Property 3: Kernel consistency
+                
                 for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if val.is_nan() && ref_val.is_nan() {
                         continue;
@@ -1698,8 +1698,8 @@ mod tests {
                     );
                 }
 
-                // Property 4: Zero momentum special case (constant prices)
-                // When prices are constant, momentum is 0, and TSI = 100 * (0/0) = NaN
+                
+                
                 let constant_data = vec![100.0; 50];
                 let const_params = TsiParams {
                     long_period: Some(10),
@@ -1707,7 +1707,7 @@ mod tests {
                 };
                 let const_input = TsiInput::from_slice(&constant_data, const_params);
                 if let Ok(TsiOutput { values: const_out }) = tsi_with_kernel(&const_input, kernel) {
-                    // All values should be NaN for constant prices (after first which is always NaN)
+                    
                     for (i, &val) in const_out.iter().enumerate() {
                         prop_assert!(
                             val.is_nan(),
@@ -1718,12 +1718,12 @@ mod tests {
                     }
                 }
 
-                // Property 5: Trend behavior for all period combinations
-                // Strong uptrend
+                
+                
                 let uptrend: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 20.0).collect();
                 let uptrend_input = TsiInput::from_slice(&uptrend, params.clone());
 
-                // Strong downtrend
+                
                 let downtrend: Vec<f64> = (0..100).map(|i| 2100.0 - i as f64 * 20.0).collect();
                 let downtrend_input = TsiInput::from_slice(&downtrend, params.clone());
 
@@ -1733,7 +1733,7 @@ mod tests {
                 ) {
                     let test_warmup = 1 + long_period + short_period - 1;
                     if test_warmup + 10 < up_out.len() {
-                        // Check last 10 values after warmup
+                        
                         let up_vals: Vec<f64> = up_out[up_out.len() - 10..]
                             .iter()
                             .filter(|&&x| !x.is_nan())
@@ -1749,7 +1749,7 @@ mod tests {
                             let up_avg = up_vals.iter().sum::<f64>() / up_vals.len() as f64;
                             let down_avg = down_vals.iter().sum::<f64>() / down_vals.len() as f64;
 
-                            // Use tolerance based on period size (larger periods smooth more)
+                            
                             let tolerance = if long_period > 20 { 10.0 } else { 0.0 };
 
                             prop_assert!(
@@ -1766,8 +1766,8 @@ mod tests {
                     }
                 }
 
-                // Property 6: Extreme values with realistic strong trends
-                // Very strong linear uptrend
+                
+                
                 let extreme_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 50.0).collect();
                 let extreme_params = TsiParams {
                     long_period: Some(5),
@@ -1778,7 +1778,7 @@ mod tests {
                     values: extreme_out,
                 }) = tsi_with_kernel(&extreme_input, kernel)
                 {
-                    // Check last few values - should be very positive (>80 for strong trend)
+                    
                     let last_valid = extreme_out.iter().rposition(|x| !x.is_nan());
                     if let Some(idx) = last_valid {
                         if idx >= 20 {
@@ -1796,7 +1796,7 @@ mod tests {
                     }
                 }
 
-                // Very strong linear downtrend
+                
                 let extreme_down: Vec<f64> = (0..100).map(|i| 5100.0 - i as f64 * 50.0).collect();
                 let extreme_down_input = TsiInput::from_slice(&extreme_down, extreme_params);
                 if let Ok(TsiOutput {
@@ -1820,14 +1820,14 @@ mod tests {
                     }
                 }
 
-                // Property 7: Enhanced formula verification
-                // Test basic TSI behavior with predictable data
+                
+                
                 if data.len() >= 20 {
-                    // Check that increasing prices generally lead to positive TSI
+                    
                     let increasing_count = data.windows(2).filter(|w| w[1] > w[0]).count();
                     let decreasing_count = data.windows(2).filter(|w| w[1] < w[0]).count();
 
-                    // Find the last few valid TSI values
+                    
                     let valid_tsi: Vec<f64> = out
                         .iter()
                         .rev()
@@ -1839,7 +1839,7 @@ mod tests {
                     if !valid_tsi.is_empty() {
                         let avg_tsi = valid_tsi.iter().sum::<f64>() / valid_tsi.len() as f64;
 
-                        // If prices are mostly increasing, TSI should tend positive
+                        
                         if increasing_count > decreasing_count * 2 {
                             prop_assert!(
 								avg_tsi > -20.0,
@@ -1847,7 +1847,7 @@ mod tests {
 								avg_tsi
 							);
                         }
-                        // If prices are mostly decreasing, TSI should tend negative
+                        
                         else if decreasing_count > increasing_count * 2 {
                             prop_assert!(
 								avg_tsi < 20.0,
@@ -1858,7 +1858,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: No poison values in debug mode
+                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out.iter().enumerate() {
@@ -1877,30 +1877,30 @@ mod tests {
                     }
                 }
 
-                // Property 9: Momentum response
-                // TSI should respond to changes in momentum direction
+                
+                
                 if data.len() >= 50 && has_variation {
-                    // Find a period where we have valid TSI values
+                    
                     let start_idx = (1 + long_period + short_period).max(20);
                     if start_idx + 20 < out.len() {
-                        // Check if TSI changes direction when price momentum changes
+                        
                         let mut momentum_changes = 0;
                         let mut tsi_follows = 0;
 
                         for i in start_idx..out.len() - 10 {
                             if !out[i].is_nan() && !out[i + 5].is_nan() && !out[i + 10].is_nan() {
-                                // Check price momentum change
+                                
                                 let price_change1 = data[i + 5] - data[i];
                                 let price_change2 = data[i + 10] - data[i + 5];
 
-                                // Check TSI change
+                                
                                 let tsi_change1 = out[i + 5] - out[i];
                                 let tsi_change2 = out[i + 10] - out[i + 5];
 
-                                // If price momentum reverses, TSI should eventually follow
+                                
                                 if price_change1 * price_change2 < 0.0 {
                                     momentum_changes += 1;
-                                    // Allow some lag, but TSI should respond
+                                    
                                     if tsi_change1 * tsi_change2 < 0.0
                                         || (price_change2 > 0.0 && tsi_change2 > tsi_change1)
                                         || (price_change2 < 0.0 && tsi_change2 < tsi_change1)
@@ -1911,11 +1911,11 @@ mod tests {
                             }
                         }
 
-                        // TSI should follow momentum changes at least 50% of the time
+                        
                         if momentum_changes > 0 {
                             let follow_rate = tsi_follows as f64 / momentum_changes as f64;
                             prop_assert!(
-								follow_rate >= 0.3,  // Allow for smoothing lag
+								follow_rate >= 0.3,  
 								"Property 9: TSI should respond to momentum changes, follow rate: {:.2}",
 								follow_rate
 							);
@@ -2006,16 +2006,16 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            // (long_start, long_end, long_step, short_start, short_end, short_step)
-            (5, 10, 1, 2, 5, 1),         // Small ranges, dense
-            (10, 30, 5, 5, 15, 5),       // Medium ranges
-            (25, 50, 5, 10, 25, 5),      // Medium to large
-            (50, 100, 10, 25, 50, 5),    // Large ranges
-            (25, 25, 0, 2, 20, 2),       // Static long, varying short
-            (10, 50, 10, 13, 13, 0),     // Varying long, static short
-            (100, 200, 50, 50, 100, 25), // Very large ranges
-            (2, 5, 1, 2, 5, 1),          // Minimum periods
-            (30, 30, 0, 5, 25, 5),       // Static long=30, varying short
+            
+            (5, 10, 1, 2, 5, 1),         
+            (10, 30, 5, 5, 15, 5),       
+            (25, 50, 5, 10, 25, 5),      
+            (50, 100, 10, 25, 50, 5),    
+            (25, 25, 0, 2, 20, 2),       
+            (10, 50, 10, 13, 13, 0),     
+            (100, 200, 50, 50, 100, 25), 
+            (2, 5, 1, 2, 5, 1),          
+            (30, 30, 0, 5, 25, 5),       
         ];
 
         for (cfg_idx, &(l_start, l_end, l_step, s_start, s_end, s_step)) in
@@ -2098,7 +2098,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "tsi")]
 #[pyo3(signature = (data, long_period=25, short_period=13, kernel=None))]
@@ -2155,20 +2155,20 @@ pub fn tsi_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("tsi_batch: size overflow"))?;
 
-    // Pre-allocate output array for batch operations
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
 
-    // Compute without GIL using _into variant for zero-copy
+    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
-            // Map batch kernels to regular kernels
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2179,11 +2179,11 @@ pub fn tsi_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Add parameter arrays
+    
     dict.set_item(
         "long_periods",
         combos
@@ -2205,7 +2205,7 @@ pub fn tsi_batch_py<'py>(
     Ok(dict)
 }
 
-// ----- CUDA Python bindings (device-returning) -----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2418,7 +2418,7 @@ impl TsiStreamPy {
     }
 }
 
-// ====== WASM Bindings ======
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2459,7 +2459,7 @@ pub fn tsi_into(
         let input = TsiInput::from_slice(data, params);
 
         if in_ptr == out_ptr as *const f64 {
-            // Aliasing detected - use temporary buffer
+            
             let mut temp = vec![0.0; len];
             tsi_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2569,7 +2569,7 @@ pub fn tsi_batch_into(
 
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Use the batch_inner_into function to compute directly into output
+        
         match tsi_batch_inner_into(data, &sweep, Kernel::Scalar, false, out_slice) {
             Ok(_) => Ok(rows),
             Err(e) => Err(JsValue::from_str(&e.to_string())),

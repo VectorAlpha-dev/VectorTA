@@ -1,16 +1,16 @@
-// Integration tests covering ALMA CUDA kernels via explicit policy.
 
-use my_project::indicators::moving_averages::alma::{
+
+use vector_ta::indicators::moving_averages::alma::{
     alma_batch_with_kernel, AlmaBatchRange, AlmaBuilder, AlmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::alma_wrapper::{
+use vector_ta::cuda::moving_averages::alma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaAlma, CudaAlmaPolicy, ManySeriesKernelPolicy,
 };
 
@@ -131,7 +131,7 @@ fn compare_many_series(policy: CudaAlmaPolicy, cols: usize, rows: usize, period:
     }
 }
 
-// --------- Tests per-kernel variant ---------
+
 
 #[cfg(feature = "cuda")]
 #[test]

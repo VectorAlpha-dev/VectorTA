@@ -1288,7 +1288,7 @@ pub mod benches {
     }
     impl CudaBenchState for StochBatchDeviceState {
         fn launch(&mut self) {
-            // rawK for all rows (time-major)
+            
             {
                 let grid_x: u32 = ((self.rows as u32) + self.block_x_row - 1) / self.block_x_row;
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -1319,7 +1319,7 @@ pub mod benches {
                 }
             }
 
-            // slowK for all rows (SMA -> time-major)
+            
             {
                 let grid_x: u32 = ((self.rows as u32) + self.block_x_row - 1) / self.block_x_row;
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -1346,7 +1346,7 @@ pub mod benches {
                 }
             }
 
-            // slowD for all rows (SMA -> reuse kraw_tm as output)
+            
             {
                 let grid_x: u32 = ((self.rows as u32) + self.block_x_row - 1) / self.block_x_row;
                 let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -1373,7 +1373,7 @@ pub mod benches {
                 }
             }
 
-            // Transpose TM -> RM into final K/D outputs.
+            
             {
                 let block: BlockSize = (32u32, 8u32, 1u32).into();
                 let grid_x: u32 = ((self.rows as u32) + 32 - 1) / 32;
@@ -1430,7 +1430,7 @@ pub mod benches {
         let slowd_p = 3i32;
         let rows = PARAM_SWEEP;
 
-        // Per-row params and stage first-valid indices for smoothing.
+        
         let mut fastk_periods = Vec::<i32>::with_capacity(rows);
         let mut first_valids = Vec::<i32>::with_capacity(rows);
         let mut first_kraws = Vec::<i32>::with_capacity(rows);
@@ -1445,23 +1445,23 @@ pub mod benches {
             first_slowks.push(first_sk);
         }
 
-        // Upload OHLC needed for raw %K.
+        
         let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
         let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
         let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
 
-        // Upload per-row params
+        
         let d_fastk = DeviceBuffer::from_slice(&fastk_periods).expect("d_fastk");
         let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
         let d_first_kraw = DeviceBuffer::from_slice(&first_kraws).expect("d_first_kraw");
         let d_first_slowk = DeviceBuffer::from_slice(&first_slowks).expect("d_first_slowk");
 
-        // Time-major temporaries: rawK (reused for slowD) and slowK.
+        
         let tm_total = rows * ONE_SERIES_LEN;
         let d_kraw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(tm_total) }.expect("d_kraw_tm");
         let d_slowk_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(tm_total) }.expect("d_slowk_tm");
 
-        // Final outputs on device (row-major: [rows, len])
+        
         let d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(tm_total) }.expect("d_k");
         let d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(tm_total) }.expect("d_d");
 

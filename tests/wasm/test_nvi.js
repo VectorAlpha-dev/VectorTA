@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -43,10 +43,10 @@ test('NVI accuracy - safe API', () => {
     const close = testData.close;
     const volume = testData.volume;
     
-    // Run NVI
+    
     const result = wasm.nvi_js(close, volume);
     
-    // Check last 5 values match expected from Rust tests
+    
     const expected = [
         154243.6925373456,
         153973.11239019397,
@@ -90,30 +90,30 @@ test('NVI fast API - basic operation', () => {
     const volume = testData.volume;
     const len = close.length;
     
-    // Allocate buffers
+    
     const closePtr = wasm.nvi_alloc(len);
     const volumePtr = wasm.nvi_alloc(len);
     const outPtr = wasm.nvi_alloc(len);
     
     try {
-        // Copy data to WASM memory
+        
         const closeMemory = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         const volumeMemory = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         closeMemory.set(close);
         volumeMemory.set(volume);
         
-        // Compute NVI using fast API
+        
         wasm.nvi_into(closePtr, volumePtr, outPtr, len);
         
-        // Read result from WASM memory
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(memory);
         
-        // Compare with safe API
+        
         const safeResult = wasm.nvi_js(close, volume);
         assertArrayClose(result, safeResult, 1e-9, 'Fast API should match safe API');
     } finally {
-        // Clean up
+        
         wasm.nvi_free(closePtr, len);
         wasm.nvi_free(volumePtr, len);
         wasm.nvi_free(outPtr, len);
@@ -121,32 +121,32 @@ test('NVI fast API - basic operation', () => {
 });
 
 test('NVI fast API - in-place operation (aliasing)', () => {
-    const close = testData.close.slice(0, 100); // Use smaller dataset
+    const close = testData.close.slice(0, 100); 
     const volume = testData.volume.slice(0, 100);
     const len = close.length;
     
-    // First get expected result
+    
     const expected = wasm.nvi_js(close, volume);
     
-    // Allocate buffer and copy close data
+    
     const dataPtr = wasm.nvi_alloc(len);
     const memory = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len);
     memory.set(close);
     
-    // Allocate volume buffer
+    
     const volumePtr = wasm.nvi_alloc(len);
     const volumeMemory = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
     volumeMemory.set(volume);
     
     try {
-        // Compute NVI in-place (output overwrites close input)
+        
         wasm.nvi_into(dataPtr, volumePtr, dataPtr, len);
         
-        // Check result
+        
         const result = Array.from(memory);
         assertArrayClose(result, expected, 1e-9, 'In-place operation should produce correct results');
     } finally {
-        // Clean up
+        
         wasm.nvi_free(dataPtr, len);
         wasm.nvi_free(volumePtr, len);
     }
@@ -159,7 +159,7 @@ test('NVI fast API - null pointer handling', () => {
 });
 
 test('NVI memory management - no leaks', () => {
-    // Test allocating and freeing multiple times
+    
     const sizes = [100, 1000, 10000];
     
     for (const size of sizes) {
@@ -167,21 +167,21 @@ test('NVI memory management - no leaks', () => {
         const volumePtrs = [];
         const outPtrs = [];
         
-        // Allocate multiple buffers
+        
         for (let i = 0; i < 10; i++) {
             closePtrs.push(wasm.nvi_alloc(size));
             volumePtrs.push(wasm.nvi_alloc(size));
             outPtrs.push(wasm.nvi_alloc(size));
         }
         
-        // Verify all allocations succeeded
+        
         for (let i = 0; i < 10; i++) {
             assert(closePtrs[i] !== 0, `Failed to allocate close buffer ${i}`);
             assert(volumePtrs[i] !== 0, `Failed to allocate volume buffer ${i}`);
             assert(outPtrs[i] !== 0, `Failed to allocate output buffer ${i}`);
         }
         
-        // Free all buffers
+        
         for (let i = 0; i < 10; i++) {
             wasm.nvi_free(closePtrs[i], size);
             wasm.nvi_free(volumePtrs[i], size);
@@ -189,37 +189,37 @@ test('NVI memory management - no leaks', () => {
         }
     }
     
-    // If we get here without crashing, memory management is working
+    
 });
 
-// ========== BATCH API TESTS ==========
+
 
 test('NVI batch - basic single row', () => {
     const close = testData.close.slice(0, 100);
     const volume = testData.volume.slice(0, 100);
     const len = close.length;
     
-    // Allocate buffers for batch processing
+    
     const closePtr = wasm.nvi_alloc(len);
     const volumePtr = wasm.nvi_alloc(len);
-    const outPtr = wasm.nvi_alloc(len); // 1×len for single row
+    const outPtr = wasm.nvi_alloc(len); 
     
     try {
-        // Copy data to WASM memory
+        
         const closeMemory = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         const volumeMemory = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         closeMemory.set(close);
         volumeMemory.set(volume);
         
-        // Call batch API (returns number of rows)
+        
         const rows = wasm.nvi_batch_into(closePtr, volumePtr, outPtr, len);
         assert.strictEqual(rows, 1, 'Should return 1 row');
         
-        // Read result from WASM memory
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const batchResult = Array.from(memory);
         
-        // Compare with regular API
+        
         const regularResult = wasm.nvi_js(close, volume);
         assertArrayClose(batchResult, regularResult, 1e-9, 'Batch result should match regular API');
     } finally {
@@ -238,14 +238,14 @@ test('NVI batch - error handling with null pointers', () => {
 test('NVI batch - length mismatch detection', () => {
     const len = 100;
     
-    // This is a conceptual test - the batch API expects same-length inputs
-    // The error would be caught when processing the data
+    
+    
     const closePtr = wasm.nvi_alloc(len);
     const volumePtr = wasm.nvi_alloc(len);
     const outPtr = wasm.nvi_alloc(len);
     
     try {
-        // Set up data with all NaN to trigger error
+        
         const closeMemory = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         const volumeMemory = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         closeMemory.fill(NaN);
@@ -272,7 +272,7 @@ test('NVI batch - not enough valid data', () => {
         const closeMemory = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         const volumeMemory = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         
-        // Only one valid data point after first NaN
+        
         closeMemory.set([NaN, 100.0]);
         volumeMemory.set([NaN, 120.0]);
         
@@ -306,11 +306,11 @@ test('NVI batch - warmup period handling', () => {
         
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // First two values should be NaN (warmup)
+        
         assert(isNaN(memory[0]), 'Index 0 should be NaN');
         assert(isNaN(memory[1]), 'Index 1 should be NaN');
         
-        // Starting from index 2, values should be valid
+        
         assert.strictEqual(memory[2], 1000.0, 'NVI should start at 1000.0');
         assert(!isNaN(memory[3]), 'Index 3 should have valid value');
     } finally {
@@ -325,7 +325,7 @@ test('NVI batch - large dataset performance', () => {
     const close = new Float64Array(size);
     const volume = new Float64Array(size);
     
-    // Generate realistic data
+    
     for (let i = 0; i < size; i++) {
         close[i] = 100 + Math.sin(i * 0.01) * 10 + Math.random() * 2;
         volume[i] = 1000000 + Math.sin(i * 0.03) * 500000 + Math.random() * 100000;
@@ -349,7 +349,7 @@ test('NVI batch - large dataset performance', () => {
         
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, size);
         
-        // Basic validity checks
+        
         assert.strictEqual(memory[0], 1000.0, 'NVI should start at 1000.0');
         assert(!isNaN(memory[size - 1]), 'Last value should be valid');
         
@@ -362,9 +362,9 @@ test('NVI batch - large dataset performance', () => {
 });
 
 test('NVI batch - volume decrease pattern verification', () => {
-    // Test specific volume patterns to verify NVI calculation
+    
     const close = new Float64Array([100, 101, 102, 103, 104, 105]);
-    const volume = new Float64Array([1000, 900, 800, 700, 600, 500]); // Always decreasing
+    const volume = new Float64Array([1000, 900, 800, 700, 600, 500]); 
     const len = close.length;
     
     const closePtr = wasm.nvi_alloc(len);
@@ -381,10 +381,10 @@ test('NVI batch - volume decrease pattern verification', () => {
         
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // With always decreasing volume, NVI should track all price changes
+        
         assert.strictEqual(memory[0], 1000.0, 'NVI starts at 1000.0');
         
-        // Each subsequent value should reflect the price change
+        
         let expectedNvi = 1000.0;
         for (let i = 1; i < len; i++) {
             const pctChange = (close[i] - close[i-1]) / close[i-1];
@@ -399,9 +399,9 @@ test('NVI batch - volume decrease pattern verification', () => {
 });
 
 test('NVI batch - volume increase pattern verification', () => {
-    // Test with always increasing volume - NVI should stay at 1000.0
+    
     const close = new Float64Array([100, 101, 102, 103, 104, 105]);
-    const volume = new Float64Array([1000, 1100, 1200, 1300, 1400, 1500]); // Always increasing
+    const volume = new Float64Array([1000, 1100, 1200, 1300, 1400, 1500]); 
     const len = close.length;
     
     const closePtr = wasm.nvi_alloc(len);
@@ -418,7 +418,7 @@ test('NVI batch - volume increase pattern verification', () => {
         
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // With always increasing volume, NVI should stay constant at 1000.0
+        
         for (let i = 0; i < len; i++) {
             assert.strictEqual(memory[i], 1000.0, `NVI should stay at 1000.0, got ${memory[i]} at index ${i}`);
         }
@@ -430,9 +430,9 @@ test('NVI batch - volume increase pattern verification', () => {
 });
 
 test('NVI batch - mixed volume pattern', () => {
-    // Test with alternating volume pattern
+    
     const close = new Float64Array([100, 101, 102, 103, 104, 105]);
-    const volume = new Float64Array([1000, 900, 1100, 800, 1200, 700]); // Alternating
+    const volume = new Float64Array([1000, 900, 1100, 800, 1200, 700]); 
     const len = close.length;
     
     const closePtr = wasm.nvi_alloc(len);
@@ -450,7 +450,7 @@ test('NVI batch - mixed volume pattern', () => {
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const regularResult = wasm.nvi_js(close, volume);
         
-        // Batch should match regular API
+        
         assertArrayClose(Array.from(memory), regularResult, 1e-9, 'Batch should match regular API for mixed pattern');
     } finally {
         wasm.nvi_free(closePtr, len);
@@ -470,7 +470,7 @@ test('NVI batch - consistency with safe API across various datasets', () => {
         const close = new Float64Array(testCase.size);
         const volume = new Float64Array(testCase.size);
         
-        // Generate data with some pattern
+        
         for (let i = 0; i < testCase.size; i++) {
             close[i] = 100 + Math.sin(i * 0.1) * 10;
             volume[i] = 1000000 * (1 + Math.cos(i * 0.15) * 0.5);

@@ -1,13 +1,13 @@
-// CUDA integration tests for Wavetrend
 
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::wavetrend::CudaWavetrend;
+use vector_ta::cuda::wavetrend::CudaWavetrend;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -32,7 +32,7 @@ fn wavetrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         return Ok(());
     }
 
-    use my_project::indicators::wavetrend::{wavetrend_batch_with_kernel, WavetrendBatchRange};
+    use vector_ta::indicators::wavetrend::{wavetrend_batch_with_kernel, WavetrendBatchRange};
 
     let len = 8192usize;
     let mut data = vec![f64::NAN; len];
@@ -70,7 +70,7 @@ fn wavetrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     dev.wt2.buf.copy_to(&mut wt2_g)?;
     dev.wt_diff.buf.copy_to(&mut diff_g)?;
 
-    // Compare via RMSE over finite pairs to allow small FP32 drift accumulation.
+    
     let mut n1 = 0usize;
     let mut sse1 = 0.0f64;
     let mut n2 = 0usize;
@@ -114,16 +114,16 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    use my_project::indicators::wavetrend::{
+    use vector_ta::indicators::wavetrend::{
         wavetrend_with_kernel, WavetrendData, WavetrendInput, WavetrendParams,
     };
 
-    let cols = 16usize; // series
-    let rows = 4096usize; // time
+    let cols = 16usize; 
+    let rows = 4096usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (8 + s)..rows {
-            // stagger valid starts
+            
             let x = t as f64 + (s as f64) * 0.13;
             tm[t * cols + s] = (x * 0.0023).cos() + 0.00037 * x;
         }
@@ -135,7 +135,7 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         factor: Some(0.015),
     };
 
-    // CPU baseline per series
+    
     let mut wt1_cpu_tm = vec![f64::NAN; cols * rows];
     let mut wt2_cpu_tm = vec![f64::NAN; cols * rows];
     let mut diff_cpu_tm = vec![f64::NAN; cols * rows];

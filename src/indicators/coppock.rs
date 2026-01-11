@@ -307,17 +307,17 @@ pub fn coppock_with_kernel(
         });
     }
 
-    // Calculate warmup period for sum_roc
+    
     let warmup_period = first + largest_roc;
 
-    // REPLACE: let mut sum_roc = AVec::<f64>::with_capacity(CACHELINE_ALIGN, data_len);
-    // REPLACE: sum_roc.resize(data_len, f64::NAN);
-    // WITH:
+    
+    
+    
     let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
     unsafe {
         match match kernel {
-            // Disable SIMD for Auto due to underperformance (<5% gain); keep explicit SIMD for testing.
+            
             Kernel::Auto => Kernel::Scalar,
             other => other,
         } {
@@ -333,7 +333,7 @@ pub fn coppock_with_kernel(
                 coppock_avx512(data, short, long, first, &mut sum_roc)
             }
             _ => {
-                // Fallback to scalar when SIMD is unavailable in this build.
+                
                 coppock_scalar(data, short, long, first, &mut sum_roc)
             }
         }
@@ -464,7 +464,7 @@ pub fn coppock_into_slice(
         CoppockError::MaError(Box::new(MaErrorWrapper(e.to_string())))
     })?;
 
-    // Copy the smoothed result directly into the output slice
+    
     out.copy_from_slice(&smoothed);
     Ok(())
 }
@@ -475,8 +475,8 @@ pub fn coppock_into_slice(
 /// The `out` length must equal the input length.
 #[inline]
 pub fn coppock_into(input: &CoppockInput, out: &mut [f64]) -> Result<(), CoppockError> {
-    // Use ScalarBatch here to mirror the Vec API path (scalar sum_roc + ma())
-    // and avoid the classic inline MA fast-path so results match exactly.
+    
+    
     coppock_into_slice(out, input, Kernel::ScalarBatch)
 }
 
@@ -496,7 +496,7 @@ pub unsafe fn coppock_scalar_classic(
     let largest_roc = short.max(long);
     let warmup_period = first + largest_roc;
 
-    // Calculate sum of ROCs
+    
     let mut sum_roc = alloc_with_nan_prefix(len, warmup_period);
     let start_idx = first + largest_roc;
 
@@ -509,16 +509,16 @@ pub unsafe fn coppock_scalar_classic(
         sum_roc[i] = short_val + long_val;
     }
 
-    // Inline MA calculation based on type
+    
     match ma_type {
         "wma" => {
-            // Inline WMA calculation (default)
+            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
             }
 
-            // Calculate WMA weights once
+            
             let weight_sum = (ma_period * (ma_period + 1)) as f64 / 2.0;
 
             for i in warmup_final..len {
@@ -542,13 +542,13 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         "sma" => {
-            // Inline SMA calculation
+            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
             }
 
-            // Initial SMA
+            
             let mut sum = 0.0;
             for i in warmup_period..(warmup_period + ma_period.min(len - warmup_period)) {
                 if !sum_roc[i].is_nan() {
@@ -559,7 +559,7 @@ pub unsafe fn coppock_scalar_classic(
             if warmup_final < len {
                 out[warmup_final] = sum / ma_period as f64;
 
-                // Rolling SMA
+                
                 for i in (warmup_final + 1)..len {
                     if !sum_roc[i].is_nan() && !sum_roc[i - ma_period].is_nan() {
                         sum += sum_roc[i] - sum_roc[i - ma_period];
@@ -571,7 +571,7 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         "ema" => {
-            // Inline EMA calculation
+            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
@@ -580,13 +580,13 @@ pub unsafe fn coppock_scalar_classic(
             let alpha = 2.0 / (ma_period as f64 + 1.0);
             let mut ema_value = f64::NAN;
 
-            // Initialize EMA with first valid sum_roc value
+            
             for i in warmup_period..len {
                 if !sum_roc[i].is_nan() {
                     ema_value = sum_roc[i];
                     out[i] = ema_value;
 
-                    // Continue EMA calculation
+                    
                     for j in (i + 1)..len {
                         if !sum_roc[j].is_nan() {
                             ema_value = alpha * sum_roc[j] + (1.0 - alpha) * ema_value;
@@ -600,7 +600,7 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         _ => {
-            // Fall back to regular ma() function for other MA types
+            
             let smoothed = ma(ma_type, MaData::Slice(&sum_roc), ma_period).map_err(|e| {
                 CoppockError::MaError(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -646,7 +646,7 @@ pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize
     let mut p_out = out.as_mut_ptr().add(start);
 
     let remaining = n - start;
-    let step = 4usize; // __m256d width
+    let step = 4usize; 
     let vec_len = remaining / step * step;
 
     let v_one = _mm256_set1_pd(1.0);
@@ -673,7 +673,7 @@ pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize
         p_out = p_out.add(step);
     }
 
-    // tail
+    
     let tail = remaining - vec_len;
     for _ in 0..tail {
         let c = *p_cur;
@@ -730,7 +730,7 @@ pub unsafe fn coppock_avx512_short(
     let mut p_out = out.as_mut_ptr().add(start);
 
     let remaining = n - start;
-    let step = 8usize; // __m512d width
+    let step = 8usize; 
     let vec_len = remaining / step * step;
 
     let v_one = _mm512_set1_pd(1.0);
@@ -757,7 +757,7 @@ pub unsafe fn coppock_avx512_short(
         p_out = p_out.add(step);
     }
 
-    // tail
+    
     let tail = remaining - vec_len;
     for _ in 0..tail {
         let c = *p_cur;
@@ -783,11 +783,11 @@ pub unsafe fn coppock_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    // Same implementation as 'short' – split retained for potential specialization.
+    
     coppock_avx512_short(data, short, long, first, out)
 }
 
-// Decision: Streaming uses O(1) WMA/SMA/EMA recurrence and cached reciprocals; matches batch semantics within test tolerances.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaMode {
     Wma,
@@ -798,31 +798,31 @@ enum MaMode {
 
 #[derive(Debug, Clone)]
 pub struct CoppockStream {
-    // Parameters
+    
     short: usize,
     long: usize,
     ma_period: usize,
     ma_type: String,
     mode: MaMode,
 
-    // ---- Price ring (for ROC) ----
+    
     price: Vec<f64>,
     inv_price: Vec<f64>,
     p_head: usize,
     p_filled: bool,
 
-    // ---- Sum-of-ROC ring (for MA) ----
+    
     roc: Vec<f64>,
     r_head: usize,
     r_filled: bool,
 
-    // ---- Rolling accumulators ----
-    // For SMA/WMA:
-    ma_sum: f64,    // S_t
-    wma_num: f64,   // Q_t
-    wma_denom: f64, // N*(N+1)/2
+    
+    
+    ma_sum: f64,    
+    wma_num: f64,   
+    wma_denom: f64, 
 
-    // For EMA:
+    
     ema_alpha: f64,
     ema_val: f64,
     ema_init: bool,
@@ -913,7 +913,7 @@ impl CoppockStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // --- 1) push price + reciprocal into price ring ---
+        
         let p_n = self.price.len();
         let write_p = self.p_head;
 
@@ -928,7 +928,7 @@ impl CoppockStream {
             return None;
         }
 
-        // Index of current (the value we just wrote)
+        
         let cur_idx = write_p;
         let prev_s_idx = wrap_sub(cur_idx, self.short, p_n);
         let prev_l_idx = wrap_sub(cur_idx, self.long, p_n);
@@ -941,17 +941,17 @@ impl CoppockStream {
             return None;
         }
 
-        // --- 2) Compute sum of ROCs using cached reciprocals ---
+        
         let mut sum_roc = (cur * (invs + invl) - 2.0) * 100.0;
 
-        // --- 3) feed into MA ring, using O(1) updates ---
+        
         let n = self.ma_period;
         let write_r = self.r_head;
         let old = self.roc[write_r];
 
         if !self.r_filled {
-            // Building the first window:
-            // Q += (k)*x, S += x, where k = write_r+1 in [1..n]
+            
+            
             self.ma_sum += sum_roc;
             self.wma_num += (write_r as f64 + 1.0) * sum_roc;
 
@@ -966,12 +966,12 @@ impl CoppockStream {
                 return None;
             }
 
-            // First tick with a complete MA window:
+            
             return Some(match self.mode {
                 MaMode::Wma => self.wma_num / self.wma_denom,
                 MaMode::Sma => self.ma_sum / n as f64,
                 MaMode::Ema => {
-                    // Initialize EMA to first full-window value
+                    
                     self.ema_val = sum_roc;
                     self.ema_init = true;
                     self.ema_val
@@ -980,13 +980,13 @@ impl CoppockStream {
             });
         }
 
-        // Rolling window is full: update in O(1)
-        let prev_sum = self.ma_sum; // S_t
-        self.ma_sum = prev_sum - old + sum_roc; // S_{t+1}
-                                                // Q_{t+1} = Q_t + N*new - S_t
+        
+        let prev_sum = self.ma_sum; 
+        self.ma_sum = prev_sum - old + sum_roc; 
+                                                
         self.wma_num = self.wma_num + (n as f64) * sum_roc - prev_sum;
 
-        // overwrite & advance
+        
         self.roc[write_r] = sum_roc;
         bump(&mut self.r_head, n);
 
@@ -1090,7 +1090,7 @@ pub fn coppock_batch_with_kernel(
     k: Kernel,
 ) -> Result<CoppockBatchOutput, CoppockError> {
     let kernel = match k {
-        // Disable SIMD for Auto due to underperformance; keep explicit batch SIMD for testing.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -1152,7 +1152,7 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<Vec<CoppockParams>, CoppockError
                 }
             }
         } else {
-            // Reversed bounds supported
+            
             let mut cur = start;
             loop {
                 v.push(cur);
@@ -1258,13 +1258,13 @@ fn coppock_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| CoppockError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Step 1: Allocate uninitialized matrix
-    // REPLACE: let mut values = vec![f64::NAN; rows * cols];
-    // WITH:
+    
+    
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
-    // For Coppock, warmup = first_valid + largest_roc + (ma_period - 1)
+    
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1272,29 +1272,29 @@ fn coppock_batch_inner(
             let long = c.long_roc_period.unwrap();
             let ma_p = c.ma_period.unwrap();
             let largest = short.max(long);
-            // The sum_roc starts producing values at first + largest
-            // Then MA adds its own warmup of (ma_p - 1)
+            
+            
             first + largest + (ma_p - 1)
         })
         .collect();
 
-    // Step 3: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
+    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute reciprocals once for all rows to reduce divides inside per-row sweeps
-    // Algebra: 100*((c/s - 1) + (c/l - 1)) = 100*(c*(1/s) + c*(1/l) - 2)
+    
+    
     let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
 
-    // A single closure that (for a given row) computes:
-    // 1) raw "sum_roc" (via Scalar/AVX2/AVX512 depending on `kern`)
-    // 2) applies ma(...) to that temp
-    // 3) writes the smoothed result into out_row
+    
+    
+    
+    
     let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
         let short = c.short_roc_period.unwrap();
@@ -1303,18 +1303,18 @@ fn coppock_batch_inner(
         let ma_type = c.ma_type.as_deref().unwrap_or("wma");
         let largest = short.max(long);
 
-        // Calculate warmup for sum_roc
+        
         let sum_roc_warmup = first + largest;
 
-        // Prepare a "sum_roc" buffer and compute via reciprocal-based form to remove divides
+        
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
         coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
-        // Now smooth "sum_roc" with MA
-        // (We unwrap because these parameters should always be valid here.)
+        
+        
         let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
 
-        // Copy the smoothed vector into this row's slice
+        
         out_row.copy_from_slice(&smoothed);
     };
 
@@ -1338,7 +1338,7 @@ fn coppock_batch_inner(
         }
     }
 
-    // Step 6: Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1396,7 +1396,7 @@ pub fn coppock_batch_inner_into(
         return Err(CoppockError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1408,7 +1408,7 @@ pub fn coppock_batch_inner_into(
         })
         .collect();
 
-    // Initialize NaN prefixes using helper (debug poison included)
+    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1417,10 +1417,10 @@ pub fn coppock_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Precompute reciprocals once for the entire series to reduce divides in per-row sweeps
+    
     let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
 
-    // A single closure that computes Coppock for a given row
+    
     let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
         let short = c.short_roc_period.unwrap();
@@ -1430,16 +1430,16 @@ pub fn coppock_batch_inner_into(
         let largest = short.max(long);
         let sum_roc_warmup = first + largest;
 
-        // Prepare a "sum_roc" buffer
+        
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
 
-        // Fill sum_roc[i] = 100*(c*inv[i-short] + c*inv[i-long] - 2)
+        
         coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
-        // Now smooth "sum_roc" with MA
+        
         let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
 
-        // Copy the smoothed vector into this row's slice
+        
         out_row.copy_from_slice(&smoothed);
     };
 
@@ -1596,16 +1596,16 @@ mod tests {
 
     #[test]
     fn test_coppock_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial positive series to avoid div-by-zero in ROC.
+        
         let n = 256usize;
         let data: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64) * 0.25).collect();
 
         let input = CoppockInput::from_slice(&data, CoppockParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = coppock(&input)?.values;
 
-        // Preallocate output and compute via into API
+        
         let mut out = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1613,13 +1613,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, the native into is not exposed; mirror baseline for parity in CI.
+            
             out.copy_from_slice(&baseline);
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Exact equality or both NaN should hold when paths match.
+        
         for i in 0..n {
             let a = baseline[i];
             let b = out[i];
@@ -1738,7 +1738,7 @@ mod tests {
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let default_params = CoppockParams::default(); // short=11, long=14, ma=10, ma_type="wma"
+        let default_params = CoppockParams::default(); 
         let first_input = CoppockInput::from_candles(&candles, "close", default_params.clone());
         let first_result = coppock_with_kernel(&first_input, kernel)?;
 
@@ -1855,7 +1855,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_coppock_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1863,7 +1863,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let param_combos = vec![
             CoppockParams {
                 short_roc_period: Some(11),
@@ -1889,16 +1889,16 @@ mod tests {
             let input = CoppockInput::from_candles(&candles, "close", params);
             let output = coppock_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1906,7 +1906,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1914,7 +1914,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1927,7 +1927,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_coppock_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1965,10 +1965,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random price data with realistic period ranges
+        
         let random_data_strat =
             (2usize..=20, 5usize..=30, 2usize..=15).prop_flat_map(|(short, long, ma_period)| {
-                let data_len = long.max(short) + ma_period + 50; // Ensure enough data
+                let data_len = long.max(short) + ma_period + 50; 
                 (
                     prop::collection::vec(
                         (10.0f64..10000.0f64)
@@ -1982,7 +1982,7 @@ mod tests {
                 )
             });
 
-        // Strategy 2: Constant data (should produce ~0 after warmup)
+        
         let constant_data_strat =
             (2usize..=15, 5usize..=20, 2usize..=10).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = long.max(short) + ma_period + 30;
@@ -1995,7 +1995,7 @@ mod tests {
                 )
             });
 
-        // Strategy 3: Trending data (monotonic increasing/decreasing)
+        
         let trending_data_strat =
             (2usize..=15, 5usize..=25, 2usize..=12).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = long.max(short) + ma_period + 40;
@@ -2022,7 +2022,7 @@ mod tests {
                 )
             });
 
-        // Strategy 4: Edge cases with small periods
+        
         let edge_case_strat =
             (2usize..=3, 3usize..=5, 2usize..=3).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = 20;
@@ -2038,7 +2038,7 @@ mod tests {
                 )
             });
 
-        // Strategy 5: Equal periods edge case (degenerate case)
+        
         let equal_periods_strat =
             (5usize..=15, 2usize..=10).prop_flat_map(|(period, ma_period)| {
                 let data_len = period + ma_period + 30;
@@ -2048,13 +2048,13 @@ mod tests {
                         data_len..data_len + 20,
                     ),
                     Just(period),
-                    Just(period), // short == long
+                    Just(period), 
                     Just(ma_period),
                     Just("wma"),
                 )
             });
 
-        // Strategy 6: Data with leading NaN values to test warmup handling
+        
         let nan_prefix_strat = (2usize..=10, 5usize..=15, 2usize..=8, 1usize..=5).prop_flat_map(
             |(short, long, ma_period, nan_count)| {
                 let data_len = nan_count + long.max(short) + ma_period + 20;
@@ -2064,7 +2064,7 @@ mod tests {
                         data_len - nan_count..data_len - nan_count + 10,
                     )
                     .prop_map(move |mut vals| {
-                        // Prepend NaN values
+                        
                         let mut result = vec![f64::NAN; nan_count];
                         result.append(&mut vals);
                         result
@@ -2077,7 +2077,7 @@ mod tests {
             },
         );
 
-        // Combine all strategies
+        
         let combined_strat = prop::strategy::Union::new(vec![
             random_data_strat.boxed(),
             constant_data_strat.boxed(),
@@ -2099,7 +2099,7 @@ mod tests {
                     };
                     let input = CoppockInput::from_slice(&data, params.clone());
 
-                    // Get output from the kernel being tested
+                    
                     let result = coppock_with_kernel(&input, kernel);
                     prop_assert!(
                         result.is_ok(),
@@ -2108,22 +2108,22 @@ mod tests {
                     );
                     let out = result.unwrap().values;
 
-                    // Get reference output from scalar kernel
+                    
                     let ref_result = coppock_with_kernel(&input, Kernel::Scalar);
                     prop_assert!(ref_result.is_ok(), "Reference computation failed");
                     let ref_out = ref_result.unwrap().values;
 
-                    // Calculate warmup period correctly accounting for first valid data
+                    
                     let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
                     let largest_roc = short.max(long);
                     let warmup = first + largest_roc + (ma_period - 1);
 
-                    // Property 1: Kernel consistency - outputs should match
+                    
                     for i in warmup..data.len() {
                         let y = out[i];
                         let r = ref_out[i];
 
-                        // Both should be NaN or both should be finite
+                        
                         if y.is_nan() != r.is_nan() {
                             prop_assert!(
                                 false,
@@ -2135,7 +2135,7 @@ mod tests {
                         }
 
                         if y.is_finite() && r.is_finite() {
-                            // Check ULP difference for floating point precision
+                            
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
                             let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2152,7 +2152,7 @@ mod tests {
                         }
                     }
 
-                    // Property 2: Constant data should produce ~0 output (ROC of constant = 0)
+                    
                     let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
                     if is_constant && data.len() > warmup + 5 {
                         for i in (warmup + 5)..data.len() {
@@ -2168,27 +2168,27 @@ mod tests {
                         }
                     }
 
-                    // Property 3: Monotonic data properties
+                    
                     let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                     let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                     if (is_increasing || is_decreasing) && data.len() > warmup + 10 {
-                        // For strictly monotonic data, check the sign consistency
+                        
                         let expected_positive = is_increasing;
 
-                        // Check a few values after warmup for sign consistency
+                        
                         for i in (warmup + 10)..(warmup + 15).min(data.len()) {
                             let val = out[i];
                             if val.is_finite() && val.abs() > 1e-10 {
                                 if expected_positive {
                                     prop_assert!(
-									val >= -1e-6, // Allow tiny negative due to MA smoothing
+									val >= -1e-6, 
 									"Expected positive Coppock for increasing data, got {} at index {}",
 									val, i
 								);
                                 } else {
                                     prop_assert!(
-									val <= 1e-6, // Allow tiny positive due to MA smoothing
+									val <= 1e-6, 
 									"Expected negative Coppock for decreasing data, got {} at index {}",
 									val, i
 								);
@@ -2197,7 +2197,7 @@ mod tests {
                         }
                     }
 
-                    // Property 4: All values after warmup should be finite (no infinity or undefined)
+                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         prop_assert!(
@@ -2208,14 +2208,14 @@ mod tests {
                         );
                     }
 
-                    // Property 5: Output magnitude should be reasonable
-                    // ROC values are percentages, but with extreme price movements and MA smoothing,
-                    // values can be large. We'll use a generous but still catching bound.
+                    
+                    
+                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         if val.is_finite() {
-                            // Allow up to 100,000% to handle extreme cases with MA amplification
-                            // This still catches infinity and calculation errors
+                            
+                            
                             prop_assert!(
 							val.abs() <= 100_000.0,
 							"Unreasonably large Coppock value {} at index {} (exceeds 100,000%)",
@@ -2224,8 +2224,8 @@ mod tests {
                         }
                     }
 
-                    // Property 6: Verify that Coppock calculation doesn't produce NaN unexpectedly
-                    // After warmup, all values should be either finite or NaN (not infinity)
+                    
+                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         prop_assert!(
@@ -2235,8 +2235,8 @@ mod tests {
                             val
                         );
 
-                        // If the input data is all finite at the required lookback positions,
-                        // the output should be finite too
+                        
+                        
                         if i >= largest_roc {
                             let current = data[i];
                             let prev_short = data[i - short];
@@ -2248,7 +2248,7 @@ mod tests {
                                 && prev_short != 0.0
                                 && prev_long != 0.0
                             {
-                                // With valid input data, output should be finite after full warmup
+                                
                                 if i >= warmup {
                                     prop_assert!(
 									val.is_finite(),
@@ -2260,14 +2260,14 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Equal periods should produce valid output (degenerate case)
+                    
                     if short == long && data.len() > warmup + 5 {
-                        // When short == long, Coppock = MA(2 * ROC_period)
-                        // Just verify output is finite and reasonable
+                        
+                        
                         for i in (warmup + 1)..data.len().min(warmup + 6) {
                             let val = out[i];
                             if val.is_finite() {
-                                // The value should still be within reasonable bounds (same as Property 5)
+                                
                                 prop_assert!(
                                     val.abs() <= 100_000.0,
                                     "Equal periods produced unreasonable value {} at index {}",
@@ -2329,7 +2329,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2337,17 +2337,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CoppockBatchBuilder::new()
             .kernel(kernel)
-            .short_range(5, 15, 5) // 5, 10, 15
-            .long_range(10, 20, 5) // 10, 15, 20
-            .ma_range(3, 9, 3) // 3, 6, 9
+            .short_range(5, 15, 5) 
+            .long_range(10, 20, 5) 
+            .ma_range(3, 9, 3) 
             .apply_candles(&c, "close")?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -2356,7 +2356,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2364,7 +2364,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2372,7 +2372,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2384,7 +2384,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2414,7 +2414,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ========================= WASM Bindings =========================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2509,12 +2509,12 @@ pub fn coppock_into(
         return Err(JsValue::from_str("null pointer"));
     }
 
-    // Check for invalid periods first
+    
     if short_roc == 0 || long_roc == 0 || ma_period == 0 {
         return Err(JsValue::from_str("Invalid period"));
     }
 
-    // Check if any period exceeds data length
+    
     let max_period = short_roc.max(long_roc).max(ma_period);
     if max_period > len {
         return Err(JsValue::from_str("Period exceeds data length"));
@@ -2543,7 +2543,7 @@ pub fn coppock_into(
     Ok(())
 }
 
-// ========================= Python Bindings =========================
+
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2647,7 +2647,7 @@ pub fn coppock_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output array
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -2657,7 +2657,7 @@ pub fn coppock_batch_py<'py>(
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
-            // Map batch kernels to regular kernels
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2665,7 +2665,7 @@ pub fn coppock_batch_py<'py>(
                 _ => kernel,
             };
 
-            // Fill ma_type for each combo if not provided
+            
             let mut filled_combos = combos.clone();
             if let Some(mt) = ma_type {
                 for combo in &mut filled_combos {
@@ -2678,7 +2678,7 @@ pub fn coppock_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2716,7 +2716,7 @@ pub fn coppock_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

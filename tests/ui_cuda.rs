@@ -1,13 +1,13 @@
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaUi;
+use vector_ta::cuda::CudaUi;
 
-use my_project::indicators::ui::{ui_batch_slice, ui_with_kernel, UiBatchRange, UiInput, UiParams};
+use vector_ta::indicators::ui::{ui_batch_slice, ui_with_kernel, UiBatchRange, UiInput, UiParams};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -91,7 +91,7 @@ fn ui_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     let period = 14usize;
     let scalar = 100.0f64;
 
-    // CPU baseline per series (write back into time-major layout)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -103,7 +103,7 @@ fn ui_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
             scalar: Some(scalar),
         };
         let input = UiInput {
-            data: my_project::indicators::ui::UiData::Slice(&series),
+            data: vector_ta::indicators::ui::UiData::Slice(&series),
             params,
         };
         let out = ui_with_kernel(&input, Kernel::Scalar)?;

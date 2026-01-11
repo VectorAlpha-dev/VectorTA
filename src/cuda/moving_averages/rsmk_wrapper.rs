@@ -141,7 +141,7 @@ impl CudaRsmk {
         Ok(())
     }
 
-    // Utility: find first index where both series finite and compare != 0
+    
     fn first_valid(main: &[f32], compare: &[f32]) -> Option<usize> {
         main.iter()
             .zip(compare.iter())
@@ -165,7 +165,7 @@ impl CudaRsmk {
         let first_valid = Self::first_valid(main_f32, compare_f32)
             .ok_or_else(|| CudaRsmkError::InvalidInput("all values NaN or compare==0".into()))?;
 
-        // Expand parameter grid (mirrors scalar expand_grid: EMA/EMA only)
+        
         fn axis(a: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = a;
             if step == 0 || start == end {
@@ -220,7 +220,7 @@ impl CudaRsmk {
             ));
         }
 
-        // VRAM estimate: indicator + signal + momentum buffers per unique lookback
+        
         let rows = combos.len();
         let uniq_looks: BTreeSet<usize> = combos.iter().map(|p| p.lookback.unwrap()).collect();
         let el = std::mem::size_of::<f32>();
@@ -244,17 +244,17 @@ impl CudaRsmk {
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Upload inputs
+        
         let d_main = DeviceBuffer::from_slice(main_f32)?;
         let d_comp = DeviceBuffer::from_slice(compare_f32)?;
 
-        // Prepare output buffers (row-major: rows x len)
+        
         let mut d_indicator: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows_len) }?;
         let mut d_signal: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows_len) }?;
 
-        // Kernel handles
+        
         let mut k_mom: Function = self
             .module
             .get_function("rsmk_momentum_f32")
@@ -268,7 +268,7 @@ impl CudaRsmk {
                 name: "rsmk_apply_mom_single_row_ema_ema_f32",
             })?;
 
-        // Build momentum per unique lookback and cache device buffers
+        
         let mut mom_dev: HashMap<usize, DeviceBuffer<f32>> = HashMap::new();
         for &lb in &uniq_looks {
             let mut d_m: DeviceBuffer<f32> =
@@ -299,7 +299,7 @@ impl CudaRsmk {
             mom_dev.insert(lb, d_m);
         }
 
-        // Apply per-row (EMA/EMA) using the cached momentum
+        
         for (row, prm) in combos.iter().enumerate() {
             let lb = prm.lookback.unwrap();
             let period = prm.period.unwrap();
@@ -312,7 +312,7 @@ impl CudaRsmk {
                 let mut fv_m_i = first_mom as i32;
                 let mut p_i = period as i32;
                 let mut s_i = sig as i32;
-                // row section pointers
+                
                 let mut ind_ptr = unsafe {
                     d_indicator
                         .as_device_ptr()
@@ -383,7 +383,7 @@ impl CudaRsmk {
         let lb = params.lookback.unwrap_or(90);
         let p = params.period.unwrap_or(3);
         let s = params.signal_period.unwrap_or(20);
-        // Only EMA/EMA documented for batch; keep many-series aligned
+        
         if !params
             .matype
             .as_deref()
@@ -400,7 +400,7 @@ impl CudaRsmk {
             ));
         }
 
-        // Build first_valids per series on host
+        
         let mut firsts = vec![0i32; cols];
         for sidx in 0..cols {
             let mut fv = -1i32;
@@ -420,7 +420,7 @@ impl CudaRsmk {
             firsts[sidx] = fv;
         }
 
-        // VRAM estimate: indicator + signal + inputs + firsts
+        
         let el_f32 = std::mem::size_of::<f32>();
         let el_i32 = std::mem::size_of::<i32>();
         let series_elems = rows
@@ -441,7 +441,7 @@ impl CudaRsmk {
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Upload inputs
+        
         let d_main = DeviceBuffer::from_slice(main_tm_f32)?;
         let d_comp = DeviceBuffer::from_slice(compare_tm_f32)?;
         let h_firsts = LockedBuffer::from_slice(&firsts)?;
@@ -451,13 +451,13 @@ impl CudaRsmk {
             d_firsts.async_copy_from(&h_firsts, &self.stream)?;
         }
 
-        // Outputs
+        
         let mut d_indicator: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_elems) }?;
         let mut d_signal: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_elems) }?;
 
-        // Launch kernel (one thread per series)
+        
         let mut func: Function = self
             .module
             .get_function("rsmk_many_series_one_param_time_major_ema_ema_f32")
@@ -520,7 +520,7 @@ pub mod benches {
     const MANY_ROWS: usize = 500_000;
 
     fn bytes_batch() -> usize {
-        // combos: 3 lookbacks * 3 periods * 3 signal_periods = 27
+        
         let rows = 27usize;
         let in_bytes = 2 * BATCH_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * rows * BATCH_LEN * std::mem::size_of::<f32>();

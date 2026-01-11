@@ -1,14 +1,14 @@
-// CUDA integration tests for PVI
 
-use my_project::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaPvi;
+use vector_ta::cuda::CudaPvi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -36,17 +36,17 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 4096usize;
     let mut close = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
-    // Start valid at index 4
+    
     for i in 4..len {
         let x = i as f64;
         close[i] = (x * 0.00121).sin() + 100.0 + 0.00019 * x;
         volume[i] = (x * 0.00081).cos().abs() * 600.0 + 150.0;
     }
 
-    // Test a set of initial values
+    
     let inits = vec![500.0, 1000.0, 1500.0, 2000.0];
 
-    // Quantize CPU baseline inputs to FP32 to match GPU inputs
+    
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
     let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
     let close32_as_f64: Vec<f64> = close_f32.iter().map(|&v| v as f64).collect();
@@ -119,7 +119,7 @@ fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let initial_value = 1200.0;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

@@ -1,15 +1,15 @@
-// CUDA tests for SuperTrend
 
-use my_project::indicators::supertrend::{
+
+use vector_ta::indicators::supertrend::{
     supertrend_batch_with_kernel, supertrend_with_kernel, SuperTrendBatchRange, SuperTrendData,
     SuperTrendInput, SuperTrendParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaSupertrend};
+use vector_ta::cuda::{cuda_available, CudaSupertrend};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -125,7 +125,7 @@ fn supertrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     let period = 10usize;
     let factor = 3.0f64;
 
-    // CPU baseline per series
+    
     let mut cpu_trend_tm = vec![f64::NAN; cols * rows];
     let mut cpu_changed_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

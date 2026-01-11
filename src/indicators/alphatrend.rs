@@ -333,7 +333,7 @@ pub fn alphatrend_with_kernel(
     let warm = first + period - 1;
 
     let mut k1 = alloc_with_nan_prefix(len, warm);
-    let mut k2 = alloc_with_nan_prefix(len, warm + 2); // K2 has 2-bar lag warmup
+    let mut k2 = alloc_with_nan_prefix(len, warm + 2); 
 
     alphatrend_compute_into(
         open, high, low, close, volume, coeff, period, no_volume, first, chosen, &mut k1, &mut k2,
@@ -354,8 +354,8 @@ pub fn alphatrend_into(
     out_k1: &mut [f64],
     out_k2: &mut [f64],
 ) -> Result<(), AlphaTrendError> {
-    // Reuse the existing into helper which validates lengths, computes warmups,
-    // prefills NaN prefixes, and calls the selected compute kernel.
+    
+    
     alphatrend_into_slices(out_k1, out_k2, input, Kernel::Auto)
 }
 
@@ -1411,9 +1411,9 @@ impl AlphaTrendStreamPy {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct AlphaTrendJsOutput {
-    pub values: Vec<f64>, // [k1..., k2...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -1441,7 +1441,7 @@ pub fn alphatrend_js(
     alphatrend_into_slices(&mut k1, &mut k2, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return structured output with metadata
+    
     let mut values = Vec::with_capacity(k1.len() * 2);
     values.extend_from_slice(&k1);
     values.extend_from_slice(&k2);
@@ -1528,12 +1528,12 @@ pub fn alphatrend_alloc(_len: usize) -> *mut f64 {
 #[deprecated(note = "Use alphatrend_free_flat")]
 pub fn alphatrend_free(_ptr: *mut f64, _len: usize) {}
 
-// ==================== BATCH PROCESSING ====================
+
 
 #[derive(Clone, Debug)]
 pub struct AlphaTrendBatchRange {
-    pub coeff: (f64, f64, f64),        // (start, end, step)
-    pub period: (usize, usize, usize), // (start, end, step)
+    pub coeff: (f64, f64, f64),        
+    pub period: (usize, usize, usize), 
     pub no_volume: bool,
 }
 
@@ -1718,7 +1718,7 @@ fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendPara
             let mut x = start;
             while x >= end - 1e-12 {
                 out.push(x);
-                x += st; // st is negative here or positive toward decreasing
+                x += st; 
             }
         }
         if out.is_empty() { return Err(AlphaTrendError::InvalidRangeF64 { start, end, step }); }
@@ -1884,11 +1884,11 @@ fn alphatrend_batch_inner(
         return Err(AlphaTrendError::EmptyInputData);
     }
 
-    // Uninit flat matrices
+    
     let mut k1_mu = make_uninit_matrix(rows, cols);
     let mut k2_mu = make_uninit_matrix(rows, cols);
 
-    // Warm prefixes per row
+    
     let first = candles
         .close
         .iter()
@@ -1903,7 +1903,7 @@ fn alphatrend_batch_inner(
     init_matrix_prefixes(&mut k1_mu, cols, &warm_k1);
     init_matrix_prefixes(&mut k2_mu, cols, &warm_k2);
 
-    // Get &mut [MaybeUninit<f64>] -> &mut [f64]
+    
     let mut k1_guard = core::mem::ManuallyDrop::new(k1_mu);
     let mut k2_guard = core::mem::ManuallyDrop::new(k2_mu);
     let out_k1: &mut [f64] = unsafe {
@@ -1953,7 +1953,7 @@ fn alphatrend_batch_inner(
         do_row(row, k1r, k2r)?;
     }
 
-    // Reclaim Vec<f64> without copy
+    
     let values_k1 = unsafe {
         Vec::from_raw_parts(
             k1_guard.as_mut_ptr() as *mut f64,
@@ -1978,7 +1978,7 @@ fn alphatrend_batch_inner(
     })
 }
 
-// New slice-based batch function for direct writes
+
 #[inline(always)]
 pub fn alphatrend_batch_inner_into_slices(
     open: &[f64],
@@ -2014,7 +2014,7 @@ pub fn alphatrend_batch_inner_into_slices(
         return Err(AlphaTrendError::OutputLengthMismatch { expected: total, got: k2_slice.len() });
     }
 
-    // Resolve kernel and SIMD mapping for momentum precompute
+    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2026,9 +2026,9 @@ pub fn alphatrend_batch_inner_into_slices(
         _ => detect_best_kernel(),
     };
 
-    // Find first valid index and initialize warmup NaN prefixes so that all
-    // batch entrypoints (Rust, Python, WASM) share the same warmup semantics
-    // and never expose debug poison values in user-visible outputs.
+    
+    
+    
     let first = close
         .iter()
         .position(|x| !x.is_nan())
@@ -2055,8 +2055,8 @@ pub fn alphatrend_batch_inner_into_slices(
     init_matrix_prefixes(k1_uninit, cols, &warm_k1);
     init_matrix_prefixes(k2_uninit, cols, &warm_k2);
 
-    // Find first valid index
-    // Precompute TR once for the whole dataset
+    
+    
     let mut tr_mu = make_uninit_matrix(1, cols);
     let tr: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, cols) };
@@ -2070,7 +2070,7 @@ pub fn alphatrend_batch_inner_into_slices(
         tr[i] = hl.max(hc).max(lc);
     }
 
-    // Optionally precompute HLC3 once if using MFI across rows
+    
     let use_rsi = sweep.no_volume;
     let hlc3_opt: Option<Vec<f64>> = if use_rsi {
         None
@@ -2081,7 +2081,7 @@ pub fn alphatrend_batch_inner_into_slices(
         for i in 0..cols {
             hlc3[i] = (high[i] + low[i] + close[i]) / 3.0;
         }
-        // Reclaim as Vec without copy
+        
         let v = unsafe {
             Vec::from_raw_parts(
                 hlc3_mu.as_mut_ptr() as *mut f64,
@@ -2093,7 +2093,7 @@ pub fn alphatrend_batch_inner_into_slices(
         Some(v)
     };
 
-    // Deduplicate periods across combos and precompute momentum per unique period
+    
     use std::collections::HashMap;
     let mut unique_periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap_or(14)).collect();
     unique_periods.sort_unstable();
@@ -2102,7 +2102,7 @@ pub fn alphatrend_batch_inner_into_slices(
     let mut momentum_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(unique_periods.len());
     for &p in &unique_periods {
         if p == 0 || p > cols {
-            // Keep behavior consistent with single-row path
+            
             return Err(AlphaTrendError::InvalidPeriod {
                 period: p,
                 data_len: cols,
@@ -2126,7 +2126,7 @@ pub fn alphatrend_batch_inner_into_slices(
         }
     }
 
-    // Row compute: streaming ATR + AlphaTrend using shared TR and per-period momentum
+    
     let do_row =
         |row: usize, k1_row: &mut [f64], k2_row: &mut [f64]| -> Result<(), AlphaTrendError> {
             let params = &combos[row];
@@ -2143,13 +2143,13 @@ pub fn alphatrend_batch_inner_into_slices(
             }
             let warmup = first + period - 1;
             if warmup >= cols {
-                // nothing to write; prefixes remain NaN as allocated by callers
+                
                 return Ok(());
             }
 
             let mom = momentum_map.get(&period).expect("momentum precomputed");
 
-            // initialize rolling sum for ATR SMA window
+            
             let mut sum = 0.0f64;
             for j in first..=warmup {
                 sum += tr[j];
@@ -2194,7 +2194,7 @@ pub fn alphatrend_batch_inner_into_slices(
                 prev1 = cur;
                 prev_alpha = cur;
 
-                // slide ATR window if next exists
+                
                 if i + 1 < cols {
                     sum += tr[i + 1] - tr[i + 1 - period];
                 }
@@ -2232,7 +2232,7 @@ pub fn alphatrend_batch_inner_into_slices(
     Ok(())
 }
 
-// ==================== ENHANCED PYTHON BINDINGS ====================
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "alphatrend_batch")]
@@ -2270,7 +2270,7 @@ pub fn alphatrend_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // Preallocate two flat output arrays, then fill in place
+    
     let rows = {
         fn axis_usize((s, e, st): (usize, usize, usize)) -> usize {
             if st == 0 || s == e {
@@ -2294,7 +2294,7 @@ pub fn alphatrend_batch_py<'py>(
     let k1_slice = unsafe { out_k1.as_slice_mut()? };
     let k2_slice = unsafe { out_k2.as_slice_mut()? };
 
-    // Lightweight wrapper that writes directly
+    
     py.allow_threads(|| {
         alphatrend_batch_inner_into_slices(o, h, l, c, v, &sweep, kern, true, k1_slice, k2_slice)
     })
@@ -2306,7 +2306,7 @@ pub fn alphatrend_batch_py<'py>(
     dict.set_item("rows", rows)?;
     dict.set_item("cols", len)?;
 
-    // Add combo parameters
+    
     let combos = expand_grid_alphatrend(&sweep)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let combo_list = PyList::new(
@@ -2325,7 +2325,7 @@ pub fn alphatrend_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ==================== CUDA PYTHON BINDINGS ====================
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "alphatrend_cuda_batch_dev")]
@@ -2483,13 +2483,13 @@ impl AtDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Stream omitted: producing stream is synchronized before return
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.device_id as i32) // 2 == kDLCUDA
+        (2, self.device_id as i32) 
     }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -2501,7 +2501,7 @@ impl AtDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2522,7 +2522,7 @@ impl AtDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move ownership of the device buffer into the DLPack capsule manager.
+        
         let buf = self
             .buf
             .take()
@@ -2536,15 +2536,15 @@ impl AtDeviceArrayF32Py {
     }
 }
 
-// ==================== ENHANCED WASM BINDINGS ====================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct AlphaTrendBatchJsOutput {
-    pub values: Vec<f64>, // flattened, rows = combos.len() * 2
+    pub values: Vec<f64>, 
     pub combos: Vec<AlphaTrendParams>,
-    pub rows: usize, // 2 * number_of_combos
-    pub cols: usize, // data length
+    pub rows: usize, 
+    pub cols: usize, 
 }
 
 #[cfg(feature = "wasm")]
@@ -2573,7 +2573,7 @@ pub fn alphatrend_batch_js(
     let rows = combos.len();
     let cols = close.len();
 
-    // Flat buffers, filled in place
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
@@ -2594,7 +2594,7 @@ pub fn alphatrend_batch_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Stack k1 then k2 per combo
+    
     let total_values = rows
         .checked_mul(2)
         .and_then(|r2| r2.checked_mul(cols))
@@ -2661,7 +2661,7 @@ pub fn alphatrend_batch_into_flat(
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
-        // Interpret out_ptr as two stacked blocks per combo
+        
         let k1 = core::slice::from_raw_parts_mut(out_ptr, total);
         let k2 = core::slice::from_raw_parts_mut(out_ptr.add(total), total);
 
@@ -2679,7 +2679,7 @@ pub fn alphatrend_batch_into_flat(
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(rows) // caller knows rows*2 and cols
+        Ok(rows) 
     }
 }
 
@@ -2714,7 +2714,7 @@ pub fn alphatrend_batch_unified_js(
         alphatrend_batch_slice(open, high, low, close, volume, &sweep, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Flatten output similar to alphatrend_batch_js
+    
     let rows2 = output.rows * 2;
     let cols = output.cols;
     let total_values = rows2
@@ -2860,7 +2860,7 @@ impl AlphaTrendContext {
             };
             let input = AlphaTrendInput::from_slices(open, high, low, close, volume, params);
 
-            // Handle in-place updates
+            
             if close_ptr == out_k1_ptr || close_ptr == out_k2_ptr {
                 let mut temp_k1 = vec![0.0; len];
                 let mut temp_k2 = vec![0.0; len];
@@ -2897,7 +2897,7 @@ mod tests {
         let input = AlphaTrendInput::from_candles(&candles, AlphaTrendParams::default());
         let result = alphatrend_with_kernel(&input, kernel)?;
 
-        // K1 Reference values from PineScript
+        
         let expected_k1 = [
             60243.00,
             60243.00,
@@ -2906,7 +2906,7 @@ mod tests {
             59937.21428571,
         ];
 
-        // K2 Reference values from PineScript
+        
         let expected_k2 = [
             60542.42857143,
             60454.14285714,
@@ -2917,7 +2917,7 @@ mod tests {
 
         let start = result.k1.len().saturating_sub(5);
 
-        // Check K1 values
+        
         for (i, &val) in result.k1[start..].iter().enumerate() {
             let diff = (val - expected_k1[i]).abs();
             assert!(
@@ -2932,7 +2932,7 @@ mod tests {
             );
         }
 
-        // Check K2 values
+        
         for (i, &val) in result.k2[start..].iter().enumerate() {
             let diff = (val - expected_k2[i]).abs();
             assert!(
@@ -3093,7 +3093,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        let data = vec![1.0; 20]; // Create a vec with 20 elements of value 1.0
+        let data = vec![1.0; 20]; 
         let params = AlphaTrendParams {
             coeff: Some(-1.0),
             period: Some(14),
@@ -3114,7 +3114,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         let open = vec![10.0, 20.0, 30.0];
-        let high = vec![12.0, 22.0]; // Different length
+        let high = vec![12.0, 22.0]; 
         let low = vec![8.0, 18.0, 28.0];
         let close = vec![11.0, 21.0, 31.0];
         let volume = vec![100.0, 200.0, 300.0];
@@ -3142,13 +3142,13 @@ mod tests {
         let first_input = AlphaTrendInput::from_candles(&candles, first_params);
         let first_result = alphatrend_with_kernel(&first_input, kernel)?;
 
-        // Use K1 output as close price for second run
+        
         let second_params = AlphaTrendParams {
             coeff: Some(1.0),
             period: Some(14),
-            no_volume: Some(true), // Use RSI since we only have one series
+            no_volume: Some(true), 
         };
-        // Create synthetic OHLCV from K1 values
+        
         let k1 = &first_result.k1;
         let synthetic_high: Vec<f64> = k1
             .iter()
@@ -3195,7 +3195,7 @@ mod tests {
         assert_eq!(res.k1.len(), candles.close.len());
         assert_eq!(res.k2.len(), candles.close.len());
 
-        // Check that values after warmup are not NaN
+        
         if res.k1.len() > 240 {
             for (i, &val) in res.k1[240..].iter().enumerate() {
                 assert!(
@@ -3210,7 +3210,7 @@ mod tests {
     }
 
     fn check_alphatrend_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Validate O(1) streaming behavior: returns Some((k1,k2)) after warmup+2
+        
         let params = AlphaTrendParams {
             coeff: Some(1.0),
             period: Some(14),
@@ -3220,7 +3220,7 @@ mod tests {
         let mut stream = AlphaTrendStream::try_new(params)?;
         let warmup = stream.get_warmup_period();
 
-        // Feed some data points
+        
         for i in 0..30 {
             let high = 100.0 + i as f64 + 2.0;
             let low = 100.0 + i as f64 - 2.0;
@@ -3229,7 +3229,7 @@ mod tests {
 
             let result = stream.update(high, low, close, volume);
             if i + 1 >= warmup + 3 {
-                // Expect values once k2 lag is available
+                
                 let some = result.expect("streaming should emit after warmup+2");
                 assert!(
                     some.0.is_finite() && some.1.is_finite(),
@@ -3351,14 +3351,14 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                0.1f64..5.0f64, // coeff
-                any::<bool>(),  // no_volume
+                0.1f64..5.0f64, 
+                any::<bool>(),  
             )
         });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(close_data, period, coeff, no_volume)| {
-                // Generate synthetic OHLCV data from close prices
+                
                 let high: Vec<f64> = close_data.iter().map(|&c| c + 5.0).collect();
                 let low: Vec<f64> = close_data.iter().map(|&c| c - 5.0).collect();
                 let open = close_data.clone();
@@ -3375,7 +3375,7 @@ mod tests {
                 let result = alphatrend_with_kernel(&input, kernel).unwrap();
                 let ref_result = alphatrend_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Verify K1 values
+                
                 for i in 0..close_data.len() {
                     let y = result.k1[i];
                     let r = ref_result.k1[i];
@@ -3395,7 +3395,7 @@ mod tests {
                     );
                 }
 
-                // Verify K2 values
+                
                 for i in 0..close_data.len() {
                     let y = result.k2[i];
                     let r = ref_result.k2[i];
@@ -3422,7 +3422,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate tests for all kernel variants
+    
     macro_rules! generate_all_alphatrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3454,7 +3454,7 @@ mod tests {
         }
     }
 
-    // Generate all kernel-specific tests
+    
     generate_all_alphatrend_tests!(
         check_alphatrend_accuracy,
         check_alphatrend_partial_params,
@@ -3483,10 +3483,10 @@ mod tests {
 
         let input = AlphaTrendInput::from_candles(&candles, AlphaTrendParams::default());
 
-        // Baseline via allocating API
+        
         let baseline = alphatrend(&input)?;
 
-        // Preallocate outputs and compute via *_into
+        
         let mut out_k1 = vec![0.0; candles.close.len()];
         let mut out_k2 = vec![0.0; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
@@ -3494,8 +3494,8 @@ mod tests {
             alphatrend_into(&input, &mut out_k1, &mut out_k2)?;
         }
 
-        // Equality helper: treat NaN == NaN; for finite values prefer exact equality,
-        // but allow a very small epsilon as a fallback if needed.
+        
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             if a.is_nan() && b.is_nan() {
                 true
@@ -3525,7 +3525,7 @@ mod tests {
         Ok(())
     }
 
-    // Batch testing functions
+    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -3538,11 +3538,11 @@ mod tests {
 
         assert_eq!(output.cols, c.close.len());
 
-        // Check that we got values for the default parameters
+        
         let k1_start = row * output.cols;
         let k2_start = row * output.cols;
 
-        // Verify last 5 K1 values match expected
+        
         let expected_k1 = [
             60243.00,
             60243.00,
@@ -3574,10 +3574,10 @@ mod tests {
 
         let output = alphatrend_batch_with_kernel(&c, &sweep, kernel)?;
 
-        // Calculate expected number of combinations
-        let coeff_count = ((2.0 - 1.0) / 0.5) as usize + 1; // 3 values
-        let period_count = ((20 - 10) / 5) as usize + 1; // 3 values
-        let expected_combos = coeff_count * period_count; // 9 total
+        
+        let coeff_count = ((2.0 - 1.0) / 0.5) as usize + 1; 
+        let period_count = ((20 - 10) / 5) as usize + 1; 
+        let expected_combos = coeff_count * period_count; 
 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
@@ -3658,7 +3658,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch tests
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {

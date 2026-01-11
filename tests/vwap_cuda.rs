@@ -1,15 +1,15 @@
-// Integration tests for CUDA VWAP kernels
 
-use my_project::indicators::moving_averages::vwap::{vwap_batch_with_kernel, VwapBatchRange};
-use my_project::indicators::moving_averages::vwap::{vwap_with_kernel, VwapInput, VwapParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::moving_averages::vwap::{vwap_batch_with_kernel, VwapBatchRange};
+use vector_ta::indicators::moving_averages::vwap::{vwap_with_kernel, VwapInput, VwapParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVwap;
+use vector_ta::cuda::moving_averages::CudaVwap;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -41,7 +41,7 @@ fn vwap_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut prices = Vec::with_capacity(series_len);
     let mut volumes = Vec::with_capacity(series_len);
     for i in 0..series_len {
-        timestamps.push(base_ts + (i as i64) * 60_000); // 1-minute spacing
+        timestamps.push(base_ts + (i as i64) * 60_000); 
         let x = i as f64;
         prices.push(100.0 + (x * 0.01).sin() + 0.05 * (x * 0.001).cos());
         let vol = if i % 16 == 0 {
@@ -71,7 +71,7 @@ fn vwap_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda vwap batch result to host");
 
-    let tol = 1e-4f64; // fp32 vs fp64 tolerance
+    let tol = 1e-4f64; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -114,7 +114,7 @@ fn vwap_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let anchor = "1m".to_string();
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

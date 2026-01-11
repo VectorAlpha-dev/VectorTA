@@ -1,29 +1,29 @@
-// CUDA kernels for Forecast Oscillator (FOSC)
-//
-// FP32-first, compensated-accumulation rewrite for Ada/Lovelace (e.g., RTX 4090).
-// Key changes vs previous version:
-// - One thread per combo/series (1D launch) â€“ no idle lanes, no __syncthreads().
-// - Rolling accumulators (Î£y, Î£xy) use Kahan/Neumaier compensated FP32.
-// - Use FMA (fmaf) in critical expressions to reduce rounding.
-// - Warmup/NaN semantics preserved.
-// - No FP64 in hot loops to avoid 1/64 FP64 throughput on GA10x/AD10x.
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// IEEE-754 quiet NaN as f32
+
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
-// Using FP64 for running sums to match scalar parity
 
-// === One-series Ã— many-params (batch). Row-major output [combo][t] ===
+
+
 extern "C" __global__ void fosc_batch_f32(
-    const float* __restrict__ data,   // [len]
+    const float* __restrict__ data,   
     int len,
     int first_valid,
-    const int* __restrict__ periods,  // [n_combos]
+    const int* __restrict__ periods,  
     int n_combos,
-    float* __restrict__ out)          // [n_combos][len] row-major
+    float* __restrict__ out)          
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -34,23 +34,23 @@ extern "C" __global__ void fosc_batch_f32(
     const int warm = first_valid + period - 1;
     const int row_off = combo * len;
 
-    // Fill warmup prefix with NaN (single thread per combo)
+    
     const int warm_end = (warm < len) ? warm : len;
     for (int t = 0; t < warm_end; ++t) {
         out[row_off + t] = f32_nan();
     }
     if (warm >= len) return;
 
-    // OLS constants in FP64 for robust solve
+    
     const double p   = (double)period;
     const double p1  = p + 1.0;
     const double inv_p = 1.0 / p;
-    const double sx  = 0.5 * p * p1;                              // Î£x
-    const double sx2 = (p * p1 * (2.0 * p + 1.0)) / 6.0;          // Î£x^2
-    const double den = p * sx2 - sx * sx;                         // p*Î£x^2 - (Î£x)^2
+    const double sx  = 0.5 * p * p1;                              
+    const double sx2 = (p * p1 * (2.0 * p + 1.0)) / 6.0;          
+    const double den = p * sx2 - sx * sx;                         
     const double inv_den = (fabs(den) < 1e-18) ? 0.0 : (1.0 / den);
 
-    // Initialize running sums over [first_valid .. first_valid + period - 2]
+    
     double sum_y = 0.0;
     double sum_xy = 0.0;
     double w = 1.0;
@@ -60,22 +60,22 @@ extern "C" __global__ void fosc_batch_f32(
         sum_xy = fma(d, w, sum_xy);
     }
 
-    // TSF forecast for "next bar" carried to next loop iteration
+    
     double tsf_prev = 0.0;
 
     for (int t = warm; t < len; ++t) {
-        const float cur = data[t];          // new value for this time
+        const float cur = data[t];          
         const double y_plus = sum_y + (double)cur;
         const double xy_plus = sum_xy + (double)cur * p;
 
-        // OLS slope & intercept in FP64
+        
         const double b = (p * xy_plus - sx * y_plus) * inv_den;
         const double a = (y_plus - b * sx) * inv_p;
 
-        // FOSC: 100 * (1 - forecast/close). Use previous forecast for this bar.
+        
         float out_val;
         if ((cur == cur) && cur != 0.0f) {
-            // Compute in FP64 then cast for improved parity
+            
             const double cd = (double)cur;
             const double ov = 100.0 * ((cd - tsf_prev) / cd);
             out_val = (float)ov;
@@ -84,33 +84,33 @@ extern "C" __global__ void fosc_batch_f32(
         }
         out[row_off + t] = out_val;
 
-        // Forecast for "next" bar (used in the next iteration)
+        
         tsf_prev = b * p1 + a;
 
-        // Slide window by 1 using compensated updates
+        
         const int old_idx = t + 1 - period;
         const float oldv = data[old_idx];
 
-        // Maintain Î£xy over the new window:
-        //   xy_plus = sum_xy + newv*p
-        //   sum_xy_next = xy_plus - y_plus
+        
+        
+        
         sum_xy = xy_plus - y_plus;
 
-        // Maintain Î£y over the new window
+        
         sum_y = y_plus - oldv;
     }
 }
 
-// === Many-series Ã— one-param (time-major). Data is time-major [t][series] ===
+
 extern "C" __global__ void fosc_many_series_one_param_time_major_f32(
-    const float* __restrict__ data_tm,     // [rows][cols] time-major
-    const int* __restrict__ first_valids,  // [cols]
+    const float* __restrict__ data_tm,     
+    const int* __restrict__ first_valids,  
     int cols,
     int rows,
     int period,
-    float* __restrict__ out_tm)            // [rows][cols] time-major
+    float* __restrict__ out_tm)            
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // one thread per series
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
     const int fv = first_valids[s];
@@ -118,14 +118,14 @@ extern "C" __global__ void fosc_many_series_one_param_time_major_f32(
 
     const int warm = fv + period - 1;
 
-    // Fill warmup prefix with NaN for this series
+    
     const int warm_end = (warm < rows) ? warm : rows;
     for (int t = 0; t < warm_end; ++t) {
         out_tm[t * cols + s] = f32_nan();
     }
     if (warm >= rows) return;
 
-    // OLS constants in FP64 for robust solve
+    
     const double p   = (double)period;
     const double p1  = p + 1.0;
     const double inv_p = 1.0 / p;
@@ -134,7 +134,7 @@ extern "C" __global__ void fosc_many_series_one_param_time_major_f32(
     const double den = p * sx2 - sx * sx;
     const double inv_den = (fabs(den) < 1e-18) ? 0.0 : (1.0 / den);
 
-    // Initialize sums for the first full window (except newest)
+    
     double sum_y = 0.0;
     double sum_xy = 0.0;
     double w = 1.0;

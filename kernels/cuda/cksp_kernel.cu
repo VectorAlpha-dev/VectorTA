@@ -1,37 +1,37 @@
-// CUDA kernels for Chande Kroll Stop (CKSP)
-// Optimized: safer init (no inter-block race), first-sample hoist, q==1 fast path,
-// optional TR precompute kernel + variant that consumes precomputed TR.
-// FP32 throughout; RMA uses FMA; compensated warmup sum only.
-//
-// Semantics mirror src/indicators/cksp.rs exactly:
-// - Inputs: high, low, close (f32)
-// - Parameters per combo: p (ATR period), x (multiplier), q (rolling window)
-// - ATR is an RMA with alpha = 1/p and a sum warmup for the first p samples.
-// - Rolling max/min via monotonic ring deques (capacity q+1).
-// - Warmup & NaN: write NaN until index = first_valid + p + q - 1.
-//
-// Entry points provided:
-//  - cksp_batch_f32:         one series × many parameter rows (grid = {x=1, y=n_combos})
-//  - cksp_batch_f32_pretr:   same as above, but consumes precomputed TR (recommended for many rows)
-//  - cksp_many_series_one_param_f32: many series × one param (time-major layout)
-//  - tr_from_hlc_f32:        parallel TR precompute for one series
-//
-// Shared-memory layout per CTA (row/combo):
-//   int   h_idx[cap_max]
-//   int   l_idx[cap_max]
-//   int   ls_idx[cap_max]
-//   int   ss_idx[cap_max]
-//   float ls_val[cap_max]
-//   float ss_val[cap_max]
-//
-// Dynamic shared mem bytes per block = (4 * cap_max * sizeof(int) + 2 * cap_max * sizeof(float)) = 24 * cap_max.
-//
-// Launch notes for cksp_batch_*:
-//   grid  = dim3(1, n_combos, 1)   // IMPORTANT: x=1 to avoid inter-block races
-//   block = dim3(256) or 512
-//   shmem = 24 * cap_max bytes     // cap_max = max(q)+1 across rows
-//
-// For cap_max needing >48KB dynamic shared memory, enable opt-in (runtime attribute).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -41,16 +41,16 @@
 #include <math.h>
 #include <math_constants.h>
 
-// Helpers for ring buffer index arithmetic
+
 __device__ __forceinline__ int rb_inc(int idx, int cap) { return (idx + 1) >= cap ? 0 : idx + 1; }
 __device__ __forceinline__ int rb_dec(int idx, int cap) { return (idx == 0) ? (cap - 1) : (idx - 1); }
 
-// -------------------------------------------------------------------------------------------------
-// Optional: Parallel True Range precompute (one series)
-// TR[i] = max(hi-lo, |hi - close[i-1]|, |lo - close[i-1]|)
-// For i == start (start = max(0, first_valid)), TR[i] = hi - lo.
-// Earlier indices may be written but are ignored by CKSP warmup logic.
-//
+
+
+
+
+
+
 extern "C" __global__
 void tr_from_hlc_f32(const float* __restrict__ high,
                      const float* __restrict__ low,
@@ -65,7 +65,7 @@ void tr_from_hlc_f32(const float* __restrict__ high,
         const float hi = high[i];
         const float lo = low[i];
         if (i <= start) {
-            tr_out[i] = hi - lo;  // i == start is the only one that matters; earlier values aren't used.
+            tr_out[i] = hi - lo;  
         } else {
             const float pc = close[i - 1];
             const float hl = hi - lo;
@@ -76,17 +76,17 @@ void tr_from_hlc_f32(const float* __restrict__ high,
     }
 }
 
-// -------------------------------------------------------------------------------------------------
-// Internal core step for cksp (shared by batch kernels)
-// Computes CKSP for a single (p, x, q) row over one series given either:
-//   - raw (high, low, close)  -> compute TR on the fly (first-sample hoist)
-//   - precomputed tr[]        -> pass tr != nullptr
-//
+
+
+
+
+
+
 template<bool UsePrecomputedTR>
 __device__ void cksp_core_row(const float* __restrict__ high,
                               const float* __restrict__ low,
                               const float* __restrict__ close,
-                              const float* __restrict__ tr_opt,  // may be nullptr if !UsePrecomputedTR
+                              const float* __restrict__ tr_opt,  
                               int series_len,
                               int first_valid,
                               int p,
@@ -99,7 +99,7 @@ __device__ void cksp_core_row(const float* __restrict__ high,
     const int start = (first_valid < 0 ? 0 : first_valid);
     if (start >= series_len) return;
 
-    // Shared memory for ring deques
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     int*   h_idx  = (int*)shraw;
     int*   l_idx  = h_idx + cap_max;
@@ -111,9 +111,9 @@ __device__ void cksp_core_row(const float* __restrict__ high,
     const int cap  = q + 1;
     const int warm = start + p + q - 1;
 
-    if (threadIdx.x != 0) return;  // single producer per row
+    if (threadIdx.x != 0) return;  
 
-    // Warmup prefix only (everything else is written exactly once in the main loop).
+    
     const int warm_end = (warm < series_len) ? warm : series_len;
     for (int i = 0; i < warm_end; ++i) {
         out_long_row[i]  = CUDART_NAN_F;
@@ -125,40 +125,40 @@ __device__ void cksp_core_row(const float* __restrict__ high,
     int ls_head = 0, ls_tail = 0;
     int ss_head = 0, ss_tail = 0;
 
-    // ATR RMA state
+    
     float rma = 0.0f;
     const float alpha = 1.0f / (float)p;
-    // Compensated warmup sum for the first p samples (small cost, better accuracy)
+    
     float sum_tr = 0.0f, c_tr = 0.0f;
 
-    // ---- process the first sample (i = start) outside the loop (no isfinite check needed)
+    
     {
         const int i = start;
         const float hi = high[i];
         const float lo = low[i];
-        const float tr = UsePrecomputedTR ? tr_opt[i] : (hi - lo); // first sample TR = hi - lo
+        const float tr = UsePrecomputedTR ? tr_opt[i] : (hi - lo); 
 
-        // Warmup (k = 0)
-        // Kahan compensation on warmup sum
+        
+        
         float y = tr - c_tr;
         float t = sum_tr + y;
         c_tr = (t - sum_tr) - y;
         sum_tr = t;
-        if (p == 1) rma = tr;  // immediate RMA
+        if (p == 1) rma = tr;  
 
-        // Initialize high/low deques unless q==1 fast path
+        
         if (q > 1) {
-            // push i into h deque
+            
             while (h_head != h_tail) {
                 const int last = rb_dec(h_tail, cap);
                 const int last_i = h_idx[last];
                 if (high[last_i] <= hi) h_tail = last; else break;
             }
             int next_tail = rb_inc(h_tail, cap);
-            if (next_tail == h_head) h_head = rb_inc(h_head, cap); // drop oldest if full
+            if (next_tail == h_head) h_head = rb_inc(h_head, cap); 
             h_idx[h_tail] = i; h_tail = next_tail;
 
-            // push i into l deque
+            
             while (l_head != l_tail) {
                 const int last = rb_dec(l_tail, cap);
                 const int last_i = l_idx[last];
@@ -170,11 +170,11 @@ __device__ void cksp_core_row(const float* __restrict__ high,
         }
     }
 
-    // ---- main loop
+    
     if (q == 1) {
-        // Fast path: rolling max/min over window=1 is just current sample.
-        int k = 1;  // already did k=0
-        float prev_close = close[start]; // for on-the-fly TR when not precomputed
+        
+        int k = 1;  
+        float prev_close = close[start]; 
         for (int i = start + 1; i < series_len; ++i, ++k) {
             const float hi = high[i];
             const float lo = low[i];
@@ -183,26 +183,26 @@ __device__ void cksp_core_row(const float* __restrict__ high,
             prev_close = close[i];
 
             if (k < p) {
-                // warmup sum with compensation
+                
                 float y = tr - c_tr;
                 float t = sum_tr + y;
                 c_tr = (t - sum_tr) - y;
                 sum_tr = t;
                 if (k == p - 1) rma = sum_tr / (float)p;
             } else {
-                rma = fmaf(alpha, tr - rma, rma); // EMA recursion
+                rma = fmaf(alpha, tr - rma, rma); 
             }
 
             if (i >= warm) {
-                out_long_row[i]  = fmaf(-x, rma, hi); // hi - x*rma
-                out_short_row[i] = fmaf(+x, rma, lo); // lo + x*rma
+                out_long_row[i]  = fmaf(-x, rma, hi); 
+                out_short_row[i] = fmaf(+x, rma, lo); 
             }
         }
         return;
     }
 
-    // General path: q > 1 (deque maintenance)
-    int k = 1; // have processed one sample (k=0)
+    
+    int k = 1; 
     float prev_close = close[start];
     for (int i = start + 1; i < series_len; ++i, ++k) {
         const float hi = high[i];
@@ -211,7 +211,7 @@ __device__ void cksp_core_row(const float* __restrict__ high,
                                     : fmaxf(hi - lo, fmaxf(fabsf(hi - prev_close), fabsf(lo - prev_close)));
         prev_close = close[i];
 
-        // Warmup then recursion
+        
         if (k < p) {
             float y = tr - c_tr;
             float t = sum_tr + y;
@@ -222,7 +222,7 @@ __device__ void cksp_core_row(const float* __restrict__ high,
             rma = fmaf(alpha, tr - rma, rma);
         }
 
-        // Rolling MAX of HIGH over q
+        
         while (h_head != h_tail) {
             const int last = rb_dec(h_tail, cap);
             const int last_i = h_idx[last];
@@ -237,7 +237,7 @@ __device__ void cksp_core_row(const float* __restrict__ high,
         }
         const float mh = high[h_idx[h_head]];
 
-        // Rolling MIN of LOW over q
+        
         while (l_head != l_tail) {
             const int last = rb_dec(l_tail, cap);
             const int last_i = l_idx[last];
@@ -253,10 +253,10 @@ __device__ void cksp_core_row(const float* __restrict__ high,
         const float ml = low[l_idx[l_head]];
 
         if (i >= warm) {
-            const float ls0 = fmaf(-x, rma, mh); // mh - x*rma
-            const float ss0 = fmaf(+x, rma, ml); // ml + x*rma
+            const float ls0 = fmaf(-x, rma, mh); 
+            const float ss0 = fmaf(+x, rma, ml); 
 
-            // Rolling MAX over ls0
+            
             while (ls_head != ls_tail) {
                 const int last = rb_dec(ls_tail, cap);
                 if (ls_val[last] <= ls0) ls_tail = last; else break;
@@ -270,7 +270,7 @@ __device__ void cksp_core_row(const float* __restrict__ high,
             }
             out_long_row[i] = ls_val[ls_head];
 
-            // Rolling MIN over ss0
+            
             while (ss_head != ss_tail) {
                 const int last = rb_dec(ss_tail, cap);
                 if (ss_val[last] >= ss0) ss_tail = last; else break;
@@ -302,7 +302,7 @@ void cksp_batch_f32(const float* __restrict__ high,
                     float* __restrict__ out_short) {
     const int row = blockIdx.y;
     if (row >= n_combos || series_len <= 0) return;
-    if (blockIdx.x != 0) return; // grid.x must be 1
+    if (blockIdx.x != 0) return; 
 
     const int base = row * series_len;
     cksp_core_row<false>(
@@ -312,14 +312,14 @@ void cksp_batch_f32(const float* __restrict__ high,
     );
 }
 
-// -------------------------------------------------------------------------------------------------
-// One series × many rows, but with precomputed TR (recommended when combos is large).
-//
+
+
+
 extern "C" __global__
 void cksp_batch_f32_pretr(const float* __restrict__ high,
                           const float* __restrict__ low,
                           const float* __restrict__ close,
-                          const float* __restrict__ tr,   // <- precomputed TR
+                          const float* __restrict__ tr,   
                           int series_len,
                           int first_valid,
                           const int* __restrict__ p_list,
@@ -331,7 +331,7 @@ void cksp_batch_f32_pretr(const float* __restrict__ high,
                           float* __restrict__ out_short) {
     const int row = blockIdx.y;
     if (row >= n_combos || series_len <= 0) return;
-    if (blockIdx.x != 0) return; // grid.x must be 1
+    if (blockIdx.x != 0) return; 
 
     const int base = row * series_len;
     cksp_core_row<true>(
@@ -341,7 +341,7 @@ void cksp_batch_f32_pretr(const float* __restrict__ high,
     );
 }
 
-// Many-series × one param (time-major: [t][series])
+
 extern "C" __global__
 void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
                                     const float* __restrict__ low_tm,
@@ -355,15 +355,15 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
                                     int cap_max,
                                     float* __restrict__ out_long_tm,
                                     float* __restrict__ out_short_tm) {
-    const int s = blockIdx.x; // one block per series
+    const int s = blockIdx.x; 
     if (s >= num_series || series_len <= 0 || p <= 0 || q <= 0) return;
-    const int stride = num_series; // time-major
+    const int stride = num_series; 
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
     if (fv >= series_len) return;
     const int warm = fv + p + q - 1;
     const int cap  = q + 1;
 
-    // Parallel NaN init for this series
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_long_tm[t * stride + s]  = CUDART_NAN_F;
         out_short_tm[t * stride + s] = CUDART_NAN_F;
@@ -388,13 +388,13 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
     const float alpha = 1.0f / (float)p;
     float sum_tr = 0.0f, c_tr = 0.0f;
 
-    // t = fv (first sample): TR = hi - lo ; initialize deques if q>1
+    
     {
         const int t = fv;
         const float hi = high_tm[t * stride + s];
         const float lo = low_tm [t * stride + s];
         const float tr = hi - lo;
-        // warmup k=0
+        
         float y = tr - c_tr; float tt = sum_tr + y; c_tr = (tt - sum_tr) - y; sum_tr = tt;
         if (p == 1) rma = tr;
 
@@ -421,7 +421,7 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
     }
 
-    // main loop
+    
     if (q == 1) {
         int k = 1;
         float prev_close = close_tm[fv * stride + s];
@@ -462,7 +462,7 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
             rma = fmaf(alpha, tr - rma, rma);
         }
 
-        // rolling MAX high over q
+        
         while (h_head != h_tail) {
             const int last = rb_dec(h_tail, cap);
             const int last_t = h_idx[last];
@@ -478,7 +478,7 @@ void cksp_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
         const float mh = high_tm[h_idx[h_head] * stride + s];
 
-        // rolling MIN low over q
+        
         while (l_head != l_tail) {
             const int last = rb_dec(l_tail, cap);
             const int last_t = l_idx[last];

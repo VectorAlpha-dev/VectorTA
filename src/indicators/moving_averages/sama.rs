@@ -276,8 +276,8 @@ pub fn sama(input: &SamaInput) -> Result<SamaOutput, SamaError> {
 pub fn sama_with_kernel(input: &SamaInput, kernel: Kernel) -> Result<SamaOutput, SamaError> {
     let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, kernel)?;
 
-    // Pine-compatible: start computing immediately but maintain proper warmup
-    // Allocate with NaN prefix only; rest is uninitialized and will be written by compute
+    
+    
     let mut out = alloc_with_nan_prefix(data.len(), first);
     sama_compute_into(
         data, length, maj_length, min_length, first, chosen, &mut out,
@@ -358,7 +358,7 @@ fn sama_prepare<'a>(
     let maj_length = input.get_maj_length();
     let min_length = input.get_min_length();
 
-    // We need length + 1 data points for highest/lowest calculation
+    
     if length + 1 > n || length == 0 {
         return Err(SamaError::InvalidPeriod {
             period: length,
@@ -374,7 +374,7 @@ fn sama_prepare<'a>(
     }
 
     let valid = n - first;
-    // Pine-compatible: start immediately once we have any valid bar
+    
     if valid < 1 {
         return Err(SamaError::NotEnoughValidData { needed: 1, valid });
     }
@@ -440,13 +440,13 @@ pub fn sama_scalar(
         return;
     }
 
-    // Precompute alphas and delta once
+    
     let maj_alpha = 2.0 / (maj_length as f64 + 1.0);
     let min_alpha = 2.0 / (min_length as f64 + 1.0);
     let delta = min_alpha - maj_alpha;
 
-    // Monotonic deques for rolling max/min over inclusive window [i-length .. i]
-    // Implemented as ring buffers of indices with capacity length + 1
+    
+    
     let cap = length + 1;
     let mut max_idx = vec![0usize; cap];
     let mut min_idx = vec![0usize; cap];
@@ -460,14 +460,14 @@ pub fn sama_scalar(
     for i in first..n {
         let p = data[i];
         if p.is_nan() {
-            // Preserve continuity but output NaN
+            
             out[i] = f64::NAN;
             continue;
         }
 
         let wstart = i.saturating_sub(length);
 
-        // Drop outdated indices from heads (max)
+        
         while max_len > 0 {
             let idx = max_idx[max_head];
             if idx >= wstart {
@@ -479,7 +479,7 @@ pub fn sama_scalar(
             }
             max_len -= 1;
         }
-        // Drop outdated indices from heads (min)
+        
         while min_len > 0 {
             let idx = min_idx[min_head];
             if idx >= wstart {
@@ -492,7 +492,7 @@ pub fn sama_scalar(
             min_len -= 1;
         }
 
-        // Push current index into MAX deque (monotonically decreasing values)
+        
         while max_len > 0 {
             let mut last_pos = max_head + max_len - 1;
             if last_pos >= cap {
@@ -513,7 +513,7 @@ pub fn sama_scalar(
         max_idx[ins_pos_max] = i;
         max_len += 1;
 
-        // Push current index into MIN deque (monotonically increasing values)
+        
         while min_len > 0 {
             let mut last_pos = min_head + min_len - 1;
             if last_pos >= cap {
@@ -534,21 +534,21 @@ pub fn sama_scalar(
         min_idx[ins_pos_min] = i;
         min_len += 1;
 
-        // With current i pushed, deques are non-empty
+        
         let hh = data[max_idx[max_head]];
         let ll = data[min_idx[min_head]];
 
-        // mult = |2*p - ll - hh| / (hh - ll) (guard zero denom)
+        
         let denom = hh - ll;
         let c = (p + p) - (hh + ll);
         let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
 
-        // final_alpha = (maj_alpha + mult * delta)^2
+        
         let a = mult.mul_add(delta, maj_alpha);
         let alpha = a * a;
 
         if sama_val.is_nan() {
-            // Seed with first valid price
+            
             sama_val = p;
         } else {
             let diff = p - sama_val;
@@ -569,8 +569,8 @@ pub fn sama_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    // For now, fallback to scalar implementation
-    // AVX2 optimization can be added later for better performance
+    
+    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
@@ -584,8 +584,8 @@ pub fn sama_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    // For now, fallback to scalar implementation
-    // AVX512 optimization can be added later for better performance
+    
+    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
@@ -599,23 +599,23 @@ pub fn sama_simd128(
     first: usize,
     out: &mut [f64],
 ) {
-    // For now, fallback to scalar implementation
-    // WASM SIMD optimization can be added later
+    
+    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
-// ========== Batch Processing ==========
+
 
 #[derive(Debug, Clone)]
 pub struct SamaBatchRange {
-    pub length: (usize, usize, usize),     // (start, end, step)
-    pub maj_length: (usize, usize, usize), // (start, end, step)
-    pub min_length: (usize, usize, usize), // (start, end, step)
+    pub length: (usize, usize, usize),     
+    pub maj_length: (usize, usize, usize), 
+    pub min_length: (usize, usize, usize), 
 }
 
 #[derive(Debug, Clone)]
 pub struct SamaBatchOutput {
-    pub values: Vec<f64>, // flattened rows × cols
+    pub values: Vec<f64>, 
     pub combos: Vec<SamaParams>,
     pub rows: usize,
     pub cols: usize,
@@ -743,7 +743,7 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, S
         if v.is_empty() { return Err(SamaError::InvalidRange { start, end, step }); }
         Ok(v)
     } else {
-        // reversed bounds supported
+        
         if step == 0 { return Ok(vec![start]); }
         let mut v = Vec::new();
         let mut x = start;
@@ -801,7 +801,7 @@ pub fn sama_batch_with_kernel(
         }
     };
 
-    // Map batch enum -> single compute enum, same pattern as alma
+    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -844,7 +844,7 @@ fn sama_batch_inner(
         return Err(SamaError::EmptyInputData);
     }
 
-    // checked rows*cols to prevent overflow
+    
     let total = rows
         .checked_mul(cols)
         .ok_or(SamaError::InvalidRange {
@@ -853,30 +853,30 @@ fn sama_batch_inner(
             step: 0,
         })?;
 
-    // Allocate uninit rows×cols without copies
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Pine-compatible: warmup prefix only up to first valid bar
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(SamaError::AllValuesNaN)?;
     let warm: Vec<usize> = combos
         .iter()
-        .map(|_| first) // Pine parity: start computing immediately
+        .map(|_| first) 
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Reborrow as &mut [f64] for writing results
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
     };
 
-    // Fill each row in-place
+    
     sama_batch_inner_into(data, &combos, first, kern, parallel, out)?;
 
-    // Reclaim as Vec<f64> without copies
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -909,7 +909,7 @@ fn sama_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Pine-compatible: only need 1 valid data point to start
+    
     if cols - first < 1 {
         return Err(SamaError::NotEnoughValidData {
             needed: 1,
@@ -917,9 +917,9 @@ fn sama_batch_inner_into(
         });
     }
 
-    // Row-specific batch optimization:
-    // Precompute rolling highs/lows once per unique `length` using O(n) deques.
-    // Then each row runs only the adaptive EMA using the shared extrema.
+    
+    
+    
     use std::collections::HashMap;
     let mut uniq_lengths: Vec<usize> = Vec::new();
     uniq_lengths.reserve(combos.len());
@@ -930,7 +930,7 @@ fn sama_batch_inner_into(
         }
     }
 
-    // Helper to build rolling extrema arrays (inclusive window [i-length .. i])
+    
     fn build_rolling_extrema(data: &[f64], length: usize) -> (Vec<f64>, Vec<f64>) {
         let n = data.len();
         let cap = length + 1;
@@ -947,7 +947,7 @@ fn sama_batch_inner_into(
             let p = data[i];
             let wstart = i.saturating_sub(length);
 
-            // Drop outdated
+            
             while max_len > 0 {
                 let idx = max_idx[max_head];
                 if idx >= wstart {
@@ -971,7 +971,7 @@ fn sama_batch_inner_into(
                 min_len -= 1;
             }
 
-            // Push current if finite (ignore NaNs inside window)
+            
             if !p.is_nan() {
                 while max_len > 0 {
                     let last_pos = (max_head + max_len - 1) % cap;
@@ -1008,7 +1008,7 @@ fn sama_batch_inner_into(
         (hh, ll)
     }
 
-    // Build shared extrema per unique length
+    
     let mut hh_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
     let mut ll_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
     for &l in &uniq_lengths {
@@ -1017,7 +1017,7 @@ fn sama_batch_inner_into(
         ll_map.insert(l, ll);
     }
 
-    // Helper: compute one row using shared extrema
+    
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let prm = &combos[row];
         let length = prm.length.unwrap_or(200);
@@ -1081,37 +1081,37 @@ fn sama_batch_inner_into(
     Ok(())
 }
 
-// ========== Streaming Support ==========
-// Decision: Streaming uses monotonic deques for O(1) updates; SIMD not needed.
+
+
 
 #[derive(Debug, Clone)]
 pub struct SamaStream {
-    // Parameters
+    
     length: usize,
     maj_length: usize,
     min_length: usize,
 
-    // Precomputed constants
+    
     maj_alpha: f64,
     min_alpha: f64,
-    delta: f64, // min_alpha - maj_alpha
+    delta: f64, 
 
-    // Ring buffer of last (length + 1) samples
-    cap: usize, // = length + 1
+    
+    cap: usize, 
     buf: Vec<f64>,
-    head: usize, // next write position in buf (t % cap)
-    tick: usize, // current time index t (monotonic)
+    head: usize, 
+    tick: usize, 
 
-    // Monotonic deques (store time indices, not values)
-    // Implemented as rings for zero-alloc updates
-    max_idx: Vec<usize>, // capacity cap
-    min_idx: Vec<usize>, // capacity cap
+    
+    
+    max_idx: Vec<usize>, 
+    min_idx: Vec<usize>, 
     max_head: usize,
     min_head: usize,
     max_len: usize,
     min_len: usize,
 
-    // Filter state
+    
     sama_val: f64,
 }
 
@@ -1164,8 +1164,8 @@ impl SamaStream {
         let t = self.tick;
         let cap = self.cap;
 
-        // 1) Drop outdated indices from deque heads.
-        // Window is inclusive: [t - length, t] after inserting this sample at logical index t.
+        
+        
         let oldest = t.saturating_sub(self.length);
 
         while self.max_len > 0 {
@@ -1191,10 +1191,10 @@ impl SamaStream {
             self.min_len -= 1;
         }
 
-        // 2) Write current value into the ring after popping outdated to avoid stale reads.
+        
         self.buf[self.head] = value;
 
-        // 3) If current value is NaN, slide the window but don't touch deques or EMA.
+        
         if value.is_nan() {
             self.head += 1;
             if self.head == cap {
@@ -1204,7 +1204,7 @@ impl SamaStream {
             return Some(f64::NAN);
         }
 
-        // 4) Push to MAX deque (monotonically decreasing values).
+        
         while self.max_len > 0 {
             let back_pos = (self.max_head + self.max_len - 1) % cap;
             let back_idx = self.max_idx[back_pos];
@@ -1219,7 +1219,7 @@ impl SamaStream {
         self.max_idx[ins_pos_max] = t;
         self.max_len += 1;
 
-        // 5) Push to MIN deque (monotonically increasing values).
+        
         while self.min_len > 0 {
             let back_pos = (self.min_head + self.min_len - 1) % cap;
             let back_idx = self.min_idx[back_pos];
@@ -1234,20 +1234,20 @@ impl SamaStream {
         self.min_idx[ins_pos_min] = t;
         self.min_len += 1;
 
-        // 6) Read extrema from deque fronts.
+        
         let hh = self.buf[self.max_idx[self.max_head] % cap];
         let ll = self.buf[self.min_idx[self.min_head] % cap];
 
-        // mult = |2*p - ll - hh| / (hh - ll)    (guard zero denom)
+        
         let denom = hh - ll;
         let c = (value + value) - (hh + ll);
         let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
 
-        // final_alpha = (maj_alpha + mult * delta)^2, using FMA and square by multiply
+        
         let a = mult.mul_add(self.delta, self.maj_alpha);
         let alpha = a * a;
 
-        // EMA update: y += alpha*(x - y), seeded on first finite value
+        
         if self.sama_val.is_nan() {
             self.sama_val = value;
         } else {
@@ -1255,7 +1255,7 @@ impl SamaStream {
             self.sama_val = diff.mul_add(alpha, self.sama_val);
         }
 
-        // 7) Advance ring/tick.
+        
         self.head += 1;
         if self.head == cap {
             self.head = 0;
@@ -1283,7 +1283,7 @@ impl SamaStream {
     }
 }
 
-// ========== Python Bindings ==========
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "sama")]
@@ -1331,19 +1331,19 @@ pub fn sama_batch_py<'py>(
         min_length: min_length_range,
     };
 
-    // Build combos up front for metadata and sizing
+    
     let combos = expand_grid_sama(&sweep)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Preallocate flattened output in NumPy without extra copies
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
 
-    // Fill in place with GIL released
+    
     let combos = py
         .allow_threads(|| {
             let mapped = match kern {
@@ -1356,7 +1356,7 @@ pub fn sama_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => Kernel::Scalar,
             };
-            // Use unified inner to avoid allocations
+            
             let first = slice_in
                 .iter()
                 .position(|x| !x.is_nan())
@@ -1490,7 +1490,7 @@ impl SamaStreamPy {
     }
 }
 
-// ========== WASM Bindings ==========
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1550,7 +1550,7 @@ pub fn sama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Raw pointer helpers (no copies)
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sama_alloc(len: usize) -> *mut f64 {
@@ -1599,7 +1599,7 @@ pub fn sama_into(
             out.copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            // pass the slice directly; no &mut of a &mut slice
+            
             sama_into_slice(out, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -1662,11 +1662,11 @@ mod tests {
         let input = SamaInput::from_candles(&candles, "close", SamaParams::default());
         let result = sama_with_kernel(&input, kernel)?;
 
-        // With Pine Script correct initialization (prev=0), values start low
-        // and converge over time. Just verify calculation produces valid results
+        
+        
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Check that we get valid values after warmup
+        
         let valid_count = result.values.iter().filter(|&&v| !v.is_nan()).count();
         assert!(
             valid_count > 0,
@@ -1680,13 +1680,13 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_sama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a non-trivial input with a small NaN prefix and varying values
+        
         let mut data = Vec::with_capacity(256);
         for _ in 0..5 {
             data.push(f64::NAN);
         }
         for i in 0..251 {
-            // Mix of periodic and slowly varying components
+            
             let x = (i as f64).sin() * 0.12345 + 50.0 + ((i % 11) as f64) * 0.001;
             data.push(x);
         }
@@ -1865,11 +1865,11 @@ mod tests {
         let input = SamaInput::from_candles(&candles, "close", params);
         let output = sama_with_kernel(&input, kernel)?;
 
-        // Find first non-NaN and verify warmup period
+        
         let first_valid = candles.close.iter().position(|x| !x.is_nan()).unwrap_or(0);
         let warmup = first_valid + input.get_length();
 
-        // After warmup, all values should be valid
+        
         for (i, &val) in output
             .values
             .iter()
@@ -1893,11 +1893,11 @@ mod tests {
 
         let params = SamaParams::default();
 
-        // Batch calculation
+        
         let batch_input = SamaInput::from_candles(&candles, "close", params.clone());
         let batch_result = sama_with_kernel(&batch_input, kernel)?;
 
-        // Streaming calculation
+        
         let mut stream = SamaStream::try_new(params)?;
         let mut stream_results = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
@@ -1906,7 +1906,7 @@ mod tests {
 
         assert_eq!(batch_result.values.len(), stream_results.len());
 
-        // Compare results (allowing for small numerical differences)
+        
         for (i, (&batch_val, &stream_val)) in batch_result
             .values
             .iter()
@@ -1932,7 +1932,7 @@ mod tests {
         Ok(())
     }
 
-    // Batch test functions
+    
     fn check_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1946,7 +1946,7 @@ mod tests {
 
         let output = sama_batch_with_kernel(&candles.close, &range, kernel)?;
 
-        // Should have (210-190+1) * (16-12+1) * (8-4+1) = 21 * 5 * 5 = 525 results
+        
         let expected_count = 21 * 5 * 5;
         assert_eq!(
             output.rows, expected_count,
@@ -1986,7 +1986,7 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macros
+    
     macro_rules! generate_all_sama_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2049,7 +2049,7 @@ mod tests {
         };
     }
 
-    // Generate all test variants
+    
     generate_all_sama_tests!(
         check_sama_accuracy,
         check_sama_partial_params,
@@ -2108,7 +2108,7 @@ mod tests {
         Ok(())
     }
 
-    // Special tests
+    
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[test]
     fn test_sama_simd128_correctness() {
@@ -2116,7 +2116,7 @@ mod tests {
         let params = SamaParams::default();
         let input = SamaInput::from_slice(&data, params);
         let scalar = sama_with_kernel(&input, Kernel::Scalar).unwrap();
-        let simd = sama_with_kernel(&input, Kernel::Scalar).unwrap(); // simd128 path behind Scalar on wasm
+        let simd = sama_with_kernel(&input, Kernel::Scalar).unwrap(); 
         assert_eq!(scalar.values.len(), simd.values.len());
         for (a, b) in scalar.values.iter().zip(simd.values.iter()) {
             assert!((a - b).abs() < 1e-10);
@@ -2137,7 +2137,7 @@ mod tests {
                 continue;
             }
             let b = v.to_bits();
-            // Check for common uninitialized memory patterns
+            
             assert_ne!(
                 b, 0x11111111_11111111,
                 "Found poison value 0x11111111_11111111"
@@ -2183,7 +2183,7 @@ mod tests {
             }
         }
 
-        // Should get results immediately with Pine parity
+        
         assert!(
             !results.is_empty(),
             "Stream should produce results immediately"
@@ -2194,26 +2194,26 @@ mod tests {
 
     #[test]
     fn sama_pine_parity_head_start() -> Result<(), Box<dyn Error>> {
-        // Create a long series, then compare the tail with and without earlier history.
+        
         let mut long = vec![0.0; 5000];
         for i in 0..long.len() {
             long[i] = (i as f64).sin() + (i as f64 * 0.01).cos();
         }
 
-        // Compute on full history (Pine-like)
+        
         let pine_params = SamaParams::default();
         let pine_out = SamaInput::from_slice(&long, pine_params.clone());
         let a = sama_with_kernel(&pine_out, Kernel::Scalar)?.values;
 
-        // Compute on truncated history but with PineParity warmup
+        
         let tail = &long[2000..];
         let pine_like_tail = SamaInput::from_slice(tail, pine_params);
         let b = sama_with_kernel(&pine_like_tail, Kernel::Scalar)?.values;
 
-        // Compare a[2000..] vs b with tolerance after settling
-        // Due to different starting points, some divergence is expected
-        // The guide mentions this can persist for hundreds of bars
-        let tol = 0.1; // More reasonable tolerance for different starting histories
+        
+        
+        
+        let tol = 0.1; 
         for (i, (&x, &y)) in a[2000..].iter().zip(b.iter()).enumerate().skip(100) {
             if x.is_finite() && y.is_finite() {
                 assert!((x - y).abs() < tol, "i={}, |Δ|={}", i, (x - y).abs());
@@ -2229,15 +2229,15 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
 
-    // Sanity: output stays finite and handles edge cases
+    
     proptest! {
         #[test]
         fn sama_properties(data in prop::collection::vec(-1e6f64..1e6, 5..400),
                            len in 2usize..64,
                            maj in 2usize..64,
                            min in 2usize..64) {
-            // SAMA needs length + 1 data points for highest/lowest calculation
-            // Skip test if we don't have enough data
+            
+            
             if data.len() <= len {
                 return Ok(());
             }
@@ -2250,7 +2250,7 @@ mod prop_tests {
             let input = SamaInput::from_slice(&data, params);
             let SamaOutput { values: out } = sama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // after warmup, output should be finite
+            
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warm = first + len;
             for i in warm..data.len() {
@@ -2258,9 +2258,9 @@ mod prop_tests {
                 let window = &data[wstart..=i];
                 if window.iter().all(|v| v.is_finite()) {
                     let y = out[i];
-                    // SAMA is an adaptive moving average that can produce values
-                    // outside the immediate window range due to its adaptive nature
-                    // and accumulation of previous values. Just check that output is finite.
+                    
+                    
+                    
                     prop_assert!(
                         y.is_finite(),
                         "Output {} at index {} is not finite",
@@ -2271,7 +2271,7 @@ mod prop_tests {
         }
     }
 }
-// Python device handle: CUDA Array Interface v3 + DLPack (SAMA)
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32SamaPy {

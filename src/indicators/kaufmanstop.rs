@@ -25,7 +25,7 @@ use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
-// aligned_vec not needed for this indicator
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -129,8 +129,8 @@ impl<'a> KaufmanstopInput<'a> {
 impl<'a> AsRef<[f64]> for KaufmanstopInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
-        // Since kaufmanstop uses two data series (high and low),
-        // we'll return the high series as the primary reference
+        
+        
         match &self.data {
             KaufmanstopData::Candles { candles } => {
                 candles.select_candle_field("high").unwrap_or(&[])
@@ -269,9 +269,9 @@ pub fn kaufmanstop_with_kernel(
     let (high, low, period, first_valid_idx, _mult, _direction, _ma_type) =
         kaufmanstop_prepare(input)?;
 
-    // Allocate with the same NaN warmup behavior
+    
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + period - 1);
-    // Compute into the provided buffer
+    
     kaufmanstop_compute_into(input, kernel, &mut out)?;
     Ok(KaufmanstopOutput { values: out })
 }
@@ -282,11 +282,11 @@ fn kaufmanstop_prepare<'a>(
 ) -> Result<(
     &'a [f64],
     &'a [f64],
-    usize,        // period
-    usize,        // first_valid_idx
-    f64,          // mult
+    usize,        
+    usize,        
+    f64,          
     &'a str,      // direction
-    &'a str,      // ma_type
+    &'a str,      
 ), KaufmanstopError> {
     let (high, low) = match &input.data {
         KaufmanstopData::Candles { candles } => {
@@ -354,7 +354,7 @@ fn kaufmanstop_compute_into(
         });
     }
 
-    // Dispatch to classic kernels for common MA types
+    
     if ma_type.eq_ignore_ascii_case("sma") {
         unsafe {
             kaufmanstop_scalar_classic_sma(
@@ -383,7 +383,7 @@ fn kaufmanstop_compute_into(
         return Ok(());
     }
 
-    // Fallback implementation for other MA types
+    
     let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
     for i in first_valid_idx..high.len() {
         if high[i].is_nan() || low[i].is_nan() {
@@ -404,7 +404,7 @@ fn kaufmanstop_compute_into(
         }
     })?;
 
-    // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -469,14 +469,14 @@ pub fn kaufmanstop_into(
         });
     }
 
-    // Prefill NaN warmup prefix using the same quiet-NaN pattern
+    
     let warmup = first_valid_idx + period - 1;
     let warm = warmup.min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute into the provided buffer (writes tail values)
+    
     kaufmanstop_compute_into(input, Kernel::Auto, out)
 }
 
@@ -498,23 +498,23 @@ pub fn kaufmanstop_scalar(
         return;
     }
 
-    // Select base series and multiplier sign once (avoid per-iteration branch)
+    
     let is_long = direction.eq_ignore_ascii_case("long");
     let base = if is_long { low } else { high };
     let signed_mult = if is_long { -mult } else { mult };
 
-    // Number of outputs we can write safely
+    
     let n = core::cmp::min(range_ma.len(), high.len() - first);
     if n == 0 {
         return;
     }
 
-    // Slice once to eliminate bounds checks in the hot loop
+    
     let rm = &range_ma[..n];
     let base_s = &base[first..first + n];
     let out_s = &mut out[first..first + n];
 
-    // Process in chunks of 4 for a touch of unrolling; tail handled after
+    
     let chunks = rm.len() & !3usize;
     let mut i = 0usize;
     while i < chunks {
@@ -692,47 +692,47 @@ unsafe fn kaufmanstop_avx512_impl(
     }
 }
 
-// Decision: Streaming uses O(1) SMA/EMA; Other MA types fall back to O(n) over
-// the current window in chronological order for correctness. SIMD remains disabled
-// by default for Auto due to memory-bound AXPY behavior.
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct KaufmanstopStream {
-    // Params
+    
     period: usize,
     mult: f64,
     direction: String,
     ma_type: String,
 
-    // Ring buffer of high-low ranges
+    
     range_buffer: Vec<f64>,
     buffer_head: usize,
     filled: bool,
 
-    // Cached direction and scale
+    
     is_long: bool,
     signed_mult: f64,
 
-    // Which streaming path to use
+    
     kind: StreamMaKind,
 
-    // --- O(1) SMA state ---
+    
     sum: f64,
     valid_count: u32,
-    inv_period: f64, // 1.0 / period (used when no NaNs in window)
+    inv_period: f64, 
 
-    // --- O(1) EMA state ---
+    
     alpha: f64,
     beta: f64,
     ema: f64,
-    ema_ready: bool, // becomes true after first seed from SMA
+    ema_ready: bool, 
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamMaKind {
     SMA,
     EMA,
-    Other, // WMA/SMMA/... -> fallback O(n)
+    Other, 
 }
 
 impl KaufmanstopStream {
@@ -760,7 +760,7 @@ impl KaufmanstopStream {
             StreamMaKind::Other
         };
 
-        // EMA coefficients (ignored for SMA/Other)
+        
         let alpha = 2.0 / (period as f64 + 1.0);
         let beta = 1.0 - alpha;
 
@@ -790,67 +790,67 @@ impl KaufmanstopStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        // Compute current range (may be NaN)
+        
         let new = if high.is_nan() || low.is_nan() {
             f64::NAN
         } else {
             high - low
         };
 
-        // Did we already have a full window before inserting this sample?
+        
         let was_filled = self.filled;
 
-        // If the window is already full, remove the value that is about to be overwritten
+        
         if was_filled {
             let old = self.range_buffer[self.buffer_head];
             if old == old {
-                // old.is_nan() == false
+                
                 self.sum -= old;
-                // valid_count > 0 by construction when old is finite
+                
                 self.valid_count -= 1;
             }
         }
 
-        // Write the new value into the ring and add to running stats if finite
+        
         self.range_buffer[self.buffer_head] = new;
         if new == new {
             self.sum += new;
             self.valid_count += 1;
         }
 
-        // Advance ring
+        
         self.buffer_head += 1;
         if self.buffer_head == self.period {
             self.buffer_head = 0;
             if !self.filled {
-                self.filled = true; // window just became full
+                self.filled = true; 
             }
         }
 
-        // Warmup: do not emit until we have a full window of samples (NaNs allowed)
+        
         if !self.filled {
             return None;
         }
 
-        // Compute MA in O(1) for SMA/EMA; otherwise fall back to O(n) for correctness
+        
         let ma_val = match self.kind {
             StreamMaKind::SMA => {
-                // If all values in the window are NaN, the SMA is NaN
+                
                 if self.valid_count == 0 {
                     f64::NAN
                 } else if self.valid_count as usize == self.period {
-                    // Hot path (no NaNs in window): multiply by 1/N to avoid slow div
+                    
                     self.sum * self.inv_period
                 } else {
-                    // Mixed window (some NaNs): average over valid samples
+                    
                     self.sum / (self.valid_count as f64)
                 }
             }
             StreamMaKind::EMA => {
-                // Seed EMA with the average of the first full window (matches batch init).
+                
                 if !self.ema_ready {
                     if self.valid_count == 0 {
-                        // Keep trying to seed until the window has finite data
+                        
                         f64::NAN
                     } else {
                         self.ema = self.sum / (self.valid_count as f64);
@@ -858,20 +858,20 @@ impl KaufmanstopStream {
                         self.ema
                     }
                 } else {
-                    // After seeding: only update EMA when the new range is finite
+                    
                     if new == new {
-                        // ema = beta*ema + alpha*new (use fused multiply-add where available)
+                        
                         self.ema = self.ema.mul_add(self.beta, self.alpha * new);
                     }
                     self.ema
                 }
             }
             StreamMaKind::Other => {
-                // Fallback path (O(n) but correct): evaluate MA over the current window
-                // in chronological order (oldest -> newest) using a small scratch buffer.
+                
+                
                 let n = self.period;
                 let mut tmp = vec![f64::NAN; n];
-                // Oldest element in the window is at buffer_head (next to be overwritten)
+                
                 let tail = n - self.buffer_head;
                 tmp[..tail].copy_from_slice(&self.range_buffer[self.buffer_head..]);
                 tmp[tail..].copy_from_slice(&self.range_buffer[..self.buffer_head]);
@@ -883,7 +883,7 @@ impl KaufmanstopStream {
             }
         };
 
-        // Final stop = base ± mult * MA(range)
+        
         let base = if self.is_long { low } else { high };
         Some(ma_val.mul_add(self.signed_mult, base))
     }
@@ -893,8 +893,8 @@ impl KaufmanstopStream {
 pub struct KaufmanstopBatchRange {
     pub period: (usize, usize, usize),
     pub mult: (f64, f64, f64),
-    // String parameters use (start, end, step) tuple for consistency,
-    // but step is always 0.0 and ignored since strings don't have numeric steps
+    
+    
     pub direction: (String, String, f64),
     pub ma_type: (String, String, f64),
 }
@@ -1040,7 +1040,7 @@ fn expand_grid(r: &KaufmanstopBatchRange) -> Result<Vec<KaufmanstopParams>, Kauf
             }
             return Ok(v);
         }
-        // reversed bounds: walk downward
+        
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -1087,8 +1087,8 @@ fn expand_grid(r: &KaufmanstopBatchRange) -> Result<Vec<KaufmanstopParams>, Kauf
         Ok(v)
     }
     fn axis_string((start, end, _step): (String, String, f64)) -> Vec<String> {
-        // For string parameters, we only support single values or start/end pairs.
-        // The step parameter is ignored for strings.
+        
+        
         if start == end {
             return vec![start.clone()];
         }
@@ -1137,7 +1137,7 @@ pub fn kaufmanstop_batch_with_kernel(
     k: Kernel,
 ) -> Result<KaufmanstopBatchOutput, KaufmanstopError> {
     let kernel = match k {
-        // SIMD underperforms for this indicator; prefer ScalarBatch for Auto.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => return Err(KaufmanstopError::InvalidKernelForBatch(k)),
@@ -1190,7 +1190,7 @@ fn kaufmanstop_batch_inner(
         });
     }
 
-    // Guard rows * cols overflow before allocation
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or_else(|| KaufmanstopError::InvalidRange {
@@ -1199,7 +1199,7 @@ fn kaufmanstop_batch_inner(
             step: "rows*cols".into(),
         })?;
 
-    // Allocate rows×cols with helpers and initialize warm prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = high
         .iter()
@@ -1212,14 +1212,14 @@ fn kaufmanstop_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Compute into that matrix
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
     let _ = kaufmanstop_batch_inner_into(high, low, sweep, kern, parallel, out)?;
 
-    // Turn back into Vec<f64> (capacity is element-count, 1:1)
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1266,7 +1266,7 @@ pub fn kaufmanstop_batch_inner_into(
         .ok_or(KaufmanstopError::AllValuesNaN)?;
 
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    // Guard n_combos * max_period against overflow (advisory; detects absurd inputs)
+    
     let _ = combos
         .len()
         .checked_mul(max_p)
@@ -1282,7 +1282,7 @@ pub fn kaufmanstop_batch_inner_into(
         });
     }
 
-    // range_buf with prefix-only init
+    
     let mut range_buf = alloc_with_nan_prefix(len, first);
     for i in first..len {
         range_buf[i] = if high[i].is_nan() || low[i].is_nan() {
@@ -1308,7 +1308,7 @@ pub fn kaufmanstop_batch_inner_into(
         });
     }
 
-    // Reinterpret as MaybeUninit for parity with ALMA's writer
+    
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1325,12 +1325,12 @@ pub fn kaufmanstop_batch_inner_into(
         let direction = c.direction.as_ref().unwrap();
         let ma_type = c.ma_type.as_ref().unwrap();
 
-        // MA for this row over the valid tail
+        
         let ma_input = MaData::Slice(&range_buf[first..]);
         let hl_diff_ma = match ma(ma_type, ma_input, period) {
             Ok(v) => v,
             Err(_) => {
-                // Fill this row with NaNs
+                
                 let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols);
                 for x in dst.iter_mut() {
                     *x = f64::NAN;
@@ -1560,7 +1560,7 @@ pub fn kaufmanstop_batch_py<'py>(
         ma_type: (ma_type.to_string(), ma_type.to_string(), 0.0),
     };
 
-    // Predict rows/cols before allocating
+    
     let combos_preview = expand_grid(&sweep)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_preview.len();
@@ -1569,7 +1569,7 @@ pub fn kaufmanstop_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow in kaufmanstop_batch_py"))?;
 
-    // Preallocate NumPy 1D buffer then fill
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -1591,7 +1591,7 @@ pub fn kaufmanstop_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // Columnar metadata like ALMA
+    
     dict.set_item(
         "periods",
         combos
@@ -1608,7 +1608,7 @@ pub fn kaufmanstop_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    // String arrays need to be Python lists, not NumPy arrays
+    
     dict.set_item(
         "directions",
         combos
@@ -1628,7 +1628,7 @@ pub fn kaufmanstop_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kaufmanstop_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, mult_range=(2.0, 2.0, 0.0), direction="long", ma_type="sma", device_id=0))]
@@ -1712,7 +1712,7 @@ pub fn kaufmanstop_cuda_many_series_one_param_dev_py(
     make_device_array_py(device_id, inner)
 }
 
-// ================== Core Helper Functions ==================
+
 /// Core helper that writes directly to an output slice with no allocations.
 /// This is the foundation for all WASM APIs.
 pub fn kaufmanstop_into_slice(
@@ -1720,7 +1720,7 @@ pub fn kaufmanstop_into_slice(
     input: &KaufmanstopInput,
     kern: Kernel,
 ) -> Result<(), KaufmanstopError> {
-    // Get data slices from input
+    
     let (high, low) = match &input.data {
         KaufmanstopData::Candles { candles } => {
             let high = candles
@@ -1739,7 +1739,7 @@ pub fn kaufmanstop_into_slice(
     let direction = input.get_direction();
     let ma_type = input.get_ma_type();
 
-    // Validate inputs
+    
     if high.is_empty() || low.is_empty() {
         return Err(KaufmanstopError::EmptyInputData);
     }
@@ -1776,7 +1776,7 @@ pub fn kaufmanstop_into_slice(
         });
     }
 
-    // Calculate high-low differences in a temporary buffer using zero-copy allocation
+    
     let mut hl_diff = alloc_with_nan_prefix(high.len(), first_valid_idx);
     for i in first_valid_idx..high.len() {
         if high[i].is_nan() || low[i].is_nan() {
@@ -1786,7 +1786,7 @@ pub fn kaufmanstop_into_slice(
         }
     }
 
-    // Calculate moving average of the differences
+    
     let ma_input = MaData::Slice(&hl_diff[first_valid_idx..]);
     let hl_diff_ma = ma(ma_type, ma_input, period).map_err(|e| {
         match e.downcast::<MaError>() {
@@ -1798,13 +1798,13 @@ pub fn kaufmanstop_into_slice(
         }
     })?;
 
-    // SIMD underperforms vs scalar (memory-bound AXPY); default to Scalar for Auto.
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // Apply the kaufmanstop formula
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => kaufmanstop_scalar(
@@ -1843,7 +1843,7 @@ pub fn kaufmanstop_into_slice(
         }
     }
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -1896,16 +1896,16 @@ pub fn kaufmanstop_into(
         return Err(JsError::new("Null pointer passed to kaufmanstop_into"));
     }
 
-    // SAFETY: We verify pointers are non-null and trust the caller for:
-    // 1. Valid memory allocation
-    // 2. Proper length
-    // 3. No data races
+    
+    
+    
+    
     unsafe {
         let high = std::slice::from_raw_parts(high_ptr, len);
         let low = std::slice::from_raw_parts(low_ptr, len);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-        // Aliasing detection: Check if output overlaps with either input
+        
         let high_start = high_ptr as usize;
         let high_end = high_start + len * std::mem::size_of::<f64>();
         let low_start = low_ptr as usize;
@@ -1913,13 +1913,13 @@ pub fn kaufmanstop_into(
         let out_start = out_ptr as usize;
         let out_end = out_start + len * std::mem::size_of::<f64>();
 
-        // Check if output overlaps with high
+        
         let overlaps_high = (out_start < high_end) && (high_start < out_end);
-        // Check if output overlaps with low
+        
         let overlaps_low = (out_start < low_end) && (low_start < out_end);
 
         if overlaps_high || overlaps_low {
-            // Overlap detected, use safe path with allocation
+            
             let params = KaufmanstopParams {
                 period: Some(period),
                 mult: Some(mult),
@@ -1930,7 +1930,7 @@ pub fn kaufmanstop_into(
             let result = kaufmanstop(&input).map_err(|e| JsError::new(&e.to_string()))?;
             out.copy_from_slice(&result.values);
         } else {
-            // No overlap, use direct write
+            
             let params = KaufmanstopParams {
                 period: Some(period),
                 mult: Some(mult),
@@ -2006,15 +2006,15 @@ pub fn kaufmanstop_batch_js(
                 cols: output.cols,
             };
 
-            // Create JS object manually
+            
             let js_object = js_sys::Object::new();
 
-            // Add values as Float64Array
+            
             let values_array = js_sys::Float64Array::from(&output.values[..]);
             js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
                 .map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
 
-            // Add metadata
+            
             let meta_value = serde_wasm_bindgen::to_value(&meta)?;
             let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
                 .map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
@@ -2078,15 +2078,15 @@ pub fn kaufmanstop_batch_unified_js(
                 cols: output.cols,
             };
 
-            // Create JS object
+            
             let js_object = js_sys::Object::new();
 
-            // Add values as Float64Array
+            
             let values_array = js_sys::Float64Array::from(&output.values[..]);
             js_sys::Reflect::set(&js_object, &"values".into(), &values_array.into())
                 .map_err(|e| JsError::new(&format!("Failed to set values: {:?}", e)))?;
 
-            // Add metadata
+            
             let meta_value = serde_wasm_bindgen::to_value(&meta)?;
             let combos = js_sys::Reflect::get(&meta_value, &"combos".into())
                 .map_err(|e| JsError::new(&format!("Failed to get combos: {:?}", e)))?;
@@ -2180,7 +2180,7 @@ pub unsafe fn kaufmanstop_scalar_classic_sma(
     let start_idx = first_valid_idx + period - 1;
     let is_long = direction.eq_ignore_ascii_case("long");
 
-    // Calculate initial SMA of high-low range
+    
     let mut sum = 0.0;
     let mut valid_count = 0;
     for i in 0..period {
@@ -2197,27 +2197,27 @@ pub unsafe fn kaufmanstop_scalar_classic_sma(
 
     let mut sma = sum / valid_count as f64;
 
-    // Calculate first KaufmanStop value
+    
     if is_long {
         out[start_idx] = low[start_idx] - sma * mult;
     } else {
         out[start_idx] = high[start_idx] + sma * mult;
     }
 
-    // Rolling window calculations
+    
     for i in (start_idx + 1)..high.len() {
-        // Update SMA with rolling window
+        
         let old_idx = i - period;
         let new_idx = i;
 
-        // Remove old value
+        
         if !high[old_idx].is_nan() && !low[old_idx].is_nan() {
             let old_range = high[old_idx] - low[old_idx];
             sum -= old_range;
             valid_count -= 1;
         }
 
-        // Add new value
+        
         if !high[new_idx].is_nan() && !low[new_idx].is_nan() {
             let new_range = high[new_idx] - low[new_idx];
             sum += new_range;
@@ -2230,7 +2230,7 @@ pub unsafe fn kaufmanstop_scalar_classic_sma(
             sma = f64::NAN;
         }
 
-        // Calculate KaufmanStop value
+        
         if is_long {
             out[i] = low[i] - sma * mult;
         } else {
@@ -2257,7 +2257,7 @@ pub unsafe fn kaufmanstop_scalar_classic_ema(
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    // Calculate initial SMA for EMA startup
+    
     let mut sum = 0.0;
     let mut valid_count = 0;
     for i in 0..period {
@@ -2274,23 +2274,23 @@ pub unsafe fn kaufmanstop_scalar_classic_ema(
 
     let mut ema = sum / valid_count as f64;
 
-    // Calculate first KaufmanStop value
+    
     if is_long {
         out[start_idx] = low[start_idx] - ema * mult;
     } else {
         out[start_idx] = high[start_idx] + ema * mult;
     }
 
-    // EMA and KaufmanStop calculations
+    
     for i in (start_idx + 1)..high.len() {
-        // Update EMA with new range value
+        
         if !high[i].is_nan() && !low[i].is_nan() {
             let range = high[i] - low[i];
             ema = alpha * range + beta * ema;
         }
-        // If current values are NaN, EMA continues with previous value
+        
 
-        // Calculate KaufmanStop value
+        
         if is_long {
             out[i] = low[i] - ema * mult;
         } else {
@@ -2444,7 +2444,7 @@ mod tests {
         let high = candles.select_candle_field("high").unwrap();
         let low = candles.select_candle_field("low").unwrap();
 
-        // Create stream
+        
         let params = KaufmanstopParams {
             period: Some(22),
             mult: Some(2.0),
@@ -2453,7 +2453,7 @@ mod tests {
         };
         let mut stream = KaufmanstopStream::try_new(params)?;
 
-        // Feed data to stream
+        
         let mut stream_results = Vec::new();
         for i in 0..high.len() {
             if let Some(val) = stream.update(high[i], low[i]) {
@@ -2463,12 +2463,12 @@ mod tests {
             }
         }
 
-        // Compare with batch computation
+        
         let input = KaufmanstopInput::with_default_candles(&candles);
         let batch_result = kaufmanstop_with_kernel(&input, kernel)?;
 
-        // Stream should match batch after warmup period
-        let warmup = 22 + 21; // period + (period - 1)
+        
+        let warmup = 22 + 21; 
         for i in warmup..high.len() {
             let diff = (stream_results[i] - batch_result.values[i]).abs();
             assert!(
@@ -2493,141 +2493,141 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations for Kaufmanstop
+        
         let test_params = vec![
-            KaufmanstopParams::default(), // period: 22, mult: 2.0, direction: "long", ma_type: "sma"
+            KaufmanstopParams::default(), 
             KaufmanstopParams {
                 period: Some(2),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // minimum period
+            }, 
             KaufmanstopParams {
                 period: Some(5),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // small period
+            }, 
             KaufmanstopParams {
                 period: Some(10),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // small-medium period
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // default period
+            }, 
             KaufmanstopParams {
                 period: Some(50),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // medium period
+            }, 
             KaufmanstopParams {
                 period: Some(100),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // large period
+            }, 
             KaufmanstopParams {
                 period: Some(200),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // very large period
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(0.1),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // very small multiplier
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(0.5),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // small multiplier
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(1.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // multiplier 1.0
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(3.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // large multiplier
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(5.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // very large multiplier
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(10.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // extreme multiplier
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(2.0),
                 direction: Some("short".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // short direction
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("ema".to_string()),
-            }, // ema type
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("smma".to_string()),
-            }, // smma type
+            }, 
             KaufmanstopParams {
                 period: Some(22),
                 mult: Some(2.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("wma".to_string()),
-            }, // wma type
+            }, 
             KaufmanstopParams {
                 period: Some(14),
                 mult: Some(1.5),
                 direction: Some("short".to_string()),
                 ma_type: Some("ema".to_string()),
-            }, // mixed params 1
+            }, 
             KaufmanstopParams {
                 period: Some(30),
                 mult: Some(2.5),
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
-            }, // mixed params 2
+            }, 
             KaufmanstopParams {
                 period: Some(7),
                 mult: Some(0.85),
                 direction: Some("short".to_string()),
                 ma_type: Some("wma".to_string()),
-            }, // mixed params 3
+            }, 
             KaufmanstopParams {
                 period: Some(3),
                 mult: Some(4.0),
                 direction: Some("long".to_string()),
                 ma_type: Some("ema".to_string()),
-            }, // edge case: very small period, large mult
+            }, 
             KaufmanstopParams {
                 period: Some(150),
                 mult: Some(0.25),
                 direction: Some("short".to_string()),
                 ma_type: Some("smma".to_string()),
-            }, // edge case: large period, small mult
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2636,12 +2636,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2700,7 +2700,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_kaufmanstop_tests {
@@ -2798,21 +2798,21 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for Kaufmanstop
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, mult_start, mult_end, mult_step, direction, ma_type)
-            (2, 10, 2, 2.0, 2.0, 0.0, "long", "sma"), // Small periods, fixed mult
-            (10, 50, 10, 2.0, 2.0, 0.0, "long", "sma"), // Medium periods, fixed mult
-            (20, 100, 20, 2.0, 2.0, 0.0, "long", "sma"), // Large periods, fixed mult
-            (22, 22, 0, 0.5, 3.0, 0.5, "long", "sma"), // Fixed period, varying mult
-            (22, 22, 0, 1.0, 5.0, 1.0, "short", "sma"), // Fixed period, varying mult, short
-            (5, 20, 5, 1.0, 3.0, 1.0, "long", "sma"), // Mixed period and mult sweep
-            (10, 30, 10, 1.5, 2.5, 0.5, "short", "sma"), // Mixed sweep, short direction
-            (2, 5, 1, 0.1, 0.5, 0.1, "long", "ema"),  // Dense small range, small mult, ema
-            (50, 150, 50, 3.0, 5.0, 1.0, "short", "wma"), // Large periods, large mult, wma
-            (3, 15, 3, 0.25, 2.0, 0.25, "long", "smma"), // Small-medium periods, varied mult, smma
-            (14, 14, 0, 0.5, 4.0, 0.5, "short", "ema"), // Fixed period, wide mult range, ema
-            (100, 200, 100, 1.0, 1.0, 0.0, "long", "sma"), // Very large periods, fixed mult
+            
+            (2, 10, 2, 2.0, 2.0, 0.0, "long", "sma"), 
+            (10, 50, 10, 2.0, 2.0, 0.0, "long", "sma"), 
+            (20, 100, 20, 2.0, 2.0, 0.0, "long", "sma"), 
+            (22, 22, 0, 0.5, 3.0, 0.5, "long", "sma"), 
+            (22, 22, 0, 1.0, 5.0, 1.0, "short", "sma"), 
+            (5, 20, 5, 1.0, 3.0, 1.0, "long", "sma"), 
+            (10, 30, 10, 1.5, 2.5, 0.5, "short", "sma"), 
+            (2, 5, 1, 0.1, 0.5, 0.1, "long", "ema"),  
+            (50, 150, 50, 3.0, 5.0, 1.0, "short", "wma"), 
+            (3, 15, 3, 0.25, 2.0, 0.25, "long", "smma"), 
+            (14, 14, 0, 0.5, 4.0, 0.5, "short", "ema"), 
+            (100, 200, 100, 1.0, 1.0, 0.0, "long", "sma"), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, dir, ma_type)) in
@@ -2823,14 +2823,14 @@ mod tests {
                 .direction_static(dir)
                 .ma_type_static(ma_type);
 
-            // Configure period range
+            
             if p_step > 0 {
                 builder = builder.period_range(p_start, p_end, p_step);
             } else {
                 builder = builder.period_static(p_start);
             }
 
-            // Configure mult range
+            
             if m_step > 0.0 {
                 builder = builder.mult_range(m_start, m_end, m_step);
             } else {
@@ -2849,7 +2849,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2914,7 +2914,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2925,68 +2925,68 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Kaufmanstop Property Test Design:
-        //
-        // This test validates the Kaufmanstop indicator which calculates adaptive price stops
-        // based on the moving average of the high-low range, multiplied by a factor.
-        //
-        // Key design decisions:
-        // 1. MA Type Selection: Only simple MA types (sma, ema, wma) are tested to avoid
-        //    complex warmup requirements of DEMA/TEMA which need 2x or 3x the period.
-        //
-        // 2. Warmup Handling: The kaufmanstop delegates warmup to the underlying MA function.
-        //    Each MA type has different warmup characteristics:
-        //    - SMA: Requires full period for first output
-        //    - EMA: Can produce output immediately but needs warmup for stability
-        //    - WMA: Requires full period for weighted calculation
-        //
-        // 3. Data Generation: Synthetic OHLC data includes:
-        //    - Normal volatility periods (0.1% to 5%)
-        //    - Occasional very small range periods to test edge cases
-        //    - Proper OHLC constraints (high >= low)
-        //    - Realistic price trends and random walk
-        //
-        // 4. Properties Tested:
-        //    - Warmup validation
-        //    - Kernel consistency (SIMD vs scalar)
-        //    - Stop level bounds (long below low, short above high)
-        //    - Mathematical formula verification
-        //    - Edge cases (period=1, small ranges, small/large multipliers)
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
 
-        // Strategy to generate realistic OHLC data with proper constraints
-        let strat = (2usize..=50) // Period range
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    100.0f64..5000.0f64, // Base price range
-                    (period + 20)..400,  // Data length
-                    0.001f64..0.05f64,   // Volatility factor (0.1% to 5%)
-                    -0.01f64..0.01f64,   // Trend factor
+                    100.0f64..5000.0f64, 
+                    (period + 20)..400,  
+                    0.001f64..0.05f64,   
+                    -0.01f64..0.01f64,   
                     Just(period),
-                    0.1f64..5.0f64,                              // Multiplier range
-                    prop::sample::select(vec!["long", "short"]), // Direction
-                    prop::sample::select(vec!["sma", "ema", "wma"]), // MA types
+                    0.1f64..5.0f64,                              
+                    prop::sample::select(vec!["long", "short"]), 
+                    prop::sample::select(vec!["sma", "ema", "wma"]), 
                 )
             })
             .prop_map(
                 |(base_price, data_len, volatility, trend, period, mult, direction, ma_type)| {
-                    // Generate synthetic OHLC data with realistic constraints
+                    
                     let mut high = Vec::with_capacity(data_len);
                     let mut low = Vec::with_capacity(data_len);
                     let mut price = base_price;
 
                     for i in 0..data_len {
-                        // Add trend and random walk
+                        
                         price *= 1.0 + trend + (i as f64 * 0.0001);
                         let noise = ((i * 17 + 11) % 100) as f64 / 100.0 - 0.5;
                         price *= 1.0 + noise * volatility;
 
-                        // Create high/low with proper constraints
-                        // Occasionally create very small or zero range periods (flat price)
+                        
+                        
                         let range = if i > data_len - 20 && i % 3 == 0 {
-                            // Last 20 points, every 3rd point has very small range
-                            price * 0.00001 // Very small range for testing
+                            
+                            price * 0.00001 
                         } else {
-                            price * volatility * 2.0 // Normal range
+                            price * volatility * 2.0 
                         };
 
                         high.push(price + range / 2.0);
@@ -3007,7 +3007,7 @@ mod tests {
                 };
                 let input = KaufmanstopInput::from_slices(&high, &low, params.clone());
 
-                // Get results from the kernel being tested
+                
                 let result = kaufmanstop_with_kernel(&input, kernel);
                 prop_assert!(
                     result.is_ok(),
@@ -3016,7 +3016,7 @@ mod tests {
                 );
                 let KaufmanstopOutput { values: out } = result.unwrap();
 
-                // Get reference results from scalar kernel
+                
                 let ref_result = kaufmanstop_with_kernel(&input, Kernel::Scalar);
                 prop_assert!(
                     ref_result.is_ok(),
@@ -3025,25 +3025,25 @@ mod tests {
                 );
                 let KaufmanstopOutput { values: ref_out } = ref_result.unwrap();
 
-                // Both outputs should have the same length as input
+                
                 prop_assert_eq!(out.len(), high.len());
                 prop_assert_eq!(ref_out.len(), high.len());
 
-                // Find first valid index
+                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
                     .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
                     .unwrap_or(0);
 
-                // Property 1: Warmup period validation
-                // The MA function itself handles warmup, and kaufmanstop writes the MA output
-                // starting from first_valid_idx. The actual warmup depends on the MA type.
-                // For simple MAs like SMA, EMA, WMA with period N:
-                // - SMA needs N points to produce first output
-                // - EMA can produce output from first point but may need warmup for stability
-                // - WMA needs N points
-                // So we expect NaN values before first_valid_idx at minimum
+                
+                
+                
+                
+                
+                
+                
+                
                 for i in 0..first_valid_idx {
                     prop_assert!(
                         out[i].is_nan(),
@@ -3053,7 +3053,7 @@ mod tests {
                     );
                 }
 
-                // Also check that we eventually get non-NaN values after sufficient data
+                
                 let expected_first_valid = first_valid_idx + period - 1;
                 if expected_first_valid < out.len() - 10 {
                     let has_valid = out[expected_first_valid..expected_first_valid + 10]
@@ -3065,8 +3065,8 @@ mod tests {
                     );
                 }
 
-                // Property 2: Kernel consistency
-                // Different kernel implementations should produce nearly identical results
+                
+                
                 for i in first_valid_idx..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -3097,8 +3097,8 @@ mod tests {
                     );
                 }
 
-                // Property 3: Stop level bounds
-                // For valid indices, check that stops respect direction
+                
+                
                 for i in first_valid_idx..out.len() {
                     if out[i].is_nan() || high[i].is_nan() || low[i].is_nan() {
                         continue;
@@ -3107,7 +3107,7 @@ mod tests {
                     let stop = out[i];
 
                     if direction == "long" {
-                        // Long stops should be below the low (with some tolerance for calculation)
+                        
                         prop_assert!(
                             stop <= low[i] + 1e-6,
                             "Long stop {} should be below low {} at index {}",
@@ -3116,7 +3116,7 @@ mod tests {
                             i
                         );
                     } else {
-                        // Short stops should be above the high (with some tolerance)
+                        
                         prop_assert!(
                             stop >= high[i] - 1e-6,
                             "Short stop {} should be above high {} at index {}",
@@ -3127,9 +3127,9 @@ mod tests {
                     }
                 }
 
-                // Remaining checks are heuristics and can be violated for some
-                // synthetic patterns (especially with EMA/WMA smoothing). Keep the
-                // property suite focused on strict invariants above.
+                
+                
+                
 
                 Ok(())
             })
@@ -3140,7 +3140,7 @@ mod tests {
 
     #[test]
     fn test_kaufmanstop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial OHLC dataset (with NaN prefix)
+        
         const N: usize = 256;
         let mut ts: Vec<i64> = (0..N as i64).collect();
         let mut open = vec![0.0; N];
@@ -3150,7 +3150,7 @@ mod tests {
         let mut vol = vec![0.0; N];
 
         for i in 3..N {
-            // Base price with mild trend + oscillation
+            
             let base = 1000.0 + (i as f64) * 0.5 + ((i as f64) * 0.1).sin() * 2.0;
             high[i] = base + 5.0;
             low[i] = base - 5.0;
@@ -3162,16 +3162,16 @@ mod tests {
         let candles = Candles::new(ts, open, high.clone(), low.clone(), close, vol);
         let input = KaufmanstopInput::with_default_candles(&candles);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = kaufmanstop(&input)?;
 
-        // Preallocate output for into API
+        
         let mut out = vec![0.0; N];
         kaufmanstop_into(&input, &mut out)?;
 
         assert_eq!(baseline.values.len(), out.len());
 
-        // Helper: exact equality or both NaN
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

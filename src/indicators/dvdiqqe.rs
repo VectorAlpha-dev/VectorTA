@@ -28,8 +28,8 @@
 //! - Consider O(1) streaming update for trailing levels.
 //! - Evaluate further row-specific batch reuse in non-flat inner API.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -39,13 +39,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dvdiqqe_wrapper::CudaDvdiqqe;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -53,7 +53,7 @@ use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context as CudaContext;
 
-// Python CUDA VRAM handle for dvdiqqe that keeps a CUDA context alive
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceDvdiqqePlanePy {
@@ -511,11 +511,11 @@ fn dvdiqqe_compute_into(
         return Ok(());
     }
 
-    // derived constants
+    
     let wper = (period * 2) - 1;
     let warmup = first_valid + wper;
 
-    // Phase 1: Build PVI/NVI in one pass with inline tick volume selection
+    
     let mut pvi = alloc_with_nan_prefix(len, 0);
     let mut nvi = alloc_with_nan_prefix(len, 0);
 
@@ -530,12 +530,12 @@ fn dvdiqqe_compute_into(
         let oi = open[i];
         let ci = close[i];
 
-        // pine-like tick volume
+        
         let rng = ci - oi;
         let tickrng = if rng.abs() < tick { tickrng_prev } else { rng };
         let tick_vol = (tickrng.abs() / tick).max(0.0);
 
-        // select real volume or tick fallback
+        
         let sel_vol = if use_tick_only {
             tick_vol
         } else if let Some(vs) = volume_opt {
@@ -564,7 +564,7 @@ fn dvdiqqe_compute_into(
         tickrng_prev = tickrng;
     }
 
-    // Phase 2: EMA(pvi), EMA(nvi)
+    
     let pvi_ema = {
         let prm = EmaParams {
             period: Some(period),
@@ -580,7 +580,7 @@ fn dvdiqqe_compute_into(
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // Phase 3: divergences then smoothing EMA (reuse pvi/nvi buffers)
+    
     for i in 0..len {
         pvi[i] = pvi[i] - pvi_ema.values[i];
         nvi[i] = nvi[i] - nvi_ema.values[i];
@@ -601,7 +601,7 @@ fn dvdiqqe_compute_into(
         ema_with_kernel(&inp, kernel).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // Phase 4: compute dvdi and range stream
+    
     let mut ranges = alloc_with_nan_prefix(len, 1);
     dvdi_out[0] = pdiv_ema.values[0] - ndiv_ema.values[0];
     for i in 1..len {
@@ -610,7 +610,7 @@ fn dvdiqqe_compute_into(
         dvdi_out[i] = dvdi_i;
     }
 
-    // Phase 5: double-EMA range smoothing using Kernel::Auto
+    
     let avg_range = {
         let prm = EmaParams { period: Some(wper) };
         let inp = EmaInput::from_slice(&ranges, prm);
@@ -622,7 +622,7 @@ fn dvdiqqe_compute_into(
         ema_with_kernel(&inp, Kernel::Auto).map_err(|e| DvdiqqeError::EmaError(e.to_string()))?
     };
 
-    // Phase 6: Warmup NaNs and trailing levels
+    
     for i in 0..warmup.min(len) {
         dvdi_out[i] = f64::NAN;
         fast_out[i] = f64::NAN;
@@ -637,7 +637,7 @@ fn dvdiqqe_compute_into(
             let fr = smooth_range.values[i] * fast_mult;
             let sr = smooth_range.values[i] * slow_mult;
 
-            // fast TL
+            
             if dvdi_out[i] > fast_out[i - 1] {
                 let nv = dvdi_out[i] - fr;
                 fast_out[i] = if nv < fast_out[i - 1] {
@@ -654,7 +654,7 @@ fn dvdiqqe_compute_into(
                 };
             }
 
-            // slow TL
+            
             if dvdi_out[i] > slow_out[i - 1] {
                 let nv = dvdi_out[i] - sr;
                 slow_out[i] = if nv < slow_out[i - 1] {
@@ -673,7 +673,7 @@ fn dvdiqqe_compute_into(
         }
     }
 
-    // Phase 7: Center line
+    
     for i in 0..warmup.min(len) {
         center_out[i] = f64::NAN;
     }
@@ -748,7 +748,7 @@ pub fn dvdiqqe_with_kernel(
     })
 }
 
-// ==================== SIMD IMPLEMENTATIONS ====================
+
 
 /// AVX2 implementation: route EMA sub-kernels via AVX2 while preserving scalar flow
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -871,10 +871,10 @@ fn calculate_dvdi(
 ) -> Result<Vec<f64>, DvdiqqeError> {
     let len = close.len();
 
-    // Build PVI and NVI identical to Pine
+    
     let (pvi, nvi) = build_pvi_nvi_pine_like(close, volume);
 
-    // Calculate EMAs of PVI and NVI with specified kernel
+    
     let pvi_ema_params = EmaParams {
         period: Some(period),
     };
@@ -889,7 +889,7 @@ fn calculate_dvdi(
     let nvi_ema = ema_with_kernel(&nvi_ema_input, kernel)
         .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?;
 
-    // Calculate divergences
+    
     let mut pvi_div = alloc_with_nan_prefix(len, 0);
     let mut nvi_div = alloc_with_nan_prefix(len, 0);
 
@@ -898,7 +898,7 @@ fn calculate_dvdi(
         nvi_div[i] = nvi[i] - nvi_ema.values[i];
     }
 
-    // Apply smoothing EMA to divergences with specified kernel
+    
     let pdiv_ema_params = EmaParams {
         period: Some(smoothing_period),
     };
@@ -913,7 +913,7 @@ fn calculate_dvdi(
     let ndiv_ema = ema_with_kernel(&ndiv_ema_input, kernel)
         .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?;
 
-    // Calculate final DVDI
+    
     let mut dvdi = alloc_with_nan_prefix(len, 0);
     for i in 0..len {
         dvdi[i] = pdiv_ema.values[i] - ndiv_ema.values[i];
@@ -932,28 +932,28 @@ fn calculate_trailing_levels(
     let len = dvdi.len();
     let wper = (period * 2) - 1;
 
-    // Calculate range with proper warmup
+    
     let mut ranges = alloc_with_nan_prefix(len, 1);
     for i in 1..len {
         ranges[i] = (dvdi[i] - dvdi[i - 1]).abs();
     }
 
-    // Apply EMA to ranges
+    
     let range_ema_params = EmaParams { period: Some(wper) };
     let range_ema_input = EmaInput::from_slice(&ranges, range_ema_params);
     let avg_range = ema_with_kernel(&range_ema_input, Kernel::Auto)
         .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?;
 
-    // Apply second EMA for smoothed range
+    
     let smooth_range_params = EmaParams { period: Some(wper) };
     let smooth_range_input = EmaInput::from_slice(&avg_range.values, smooth_range_params);
     let smooth_range = ema_with_kernel(&smooth_range_input, Kernel::Auto)
         .map_err(|e| DvdiqqeError::EmaError(e.to_string()))?;
 
-    // Find first valid dvdi value
+    
     let first_valid = dvdi.iter().position(|&x| x.is_finite()).unwrap_or(len);
 
-    // Calculate trailing levels with proper warmup
+    
     let mut fast_tl = alloc_with_nan_prefix(len, first_valid);
     let mut slow_tl = alloc_with_nan_prefix(len, first_valid);
 
@@ -965,7 +965,7 @@ fn calculate_trailing_levels(
             let fast_range = smooth_range.values[i] * fast_mult;
             let slow_range = smooth_range.values[i] * slow_mult;
 
-            // Fast trailing level
+            
             if dvdi[i] > fast_tl[i - 1] {
                 let new_val = dvdi[i] - fast_range;
                 fast_tl[i] = if new_val < fast_tl[i - 1] {
@@ -982,7 +982,7 @@ fn calculate_trailing_levels(
                 };
             }
 
-            // Slow trailing level
+            
             if dvdi[i] > slow_tl[i - 1] {
                 let new_val = dvdi[i] - slow_range;
                 slow_tl[i] = if new_val < slow_tl[i - 1] {
@@ -1022,7 +1022,7 @@ fn calculate_cumulative_mean(dvdi: &[f64]) -> Vec<f64> {
     center
 }
 
-// ==================== IN-PLACE API ====================
+
 /// Multi-output in-place variant for bindings
 pub fn dvdiqqe_into_slices(
     dvdi_dst: &mut [f64],
@@ -1035,7 +1035,7 @@ pub fn dvdiqqe_into_slices(
     let (o, h, l, c, v, period, smoothing, fast, slow, vt, ct, tick, first) =
         dvdiqqe_prepare(input)?;
 
-    // Length checks
+    
     let len = c.len();
     if dvdi_dst.len() != len {
         return Err(DvdiqqeError::OutputLengthMismatch { expected: len, got: dvdi_dst.len() });
@@ -1299,7 +1299,7 @@ impl DvdiqqeBatchOutput {
             .map(|idx| {
                 let start = idx * self.cols;
                 let end = start + self.cols;
-                // Return concatenated values for all 4 outputs
+                
                 let mut row = Vec::with_capacity(self.cols * 4);
                 row.extend_from_slice(&self.dvdi_values[start..end]);
                 row.extend_from_slice(&self.fast_tl_values[start..end]);
@@ -2551,7 +2551,7 @@ pub fn dvdiqqe_py<'py>(
     Bound<'py, PyArray1<f64>>,
     Bound<'py, PyArray1<f64>>,
 )> {
-    // Validate that we have OHLC data
+    
     if open.is_none() || high.is_none() || low.is_none() || close.is_none() {
         return Err(PyValueError::new_err(
             "OHLC data (open, high, low, close) is required",
@@ -2570,7 +2570,7 @@ pub fn dvdiqqe_py<'py>(
     let v = volume.as_ref().map(|v| v.as_slice()).transpose()?;
     let len = c.len();
 
-    // Preallocate NumPy arrays
+    
     let mut dvdi = unsafe { numpy::PyArray1::<f64>::new(py, [len], false) };
     let mut fast = unsafe { numpy::PyArray1::<f64>::new(py, [len], false) };
     let mut slow = unsafe { numpy::PyArray1::<f64>::new(py, [len], false) };
@@ -2580,7 +2580,7 @@ pub fn dvdiqqe_py<'py>(
     let slow_s = unsafe { slow.as_slice_mut()? };
     let cent_s = unsafe { cent.as_slice_mut()? };
 
-    // Validate period parameters
+    
     let period_validated = if let Some(p) = period {
         if p <= 0 {
             return Err(PyValueError::new_err(format!(
@@ -2617,7 +2617,7 @@ pub fn dvdiqqe_py<'py>(
     let input = DvdiqqeInput::from_slices(o, h, l, c, v, params);
     let kern = validate_kernel(kernel, false).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Compute directly into NumPy arrays
+    
     py.allow_threads(|| dvdiqqe_into_slices(dvdi_s, fast_s, slow_s, cent_s, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -3485,7 +3485,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             -654.73695895,
         ];
         // Center line is a cumulative average, so it depends on the dataset's starting point
-        // These values are for our CSV file (2018-09-01-2024-Bitfinex_Spot-4h.csv)
+        
         let expected_center = vec![
             21.98929919135097,
             21.969910753134442,
@@ -3705,7 +3705,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
     fn check_dvdiqqe_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create data with some NaN values
+        
         let mut close = vec![100.0; 50];
         close[10] = f64::NAN;
         close[11] = f64::NAN;
@@ -3729,7 +3729,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let res = dvdiqqe_with_kernel(&input, kernel)?;
 
         assert_eq!(res.dvdi.len(), 50);
-        // Check that calculation continues after NaN values
+        
         if res.dvdi.len() > 30 {
             assert!(
                 res.dvdi[30..].iter().any(|x| x.is_finite()),
@@ -3749,7 +3749,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with tick volume forced
+        
         let params = DvdiqqeParams {
             volume_type: Some("tick".to_string()),
             ..Default::default()
@@ -3783,8 +3783,8 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let input = DvdiqqeInput::from_candles(&candles, params);
         let result = dvdiqqe_with_kernel(&input, kernel)?;
 
-        // Static center should be all zeros after warmup (NaN during warmup)
-        let warmup = 25; // (13 * 2) - 1 for default period
+        
+        let warmup = 25; 
         for i in warmup..result.center_line.len() {
             assert!(
                 result.center_line[i] == 0.0,
@@ -3798,7 +3798,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Macro for generating tests for all kernel variants
+    
     macro_rules! generate_all_dvdiqqe_tests {
         ($($test_fn:ident),* $(,)?) => {
             paste::paste! {
@@ -3823,7 +3823,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Batch test macro
+    
     macro_rules! gen_dvdiqqe_batch_tests {
         ($fnn:ident) => {
             paste::paste!{
@@ -3891,13 +3891,13 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             .values_for(&def_params)
             .expect("default row missing");
 
-        // Compare with single calculation
+        
         let single_input = DvdiqqeInput::with_default_candles(&c);
         let single_output = dvdiqqe_with_kernel(&single_input, kernel)?;
 
         assert_eq!(batch_values.dvdi.len(), single_output.dvdi.len());
 
-        // Check values match
+        
         for i in 0..batch_values.dvdi.len() {
             if batch_values.dvdi[i].is_finite() && single_output.dvdi[i].is_finite() {
                 assert!(
@@ -3915,17 +3915,17 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
     }
 
     fn check_dvdiqqe_streaming(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Streaming doesn't use kernel directly, but we keep signature for consistency
+        
         let test_data = vec![
             (100.0, 102.0, 99.0, 101.0, 1000.0),
             (101.0, 103.0, 100.0, 102.0, 1100.0),
             (102.0, 104.0, 101.0, 103.0, 1200.0),
             (103.0, 105.0, 102.0, 104.0, 1150.0),
             (104.0, 106.0, 103.0, 105.0, 1250.0),
-            // Add more data points
+            
         ];
 
-        // Fill with more test data
+        
         let mut full_data = test_data.clone();
         for i in 0..50 {
             let base = 105.0 + i as f64 * 0.5;
@@ -3941,7 +3941,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let params = DvdiqqeParams::default();
         let mut stream = DvdiqqeStream::try_new(params.clone())?;
 
-        // Feed data to stream
+        
         let mut stream_results = Vec::new();
         for (open, high, low, close, volume) in &full_data {
             if let Some(output) = stream.update(*open, *high, *low, *close, *volume) {
@@ -3954,14 +3954,14 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Stream should produce some results after warmup
+        
         assert!(
             !stream_results.is_empty(),
             "[{}] Stream should produce outputs",
             test_name
         );
 
-        // Verify last stream value matches batch calculation on full data
+        
         if stream_results.len() > 0 {
             let (opens, highs, lows, closes, volumes): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) =
                 full_data.iter().cloned().unzip_n_tuple();
@@ -3973,7 +3973,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 let last_idx = batch_output.dvdi.len() - 1;
                 let last_stream = stream_results.last().unwrap();
 
-                // Allow some tolerance for cumulative calculations
+                
                 if batch_output.dvdi[last_idx].is_finite() && last_stream.0.is_finite() {
                     assert!(
                         (batch_output.dvdi[last_idx] - last_stream.0).abs() < 1.0,
@@ -3992,7 +3992,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
     fn check_dvdiqqe_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create simple test data
+        
         let n = 100;
         let mut opens = vec![100.0; n];
         let mut highs = vec![102.0; n];
@@ -4000,7 +4000,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let mut closes = vec![100.0; n];
         let mut volumes = vec![1000.0; n];
 
-        // Add some variation
+        
         for i in 0..n {
             let base = 100.0 + (i as f64 * 0.1);
             opens[i] = base;
@@ -4018,11 +4018,11 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             .slow_range(4.0, 5.0, 0.5)
             .apply_slices(&opens, &highs, &lows, &closes, Some(&volumes))?;
 
-        // Should have correct dimensions
-        let expected_periods = 3; // 10, 12, 14
-        let expected_smoothings = 3; // 4, 6, 8
-        let expected_fasts = 3; // 2.0, 2.5, 3.0
-        let expected_slows = 3; // 4.0, 4.5, 5.0
+        
+        let expected_periods = 3; 
+        let expected_smoothings = 3; 
+        let expected_fasts = 3; 
+        let expected_slows = 3; 
         let expected_rows =
             expected_periods * expected_smoothings * expected_fasts * expected_slows;
 
@@ -4037,7 +4037,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             test_name
         );
 
-        // Check that we can retrieve specific combinations
+        
         let test_params = DvdiqqeParams {
             period: Some(12),
             smoothing_period: Some(6),
@@ -4057,7 +4057,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Helper for unzipping 5-tuples
+    
     trait UnzipN<A, B, C, D, E> {
         fn unzip_n_tuple(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>, Vec<E>);
     }
@@ -4085,7 +4085,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Add batch sweep test function
+    
     fn check_dvdiqqe_batch_sweep_old(
         test_name: &str,
         kernel: Kernel,
@@ -4110,13 +4110,13 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Add reinput test function
+    
     fn check_dvdiqqe_reinput(test: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(k, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let out1 = dvdiqqe_with_kernel(&DvdiqqeInput::with_default_candles(&c), k)?;
-        // Reuse dvdi as a synthetic close to ensure length/API parity
+        
         let i2 = DvdiqqeInput::from_slices(
             &c.open,
             &c.high,
@@ -4130,7 +4130,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Generate all test variants
+    
     generate_all_dvdiqqe_tests!(
         check_dvdiqqe_accuracy,
         check_dvdiqqe_partial_params,
@@ -4155,10 +4155,10 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         use crate::utilities::data_loader::read_candles_from_csv;
         let c = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
 
-        // Test single calculation
+        
         let out = dvdiqqe_with_kernel(&DvdiqqeInput::with_default_candles(&c), Kernel::Scalar)?;
 
-        // Check for poison patterns that would indicate uninitialized memory
+        
         for &v in out
             .dvdi
             .iter()
@@ -4180,7 +4180,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             );
         }
 
-        // Test batch calculation with flat output
+        
         let sweep = DvdiqqeBatchRange::default();
         let flat_out = dvdiqqe_batch_with_kernel_flat(
             &c.open,
@@ -4215,7 +4215,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // ==================== PROPERTY-BASED TESTS ====================
+    
     #[cfg(feature = "proptest")]
     mod proptest_tests {
         use super::*;
@@ -4253,7 +4253,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         prop_assert_eq!(output.center_line.len(), len);
                     }
                     Err(DvdiqqeError::NotEnoughValidData { .. }) => {
-                        // Expected for small datasets
+                        
                     }
                     Err(e) => {
                         prop_assert!(false, "Unexpected error: {:?}", e);
@@ -4269,7 +4269,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 let len = valid_data.len();
                 let mut data = valid_data.clone();
 
-                // Insert NaNs at specified positions
+                
                 for &pos in &nan_positions {
                     if pos < len {
                         data[pos] = f64::NAN;
@@ -4287,23 +4287,23 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
 
                 match dvdiqqe(&input) {
                     Ok(output) => {
-                        // Verify the indicator handles NaN inputs gracefully
-                        // The indicator should produce valid output structure
+                        
+                        
                         prop_assert_eq!(output.dvdi.len(), len);
                         prop_assert_eq!(output.fast_tl.len(), len);
                         prop_assert_eq!(output.slow_tl.len(), len);
                         prop_assert_eq!(output.center_line.len(), len);
 
-                        // Check that early positions have NaN due to warmup
-                        // The exact warmup period depends on parameters
-                        let expected_warmup = 25; // Default period (13) * 2 - 1
+                        
+                        
+                        let expected_warmup = 25; 
                         for i in 0..expected_warmup.min(len) {
-                            // Early values should be NaN due to warmup, not input NaNs
+                            
                             prop_assert!(output.dvdi[i].is_nan() || output.dvdi[i].is_finite(),
                                 "Position {} should be either NaN (warmup) or finite", i);
                         }
 
-                        // Verify no poison values (uninitialized memory)
+                        
                         for &v in output.dvdi.iter()
                             .chain(&output.fast_tl)
                             .chain(&output.slow_tl)
@@ -4316,11 +4316,11 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     Err(DvdiqqeError::AllValuesNaN) => {
-                        // Expected if all close values become NaN
+                        
                         prop_assert!(nan_positions.len() >= len / 2);
                     }
                     Err(_) => {
-                        // Other errors acceptable for edge cases with many NaNs
+                        
                     }
                 }
             }
@@ -4352,7 +4352,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
 
                 match dvdiqqe(&input) {
                     Ok(output) => {
-                        // All outputs should be finite after warmup
+                        
                         for i in 30..len {
                             prop_assert!(output.dvdi[i].is_finite() || output.dvdi[i].is_nan());
                             prop_assert!(output.fast_tl[i].is_finite() || output.fast_tl[i].is_nan());
@@ -4363,7 +4363,7 @@ fn test_dvdiqqe_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         prop_assert!(period > len || period == 0);
                     }
                     Err(_) => {
-                        // Other errors acceptable for edge cases
+                        
                     }
                 }
             }

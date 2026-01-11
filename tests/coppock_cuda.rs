@@ -1,16 +1,16 @@
-// CUDA integration tests for Coppock Curve
 
-use my_project::indicators::coppock::{
+
+use vector_ta::indicators::coppock::{
     coppock_batch_with_kernel, coppock_with_kernel, CoppockBatchRange, CoppockInput, CoppockParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::coppock_wrapper::CudaCoppock;
+use vector_ta::cuda::oscillators::coppock_wrapper::CudaCoppock;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -76,8 +76,8 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         eprintln!("[coppock_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 6usize; // series
-    let rows = 2048usize; // time
+    let cols = 6usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -90,7 +90,7 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let long = 14usize;
     let ma_p = 10usize;
 
-    // CPU baseline: per series
+    
     let mut cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -110,7 +110,7 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         }
     }
 
-    // GPU
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCoppock::new(0).expect("CudaCoppock::new");
     let dev = cuda

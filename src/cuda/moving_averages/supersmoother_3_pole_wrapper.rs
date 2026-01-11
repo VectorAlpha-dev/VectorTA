@@ -50,7 +50,7 @@ pub enum CudaSuperSmoother3PoleError {
     NotImplemented,
 }
 
-// -------- Kernel policy + introspection (kept minimal; no tiled variants) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -108,7 +108,7 @@ impl CudaSupersmoother3Pole {
         let ctx = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_3_pole_kernel.ptx"));
-        // Use context-targeted JIT; default to O4 (most optimized), unless overridden.
+        
         let opt = match std::env::var("CUDA_JIT_OPT").ok().as_deref() {
             Some("O0") => OptLevel::O0,
             Some("O1") => OptLevel::O1,
@@ -163,7 +163,7 @@ impl CudaSupersmoother3Pole {
         Ok(())
     }
 
-    // Expose interop details for Python wrappers
+    
     pub fn stream_handle(&self) -> usize {
         self.stream.as_inner() as usize
     }
@@ -200,9 +200,9 @@ impl CudaSupersmoother3Pole {
     fn ptr_device_id<T: cust::memory::DeviceCopy>(_buf: &DeviceBuffer<T>) -> Result<u32, CudaSuperSmoother3PoleError> {
         unsafe {
             use cust::sys as cu;
-            // We rely on the current CUDA context's device id rather than
-            // querying pointer attributes, to stay compatible with older
-            // driver bindings that lack DEVICE_ORDINAL.
+            
+            
+            
             let mut cur_dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut cur_dev as *mut _);
             if cur_dev < 0 {
@@ -220,7 +220,7 @@ impl CudaSupersmoother3Pole {
         } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
         } else {
-            // Reversed bounds: generate descending sequence
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -348,7 +348,7 @@ impl CudaSupersmoother3Pole {
             }
         }
 
-        // Kernel + prefer L1
+        
         let mut func = self
             .module
             .get_function("supersmoother_3_pole_batch_f32")
@@ -357,7 +357,7 @@ impl CudaSupersmoother3Pole {
             })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Occupancy-based block size for Auto
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => {
                 match func.suggested_launch_configuration(0, (0, 0, 0).into()) {
@@ -372,7 +372,7 @@ impl CudaSupersmoother3Pole {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        // True device max grid.x
+        
         let device = Device::get_device(self.device_id)?;
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
         let max_block_x = device.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
@@ -444,7 +444,7 @@ impl CudaSupersmoother3Pole {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024; // 64MB cushion
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
             return Err(CudaSuperSmoother3PoleError::OutOfMemory {
@@ -528,7 +528,7 @@ impl CudaSupersmoother3Pole {
                 "series_len and n_combos must be > 0".into(),
             ));
         }
-        // Ensure all buffers belong to the same device as this wrapper
+        
         let dev_prices = Self::ptr_device_id(d_prices)?;
         let dev_periods = Self::ptr_device_id(d_periods)?;
         let dev_out = Self::ptr_device_id(d_out)?;
@@ -672,7 +672,7 @@ impl CudaSupersmoother3Pole {
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().add(launched).as_raw();
                 let mut period_i = period as i32;
-                let mut cols_i = cols as i32; // full stride stays constant
+                let mut cols_i = cols as i32; 
                 let mut rows_i = rows as i32;
                 let mut first_ptr = d_first_valids.as_device_ptr().add(launched).as_raw();
                 let mut out_ptr = d_out.as_device_ptr().add(launched).as_raw();
@@ -836,7 +836,7 @@ impl CudaSupersmoother3Pole {
     }
 }
 
-// -------------------- Python: CUDA Array Interface v3 + DLPack ----------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -884,8 +884,8 @@ impl DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -906,12 +906,12 @@ impl DeviceArrayF32Py {
             }
         }
 
-        // Synchronize producer stream so no pending work remains; `stream` is
-        // accepted but not used since kernels are complete before this call.
+        
+        
         unsafe { let _ = cust::sys::cuStreamSynchronize(self.stream_handle as *mut _); }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -936,7 +936,7 @@ impl DeviceArrayF32Py {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

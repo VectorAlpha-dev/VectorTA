@@ -1,14 +1,14 @@
-// CUDA kernels for DVDIQQE (Dual Volume Divergence Index QQE-style)
-// Optimized FP32-only path with FMA, Kahan summation, and reduced global stores.
-// Warmup/NaN semantics preserved.
-//
-// Kernels:
-// - dvdiqqe_batch_f32: one series × many params (each block handles 1 combo)
-// - dvdiqqe_many_series_one_param_f32: many series × one param (time‑major)
-//
-// Warmup/NaN semantics:
-//   warm = first_valid + (2*period - 1);
-//   outputs before warm are NaN; at warm index TLs are seeded to dvdi.
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -19,7 +19,7 @@
 #include <float.h>
 #include <stdint.h>
 
-// ----------------------------- helpers ---------------------------------
+
 
 static __forceinline__ __device__ float dvdiqqe_tick_volume(
     const float o, const float c, const float tick, float &tickrng_prev)
@@ -32,8 +32,8 @@ static __forceinline__ __device__ float dvdiqqe_tick_volume(
     return tv > 0.0f ? tv : 0.0f;
 }
 
-// Pine-like selection: prefer provided volume if finite, else tick-volume.
-// use_tick_only is kept at 0 in our kernels per original logic.
+
+
 static __forceinline__ __device__ float select_volume(
     const float vol_opt, const float tick_vol, const int use_tick_only)
 {
@@ -42,7 +42,7 @@ static __forceinline__ __device__ float select_volume(
     return tick_vol;
 }
 
-// Kahan compensated addition for long-running sums (PVI/NVI, etc.)
+
 static __forceinline__ __device__ void kahan_add(float &sum, float &comp, const float x)
 {
     float y = x - comp;
@@ -51,20 +51,20 @@ static __forceinline__ __device__ void kahan_add(float &sum, float &comp, const 
     sum = t;
 }
 
-// EMA in stable FMA form: y += a*(x - y)
+
 static __forceinline__ __device__ float ema_update(const float y, const float x, const float a)
 {
     return __fmaf_rn(a, (x - y), y);
 }
 
-// Safe quiet NaN
+
 static __forceinline__ __device__ float qnan_f32() { return nanf(""); }
 
 extern "C" __global__
 void dvdiqqe_batch_f32(
     const float* __restrict__ open,
     const float* __restrict__ close,
-    const float* __restrict__ volume, // may be null; use has_volume flag
+    const float* __restrict__ volume, 
     const int   has_volume,
     const int*  __restrict__ periods,
     const int*  __restrict__ smoothings,
@@ -74,7 +74,7 @@ void dvdiqqe_batch_f32(
     const int   series_len,
     const int   first_valid,
     const float tick_size,
-    const int   center_dynamic, // 1 dynamic, 0 static
+    const int   center_dynamic, 
     float* __restrict__ out_dvdi,
     float* __restrict__ out_fast,
     float* __restrict__ out_slow,
@@ -98,12 +98,12 @@ void dvdiqqe_batch_f32(
     float* slow_row = out_slow  + combo * series_len;
     float* cent_row = out_center+ combo * series_len;
 
-    // FP32 coefficients
+    
     const float a_p = 2.0f / (float)(period + 1);
     const float a_s = 2.0f / (float)(smoothing + 1);
     const float a_r = 2.0f / (float)(wper + 1);
 
-    // Rolling state (FP32 + compensation where needed)
+    
     float pvi_sum = 0.0f, pvi_c = 0.0f;
     float nvi_sum = 0.0f, nvi_c = 0.0f;
 
@@ -120,7 +120,7 @@ void dvdiqqe_batch_f32(
     float prev_close = 0.0f;
     float tickrng_prev = tick_size;
 
-    // Single-thread sequential per row to avoid multi-warp duplicates with large blocks
+    
     if (threadIdx.x == 0)
     {
         #pragma unroll 1
@@ -129,7 +129,7 @@ void dvdiqqe_batch_f32(
             const float ci = close[t];
             if (!isfinite(ci)) { continue; }
 
-            // Tick/real volume selection
+            
             const float tick_vol = dvdiqqe_tick_volume(oi, ci, tick_size, tickrng_prev);
             const float real_vol = has_volume ? volume[t] : NAN;
             const float sel_vol  = select_volume(real_vol, tick_vol, /*use_tick_only*/ 0);
@@ -141,12 +141,12 @@ void dvdiqqe_batch_f32(
             if (sel_vol < prev_vol) { kahan_add(nvi_sum, nvi_c, -dpc); }
             prev_close = ci; prev_vol = sel_vol;
 
-            // Warmup-adjusted EMA(pvi/nvi)
+            
             if (t >= first_valid) {
                 const float pvi_val = pvi_sum + pvi_c;
                 const float nvi_val = nvi_sum + nvi_c;
                 if (pvi_cnt < period) {
-                    // running mean via 1/n step
+                    
                     pvi_cnt += 1;
                     const float inv = 1.0f / (float)pvi_cnt;
                     pvi_ema = __fmaf_rn((pvi_val - pvi_ema), inv, pvi_ema);
@@ -160,7 +160,7 @@ void dvdiqqe_batch_f32(
             const float pdiv = (pvi_sum + pvi_c) - pvi_ema;
             const float ndiv = (nvi_sum + nvi_c) - nvi_ema;
 
-            // EMA(divergences) with warmup
+            
             if (t >= first_valid) {
                 if (div_cnt < smoothing) {
                     div_cnt += 1;
@@ -174,9 +174,9 @@ void dvdiqqe_batch_f32(
             }
 
             const float dv = pdiv_ema - ndiv_ema;
-            dvdi_row[t] = dv;  // warmup NaN masked later
+            dvdi_row[t] = dv;  
 
-            // |Δdvdi| range double-EMA with warmups
+            
             if (!dvdi_inited) { dvdi_prev = dv; dvdi_inited = true; }
             const float abs_delta = fabsf(dv - dvdi_prev);
             if (t >= first_valid + 1) {
@@ -197,7 +197,7 @@ void dvdiqqe_batch_f32(
                 }
             }
 
-            // Trailing levels (seed at warm)
+            
             if (t == warm && rng2_cnt >= 1) {
                 fast_row[t] = dv; slow_row[t] = dv;
             } else if (t > warm && rng2_cnt >= wper) {
@@ -223,10 +223,10 @@ void dvdiqqe_batch_f32(
                 }
             }
 
-            // Center line
+            
             if (t >= warm) {
                 if (center_dynamic) {
-                    // running mean of dv
+                    
                     center_cnt += 1;
                     const float invc = 1.0f / (float)center_cnt;
                     center_mean = __fmaf_rn((dv - center_mean), invc, center_mean);
@@ -240,9 +240,9 @@ void dvdiqqe_batch_f32(
         }
     }
 
-    __syncthreads(); // let thread 0 finish
+    __syncthreads(); 
 
-    // Finalize warmup NaNs cooperatively (avoid whole-row prefill)
+    
     const float qnan = qnan_f32();
     for (int i = threadIdx.x; i < series_len && i < warm; i += blockDim.x) {
         dvdi_row[i] = qnan;
@@ -252,7 +252,7 @@ void dvdiqqe_batch_f32(
     }
 }
 
-// ---------------- many series × one param (time-major) ------------------
+
 
 extern "C" __global__
 void dvdiqqe_many_series_one_param_f32(
@@ -260,7 +260,7 @@ void dvdiqqe_many_series_one_param_f32(
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
     const int   has_volume,
-    const int*  __restrict__ first_valids, // per series (column)
+    const int*  __restrict__ first_valids, 
     const int   period,
     const int   smoothing,
     const float fast_mult,
@@ -293,7 +293,7 @@ void dvdiqqe_many_series_one_param_f32(
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) {
-            // still need to NaN warmup region cooperatively
+            
             const float qnan = qnan_f32();
             for (int t = lane; t < series_len; t += warpSize) {
                 const int idx = t * cols + s;
@@ -304,7 +304,7 @@ void dvdiqqe_many_series_one_param_f32(
 
         const int warm = first_valid + wper;
 
-        // Rolling state per series (lane 0 does the scan)
+        
         float pvi_sum = 0.0f, pvi_c = 0.0f;
         float nvi_sum = 0.0f, nvi_c = 0.0f;
 
@@ -422,7 +422,7 @@ void dvdiqqe_many_series_one_param_f32(
             }
         }
 
-        // Warmup NaNs for this column (warp-cooperative)
+        
         const float qnan = qnan_f32();
         for (int t = lane; t < series_len && t < warm; t += warpSize) {
             const int idx = t * cols + s;

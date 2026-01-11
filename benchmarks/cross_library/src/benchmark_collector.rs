@@ -56,7 +56,7 @@ impl BenchmarkCollector {
         println!("\n✅ Benchmark results exported to: {}", path.display());
         println!("   Total measurements: {}", measurements.len());
 
-        // Count unique indicators and libraries
+        
         let mut indicators = std::collections::HashSet::new();
         let mut libraries = std::collections::HashSet::new();
         for m in measurements.iter() {
@@ -71,7 +71,7 @@ impl BenchmarkCollector {
     }
 }
 
-// Global instance
+
 lazy_static::lazy_static! {
     pub static ref COLLECTOR: BenchmarkCollector = BenchmarkCollector::new();
 }

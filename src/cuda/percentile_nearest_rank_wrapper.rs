@@ -105,7 +105,7 @@ impl CudaPercentileNearestRank {
             env!("OUT_DIR"),
             "/percentile_nearest_rank_kernel.ptx"
         ));
-        // Stable JIT options with fallbacks
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -185,7 +185,7 @@ impl CudaPercentileNearestRank {
         }
     }
 
-    // -------- Helpers --------
+    
 
     fn axis_usize(
         axis: (usize, usize, usize),
@@ -288,13 +288,13 @@ impl CudaPercentileNearestRank {
         }
     }
 
-    // Dynamic shared bytes for same-length shared kernel
+    
     #[inline]
     fn smem_bytes_for_len(length: usize) -> usize {
         (Self::next_pow2_u32(length as u32) as usize) * core::mem::size_of::<f32>()
     }
 
-    // Simple heuristic for when the shared-sort kernel tends to win
+    
     #[inline]
     fn shared_worth_it(length: usize, group_size: usize) -> bool {
         if group_size < 4 {
@@ -358,7 +358,7 @@ impl CudaPercentileNearestRank {
         Ok(())
     }
 
-    // -------- Batch: one-series × many params --------
+    
     pub fn pnr_batch_dev(
         &self,
         data_f32: &[f32],
@@ -373,7 +373,7 @@ impl CudaPercentileNearestRank {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaPnrError::InvalidInput("all values are NaN".into()))?;
 
-        // Length-major, percentage-minor pairs
+        
         let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
             return Err(CudaPnrError::InvalidInput(
@@ -385,7 +385,7 @@ impl CudaPercentileNearestRank {
             return Err(CudaPnrError::InvalidInput("not enough valid data".into()));
         }
         
-        // Flattened parameter axes
+        
         let periods: Vec<i32> = combos
             .iter()
             .map(|c| c.length.unwrap_or(15) as i32)
@@ -395,12 +395,12 @@ impl CudaPercentileNearestRank {
             .map(|c| c.percentage.unwrap_or(50.0) as f32)
             .collect();
 
-        // Group info
+        
         let lengths_axis: Vec<usize> = Self::axis_usize(sweep.length)?;
         let percs_axis: Vec<f64> = Self::axis_f64(sweep.percentage)?;
         let group_rows = percs_axis.len();
 
-        // Memory estimate with per-group scratch (baseline groups only)
+        
         let prices_bytes = len
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaPnrError::InvalidInput("series_len bytes overflow".into()))?;
@@ -420,7 +420,7 @@ impl CudaPercentileNearestRank {
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaPnrError::InvalidInput("output bytes overflow".into()))?;
 
-        // Query shared kernel handle and set cache pref
+        
         let mut func_shared = self
             .module
             .get_function("percentile_nearest_rank_one_series_many_params_same_len_f32")
@@ -429,12 +429,12 @@ impl CudaPercentileNearestRank {
             })?;
         func_shared.set_cache_config(CacheConfig::PreferShared)?;
 
-        // Per-block shared memory limit (conservative)
+        
         let max_smem_per_block = Device::get_device(0)
             .and_then(|d| d.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock))
             .unwrap_or(48 * 1024) as usize;
 
-        // Decide which length-groups use shared path
+        
         let mut use_shared: Vec<bool> = Vec::with_capacity(lengths_axis.len());
         for &L in &lengths_axis {
             let smem_need = Self::smem_bytes_for_len(L);
@@ -442,7 +442,7 @@ impl CudaPercentileNearestRank {
             use_shared.push(enough_smem && Self::shared_worth_it(L, group_rows));
         }
 
-        // Sum scratch for baseline groups only
+        
         let mut scratch_bytes = 0usize;
         for (g, &L) in lengths_axis.iter().enumerate() {
             if !use_shared[g] {
@@ -466,7 +466,7 @@ impl CudaPercentileNearestRank {
             .and_then(|x| x.checked_add(out_bytes))
             .and_then(|x| x.checked_add(scratch_bytes))
             .ok_or_else(|| CudaPnrError::InvalidInput("total bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaPnrError::OutOfMemory {
@@ -481,7 +481,7 @@ impl CudaPercentileNearestRank {
             }
         }
 
-        // Device allocations
+        
         let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_percs: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(percs.len()) }?;
@@ -490,14 +490,14 @@ impl CudaPercentileNearestRank {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
-        // Direct H2D copies (avoid extra LockedBuffer host copy)
+        
         unsafe {
             d_prices.async_copy_from(data_f32, &self.stream)?;
             d_percs.async_copy_from(&percs, &self.stream)?;
             d_periods.async_copy_from(&periods, &self.stream)?;
         }
 
-        // Fallback baseline function (per-row maintenance)
+        
         let func_baseline = self
             .module
             .get_function("percentile_nearest_rank_batch_f32")
@@ -509,7 +509,7 @@ impl CudaPercentileNearestRank {
             BatchKernelPolicy::OneD { block_x } => block_x,
         };
 
-        // Launch per length-group
+        
         let series_len_i = len as i32;
         let first_valid_i = first_valid as i32;
         let mut last_block_x_used: u32 = block_x_baseline;
@@ -519,9 +519,9 @@ impl CudaPercentileNearestRank {
             let group_size = group_rows;
             let warm = first_valid + L - 1;
             if warm >= len {
-                // Degenerate: write NaNs via baseline path (keeps parity)
+                
                 let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
-                // small scratch to satisfy baseline signature
+                
                 let mut d_scratch: DeviceBuffer<f32> =
                     unsafe { DeviceBuffer::uninitialized(group_size * L) }?;
                 unsafe {
@@ -554,7 +554,7 @@ impl CudaPercentileNearestRank {
             }
 
             if use_shared[gi] {
-                // Shared-sort kernel path
+                
                 let threads = Self::next_pow2_u32(L as u32).min(256);
                 let smem_bytes = Self::smem_bytes_for_len(L);
                 let tcount = len - warm;
@@ -584,7 +584,7 @@ impl CudaPercentileNearestRank {
                     last_block_x_used = threads;
                 }
             } else {
-                // Baseline fallback for this group with minimal scratch
+                
                 let grid_x = ((group_size as u32) + block_x_baseline - 1) / block_x_baseline;
                 let mut d_scratch: DeviceBuffer<f32> =
                     unsafe { DeviceBuffer::uninitialized(group_size * L) }?;
@@ -617,7 +617,7 @@ impl CudaPercentileNearestRank {
             }
         }
 
-        // Record selection (last used block size)
+        
         let sel = BatchKernelSelected::OneD {
             block_x: last_block_x_used,
         };
@@ -639,7 +639,7 @@ impl CudaPercentileNearestRank {
         ))
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
     pub fn pnr_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -663,7 +663,7 @@ impl CudaPercentileNearestRank {
             return Err(CudaPnrError::InvalidInput("invalid length".into()));
         }
 
-        // Per-series first_valid (index of first non-NaN)
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -805,7 +805,7 @@ impl CudaPercentileNearestRank {
     }
 }
 
-// ---------------- Bench integration ----------------
+
 #[cfg(test)]
 mod benches_dummy_compile_only {}
 
@@ -916,7 +916,7 @@ pub mod benches {
         }
     }
 
-    // Non-capturing prep functions for benches
+    
     fn prep_pnr_batch() -> Box<dyn CudaBenchState> {
         let len = 100_000usize;
         let prices = gen_series(len);

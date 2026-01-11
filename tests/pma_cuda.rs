@@ -1,13 +1,13 @@
-// Integration tests for CUDA PMA kernels (non-lag variant in indicators::pma)
 
-use my_project::indicators::pma::{pma, PmaInput, PmaParams};
+
+use vector_ta::indicators::pma::{pma, PmaInput, PmaParams};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaPma;
+use vector_ta::cuda::moving_averages::CudaPma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -49,7 +49,7 @@ fn pma_cuda_one_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let pair = cuda
         .pma_batch_dev(
             &data_f32,
-            &my_project::indicators::pma::PmaBatchRange::default(),
+            &vector_ta::indicators::pma::PmaBatchRange::default(),
         )
         .expect("pma_batch_dev");
 
@@ -61,7 +61,7 @@ fn pma_cuda_one_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.predict.buf.copy_to(&mut gpu_predict)?;
     pair.trigger.buf.copy_to(&mut gpu_trigger)?;
 
-    // FP32 GPU vs f64 CPU path: allow a modest tolerance
+    
     let tol = 2e-4;
     for idx in 0..n {
         assert!(
@@ -90,12 +90,12 @@ fn pma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 7usize; // number of series
-    let rows = 2048usize; // series length
+    let cols = 7usize; 
+    let rows = 2048usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            // staggered NaN prefixes
+            
             let x = r as f64 + (s as f64) * 0.37;
             data_tm[r * cols + s] = (x * 0.0016).cos() + (x * 0.0011).sin() * 0.4 + 0.0003 * x;
         }

@@ -1,4 +1,4 @@
-// Restored original O(W) kernel for parity with CPU reference
+
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -37,7 +37,7 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Match CPU EMA semantics: compute alpha/beta in FP64 from the period.
+    
     const double alpha = 2.0 / (static_cast<double>(base_period) + 1.0);
     const double beta  = 1.0 - alpha;
     const int base_offset = combo * series_len;
@@ -46,9 +46,9 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // The public API returns only `out` (ema is an internal detail). Avoid a full
-    // O(N) init sweep + second write pass; write warmup NaNs and computed values
-    // exactly once.
+    
+    
+    
     for (int t = 0; t < first_valid; ++t) {
         out[base_offset + t] = NAN;
     }
@@ -68,12 +68,12 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Monotonic deques over deviation d_t = price_t - ema_t (FP64), matching CPU semantics.
-    // Shared memory layout (dynamic):
-    //   dq_max_vals[vol_period] (double)
-    //   dq_max_idx [vol_period] (int)
-    //   dq_min_vals[vol_period] (double)  (8-byte aligned)
-    //   dq_min_idx [vol_period] (int)
+    
+    
+    
+    
+    
+    
     extern __shared__ unsigned char smem_rb[];
     double* dq_max_vals = reinterpret_cast<double*>(smem_rb);
     int* dq_max_idx = reinterpret_cast<int*>(dq_max_vals + vol_period);
@@ -84,8 +84,8 @@ void vama_batch_f32(const float* __restrict__ prices,
     int headMax = 0, tailMax = 0;
     int headMin = 0, tailMin = 0;
 
-    // Update deques + outputs for the running-mean warmup tail (from first_valid+1 .. warm_base_end-1)
-    // NOTE: i=first_valid already has mean=price and was written above; process it too.
+    
+    
     int i = first_valid;
     double ema_d = mean;
     double prev = mean;
@@ -148,7 +148,7 @@ void vama_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    // EMA phase (from first_valid+base_period onwards)
+    
     for (; i < series_len; ++i) {
         const float price_f = prices[i];
         if (isfinite(price_f)) {
@@ -292,7 +292,7 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    // O(N) deques (head/tail) matching CPU semantics
+    
     extern __shared__ unsigned char smem_rb2[];
     float* dq_max_vals = reinterpret_cast<float*>(smem_rb2);
     int*   dq_max_idx  = reinterpret_cast<int*>(dq_max_vals + vol_period);

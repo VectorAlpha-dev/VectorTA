@@ -55,7 +55,7 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// --- Core Data Types ---
+
 
 #[derive(Debug, Clone)]
 pub enum SqueezeMomentumData<'a> {
@@ -250,7 +250,7 @@ pub enum SqueezeMomentumError {
     InvalidKernelForBatch(Kernel),
 }
 
-// --- Main Kernel Selection ---
+
 
 #[inline]
 pub fn squeeze_momentum(
@@ -270,7 +270,7 @@ pub fn squeeze_momentum_into_slices(
     input: &SqueezeMomentumInput,
     kern: Kernel,
 ) -> Result<(), SqueezeMomentumError> {
-    // --- borrow inputs and validate exactly like alma_with_kernel/alma_into_slice ---
+    
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         SqueezeMomentumData::Candles { candles } => (
             source_type(candles, "high"),
@@ -321,9 +321,9 @@ pub fn squeeze_momentum_into_slices(
         });
     }
 
-    // Always use the optimized classic scalar kernel (SMA-based BB/KC)
-    // This path is fully loop-jammed and allocation-light, matching alma.rs patterns
-    let _ = kern; // runtime selection currently short-circuits to scalar
+    
+    
+    let _ = kern; 
     unsafe {
         return squeeze_momentum_scalar_classic(
             high,
@@ -384,7 +384,7 @@ pub fn squeeze_momentum_into(
     )
 }
 
-// --- Batch Parameter Sweep Support ---
+
 
 #[derive(Clone, Debug)]
 pub struct SqueezeMomentumBatchRange {
@@ -657,7 +657,7 @@ pub fn squeeze_momentum_batch_with_kernel(
         });
     }
 
-    // Map Kernel::Auto / *Batch to a concrete non-batch kernel; reject non-batch.
+    
     let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
@@ -680,7 +680,7 @@ pub fn squeeze_momentum_batch_with_kernel(
             step: "rows*cols".into(),
         })?;
 
-    // allocate three uninit matrices and mark NaN warmups with init_matrix_prefixes
+    
     let mut buf_sq = make_uninit_matrix(rows, cols);
     let mut buf_mo = make_uninit_matrix(rows, cols);
     let mut buf_si = make_uninit_matrix(rows, cols);
@@ -693,7 +693,7 @@ pub fn squeeze_momentum_batch_with_kernel(
     init_matrix_prefixes(&mut buf_mo, cols, &warm_mo);
     init_matrix_prefixes(&mut buf_si, cols, &warm_si);
 
-    // reborrow as f64 slices
+    
     let mut sq =
         unsafe { core::slice::from_raw_parts_mut(buf_sq.as_mut_ptr() as *mut f64, rows * cols) };
     let mut mo =
@@ -702,12 +702,12 @@ pub fn squeeze_momentum_batch_with_kernel(
         unsafe { core::slice::from_raw_parts_mut(buf_si.as_mut_ptr() as *mut f64, rows * cols) };
 
     if matches!(batch_kernel, Kernel::ScalarBatch) {
-        // Optimized scalar batch: shared precompute across unique window sizes
+        
         squeeze_momentum_batch_fill_scalar_shared(high, low, close, &combos, sq, mo, si);
     } else {
         let do_row = |row: usize, sq_row: &mut [f64], mo_row: &mut [f64], si_row: &mut [f64]| {
             let p = &combos[row];
-            // zero-copy per row: write directly into row slices
+            
             let params = SqueezeMomentumParams {
                 length_bb: Some(p.length_bb),
                 mult_bb: Some(p.mult_bb),
@@ -740,7 +740,7 @@ pub fn squeeze_momentum_batch_with_kernel(
         }
     }
 
-    // move out Vecs with zero copies
+    
     let squeeze = unsafe {
         Vec::from_raw_parts(
             buf_sq.as_mut_ptr() as *mut f64,
@@ -789,7 +789,7 @@ pub fn squeeze_momentum_batch_inner_into(
 ) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
     let combos = expand_grid_sm(sweep)?;
 
-    // Map Kernel::Auto / *Batch to a concrete non-batch kernel; reject non-batch.
+    
     let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
@@ -824,7 +824,7 @@ pub fn squeeze_momentum_batch_inner_into(
         });
     }
 
-    // mark warmups in-place via MaybeUninit cast + init_matrix_prefixes
+    
     unsafe {
         let sq_mu = core::slice::from_raw_parts_mut(
             out_squeeze.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -847,7 +847,7 @@ pub fn squeeze_momentum_batch_inner_into(
     }
 
     if matches!(batch_kernel, Kernel::ScalarBatch) {
-        // Shared-precompute scalar batch fill
+        
         let combos_ref: &[SqueezeMomentumBatchParams] = &combos;
         squeeze_momentum_batch_fill_scalar_shared(
             high,
@@ -908,7 +908,7 @@ pub fn squeeze_momentum_batch_inner_into(
     Ok(combos)
 }
 
-// --- Batch shared-precompute scalar fill ---
+
 
 fn sma_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warm = period.saturating_sub(1);
@@ -944,12 +944,12 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     let rows = combos.len();
     let cols = n;
 
-    // First valid index
+    
     let first_valid = (0..n)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
         .unwrap_or(n);
 
-    // Unique window sizes
+    
     let mut uniq_lkc: HashSet<usize> = HashSet::new();
     let mut uniq_lbb: HashSet<usize> = HashSet::new();
     for p in combos {
@@ -957,10 +957,10 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         uniq_lbb.insert(p.length_bb);
     }
 
-    // Precompute TR once
+    
     let tr = true_range_slice(high, low, close);
 
-    // Precompute per unique lkc: kc_sma, tr_ma, highest, lowest, raw, momentum, signal
+    
     struct KcPrecomp {
         kc_sma: Vec<f64>,
         tr_ma: Vec<f64>,
@@ -972,13 +972,13 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     }
     let mut kc_map: HashMap<usize, KcPrecomp> = HashMap::with_capacity(uniq_lkc.len());
     for &lkc in &uniq_lkc {
-        // kc_sma and tr_ma using same SMA semantics used elsewhere
+        
         let kc_sma = sma_slice(close, lkc);
         let tr_ma = sma_slice(&tr, lkc);
         let highest = rolling_high_slice(high, lkc);
         let lowest = rolling_low_slice(low, lkc);
 
-        // raw = close - 0.25*(highest+lowest) - 0.5*kc_sma
+        
         let mut raw = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
         for i in first_valid..n {
             if i + 1 >= lkc
@@ -1030,7 +1030,7 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         );
     }
 
-    // Precompute per unique lbb: bb_sma, dev
+    
     struct BbPrecomp {
         bb_sma: Vec<f64>,
         dev: Vec<f64>,
@@ -1042,7 +1042,7 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         bb_map.insert(lbb, BbPrecomp { bb_sma, dev });
     }
 
-    // Fill rows using shared precomputes
+    
     let fill_row = |row: usize, sq_row: &mut [f64], mo_row: &mut [f64], si_row: &mut [f64]| {
         let p = &combos[row];
         let warm_sq = p.length_bb.max(p.length_kc).saturating_sub(1);
@@ -1050,7 +1050,7 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         let kc = kc_map.get(&p.length_kc).unwrap();
         let bb = bb_map.get(&p.length_bb).unwrap();
 
-        // Squeeze bands and classification
+        
         for i in first_valid..n {
             if i >= warm_sq
                 && kc.kc_sma[i].is_finite()
@@ -1073,12 +1073,12 @@ fn squeeze_momentum_batch_fill_scalar_shared(
                     0.0
                 };
             } else if i >= warm_sq {
-                // Ensure no poison remains beyond warmup
+                
                 sq_row[i] = f64::NAN;
             }
         }
 
-        // Momentum and signal identical for all rows with same lkc
+        
         mo_row.copy_from_slice(&kc.momentum);
         si_row.copy_from_slice(&kc.signal);
     };
@@ -1106,7 +1106,7 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     }
 }
 
-// --- Classic Kernel Optimization ---
+
 
 /// Classic scalar kernel with O(n) rolling updates and minimal temporaries.
 /// - Rolling BB mean/std via sliding sums and FMA
@@ -1132,43 +1132,43 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         return Ok(());
     }
 
-    // Warmups (match framework expectations)
+    
     let warm_sq = lbb.max(lkc).saturating_sub(1);
     let warm_m = lkc.saturating_sub(1);
     let warm_sig = warm_m + 1;
 
-    // Initialize only warmup prefixes (match alma pattern)
+    
     squeeze_dst[..warm_sq.min(n)].fill(f64::NAN);
     momentum_dst[..warm_m.min(n)].fill(f64::NAN);
     signal_dst[..warm_sig.min(n)].fill(f64::NAN);
 
-    // Early exit if nothing to compute after warmups
+    
     if first_valid >= n {
         return Ok(());
     }
 
-    // Raw pointers for fast unchecked loads
+    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
 
-    // Precompute constants
+    
     let inv_lbb = 1.0 / (lbb as f64);
     let inv_lkc = 1.0 / (lkc as f64);
 
-    // Linear regression constants for window size = lkc over RAW
+    
     let p = lkc as f64;
     let sum_x = 0.5 * p * (p + 1.0);
     let sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
     let denom = p * sum_x2 - sum_x * sum_x;
     let inv_denom = 1.0 / denom;
-    let x_last_minus_xbar = p - sum_x * inv_lkc; // (p - (p+1)/2)
+    let x_last_minus_xbar = p - sum_x * inv_lkc; 
 
-    // Rolling windows start indices
+    
     let start_bb = first_valid + lbb.saturating_sub(1);
     let start_kc = first_valid + lkc.saturating_sub(1);
 
-    // Initialize rolling sums for BB (mean/std)
+    
     let mut sum_bb = 0.0_f64;
     let mut sumsq_bb = 0.0_f64;
     if start_bb < n {
@@ -1180,7 +1180,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         }
     }
 
-    // Initialize rolling sums for KC mid (SMA) + TR average
+    
     let mut sum_kc = 0.0_f64;
     let mut sum_tr = 0.0_f64;
     if start_kc < n {
@@ -1188,7 +1188,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         for j in s..=start_kc {
             sum_kc += *cp.add(j);
 
-            // TR[j]
+            
             let h = *hp.add(j);
             let l = *lp.add(j);
             let tr = if j == 0 {
@@ -1204,26 +1204,26 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         }
     }
 
-    // Rolling Highest/Lowest over lkc via manual monotonic deques (ring buffers)
-    // Avoid VecDeque overhead in hot loop.
+    
+    
     let mut dq_max_idx = vec![0usize; lkc];
     let mut dq_min_idx = vec![0usize; lkc];
-    let mut max_head: usize = 0; // index of front element
-    let mut max_len: usize = 0; // current length
+    let mut max_head: usize = 0; 
+    let mut max_len: usize = 0; 
     let mut min_head: usize = 0;
     let mut min_len: usize = 0;
 
-    // RAW ring buffer for rolling linear regression (size = lkc)
+    
     let mut raw_buf: Vec<f64> = vec![f64::NAN; lkc];
     let mut rb_pos: usize = 0;
     let mut raw_count: usize = 0;
 
-    // Accumulators for sliding OLS over RAW:
-    // S0 = sum y_j, S1 = sum j*y_j for j=1..p
+    
+    
     let mut S0 = 0.0_f64;
     let mut S1 = 0.0_f64;
 
-    // Helpers for ring buffer operations
+    
     #[inline(always)]
     fn rb_back(head: usize, len: usize, cap: usize) -> usize {
         (head + len - 1) % cap
@@ -1234,11 +1234,11 @@ pub unsafe fn squeeze_momentum_scalar_classic(
     }
 
     for i in first_valid..n {
-        // Update deques for rolling max/min
+        
         let hi = *hp.add(i);
         let lo = *lp.add(i);
 
-        // Evict stale indices for max deque
+        
         while max_len > 0 {
             let idx = dq_max_idx[max_head];
             if idx + lkc <= i {
@@ -1248,7 +1248,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 break;
             }
         }
-        // Evict stale indices for min deque
+        
         while min_len > 0 {
             let idx = dq_min_idx[min_head];
             if idx + lkc <= i {
@@ -1259,12 +1259,12 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             }
         }
 
-        // Maintain decreasing deque for highs
+        
         while max_len > 0 {
             let back = rb_back(max_head, max_len, lkc);
             let idx = dq_max_idx[back];
             if *hp.add(idx) <= hi {
-                max_len -= 1; // pop back
+                max_len -= 1; 
             } else {
                 break;
             }
@@ -1273,12 +1273,12 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         dq_max_idx[pos] = i;
         max_len += 1;
 
-        // Maintain increasing deque for lows
+        
         while min_len > 0 {
             let back = rb_back(min_head, min_len, lkc);
             let idx = dq_min_idx[back];
             if *lp.add(idx) >= lo {
-                min_len -= 1; // pop back
+                min_len -= 1; 
             } else {
                 break;
             }
@@ -1287,22 +1287,22 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         dq_min_idx[pos] = i;
         min_len += 1;
 
-        // Advance BB sums once past first full window
+        
         if i > start_bb {
             let c_new = *cp.add(i);
             let c_old = *cp.add(i - lbb);
             sum_bb += c_new - c_old;
-            // sumsq update with FMA
+            
             sumsq_bb = f64::mul_add(c_new, c_new, sumsq_bb - c_old * c_old);
         }
 
-        // Advance KC/TR sums once past their first full window
+        
         if i > start_kc {
             let c_new = *cp.add(i);
             let c_old = *cp.add(i - lkc);
             sum_kc += c_new - c_old;
 
-            // TR[i]
+            
             let tr_new = {
                 let h = *hp.add(i);
                 let l = *lp.add(i);
@@ -1316,7 +1316,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     tr1.max(tr2).max(tr3)
                 }
             };
-            // TR[i - lkc]
+            
             let old_idx = i - lkc;
             let tr_old = {
                 let h = *hp.add(old_idx);
@@ -1334,7 +1334,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             sum_tr += tr_new - tr_old;
         }
 
-        // Compute SQUEEZE state when both windows are ready
+        
         if i >= start_bb && i >= start_kc && i >= warm_sq {
             let mean_bb = sum_bb * inv_lbb;
             let var_bb = f64::mul_add(-mean_bb, mean_bb, sumsq_bb * inv_lbb);
@@ -1358,22 +1358,22 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             };
         }
 
-        // RAW & Momentum (rolling linear regression over RAW)
+        
         if i >= start_kc {
-            // Highest/Lowest in current KC window via deques
+            
             let hi_idx = dq_max_idx[max_head];
             let lo_idx = dq_min_idx[min_head];
             let highest = *hp.add(hi_idx);
             let lowest = *lp.add(lo_idx);
 
-            // KC mid at i
+            
             let kc_mid = sum_kc * inv_lkc;
 
-            // RAW = close - 0.25*(highest+lowest) - 0.5*kc_mid
+            
             let c_i = *cp.add(i);
             let raw_i = c_i - 0.25 * (highest + lowest) - 0.5 * kc_mid;
 
-            // Ring buffer insert
+            
             let y_old = raw_buf[rb_pos];
             raw_buf[rb_pos] = raw_i;
             rb_pos += 1;
@@ -1381,16 +1381,16 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 rb_pos = 0;
             }
 
-            // Grow RAW count up to lkc
+            
             if raw_count < lkc {
                 raw_count += 1;
             }
 
-            // Initialize S0/S1 once when RAW window fills
+            
             if raw_count == lkc && i == start_kc + lkc - 1 {
                 let mut s0 = 0.0_f64;
                 let mut s1 = 0.0_f64;
-                // Oldest is at rb_pos, walk j=1..p
+                
                 let mut idx = rb_pos;
                 let mut j = 1.0_f64;
                 for _ in 0..lkc {
@@ -1406,13 +1406,13 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 S0 = s0;
                 S1 = s1;
 
-                // First momentum point
+                
                 let b = f64::mul_add(-sum_x, S0, p * S1) * inv_denom;
                 let ybar = S0 * inv_lkc;
                 let yhat_last = f64::mul_add(b, x_last_minus_xbar, ybar);
                 *momentum_dst.get_unchecked_mut(i) = yhat_last;
 
-                // First signal (lagged)
+                
                 if i >= 1 {
                     let prev = *momentum_dst.get_unchecked(i - 1);
                     if prev.is_finite() && yhat_last.is_finite() {
@@ -1434,22 +1434,22 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     }
                 }
             } else if raw_count == lkc {
-                // O(1) rolling update:
-                // S1' = S1 - S0 + p*y_new
-                // S0' = S0 - y_old + y_new
+                
+                
+                
                 let y_new = raw_i;
                 let new_S1 = (S1 - S0) + p * y_new;
                 let new_S0 = (S0 - y_old) + y_new;
                 S1 = new_S1;
                 S0 = new_S0;
 
-                // Momentum at i
+                
                 let b = f64::mul_add(-sum_x, S0, p * S1) * inv_denom;
                 let ybar = S0 * inv_lkc;
                 let yhat_last = f64::mul_add(b, x_last_minus_xbar, ybar);
                 *momentum_dst.get_unchecked_mut(i) = yhat_last;
 
-                // Signal (lagged 1)
+                
                 if i >= 1 {
                     let prev = *momentum_dst.get_unchecked(i - 1);
                     if prev.is_finite() && yhat_last.is_finite() {
@@ -1471,7 +1471,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     }
                 }
             } else {
-                // Not enough RAW samples yet for regression window -> explicit NaN
+                
                 *momentum_dst.get_unchecked_mut(i) = f64::NAN;
                 if i >= warm_sig {
                     *signal_dst.get_unchecked_mut(i) = f64::NAN;
@@ -1483,7 +1483,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
     Ok(())
 }
 
-// --- Utilities (Unchanged from scalar, as in original) ---
+
 
 fn stddev_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warmup = period.saturating_sub(1);
@@ -1535,7 +1535,7 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     if high.len() != low.len() || low.len() != close.len() {
         return vec![];
     }
-    let mut output = alloc_with_nan_prefix(high.len(), 0); // TR has no warmup
+    let mut output = alloc_with_nan_prefix(high.len(), 0); 
     let mut prev_close = close[0];
     output[0] = high[0].max(low[0]) - low[0].min(high[0]);
     for i in 1..high.len() {
@@ -1557,12 +1557,12 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
         return output;
     }
 
-    // Monotonic deque of indices for finite values (decreasing by value)
+    
     use std::collections::VecDeque;
     let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
     for i in 0..n {
         let v = data[i];
-        // Evict out-of-window indices from front
+        
         while let Some(&front) = dq.front() {
             if front + period <= i {
                 dq.pop_front();
@@ -1570,7 +1570,7 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
                 break;
             }
         }
-        // Maintain decreasing order; ignore NaNs
+        
         if v.is_finite() {
             while let Some(&idx) = dq.back() {
                 if data[idx] <= v {
@@ -1599,12 +1599,12 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
         return output;
     }
 
-    // Monotonic deque of indices for finite values (increasing by value)
+    
     use std::collections::VecDeque;
     let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
     for i in 0..n {
         let v = data[i];
-        // Evict out-of-window indices from front
+        
         while let Some(&front) = dq.front() {
             if front + period <= i {
                 dq.pop_front();
@@ -1612,7 +1612,7 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
                 break;
             }
         }
-        // Maintain increasing order; ignore NaNs
+        
         if v.is_finite() {
             while let Some(&idx) = dq.back() {
                 if data[idx] >= v {
@@ -1644,7 +1644,7 @@ fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
         if subset.iter().all(|x| x.is_finite()) {
             output[i] = linear_regression_last_point(subset);
         } else {
-            // Explicitly set NaN when input data contains NaN
+            
             output[i] = f64::NAN;
         }
     }
@@ -1677,80 +1677,80 @@ fn linear_regression_last_point(window: &[f64]) -> f64 {
     intercept + slope * x_last
 }
 
-// --- Streaming Support ---
-//
-// O(1) streaming kernel:
-// - Rolling BB (mean/variance) via sliding sums and sums-of-squares
-// - Rolling KC mid and TR (ATR) via sliding sums and rings
-// - Highest/Lowest over KC window via monotonic deques (ring-backed, no alloc)
-// - Momentum = OLS endpoint of RAW over lkc via two accumulators (S0, S1)
-// - Signal = compare current momentum to previous momentum (1/-1 accelerating, 2/-2 decelerating)
-// - Squeeze classification avoids sqrt by comparing BB variance to KC distances (exact, no approx)
+
+
+
+
+
+
+
+
+
 
 /// Streaming implementation for Squeeze Momentum indicator
 pub struct SqueezeMomentumStream {
-    // original config
+    
     params: SqueezeMomentumParams,
     rp: ResolvedParams,
 
-    // counters
-    n: usize,        // number of ticks processed so far
-    ready_bb: bool,  // BB window filled once
-    ready_kc: bool,  // KC/TR window filled once
-    ready_raw: bool, // RAW regression window filled once
+    
+    n: usize,        
+    ready_bb: bool,  
+    ready_kc: bool,  
+    ready_raw: bool, 
 
-    // --- Bollinger Bands state (window = lbb) ---
+    
     lbb: usize,
     inv_lbb: f64,
     sum_bb: f64,
     sumsq_bb: f64,
-    rb_close_bb: Vec<f64>, // ring for close (length lbb)
-    bb_pos: usize,         // write position in rb_close_bb
+    rb_close_bb: Vec<f64>, 
+    bb_pos: usize,         
 
-    // --- Keltner Channels state (window = lkc) ---
+    
     lkc: usize,
     inv_lkc: f64,
     mbb: f64,
     mkc: f64,
 
-    // SMA(close, lkc)
+    
     sum_kc: f64,
-    rb_close_kc: Vec<f64>, // ring for close (length lkc)
+    rb_close_kc: Vec<f64>, 
     kc_pos: usize,
 
-    // ATR = SMA(TR, lkc)
+    
     sum_tr: f64,
-    rb_tr: Vec<f64>, // ring for TR (length lkc)
+    rb_tr: Vec<f64>, 
 
-    prev_close: f64, // previous close (for TR)
+    prev_close: f64, 
 
-    // --- rolling highest/lowest over lkc using monotone deques ---
-    ring_high: Vec<f64>, // last lkc highs at indices i % lkc
-    ring_low: Vec<f64>,  // last lkc lows  at indices i % lkc
+    
+    ring_high: Vec<f64>, 
+    ring_low: Vec<f64>,  
 
-    dq_hi_idx: Vec<usize>, // stores absolute indices (capacity lkc)
+    dq_hi_idx: Vec<usize>, 
     dq_hi_head: usize,
     dq_hi_len: usize,
 
-    dq_lo_idx: Vec<usize>, // stores absolute indices (capacity lkc)
+    dq_lo_idx: Vec<usize>, 
     dq_lo_head: usize,
     dq_lo_len: usize,
 
-    // --- O(1) sliding OLS on RAW over lkc ---
-    raw_ring: Vec<f64>, // ring buffer for RAW (length lkc)
+    
+    raw_ring: Vec<f64>, 
     raw_pos: usize,
     raw_count: usize,
-    S0: f64, // sum y
-    S1: f64, // sum j*y, j=1..p
+    S0: f64, 
+    S1: f64, 
 
-    // precomputed constants for fixed x = 1..p
+    
     p_f64: f64,
     sum_x: f64,
     sum_x2: f64,
     inv_denom: f64,
     x_last_minus_xbar: f64,
 
-    // last momentum (for signal)
+    
     last_momentum: f64,
 }
 
@@ -1771,7 +1771,7 @@ impl SqueezeMomentumStream {
         let inv_lbb = 1.0 / (lbb as f64);
         let inv_lkc = 1.0 / (lkc as f64);
 
-        // OLS precompute for x = 1..p
+        
         let p = lkc as f64;
         let sum_x = 0.5 * p * (p + 1.0);
         let sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
@@ -1879,13 +1879,13 @@ impl SqueezeMomentumStream {
         let upper_kc = kc_mid + mkc * tr_avg;
         let lower_kc = kc_mid - mkc * tr_avg;
 
-        // distances from BB mean to KC rails
-        let d1 = mean_bb - lower_kc; // must be > m*std for ON
-        let d2 = upper_kc - mean_bb; // must be > m*std for ON
+        
+        let d1 = mean_bb - lower_kc; 
+        let d2 = upper_kc - mean_bb; 
 
-        let m = mbb.abs(); // safety
+        let m = mbb.abs(); 
 
-        // ON: require both distances positive and variance below both thresholds
+        
         if d1 > 0.0 && d2 > 0.0 {
             let thr = (d1.min(d2) / m);
             if var_bb < thr * thr {
@@ -1893,7 +1893,7 @@ impl SqueezeMomentumStream {
             }
         }
 
-        // OFF: require m*std > max(d1,d2) (clip negatives to zero)
+        
         let t1 = d1.max(0.0);
         let t2 = d2.max(0.0);
         let thr_off = (t1.max(t2) / m);
@@ -1906,7 +1906,7 @@ impl SqueezeMomentumStream {
     /// Update the stream with a new (high, low, close).
     /// Returns None until both windows are warm and the 1‑bar lagged signal is available.
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64)> {
-        // reject non-finite inputs: match batch/scalar expectations of NaN propagation
+        
         if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             self.n = self.n.saturating_add(1);
             return None;
@@ -1916,11 +1916,11 @@ impl SqueezeMomentumStream {
         let lbb = self.lbb;
         let lkc = self.lkc;
 
-        // -----------------------------
-        // 1) Maintain BB rolling sums
-        // -----------------------------
+        
+        
+        
         if self.ready_bb {
-            // evict oldest
+            
             let old = self.rb_close_bb[self.bb_pos];
             self.sum_bb += close - old;
             self.sumsq_bb += close * close - old * old;
@@ -1940,10 +1940,10 @@ impl SqueezeMomentumStream {
             }
         }
 
-        // -----------------------------
-        // 2) Maintain KC SMA(close) and ATR = SMA(TR)
-        // -----------------------------
-        // TR for this bar
+        
+        
+        
+        
         let tr = if i == 0 || !self.prev_close.is_finite() {
             (high - low).abs()
         } else {
@@ -1962,7 +1962,7 @@ impl SqueezeMomentumStream {
             self.sum_tr += tr - old_tr;
             self.rb_close_kc[self.kc_pos] = close;
             self.rb_tr[self.kc_pos] = tr;
-            // advance
+            
             self.kc_pos += 1;
             if self.kc_pos == lkc {
                 self.kc_pos = 0;
@@ -1979,14 +1979,14 @@ impl SqueezeMomentumStream {
             }
         }
 
-        // ------------------------------------
-        // 3) Maintain deque highs/lows (lkc)
-        // ------------------------------------
+        
+        
+        
         let slot = i % lkc;
         self.ring_high[slot] = high;
         self.ring_low[slot] = low;
 
-        // evict stale from fronts: while idx + lkc <= i
+        
         while self.dq_hi_len > 0 {
             let idx = self.dq_hi_idx[self.dq_hi_head];
             if idx + lkc <= i {
@@ -2004,7 +2004,7 @@ impl SqueezeMomentumStream {
             }
         }
 
-        // maintain decreasing deque for highs
+        
         while self.dq_hi_len > 0 {
             let back = Self::dq_back(self.dq_hi_head, self.dq_hi_len, lkc);
             let idx = self.dq_hi_idx[back];
@@ -2023,7 +2023,7 @@ impl SqueezeMomentumStream {
             i,
         );
 
-        // maintain increasing deque for lows
+        
         while self.dq_lo_len > 0 {
             let back = Self::dq_back(self.dq_lo_head, self.dq_lo_len, lkc);
             let idx = self.dq_lo_idx[back];
@@ -2042,9 +2042,9 @@ impl SqueezeMomentumStream {
             i,
         );
 
-        // -----------------------------
-        // 4) If KC window ready, build RAW and update OLS
-        // -----------------------------
+        
+        
+        
         let mut momentum = f64::NAN;
         if self.ready_kc {
             let hi_idx = self.dq_hi_idx[self.dq_hi_head];
@@ -2053,14 +2053,14 @@ impl SqueezeMomentumStream {
             let lowest = self.ring_low[lo_idx % lkc];
             let kc_mid = self.sum_kc * self.inv_lkc;
 
-            // RAW = close - 0.25*(highest+lowest) - 0.5*kc_mid
+            
             let raw_i = close - 0.25 * (highest + lowest) - 0.5 * kc_mid;
 
             if self.raw_count < lkc {
-                // growing stage: append at raw_pos (== slot)
+                
                 self.raw_ring[slot] = raw_i;
                 self.raw_count += 1;
-                // update S0, S1 with j = raw_count
+                
                 let j = self.raw_count as f64;
                 self.S0 += raw_i;
                 self.S1 = f64::mul_add(j, raw_i, self.S1);
@@ -2068,20 +2068,20 @@ impl SqueezeMomentumStream {
                     self.ready_raw = true;
                 }
             } else {
-                // steady stage: O(1) update
+                
                 let y_old = self.raw_ring[slot];
                 self.raw_ring[slot] = raw_i;
 
-                // S1' = S1 - S0 + p*y_new
-                // S0' = S0 - y_old + y_new
+                
+                
                 self.S1 = (self.S1 - self.S0) + self.p_f64 * raw_i;
                 self.S0 = (self.S0 - y_old) + raw_i;
             }
 
-            // compute momentum when regression window is ready
+            
             if self.ready_raw {
                 let ybar = self.S0 * self.inv_lkc;
-                // b = (-sum_x*S0 + p*S1) / denom; handle denom == 0 -> b = 0
+                
                 let b_num = -self.sum_x * self.S0 + self.p_f64 * self.S1;
                 let b = if self.inv_denom == 0.0 {
                     0.0
@@ -2090,19 +2090,19 @@ impl SqueezeMomentumStream {
                 };
                 momentum = f64::mul_add(b, self.x_last_minus_xbar, ybar);
             } else {
-                // KC window is ready but OLS ring has not accumulated lkc samples yet.
-                // Emit a neutral momentum to allow streams to produce values at the warmup boundary.
+                
+                
                 momentum = 0.0;
             }
         }
 
-        // -----------------------------
-        // 5) Compute squeeze classification (no sqrt)
-        // -----------------------------
+        
+        
+        
         let mut squeeze = f64::NAN;
         if self.ready_bb && self.ready_kc {
             let mean_bb = self.sum_bb * self.inv_lbb;
-            let var_bb = f64::mul_add(self.sumsq_bb * self.inv_lbb, 1.0, -mean_bb * mean_bb); // E[x^2] - (E[x])^2
+            let var_bb = f64::mul_add(self.sumsq_bb * self.inv_lbb, 1.0, -mean_bb * mean_bb); 
             let kc_mid = self.sum_kc * self.inv_lkc;
             let tr_avg = self.sum_tr * self.inv_lkc;
             squeeze = Self::classify_squeeze_no_sqrt(
@@ -2115,13 +2115,13 @@ impl SqueezeMomentumStream {
             );
         }
 
-        // -----------------------------
-        // 6) Signal (handle first momentum gracefully)
-        // -----------------------------
+        
+        
+        
         let mut signal = f64::NAN;
         if momentum.is_finite() {
             if self.last_momentum.is_finite() {
-                // Subsequent ticks: compare against previous momentum
+                
                 signal = if momentum > 0.0 {
                     if momentum > self.last_momentum {
                         1.0
@@ -2136,21 +2136,21 @@ impl SqueezeMomentumStream {
                     }
                 };
             } else {
-                // First tick with a finite momentum: emit a stable initial signal
-                // Choose decelerating class (±2) based on sign to avoid None at warmup boundary.
+                
+                
                 signal = if momentum >= 0.0 { 2.0 } else { -2.0 };
             }
         }
 
-        // update prev momentum after signal decision
+        
         if momentum.is_finite() {
             self.last_momentum = momentum;
         }
 
-        // tick++
+        
         self.n = i + 1;
 
-        // warmup: emit as soon as both BB and KC windows are ready
+        
         if self.ready_bb && self.ready_kc {
             Some((squeeze, momentum, signal))
         } else {
@@ -2165,13 +2165,13 @@ impl Default for SqueezeMomentumStream {
     }
 }
 
-// --- Python Bindings ---
+
 
 #[cfg(feature = "python")]
 #[pyclass(name = "SqueezeMomentumStream")]
 pub struct SqueezeMomentumStreamPy {
     stream: SqueezeMomentumStream,
-    // Track warmup threshold and count to provide a first non-None tuple
+    
     lbb: usize,
     lkc: usize,
     n: usize,
@@ -2204,7 +2204,7 @@ impl SqueezeMomentumStreamPy {
         match self.stream.update(high, low, close) {
             Some((squeeze, momentum, signal)) => (Some(squeeze), Some(momentum), Some(signal)),
             None => {
-                // Provide a first non-None tuple once windows are warm to satisfy stream semantics in Python tests.
+                
                 if self.n >= self.lbb.max(self.lkc) {
                     (Some(0.0), Some(0.0), Some(2.0))
                 } else {
@@ -2220,7 +2220,7 @@ impl SqueezeMomentumStreamPy {
     }
 }
 
-// --- Python Bindings ---
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "squeeze_momentum")]
@@ -2270,13 +2270,13 @@ pub fn squeeze_momentum_py<'py>(
     Ok((sq, mo, si))
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaSqueezeMomentum};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyReadonlyArray1 and PyValueError already imported for Python above.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "squeeze_momentum_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, length_bb_range, mult_bb_range, length_kc_range, mult_kc_range, device_id=0))]
@@ -2395,13 +2395,13 @@ pub fn squeeze_momentum_batch_py<'py>(
     })?;
 
     let dict = PyDict::new(py);
-    // Return only momentum values as 'values' to match test expectations
+    
     dict.set_item(
         "values",
         PyArray1::from_vec(py, out.momentum).reshape((out.rows, out.cols))?,
     )?;
 
-    // Also include squeeze and signal for completeness
+    
     dict.set_item(
         "squeeze",
         PyArray1::from_vec(py, out.squeeze).reshape((out.rows, out.cols))?,
@@ -2411,7 +2411,7 @@ pub fn squeeze_momentum_batch_py<'py>(
         PyArray1::from_vec(py, out.signal).reshape((out.rows, out.cols))?,
     )?;
 
-    // metadata arrays
+    
     dict.set_item(
         "length_bb",
         PyArray1::from_vec(
@@ -2443,14 +2443,14 @@ pub fn squeeze_momentum_batch_py<'py>(
     Ok(dict)
 }
 
-// --- WASM Bindings ---
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SmiResult {
-    pub values: Vec<f64>, // [squeeze..., momentum..., signal...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2496,9 +2496,9 @@ pub struct SmiBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SmiBatchJsOutput {
-    pub values: Vec<f64>, // flattened momentum values only (rows x cols)
-    pub rows: usize,      // number of parameter combinations
-    pub cols: usize,      // data length
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
     pub length_bb: Vec<usize>,
     pub mult_bb: Vec<f64>,
     pub length_kc: Vec<usize>,
@@ -2525,7 +2525,7 @@ pub fn squeeze_momentum_batch(
         squeeze_momentum_batch_with_kernel(high, low, close, &sweep, detect_best_batch_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Extract parameter arrays from combos
+    
     let mut length_bb = Vec::with_capacity(out.combos.len());
     let mut mult_bb = Vec::with_capacity(out.combos.len());
     let mut length_kc = Vec::with_capacity(out.combos.len());
@@ -2539,7 +2539,7 @@ pub fn squeeze_momentum_batch(
     }
 
     let js = SmiBatchJsOutput {
-        values: out.momentum, // Only return momentum values
+        values: out.momentum, 
         rows: out.rows,
         cols: out.cols,
         length_bb,
@@ -2613,7 +2613,7 @@ pub fn squeeze_momentum_into(
     }
 }
 
-// --- Tests: Parity with alma.rs, for all kernels, errors, accuracy, etc. ---
+
 
 #[cfg(test)]
 mod tests {
@@ -2623,16 +2623,16 @@ mod tests {
 
     #[test]
     fn test_squeeze_momentum_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use existing CSV candles (same as other tests in this module)
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = SqueezeMomentumInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = squeeze_momentum(&input)?;
         let n = baseline.momentum.len();
 
-        // Preallocate outputs and use the new into API
+        
         let mut out_sq = vec![0.0; n];
         let mut out_mo = vec![0.0; n];
         let mut out_si = vec![0.0; n];
@@ -2640,7 +2640,7 @@ mod tests {
         squeeze_momentum_into(&input, &mut out_sq, &mut out_mo, &mut out_si)?;
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native into is not available; fall back to slices helper for parity.
+            
             squeeze_momentum_into_slices(&mut out_sq, &mut out_mo, &mut out_si, &input, Kernel::Auto)?;
         }
 
@@ -2850,25 +2850,25 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             SqueezeMomentumParams::default(),
-            // Minimum periods
+            
             SqueezeMomentumParams {
                 length_bb: Some(2),
                 mult_bb: Some(1.0),
                 length_kc: Some(2),
                 mult_kc: Some(1.0),
             },
-            // Small periods with default multipliers
+            
             SqueezeMomentumParams {
                 length_bb: Some(5),
                 mult_bb: Some(2.0),
                 length_kc: Some(5),
                 mult_kc: Some(1.5),
             },
-            // Medium periods with various multipliers
+            
             SqueezeMomentumParams {
                 length_bb: Some(10),
                 mult_bb: Some(1.5),
@@ -2881,7 +2881,7 @@ mod tests {
                 length_kc: Some(14),
                 mult_kc: Some(1.0),
             },
-            // Standard periods with edge multipliers
+            
             SqueezeMomentumParams {
                 length_bb: Some(20),
                 mult_bb: Some(0.5),
@@ -2894,21 +2894,21 @@ mod tests {
                 length_kc: Some(20),
                 mult_kc: Some(3.0),
             },
-            // Large periods
+            
             SqueezeMomentumParams {
                 length_bb: Some(50),
                 mult_bb: Some(2.0),
                 length_kc: Some(50),
                 mult_kc: Some(1.5),
             },
-            // Very large periods
+            
             SqueezeMomentumParams {
                 length_bb: Some(100),
                 mult_bb: Some(1.5),
                 length_kc: Some(100),
                 mult_kc: Some(2.0),
             },
-            // Asymmetric periods
+            
             SqueezeMomentumParams {
                 length_bb: Some(10),
                 mult_bb: Some(2.0),
@@ -2927,15 +2927,15 @@ mod tests {
             let input = SqueezeMomentumInput::from_candles(&candles, params.clone());
             let output = squeeze_momentum_with_kernel(&input, kernel)?;
 
-            // Check squeeze values
+            
             for (i, &val) in output.squeeze.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in squeeze \
@@ -2976,7 +2976,7 @@ mod tests {
                 }
             }
 
-            // Check momentum values
+            
             for (i, &val) in output.momentum.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3024,7 +3024,7 @@ mod tests {
                 }
             }
 
-            // Check momentum_signal values
+            
             for (i, &val) in output.momentum_signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3081,7 +3081,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -3093,22 +3093,22 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic OHLC data
+        
         let strat = (2usize..=50).prop_flat_map(|max_period| {
-            let data_len = max_period * 2 + 50; // Ensure sufficient data length
+            let data_len = max_period * 2 + 50; 
             (
-                // Generate base price and variations for OHLC
+                
                 prop::collection::vec(
                     (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                     data_len,
                 ),
-                // length_bb: 2 to max_period
+                
                 2usize..=max_period.min(30),
-                // mult_bb: 0.5 to 3.0
+                
                 0.5f64..3.0f64,
-                // length_kc: 2 to max_period
+                
                 2usize..=max_period.min(30),
-                // mult_kc: 0.5 to 3.0
+                
                 0.5f64..3.0f64,
             )
         });
@@ -3117,28 +3117,28 @@ mod tests {
             .run(
                 &strat,
                 |(base_prices, length_bb, mult_bb, length_kc, mult_kc)| {
-                    // Generate realistic OHLC data from base prices
+                    
                     let n = base_prices.len();
                     let mut high = Vec::with_capacity(n);
                     let mut low = Vec::with_capacity(n);
                     let mut close = Vec::with_capacity(n);
 
-                    // Check if all base prices are the same (flat market)
+                    
                     let is_flat = base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                     for &base in &base_prices {
                         if is_flat {
-                            // For flat markets, keep prices identical
+                            
                             high.push(base);
                             low.push(base);
                             close.push(base);
                         } else {
-                            // Create realistic OHLC relationships
-                            // Simple and realistic: high > close > low with consistent variation
-                            let variation = base * 0.01; // 1% variation for more realistic daily moves
+                            
+                            
+                            let variation = base * 0.01; 
                             let h = base + variation;
                             let l = base - variation;
-                            let c = base + variation * 0.2; // Close slightly above midpoint (bullish bias)
+                            let c = base + variation * 0.2; 
 
                             high.push(h);
                             low.push(l);
@@ -3155,13 +3155,13 @@ mod tests {
                     let input =
                         SqueezeMomentumInput::from_slices(&high, &low, &close, params.clone());
 
-                    // Get output from tested kernel
+                    
                     let output = squeeze_momentum_with_kernel(&input, kernel)?;
 
-                    // Get reference output from scalar kernel
+                    
                     let ref_output = squeeze_momentum_with_kernel(&input, Kernel::Scalar)?;
 
-                    // Property 1: Output length matches input length
+                    
                     prop_assert_eq!(output.squeeze.len(), n, "Squeeze length mismatch");
                     prop_assert_eq!(output.momentum.len(), n, "Momentum length mismatch");
                     prop_assert_eq!(
@@ -3170,13 +3170,13 @@ mod tests {
                         "Momentum signal length mismatch"
                     );
 
-                    // Property 2: Warmup period validation
-                    // Different outputs have different warmup periods
+                    
+                    
                     let squeeze_warmup = length_bb.max(length_kc).saturating_sub(1);
                     let momentum_warmup = length_kc.saturating_sub(1);
-                    let signal_warmup = length_kc.saturating_sub(1) + 1; // +1 for the lag
+                    let signal_warmup = length_kc.saturating_sub(1) + 1; 
 
-                    // Check squeeze warmup
+                    
                     for i in 0..squeeze_warmup.min(n) {
                         prop_assert!(
                             output.squeeze[i].is_nan(),
@@ -3185,7 +3185,7 @@ mod tests {
                         );
                     }
 
-                    // Check momentum warmup
+                    
                     for i in 0..momentum_warmup.min(n) {
                         prop_assert!(
                             output.momentum[i].is_nan(),
@@ -3194,7 +3194,7 @@ mod tests {
                         );
                     }
 
-                    // Check momentum_signal warmup
+                    
                     for i in 0..signal_warmup.min(n) {
                         prop_assert!(
                             output.momentum_signal[i].is_nan(),
@@ -3203,7 +3203,7 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Squeeze values are only -1.0, 0.0, or 1.0
+                    
                     for (i, &val) in output.squeeze.iter().enumerate() {
                         if !val.is_nan() {
                             prop_assert!(
@@ -3215,7 +3215,7 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Momentum signal values are only -2.0, -1.0, 1.0, or 2.0 (or NaN)
+                    
                     for (i, &val) in output.momentum_signal.iter().enumerate() {
                         if !val.is_nan() {
                             prop_assert!(
@@ -3227,9 +3227,9 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Kernel consistency - compare with scalar implementation
+                    
                     for i in 0..n {
-                        // Check squeeze consistency
+                        
                         let sq = output.squeeze[i];
                         let ref_sq = ref_output.squeeze[i];
                         if sq.is_finite() && ref_sq.is_finite() {
@@ -3249,7 +3249,7 @@ mod tests {
                             );
                         }
 
-                        // Check momentum consistency with ULP tolerance
+                        
                         let mom = output.momentum[i];
                         let ref_mom = ref_output.momentum[i];
                         if mom.is_finite() && ref_mom.is_finite() {
@@ -3274,7 +3274,7 @@ mod tests {
                             );
                         }
 
-                        // Check momentum_signal consistency
+                        
                         let sig = output.momentum_signal[i];
                         let ref_sig = ref_output.momentum_signal[i];
                         if sig.is_finite() && ref_sig.is_finite() {
@@ -3295,9 +3295,9 @@ mod tests {
                         }
                     }
 
-                    // Property 6: Momentum reasonableness check
-                    // Since momentum uses linear regression, it can extrapolate beyond the immediate price range
-                    // We'll use a check based on the overall data range
+                    
+                    
+                    
                     let overall_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let overall_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
                     let overall_range = overall_max - overall_min;
@@ -3305,15 +3305,15 @@ mod tests {
                     for i in momentum_warmup..n {
                         if output.momentum[i].is_finite() {
                             if overall_range > 1e-10 {
-                                // Momentum should be within a reasonable multiple of the overall price range
-                                // Linear regression can extrapolate but should remain reasonable
+                                
+                                
                                 prop_assert!(
 								output.momentum[i].abs() <= overall_range * 5.0,
 								"Momentum {} exceeds reasonable bounds at index {} (overall range: {})",
 								output.momentum[i], i, overall_range
 							);
                             } else {
-                                // For flat markets (range near zero), momentum should be very small
+                                
                                 prop_assert!(
                                     output.momentum[i].abs() < 1e-4,
                                     "Momentum {} should be near zero for flat market at index {}",
@@ -3399,17 +3399,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (length_bb_start, length_bb_end, length_bb_step, mult_bb_start, mult_bb_end, mult_bb_step,
-            //  length_kc_start, length_kc_end, length_kc_step, mult_kc_start, mult_kc_end, mult_kc_step)
-            (2, 10, 2, 1.0, 2.0, 0.5, 2, 10, 2, 1.0, 2.0, 0.5), // Small periods
-            (5, 25, 5, 2.0, 2.0, 0.0, 5, 25, 5, 1.5, 1.5, 0.0), // Medium periods, static multipliers
-            (10, 10, 0, 1.0, 3.0, 0.5, 10, 10, 0, 1.0, 3.0, 0.5), // Static periods, varying multipliers
-            (2, 5, 1, 1.5, 1.5, 0.0, 2, 5, 1, 2.0, 2.0, 0.0),     // Dense small range
-            (30, 60, 15, 2.0, 2.0, 0.0, 30, 60, 15, 1.5, 1.5, 0.0), // Large periods
-            (20, 30, 5, 1.0, 2.5, 0.5, 15, 25, 5, 1.0, 2.0, 0.5), // Mixed ranges
-            (8, 12, 1, 0.5, 3.0, 0.5, 8, 12, 1, 0.5, 2.5, 0.5), // Dense medium range with wide multipliers
+            
+            
+            (2, 10, 2, 1.0, 2.0, 0.5, 2, 10, 2, 1.0, 2.0, 0.5), 
+            (5, 25, 5, 2.0, 2.0, 0.0, 5, 25, 5, 1.5, 1.5, 0.0), 
+            (10, 10, 0, 1.0, 3.0, 0.5, 10, 10, 0, 1.0, 3.0, 0.5), 
+            (2, 5, 1, 1.5, 1.5, 0.0, 2, 5, 1, 2.0, 2.0, 0.0),     
+            (30, 60, 15, 2.0, 2.0, 0.0, 30, 60, 15, 1.5, 1.5, 0.0), 
+            (20, 30, 5, 1.0, 2.5, 0.5, 15, 25, 5, 1.0, 2.0, 0.5), 
+            (8, 12, 1, 0.5, 3.0, 0.5, 8, 12, 1, 0.5, 2.5, 0.5), 
         ];
 
         for (
@@ -3438,7 +3438,7 @@ mod tests {
                 .mult_kc_range(mkc_start, mkc_end, mkc_step)
                 .apply_candles(&c)?;
 
-            // Check all three output arrays
+            
             for (name, values) in [
                 ("squeeze", &output.squeeze),
                 ("momentum", &output.momentum),

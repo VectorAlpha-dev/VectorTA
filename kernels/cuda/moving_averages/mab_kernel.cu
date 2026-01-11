@@ -1,11 +1,11 @@
-// CUDA kernels for Moving Average Bands (MAB)
-//
-// Behavior mirrors scalar MAB:
-// - middle = fastMA
-// - upper  = slowMA + devup * RMS(fastMA - slowMA, window=fast_period)
-// - lower  = slowMA - devdn * RMS(fastMA - slowMA, window=fast_period)
-// Warmup: first_output = first_valid + max(fast,slow) + fast - 1
-// Before first_output: write NaN
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -28,11 +28,11 @@ __device__ __forceinline__ float sma_from_prefix_f32(
     return (float)(sum / (double)period);
 }
 
-// Batch: one series × many params, SMA-only. Uses host-precomputed prefix sums
-// (f64) and prefix NaN counts to compute SMA(fast) and SMA(slow) on device, then
-// computes the RMS deviation over a window of length fast_period.
-//
-// One thread per row scans time sequentially (rolling update matches scalar).
+
+
+
+
+
 extern "C" __global__ void mab_batch_from_prefix_sma_f32(
     const double* __restrict__ pref_close_sum,
     const int* __restrict__ pref_close_nan,
@@ -43,9 +43,9 @@ extern "C" __global__ void mab_batch_from_prefix_sma_f32(
     int len,
     int first_valid,
     int rows,
-    float* __restrict__ out_upper,  // rows x len
-    float* __restrict__ out_middle, // rows x len
-    float* __restrict__ out_lower   // rows x len
+    float* __restrict__ out_upper,  
+    float* __restrict__ out_middle, 
+    float* __restrict__ out_lower   
 ) {
     const int row = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     if (row >= rows) return;
@@ -107,24 +107,24 @@ extern "C" __global__ void mab_batch_from_prefix_sma_f32(
     }
 }
 
-// Compute dev[t] = sqrt(mean((fast-slow)^2 over last fast_period)) for a single series
-// Inputs are 1D fast and slow arrays of length len.
+
+
 extern "C" __global__ void mab_dev_from_ma_f32(
     const float* __restrict__ fast,
     const float* __restrict__ slow,
     int fast_period,
     int first_valid,
     int len,
-    float* __restrict__ dev_out // length=len; dev_out[t] valid only for t>=first_output
+    float* __restrict__ dev_out 
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; // single-thread sequential
+    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
     if (len <= 0 || fast_period <= 0) return;
 
-    const int first_output = first_valid + max(fast_period, 0) + fast_period - 1; // max(slow,fast) handled by caller when used; here we only use fast
-    // Note: in shared-weights fast-path, slow period equals that used to build slow[];
-    // first_output used by the "apply" kernel for NaN policy; here we safely fill entries >= first_output
+    const int first_output = first_valid + max(fast_period, 0) + fast_period - 1; 
+    
+    
 
-    // Prefill leading with NaN to be robust if read directly (optional)
+    
     for (int t = 0; t < min(first_output, len); ++t) {
         dev_out[t] = qnan32();
     }
@@ -148,22 +148,22 @@ extern "C" __global__ void mab_dev_from_ma_f32(
     }
 }
 
-// Apply shared dev/MA to produce outputs for N rows (combos) where only devup/devdn vary.
-// fast_period is used only to compute first_output and match warmup/NaN behavior.
+
+
 extern "C" __global__ void mab_apply_dev_shared_ma_batch_f32(
     const float* __restrict__ fast,
     const float* __restrict__ slow,
-    const float* __restrict__ dev, // length=len
+    const float* __restrict__ dev, 
     int fast_period,
     int slow_period,
     int first_valid,
     int len,
-    const float* __restrict__ devups, // length=rows
-    const float* __restrict__ devdns, // length=rows
+    const float* __restrict__ devups, 
+    const float* __restrict__ devdns, 
     int rows,
-    float* __restrict__ out_upper,  // rows x len
-    float* __restrict__ out_middle, // rows x len
-    float* __restrict__ out_lower   // rows x len
+    float* __restrict__ out_upper,  
+    float* __restrict__ out_middle, 
+    float* __restrict__ out_lower   
 ) {
     const int row = blockIdx.y;
     if (row >= rows) return;
@@ -191,7 +191,7 @@ extern "C" __global__ void mab_apply_dev_shared_ma_batch_f32(
     }
 }
 
-// Generic single-row kernel: compute dev and outputs from row-own fast/slow arrays.
+
 extern "C" __global__ void mab_single_row_from_ma_f32(
     const float* __restrict__ fast,
     const float* __restrict__ slow,
@@ -201,11 +201,11 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
     int len,
     float devup,
     float devdn,
-    float* __restrict__ out_upper,  // length=len (target row section)
+    float* __restrict__ out_upper,  
     float* __restrict__ out_middle,
     float* __restrict__ out_lower
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; // sequential per-row
+    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
     const int warm = first_valid + max(fast_period, slow_period) + fast_period - 1;
     const float nanf = qnan32();
 
@@ -216,7 +216,7 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
     }
     if (warm >= len) return;
 
-    // First valid output
+    
     int start = (warm + 1) - fast_period;
     if (start < 0) start = 0;
     double sumsq = 0.0;
@@ -242,11 +242,11 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
     }
 }
 
-// Many-series (time-major), one param. fast and slow are rows x cols (time-major).
+
 extern "C" __global__ void mab_many_series_one_param_time_major_f32(
     const float* __restrict__ fast_tm,
     const float* __restrict__ slow_tm,
-    const int* __restrict__ first_valids, // length=cols
+    const int* __restrict__ first_valids, 
     int cols,
     int rows,
     int fast_period,
@@ -262,7 +262,7 @@ extern "C" __global__ void mab_many_series_one_param_time_major_f32(
     const int fv = first_valids[s];
     const int warm = fv + max(fast_period, slow_period) + fast_period - 1;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return; // one thread per series
+    if (threadIdx.x != 0 || blockIdx.x != 0) return; 
     const int stride = cols;
     const float nanf = qnan32();
 

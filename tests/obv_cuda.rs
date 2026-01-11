@@ -1,14 +1,14 @@
-// Integration tests for CUDA OBV kernels
 
-use my_project::indicators::obv::{obv, ObvData, ObvInput, ObvParams};
-// use my_project::utilities::enums::Kernel; // not needed in these tests
+
+use vector_ta::indicators::obv::{obv, ObvData, ObvInput, ObvParams};
+
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaObv;
+use vector_ta::cuda::CudaObv;
 
 fn approx_eq_absrel(a: f64, b: f64, abs_tol: f64, rel_tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -43,7 +43,7 @@ fn obv_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = (x * 0.00123).sin() + 0.00017 * x;
         volume[i] = (x * 0.00077).cos().abs() * 800.0 + 1.0;
     }
-    // Build CPU baseline on FP32-rounded data to match GPU inputs
+    
     let close32_as_f64: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
     let volume32_as_f64: Vec<f64> = volume.iter().map(|&v| (v as f32) as f64).collect();
     let cpu = obv(&ObvInput {
@@ -89,8 +89,8 @@ fn obv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 16usize; // series
-    let rows = 2048usize; // length
+    let cols = 16usize; 
+    let rows = 2048usize; 
     let mut close_tm = vec![f64::NAN; cols * rows];
     let mut volume_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -104,7 +104,7 @@ fn obv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
     let volume_tm_f32: Vec<f32> = volume_tm.iter().map(|&v| v as f32).collect();
 
-    // CPU baseline per series (computed on FP32-rounded data to match GPU inputs)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

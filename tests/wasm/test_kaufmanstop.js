@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -41,10 +41,10 @@ test.before(async () => {
 });
 
 test('KAUFMANSTOP partial params', () => {
-    // Test with default parameters - mirrors check_kaufmanstop_partial_params
+    
     const { high, low } = testData;
     
-    // Test with default params (should use defaults from Rust)
+    
     const result = wasm.kaufmanstop_js(
         new Float64Array(high), 
         new Float64Array(low), 
@@ -55,7 +55,7 @@ test('KAUFMANSTOP partial params', () => {
 });
 
 test('KAUFMANSTOP accuracy', async () => {
-    // Test KAUFMANSTOP matches expected values from Rust tests - mirrors check_kaufmanstop_accuracy
+    
     const { high, low } = testData;
     const expected = EXPECTED_OUTPUTS.kaufmanstop;
     
@@ -71,21 +71,21 @@ test('KAUFMANSTOP accuracy', async () => {
     assert.ok(result instanceof Float64Array, 'Result should be Float64Array');
     assert.strictEqual(result.length, high.length);
     
-    // Check last 5 values match expected
+    
     const last5 = Array.from(result).slice(-5);
     assertArrayClose(
         last5,
         expected.last5Values,
-        1e-1,  // Use same tolerance as Rust test
+        1e-1,  
         "KAUFMANSTOP last 5 values mismatch"
     );
     
-    // Compare full output with Rust - skip for now as generate_references doesn't have kaufmanstop yet
-    // await compareWithRust('kaufmanstop', result, 'high,low', expected.defaultParams);
+    
+    
 });
 
 test('KAUFMANSTOP default candles', () => {
-    // Test KAUFMANSTOP with default parameters - mirrors check_kaufmanstop_default_candles
+    
     const { high, low } = testData;
     const expected = EXPECTED_OUTPUTS.kaufmanstop;
     
@@ -102,7 +102,7 @@ test('KAUFMANSTOP default candles', () => {
 });
 
 test('KAUFMANSTOP zero period', () => {
-    // Test KAUFMANSTOP fails with zero period - mirrors check_kaufmanstop_zero_period
+    
     const high = new Float64Array([10.0, 20.0, 30.0]);
     const low = new Float64Array([5.0, 15.0, 25.0]);
     
@@ -112,7 +112,7 @@ test('KAUFMANSTOP zero period', () => {
 });
 
 test('KAUFMANSTOP period exceeds length', () => {
-    // Test KAUFMANSTOP fails when period exceeds data length - mirrors check_kaufmanstop_period_exceeds_length
+    
     const high = new Float64Array([10.0, 20.0, 30.0]);
     const low = new Float64Array([5.0, 15.0, 25.0]);
     
@@ -122,7 +122,7 @@ test('KAUFMANSTOP period exceeds length', () => {
 });
 
 test('KAUFMANSTOP very small dataset', () => {
-    // Test KAUFMANSTOP fails with insufficient data - mirrors check_kaufmanstop_very_small_dataset
+    
     const high = new Float64Array([42.0]);
     const low = new Float64Array([41.0]);
     
@@ -132,7 +132,7 @@ test('KAUFMANSTOP very small dataset', () => {
 });
 
 test('KAUFMANSTOP empty data', () => {
-    // Test KAUFMANSTOP fails with empty arrays - mirrors check_kaufmanstop_empty_input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -141,17 +141,17 @@ test('KAUFMANSTOP empty data', () => {
 });
 
 test('KAUFMANSTOP mismatched lengths', () => {
-    // Test KAUFMANSTOP fails when high and low have different lengths
+    
     const high = new Float64Array([10.0, 20.0, 30.0]);
-    const low = new Float64Array([5.0, 15.0]); // Different length
+    const low = new Float64Array([5.0, 15.0]); 
     
     assert.throws(() => {
         wasm.kaufmanstop_js(high, low, 2, 2.0, 'long', 'sma');
-    });  // Just check that it throws, error message might vary
+    });  
 });
 
 test('KAUFMANSTOP all NaN input', () => {
-    // Test KAUFMANSTOP with all NaN values
+    
     const allNaNHigh = new Float64Array(100);
     const allNaNLow = new Float64Array(100);
     allNaNHigh.fill(NaN);
@@ -163,7 +163,7 @@ test('KAUFMANSTOP all NaN input', () => {
 });
 
 test('KAUFMANSTOP NaN handling', () => {
-    // Test KAUFMANSTOP handles NaN values correctly - mirrors check_kaufmanstop_nan_handling
+    
     const { high, low } = testData;
     const expected = EXPECTED_OUTPUTS.kaufmanstop;
     
@@ -177,15 +177,15 @@ test('KAUFMANSTOP NaN handling', () => {
     );
     assert.strictEqual(result.length, high.length);
     
-    // After warmup period (240), no NaN values should exist
+    
     if (result.length > 240) {
         for (let i = 240; i < result.length; i++) {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
     
-    // Check warmup period - first + period - 1 values should be NaN
-    const warmup = expected.warmupPeriod;  // 43
+    
+    const warmup = expected.warmupPeriod;  
     for (let i = 0; i < warmup && i < result.length; i++) {
         assert(isNaN(result[i]), `Expected NaN at warmup index ${i}`);
     }
@@ -205,7 +205,7 @@ test('KAUFMANSTOP with short direction', () => {
         22, 2.0, 'short', 'sma'
     );
     
-    // Results should be different
+    
     let foundDifference = false;
     const warmup = 43;
     for (let i = warmup; i < 100; i++) {
@@ -218,15 +218,15 @@ test('KAUFMANSTOP with short direction', () => {
 });
 
 test('KAUFMANSTOP batch single parameter set', () => {
-    // Test batch with single parameter combination
+    
     const { high, low } = testData;
     const expected = EXPECTED_OUTPUTS.kaufmanstop;
     
     const batchResult = wasm.kaufmanstop_batch_js(
         new Float64Array(high),
         new Float64Array(low),
-        22, 22, 0,      // period range
-        2.0, 2.0, 0.0,  // mult range
+        22, 22, 0,      
+        2.0, 2.0, 0.0,  
         'long', 'sma'
     );
     
@@ -236,7 +236,7 @@ test('KAUFMANSTOP batch single parameter set', () => {
     assert.strictEqual(batchResult.rows, 1);
     assert.strictEqual(batchResult.cols, high.length);
     
-    // Extract single row and compare with expected
+    
     const singleRow = batchResult.values.slice(0, high.length);
     const last5 = singleRow.slice(-5);
     assertArrayClose(
@@ -248,25 +248,25 @@ test('KAUFMANSTOP batch single parameter set', () => {
 });
 
 test('KAUFMANSTOP batch multiple periods', () => {
-    // Test batch with multiple period values
+    
     const { high, low } = testData;
     const testHigh = new Float64Array(high.slice(0, 100));
     const testLow = new Float64Array(low.slice(0, 100));
     
     const batchResult = wasm.kaufmanstop_batch_js(
         testHigh, testLow,
-        20, 24, 2,      // period range: 20, 22, 24
-        2.0, 2.0, 0.0,  // mult range
+        20, 24, 2,      
+        2.0, 2.0, 0.0,  
         'long', 'sma'
     );
     
-    // Should have 3 rows * 100 cols
+    
     assert.strictEqual(batchResult.rows, 3);
     assert.strictEqual(batchResult.cols, 100);
     assert.strictEqual(batchResult.values.length, 3 * 100);
     assert.strictEqual(batchResult.combos.length, 3);
     
-    // Verify each row matches individual calculation
+    
     const periods = [20, 22, 24];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -287,39 +287,39 @@ test('KAUFMANSTOP batch multiple periods', () => {
 });
 
 test('KAUFMANSTOP batch metadata', () => {
-    // Test that batch result includes correct parameter combinations
+    
     const { high, low } = testData;
     const testHigh = new Float64Array(high.slice(0, 50));
     const testLow = new Float64Array(low.slice(0, 50));
     
     const result = wasm.kaufmanstop_batch_js(
         testHigh, testLow,
-        20, 22, 2,      // period: 20, 22
-        1.5, 2.0, 0.5,  // mult: 1.5, 2.0
+        20, 22, 2,      
+        1.5, 2.0, 0.5,  
         'long', 'sma'
     );
     
-    // Should have 2 * 2 = 4 combinations
+    
     assert.strictEqual(result.combos.length, 4);
     assert.strictEqual(result.rows, 4);
     assert.strictEqual(result.cols, 50);
     
-    // Check first combination
+    
     assert.strictEqual(result.combos[0].period, 20);
     assert.strictEqual(result.combos[0].mult, 1.5);
     assert.strictEqual(result.combos[0].direction, 'long');
     assert.strictEqual(result.combos[0].ma_type, 'sma');
     
-    // Check last combination
+    
     assert.strictEqual(result.combos[3].period, 22);
     assert.strictEqual(result.combos[3].mult, 2.0);
 });
 
 test('KAUFMANSTOP batch edge cases', () => {
-    // Test edge cases for batch processing
+    
     const testData = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]);
     
-    // Single value sweep
+    
     const singleBatch = wasm.kaufmanstop_batch_js(
         testData, testData,
         5, 5, 1,
@@ -330,25 +330,25 @@ test('KAUFMANSTOP batch edge cases', () => {
     assert.strictEqual(singleBatch.values.length, 25);
     assert.strictEqual(singleBatch.combos.length, 1);
     
-    // Step larger than range
+    
     const largeBatch = wasm.kaufmanstop_batch_js(
         testData, testData,
-        5, 7, 10,  // Step larger than range
+        5, 7, 10,  
         2.0, 2.0, 0,
         'long', 'sma'
     );
     
-    // Should only have period=5
+    
     assert.strictEqual(largeBatch.values.length, 25);
     assert.strictEqual(largeBatch.combos.length, 1);
 });
 
 test('KAUFMANSTOP different MA types', () => {
-    // Test various MA types
+    
     const { high, low } = testData;
     const testHigh = new Float64Array(high.slice(0, 100));
     const testLow = new Float64Array(low.slice(0, 100));
-    const maTypes = ['sma', 'ema', 'wma', 'smma'];  // Only test supported types
+    const maTypes = ['sma', 'ema', 'wma', 'smma'];  
     const results = [];
     
     for (const maType of maTypes) {
@@ -359,26 +359,26 @@ test('KAUFMANSTOP different MA types', () => {
             );
             results.push({ maType, result });
         } catch (e) {
-            // Some MA types might not be supported
+            
         }
     }
     
-    // At least SMA should work
+    
     assert(results.length >= 1, "At least SMA should be supported");
     
-    // Different MA types should produce different results
+    
     if (results.length > 1) {
         for (let i = 1; i < results.length; i++) {
             let foundDifference = false;
-            for (let j = 21; j < 100; j++) {  // After warmup (index 21+)
+            for (let j = 21; j < 100; j++) {  
                 if (!isNaN(results[0].result[j]) && !isNaN(results[i].result[j]) &&
                     Math.abs(results[0].result[j] - results[i].result[j]) > 1e-10) {
                     foundDifference = true;
                     break;
                 }
             }
-            // Note: Some MA types might default to SMA if not supported
-            // So we don't fail the test, just note it
+            
+            
             if (!foundDifference) {
                 console.log(`Note: ${results[0].maType} and ${results[i].maType} produced same results`);
             }
@@ -386,7 +386,7 @@ test('KAUFMANSTOP different MA types', () => {
     }
 });
 
-// Zero-copy API tests
+
 test('KAUFMANSTOP zero-copy API', () => {
     const high = new Float64Array([100, 102, 101, 103, 102, 104, 103, 105, 104, 106,
                                     105, 107, 106, 108, 107, 109, 108, 110, 109, 111,
@@ -396,7 +396,7 @@ test('KAUFMANSTOP zero-copy API', () => {
                                    109, 111, 110, 112, 111]);
     const len = high.length;
     
-    // Allocate buffers
+    
     const highPtr = wasm.kaufmanstop_alloc(len);
     const lowPtr = wasm.kaufmanstop_alloc(len);
     const outPtr = wasm.kaufmanstop_alloc(len);
@@ -406,33 +406,33 @@ test('KAUFMANSTOP zero-copy API', () => {
     assert(outPtr !== 0, 'Failed to allocate output buffer');
     
     try {
-        // Create views into WASM memory
+        
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // Copy data into WASM memory
+        
         highView.set(high);
         lowView.set(low);
         
-        // Compute KAUFMANSTOP
+        
         wasm.kaufmanstop_into(highPtr, lowPtr, outPtr, len, 5, 2.0, 'long', 'sma');
         
-        // Verify results match regular API
+        
         const regularResult = wasm.kaufmanstop_js(high, low, 5, 2.0, 'long', 'sma');
         
-        // Recreate view in case memory grew
+        
         const outView2 = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
         for (let i = 0; i < len; i++) {
             if (isNaN(regularResult[i]) && isNaN(outView2[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - outView2[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${outView2[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.kaufmanstop_free(highPtr, len);
         wasm.kaufmanstop_free(lowPtr, len);
         wasm.kaufmanstop_free(outPtr, len);
@@ -440,15 +440,15 @@ test('KAUFMANSTOP zero-copy API', () => {
 });
 
 test('KAUFMANSTOP zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.kaufmanstop_into(0, 0, 0, 10, 22, 2.0, 'long', 'sma');
     }, /Null pointer/);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.kaufmanstop_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.kaufmanstop_into(ptr, ptr, ptr, 10, 0, 2.0, 'long', 'sma');
         }, /Invalid period/);
@@ -458,7 +458,7 @@ test('KAUFMANSTOP zero-copy error handling', () => {
 });
 
 test('KAUFMANSTOP memory management', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 10000];
     
     for (const size of sizes) {
@@ -467,7 +467,7 @@ test('KAUFMANSTOP memory management', () => {
         assert(highPtr !== 0, `Failed to allocate high buffer of ${size} elements`);
         assert(lowPtr !== 0, `Failed to allocate low buffer of ${size} elements`);
         
-        // Write pattern to verify memory
+        
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, size);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
@@ -475,13 +475,13 @@ test('KAUFMANSTOP memory management', () => {
             lowView[i] = i * 1.2;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(highView[i], i * 1.5, `High memory corruption at index ${i}`);
             assert.strictEqual(lowView[i], i * 1.2, `Low memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.kaufmanstop_free(highPtr, size);
         wasm.kaufmanstop_free(lowPtr, size);
     }

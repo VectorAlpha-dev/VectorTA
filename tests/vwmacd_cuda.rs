@@ -1,16 +1,16 @@
-// Integration tests for CUDA VWMACD kernels
 
-use my_project::indicators::vwmacd::{
+
+use vector_ta::indicators::vwmacd::{
     vwmacd_batch_with_kernel, VwmacdBatchRange, VwmacdBuilder, VwmacdParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaVwmacd;
+use vector_ta::cuda::CudaVwmacd;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -96,7 +96,7 @@ fn vwmacd_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::e
         );
     }
 
-    // Sanity: single-series matches a selected row
+    
     let target = VwmacdParams {
         fast_period: Some(12),
         slow_period: Some(24),
@@ -135,8 +135,8 @@ fn vwmacd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let cols = 5usize; // num_series
-    let rows = 2048usize; // series_len
+    let cols = 5usize; 
+    let rows = 2048usize; 
     let mut prices_tm = vec![f64::NAN; rows * cols];
     let mut volumes_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
@@ -151,7 +151,7 @@ fn vwmacd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let sl = 26usize;
     let g = 9usize;
 
-    // CPU baseline per series (time-major)
+    
     let mut cpu_macd = vec![f32::NAN; rows * cols];
     let mut cpu_signal = vec![f32::NAN; rows * cols];
     let mut cpu_hist = vec![f32::NAN; rows * cols];
@@ -176,7 +176,7 @@ fn vwmacd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         }
     }
 
-    // GPU
+    
     let cuda = CudaVwmacd::new(0).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
     let p32: Vec<f32> = prices_tm.iter().map(|&x| x as f32).collect();
     let v32: Vec<f32> = volumes_tm.iter().map(|&x| x as f32).collect();

@@ -1,13 +1,13 @@
-// CUDA kernels for Bill Williams Alligator (three SMMA lines with forward shift)
-//
-// Category: Recurrence/IIR. Each output line is a smoothed moving average (SMMA)
-// with its own period and forward shift (offset). We compute the three recurrences
-// in a single pass over prices to minimize global loads. Warmup/NaN semantics
-// match the scalar Rust implementation in src/indicators/alligator.rs:
-//   - Warm index per line = first_valid + period - 1 + offset
-//   - Write NaN before warm; at warm write the initial average; thereafter use
-//     the SMMA recurrence prev = (1-1/p)*prev + (1/p)*price[i]
-//   - Writes occur at shifted indices t = i + offset
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -66,14 +66,14 @@ void alligator_batch_f32(const float* __restrict__ prices,
   const int combo = blockIdx.x * blockDim.x + threadIdx.x;
   const float nan_f = __int_as_float(0x7fffffff);
 
-  // Per-thread parameters
+  
   int pj = 0, pt = 0, pl = 0;
   int oj = 0, ot = 0, ol = 0;
   int base = 0;
   bool valid = false;
-  float aj = 0.f, bj = 0.f; // jaw alpha/beta
-  float at = 0.f, bt = 0.f; // teeth
-  float al = 0.f, bl = 0.f; // lips
+  float aj = 0.f, bj = 0.f; 
+  float at = 0.f, bt = 0.f; 
+  float al = 0.f, bl = 0.f; 
 
   if (combo < n_combos) {
     pj = jaw_periods[combo];
@@ -91,8 +91,8 @@ void alligator_batch_f32(const float* __restrict__ prices,
     }
   }
 
-  // Initialize outputs with NaN up to warm indices (clamped). Do this once
-  // per thread to ensure prefixes are set even when writes are sparse due to offsets.
+  
+  
   if (combo < n_combos && valid) {
     const int warm_base_j = first_valid + pj - 1;
     const int warm_base_t = first_valid + pt - 1;
@@ -103,12 +103,12 @@ void alligator_batch_f32(const float* __restrict__ prices,
     for (int i = 0; i < warm_j; ++i) out_jaw[base + i] = nan_f;
     for (int i = 0; i < warm_t; ++i) out_teeth[base + i] = nan_f;
     for (int i = 0; i < warm_l; ++i) out_lips[base + i] = nan_f;
-    // For indices >= warm_* we will write progressively below; cells beyond last write
-    // keep their initial value; callers generally compare only within valid window.
+    
+    
   }
 
-  // Compute initial averages for each line at i = first_valid + period - 1, using a single
-  // broadcasted pass up to max(pj, pt, pl).
+  
+  
   float prev_j = 0.f, prev_t = 0.f, prev_l = 0.f;
   if (combo < n_combos && valid) {
     const unsigned mask = __activemask();
@@ -116,10 +116,10 @@ void alligator_batch_f32(const float* __restrict__ prices,
     const int warm_base_t = first_valid + pt - 1;
     const int warm_base_l = first_valid + pl - 1;
     int maxP = warp_reduce_max(max(pj, max(pt, pl)), mask);
-    // warp_reduce_max only returns the full reduction in lane 0; broadcast it so
-    // all lanes loop over the same max period.
+    
+    
     maxP = __shfl_sync(mask, maxP, 0);
-    const int leader = 0; // broadcast lane
+    const int leader = 0; 
     float sum_j = 0.f, sum_t = 0.f, sum_l = 0.f;
     for (int k = 0; k < maxP; ++k) {
       float v = 0.f;
@@ -135,7 +135,7 @@ void alligator_batch_f32(const float* __restrict__ prices,
     prev_t = sum_t * at;
     prev_l = sum_l * al;
 
-    // Write initial averages at shifted indices t = warm_base + offset (if in range)
+    
     const int tj = warm_base_j + oj;
     const int tt = warm_base_t + ot;
     const int tl = warm_base_l + ol;
@@ -143,12 +143,12 @@ void alligator_batch_f32(const float* __restrict__ prices,
     if (tt < series_len) out_teeth[base + tt] = prev_t;
     if (tl < series_len) out_lips[base + tl] = prev_l;
 
-    // Continue recurrence for i = warm_base+1.., writing at shifted indices.
-    //
-    // IMPORTANT: We broadcast prices from lane 0 to reduce global loads. To keep
-    // the broadcast correct, every active lane in the warp must iterate over
-    // the same `i` values. Use a warp-wide minimum start index; per-lane gates
-    // below ensure each line only updates/writes once it is warm.
+    
+    
+    
+    
+    
+    
     const int min_base = min(min(warm_base_j, warm_base_t), warm_base_l);
     int start_i = warp_reduce_min(min_base, mask);
     start_i = __shfl_sync(mask, start_i, 0) + 1;
@@ -158,7 +158,7 @@ void alligator_batch_f32(const float* __restrict__ prices,
         v2 = prices[i];
       }
       const float px = __shfl_sync(mask, v2, leader);
-      // Update only after each line's warm_base
+      
       if (i > warm_base_j) {
         prev_j = fmaf(prev_j, bj, px * aj);
       }
@@ -217,7 +217,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
   const size_t col    = size_t(series_idx);
   const float nan_f = __int_as_float(0x7fffffff);
 
-  // Fill NaN prefixes
+  
   for (int t = 0; t < min(series_len, warm_j); ++t)
     out_jaw_tm[size_t(t) * stride + col] = nan_f;
   for (int t = 0; t < min(series_len, warm_t); ++t)
@@ -227,7 +227,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
   if (warm_base_j >= series_len && warm_base_t >= series_len && warm_base_l >= series_len) return;
 
-  // Initial sums over [first .. first+period)
+  
   size_t idx = size_t(first) * stride + col;
   float sum_j = 0.f, sum_t = 0.f, sum_l = 0.f;
   for (int k = 0; k < max(max(jaw_period, teeth_period), lips_period); ++k) {
@@ -244,7 +244,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
   if (warm_t < series_len) out_teeth_tm[size_t(warm_t) * stride + col] = prev_t;
   if (warm_l < series_len) out_lips_tm[size_t(warm_l) * stride + col] = prev_l;
 
-  // Continue recurrence over source time i; write at shifted t = i + offset
+  
   int start_i = min(min(warm_base_j, warm_base_t), warm_base_l) + 1;
   size_t t_idx = size_t(start_i) * stride + col;
   for (int i = start_i; i < series_len; ++i, t_idx += stride) {

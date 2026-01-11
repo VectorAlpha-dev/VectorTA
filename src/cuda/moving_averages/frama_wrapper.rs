@@ -7,8 +7,8 @@
 //! - Warmup/NaN handling and semantics match the scalar reference.
 //!
 //! Kernels expected (recurrence/time-marching; one thread per combo/series):
-//! - "frama_batch_f32"                   // one-series × many-params
-//! - "frama_many_series_one_param_f32"   // many-series × one-param (time-major)
+//! - "frama_batch_f32"                   
+//! - "frama_many_series_one_param_f32"   
 
 #![cfg(feature = "cuda")]
 
@@ -32,21 +32,21 @@ use std::sync::Arc;
 
 const FRAMA_MAX_WINDOW: usize = 1024;
 
-// -------- Kernel selection policy (keep simple for recurrence kernels) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    // Each thread processes one combo across time. Tunable block_x for occupancy.
+    
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    // One thread per series (time-major). Tunable block_x.
+    
     OneD { block_x: u32 },
-    // Placeholder for API symmetry with ALMA; falls back to OneD.
+    
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -64,7 +64,7 @@ impl Default for CudaFramaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {

@@ -1,13 +1,13 @@
-// CUDA kernels for RSX (Relative Strength Xtra)
-//
-// Math pattern: recurrence/IIR chain with warmup latch.
-// Semantics (must match scalar RSX exactly):
-// - Warmup index = first_valid + period - 1; write NaN at warmup and before.
-// - Valid outputs start at warmup + 1.
-// - If denominator proxy (v20_) <= 1e-10, output 50.0.
-// - Clamp final value to [0, 100].
-// - Ignore NaNs in input like scalar: the arithmetic propagates them; we only
-//   guard warmup and bounds.
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -16,27 +16,27 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Branchless clamp helper used by both kernels
+
 static __device__ __forceinline__ float clamp_0_100(float x) {
     x = fminf(x, 100.0f);
     x = fmaxf(x, 0.0f);
     return x;
 }
 
-// ----------------- Utility: 32x32 tiled transpose (TM -> RM) -----------------
-// in_tm shape: [rows x cols] with time-major layout (rows=time, cols=combos)
-// out_rm shape: [cols x rows] with row-major layout (rows=combos, cols=time)
+
+
+
 extern "C" __global__
 void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
                             int rows, int cols,
                             float* __restrict__ out_rm)
 {
-    __shared__ float tile[32][33]; // +1 to avoid shared bank conflicts
+    __shared__ float tile[32][33]; 
 
-    int x = blockIdx.x * 32 + threadIdx.x; // column in in_tm (combo)
-    int y = blockIdx.y * 32 + threadIdx.y; // row in in_tm (time)
+    int x = blockIdx.x * 32 + threadIdx.x; 
+    int y = blockIdx.y * 32 + threadIdx.y; 
 
-    // Load 32x32 tile from in_tm -> shared
+    
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
         int yy = y + j;
@@ -46,25 +46,25 @@ void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
     }
     __syncthreads();
 
-    // Transpose coordinates for store
-    x = blockIdx.y * 32 + threadIdx.x; // time becomes x
-    y = blockIdx.x * 32 + threadIdx.y; // combo becomes y
+    
+    x = blockIdx.y * 32 + threadIdx.x; 
+    y = blockIdx.x * 32 + threadIdx.y; 
 
-    // Store transposed tile into out_rm [combo][time]
+    
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
-        int yy = y + j; // combo index
+        int yy = y + j; 
         if (x < rows && yy < cols) {
             out_rm[yy * rows + x] = tile[threadIdx.x][threadIdx.y + j];
         }
     }
 }
 
-// One series x many params (batch), time-major output
-// Mapping: 1 thread = 1 param combo; warp broadcasts price[t]
-// prices: length = series_len
-// periods: length = n_combos
-// out_tm: layout rows=series_len, cols=n_combos (time-major: t * n_combos + combo)
+
+
+
+
+
 extern "C" __global__
 void rsx_batch_tm_f32(const float* __restrict__ prices,
                       const int*   __restrict__ periods,
@@ -83,9 +83,9 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period - 1;
 
-    // RSX state (FP32)
+    
     float f0  = 0.0f;
-    float f8  = 0.0f;   // set at t==warm
+    float f8  = 0.0f;   
     bool  have_init = false;
     const float alpha = 3.0f / (float(period) + 2.0f);
     const float beta  = 1.0f - alpha;
@@ -98,10 +98,10 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
     const float f88 = (period >= 6) ? float(period - 1) : 5.0f;
     float f90 = 1.0f;
 
-    // Sequential in time per combo
+    
     #pragma unroll 1
     for (int t = 0; t < series_len; ++t) {
-        // Warp-broadcast price[t]: lane0 loads; __shfl_sync shares within warp
+        
         unsigned mask = __activemask();
         float p = 0.0f;
         if ((threadIdx.x & 31) == 0) {
@@ -110,20 +110,20 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
         p = __shfl_sync(mask, p, 0);
         const float p100 = 100.0f * p;
 
-        // Warmup semantics: prefix including warm index as NaN
+        
         if (t <= warm) {
             out_tm[(size_t)t * (size_t)n_combos + combo] = NAN;
             if (t == warm) { f8 = p100; have_init = true; }
             continue;
         }
 
-        // After warmup
+        
         f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
         const float prev = f8;
         f8 = p100;
         const float v8 = f8 - prev;
 
-        // IIR cascade; compiler fuses to FMAs
+        
         f28 = beta * f28 + alpha * v8;
         f30 = alpha * f28 + beta * f30;
         const float v_c = 1.5f * f28 - 0.5f * f30;
@@ -160,11 +160,11 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
     }
 }
 
-// One series x many params (batch)
-// Mapping: 1 thread = 1 param combo; warp broadcasts price[t]
-// prices: length = series_len
-// periods: length = n_combos
-// out: layout rows=n_combos, cols=series_len (row-major)
+
+
+
+
+
 extern "C" __global__
 void rsx_batch_f32(const float* __restrict__ prices,
                    const int*   __restrict__ periods,
@@ -184,9 +184,9 @@ void rsx_batch_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period - 1;
 
-    // RSX state (FP32)
+    
     float f0  = 0.0f;
-    float f8  = 0.0f;   // set at t==warm
+    float f8  = 0.0f;   
     bool  have_init = false;
     const float alpha = 3.0f / (float(period) + 2.0f);
     const float beta  = 1.0f - alpha;
@@ -199,10 +199,10 @@ void rsx_batch_f32(const float* __restrict__ prices,
     const float f88 = (period >= 6) ? float(period - 1) : 5.0f;
     float f90 = 1.0f;
 
-    // Sequential in time per combo
+    
     #pragma unroll 1
     for (int t = 0; t < series_len; ++t) {
-        // Warp-broadcast price[t]: lane0 loads; __shfl_sync shares within warp
+        
         unsigned mask = __activemask();
         float p = 0.0f;
         if ((threadIdx.x & 31) == 0) {
@@ -211,20 +211,20 @@ void rsx_batch_f32(const float* __restrict__ prices,
         p = __shfl_sync(mask, p, 0);
         const float p100 = 100.0f * p;
 
-        // Warmup semantics: prefix including warm index as NaN
+        
         if (t <= warm) {
             out[base + t] = NAN;
             if (t == warm) { f8 = p100; have_init = true; }
             continue;
         }
 
-        // After warmup
+        
         f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
         const float prev = f8;
         f8 = p100;
         const float v8 = f8 - prev;
 
-        // IIR cascade; compiler fuses to FMAs
+        
         f28 = beta * f28 + alpha * v8;
         f30 = alpha * f28 + beta * f30;
         const float v_c = 1.5f * f28 - 0.5f * f30;
@@ -261,8 +261,8 @@ void rsx_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Many-series x one-param (time-major)
-// prices_tm/out_tm layout: index = t * cols + s
+
+
 extern "C" __global__
 void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int*   __restrict__ first_valids,
@@ -270,7 +270,7 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int rows,
                                    int period,
                                    float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series index
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
     if (period <= 0) return;
 
@@ -281,13 +281,13 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     const int warm = fv + period - 1;
 
-    // Warmup prefix incl. warm index as NaN to match scalar
+    
     for (int t = 0; t <= warm && t < rows; ++t) {
         out_tm[t * cols + s] = NAN;
     }
     if (warm >= rows) return;
 
-    // State registers
+    
     float f0 = 0.0f;
     float f8 = 100.0f * prices_tm[warm * cols + s];
     const float alpha = 3.0f / (float(period) + 2.0f);

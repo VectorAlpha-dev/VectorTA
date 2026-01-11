@@ -1,29 +1,29 @@
-// CUDA kernels for Chande Forecast Oscillator (CFO)
-//
-// Math pattern: prefix-sum/rational.
-// Host builds prefix sums over the valid segment and passes them to the kernel.
-// Kernel computes O(1) per-output window statistics for each param row.
-//
-// Semantics:
-// - Warmup per row: warm = first_valid + period - 1
-// - Warmup prefix filled with NaN
-// - If current value is NaN or zero: write NaN
-// - Accumulations in float64; outputs in float32
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Helper to write an IEEE-754 quiet NaN as f32
+
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
-// One-series × many-params (batch). Uses host-provided prefix sums P (sum_y) and
-// Q (sum_{k=1..j} k*y_k) over the valid segment that starts at first_valid.
-// Periods and scalars arrays are length n_combos. Output is row-major
-// [combo][t] (n_combos x len).
+
+
+
+
 extern "C" __global__ void cfo_batch_f32(
     const float* __restrict__ data,
-    const double* __restrict__ prefix_sum,      // length = len - first_valid + 1 (but passed as linear over whole len; kernel indexes with absolute t)
-    const double* __restrict__ prefix_weighted, // same layout as prefix_sum
+    const double* __restrict__ prefix_sum,      
+    const double* __restrict__ prefix_weighted, 
     int len,
     int first_valid,
     const int* __restrict__ periods,
@@ -41,10 +41,10 @@ extern "C" __global__ void cfo_batch_f32(
     const int warm = first_valid + period - 1;
     const int row_off = combo * len;
 
-    // OLS constants for x = 1..n
+    
     const double n = (double)period;
-    const double sx = (double)(period * (period + 1)) * 0.5; // Σx
-    const double sx2 = (double)(period * (period + 1) * (2 * period + 1)) / 6.0; // Σx^2
+    const double sx = (double)(period * (period + 1)) * 0.5; 
+    const double sx2 = (double)(period * (period + 1) * (2 * period + 1)) / 6.0; 
     const double inv_denom = 1.0 / (n * sx2 - sx * sx);
     const double half_nm1 = 0.5 * (n - 1.0);
 
@@ -55,12 +55,12 @@ extern "C" __global__ void cfo_batch_f32(
     while (t < len) {
         float out_val = nanf;
         if (t >= warm) {
-            // Map absolute index t (in full series) to valid-segment indices
-            const int idx = t - first_valid;       // 0-based within valid segment
-            const int r1 = idx + 1;                // 1-based right endpoint for prefix
-            const int l1_minus1 = r1 - period;     // (left1 - 1)
+            
+            const int idx = t - first_valid;       
+            const int r1 = idx + 1;                
+            const int l1_minus1 = r1 - period;     
 
-            // prefix arrays are stored starting at absolute 0 with zeros up to first_valid
+            
             const double sum_y = prefix_sum[first_valid + r1] - prefix_sum[first_valid + l1_minus1];
             const double sum_xy_raw = prefix_weighted[first_valid + r1] - prefix_weighted[first_valid + l1_minus1];
             const double sum_xy = sum_xy_raw - ((double)l1_minus1) * sum_y;
@@ -70,7 +70,7 @@ extern "C" __global__ void cfo_batch_f32(
             const double f = b_scaled * half_nm1 + sum_y / n;
             const float cur = data[t];
             if (!isnan(cur) && cur != 0.0f) {
-                // CFO = scalar * (1 - f/cur)
+                
                 out_val = scalar * (1.0f - (float)(f / (double)cur));
             } else {
                 out_val = nanf;
@@ -81,10 +81,10 @@ extern "C" __global__ void cfo_batch_f32(
     }
 }
 
-// Many-series × one-param (time-major). Data layout: time-major with shape
-// rows x cols. Prefix arrays P and Q are time-major with +1 length per element
-// (i.e., stored at linear index (t*cols + s) + 1). first_valids has one entry
-// per series/column.
+
+
+
+
 extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
     const float* __restrict__ data_tm,
     const double* __restrict__ prefix_sum_tm,
@@ -96,8 +96,8 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
     float scalar,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.y * blockDim.y + threadIdx.y; // series/column
-    const int tx = blockIdx.x * blockDim.x + threadIdx.x; // time index iterator
+    const int s = blockIdx.y * blockDim.y + threadIdx.y; 
+    const int tx = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
     const int fv = first_valids[s];
@@ -105,25 +105,25 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
 
     const int warm = fv + period - 1;
 
-    // OLS constants
+    
     const double n = (double)period;
     const double sx = (double)(period * (period + 1)) * 0.5;
     const double sx2 = (double)(period * (period + 1) * (2 * period + 1)) / 6.0;
     const double inv_denom = 1.0 / (n * sx2 - sx * sx);
     const double half_nm1 = 0.5 * (n - 1.0);
 
-    // Exact streaming path per series to match CPU scalar implementation.
-    // Run sequentially on a single thread per series (x==0 of grid.x==0).
+    
+    
     if (blockIdx.x == 0 && threadIdx.x == 0) {
         const float nanf = f32_nan();
-        // Emit NaNs before first valid
+        
         int t = 0;
         for (; t < fv && t < rows; ++t) {
             out_tm[t * cols + s] = nanf;
         }
         if (t >= rows) return;
 
-        // Warm-up accumulation for first (period-1) samples
+        
         double sum_y = 0.0;
         double sum_xy = 0.0;
         int warm_needed = period - 1;
@@ -138,7 +138,7 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
         }
         if (t >= rows) return;
 
-        // First full window: add newest with weight n
+        
         {
             float v = data_tm[t * cols + s];
             double vd = (double)v;
@@ -152,7 +152,7 @@ extern "C" __global__ void cfo_many_series_one_param_time_major_f32(
             ++t;
         }
 
-        // Steady-state sliding updates
+        
         for (; t < rows; ++t) {
             float v_new = data_tm[t * cols + s];
             float v_old = data_tm[(t - period) * cols + s];

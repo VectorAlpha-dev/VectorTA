@@ -1,7 +1,7 @@
-// CUDA kernels for the Time Series Forecast (TSF) indicator.
-// TSF is equivalent to forecasting the next value from a rolling linear
-// regression over a window of size `period`. The math matches the LINREG
-// kernels; symbol names are TSF-specific.
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,7 +18,7 @@
 #define TSF_LAUNCH_BOUNDS 256, 2
 #endif
 
-// See linreg_kernel.cu for the prefix derivation (prefix_y / prefix_yi).
+
 extern "C" __global__ void tsf_exclusive_prefix_y_yi_f64(
     const float* __restrict__ prices,
     int series_len,
@@ -114,7 +114,7 @@ void tsf_batch_from_prefix_f64(
     }
 }
 
-// -------------------------- Batch kernel (one series × many params) --------------------------
+
 
 extern "C" __global__
 __launch_bounds__(TSF_LAUNCH_BOUNDS)
@@ -137,7 +137,7 @@ void tsf_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        // Guard invalid params as NaN row (wrapper should validate first).
+        
         if (period <= 1 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = TSF_NAN;
             continue;
@@ -155,10 +155,10 @@ void tsf_batch_f32(const float* __restrict__ prices,
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
 
-        // Prefix warmup = NaN
+        
         for (int i = 0; i < warm; ++i) out[base + i] = TSF_NAN;
 
-        // Initialize rolling sums over the first period-1 values (x = 1..period-1)
+        
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {
@@ -168,10 +168,10 @@ void tsf_batch_f32(const float* __restrict__ prices,
             xy_sum  = fma(val, x, xy_sum);
         }
 
-        // Prefetch the first fully-included value at index `warm`
+        
         double latest = static_cast<double>(prices[warm]);
 
-        // Main loop
+        
         const double period_next = period_f + 1.0;
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum  += latest;
@@ -193,7 +193,7 @@ void tsf_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// -------------------------- Many-series × one param (time-major) --------------------------
+
 
 static __device__ __forceinline__
 int tm_idx(int row, int num_series, int series) {

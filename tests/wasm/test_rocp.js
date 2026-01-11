@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -45,7 +45,7 @@ test('ROCP Safe API accuracy', () => {
     
     assert.strictEqual(result.length, testData.close.length);
     
-    // Expected values from Rust tests
+    
     const expectedLastFive = [
         -0.0022551709049293996,
         -0.005561903481650759,
@@ -67,24 +67,24 @@ test('ROCP Fast API with aliasing', () => {
     const period = 10;
     const len = testData.close.length;
     
-    // Allocate memory
+    
     const ptr = wasm.rocp_alloc(len);
     
     try {
-        // Create typed array view for input/output
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         memory.set(testData.close);
         
-        // In-place computation (aliasing case)
+        
         wasm.rocp_into(ptr, ptr, len, period);
         
-        // Recreate view in case memory grew
+        
         const memory2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
         
-        // Convert to regular array to avoid detached buffer issues
+        
         const result = [...memory2];
         
-        // Compare with safe API result
+        
         const safeResult = wasm.rocp_js(testData.close, period);
         assertArrayClose(
             result,
@@ -101,28 +101,28 @@ test('ROCP Fast API without aliasing', () => {
     const period = 10;
     const len = testData.close.length;
     
-    // Allocate separate input and output memory
+    
     const inPtr = wasm.rocp_alloc(len);
     const outPtr = wasm.rocp_alloc(len);
     
     try {
-        // Create typed array views
+        
         const inMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         const outMemory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // Copy input data
+        
         inMemory.set(testData.close);
         
-        // Compute with separate buffers
+        
         wasm.rocp_into(inPtr, outPtr, len, period);
         
-        // Recreate view in case memory grew
+        
         const outMemory2 = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // Convert to regular array to avoid detached buffer issues
+        
         const result = [...outMemory2];
         
-        // Compare with safe API result
+        
         const safeResult = wasm.rocp_js(testData.close, period);
         assertArrayClose(
             result,
@@ -168,7 +168,7 @@ test('ROCP error handling - empty input', () => {
 
 test('ROCP Batch API - small config', () => {
     const config = {
-        period_range: [9, 15, 3]  // periods: 9, 12, 15
+        period_range: [9, 15, 3]  
     };
     
     const result = wasm.rocp_batch(testData.close, config);
@@ -179,11 +179,11 @@ test('ROCP Batch API - small config', () => {
     assert.strictEqual(result.rows, 3);
     assert.strictEqual(result.cols, testData.close.length);
     
-    // Check that period values match
+    
     const periods = result.combos.map(c => c.period);
     assert.deepStrictEqual(periods, [9, 12, 15]);
     
-    // Check that first row matches single calculation with period=9
+    
     const firstRow = result.values.slice(0, result.cols);
     const singleResult = wasm.rocp_js(testData.close, 9);
     assertArrayClose(firstRow, singleResult, 1e-9, 'Batch first row mismatch');
@@ -195,20 +195,20 @@ test('ROCP Batch Fast API', () => {
     const periodStep = 5;
     const len = testData.close.length;
     
-    // Calculate expected rows
-    const expectedRows = Math.floor((periodEnd - periodStart) / periodStep) + 1; // 3 rows
+    
+    const expectedRows = Math.floor((periodEnd - periodStart) / periodStep) + 1; 
     const totalSize = expectedRows * len;
     
-    // Allocate memory
+    
     const inPtr = wasm.rocp_alloc(len);
     const outPtr = wasm.rocp_alloc(totalSize);
     
     try {
-        // Copy input data
+        
         const inMemory = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inMemory.set(testData.close);
         
-        // Run batch computation
+        
         const rows = wasm.rocp_batch_into(
             inPtr,
             outPtr,
@@ -220,10 +220,10 @@ test('ROCP Batch Fast API', () => {
         
         assert.strictEqual(rows, expectedRows, 'Batch rows mismatch');
         
-        // Get output
+        
         const outMemory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
         
-        // Verify first row (period=5)
+        
         const firstRow = outMemory.slice(0, len);
         const singleResult = wasm.rocp_js(testData.close, periodStart);
         assertArrayClose(
@@ -242,12 +242,12 @@ test('ROCP NaN handling', () => {
     const period = 9;
     const result = wasm.rocp_js(testData.close, period);
     
-    // Check warmup period
+    
     for (let i = 0; i < period; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
     }
     
-    // Check no NaN after valid data starts
+    
     const validStartIdx = Math.max(240, period);
     if (result.length > validStartIdx) {
         for (let i = validStartIdx; i < result.length; i++) {

@@ -303,8 +303,8 @@ fn bandpass_prepare<'a>(
         return Err(BandPassError::TriggerPeriodTooSmall { trigger_period });
     }
 
-    // Use standard runtime selection so CPUs with AVX2/AVX512 can pick those variants.
-    // Our AVX stubs route to an unchecked scalar kernel (bounds-check-free), which can be faster.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -327,24 +327,24 @@ pub fn bandpass_with_kernel(
     let (data, len, period, bandwidth, hp_period, trigger_period, chosen) =
         bandpass_prepare(input, kernel)?;
 
-    // high-pass on source
+    
     let mut hp_params = HighPassParams::default();
     hp_params.period = Some(hp_period);
     let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
 
-    // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+    
     let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(len);
     let warmup_bp = first_valid_hp.saturating_add(2).max(2).min(len);
 
-    // filter constants
+    
     let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
     let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-    // Allocate bp with NaN prefix only; remainder left uninitialized to reduce writes
+    
     let mut bp = alloc_with_nan_prefix(len, warmup_bp);
 
-    // compute bp (seed from the first finite triplet)
+    
     let bp_start = warmup_bp.saturating_sub(2);
     unsafe {
         match chosen {
@@ -363,15 +363,15 @@ pub fn bandpass_with_kernel(
         }
     }
 
-    // Explicitly set warmup prefix to NaN for consistency
+    
     for v in &mut bp[..warmup_bp] {
         *v = f64::NAN;
     }
 
-    // bp_normalized with NaN prefix only
+    
     let mut bp_normalized = alloc_with_nan_prefix(len, warmup_bp);
 
-    // normalize only after warmup_bp
+    
     let k = 0.991;
     let mut peak_prev = 0.0f64;
     for i in warmup_bp..len {
@@ -387,7 +387,7 @@ pub fn bandpass_with_kernel(
         };
     }
 
-    // trigger on normalized - only process valid portion (zero-copy into suffix)
+    
     let mut trigger = alloc_with_nan_prefix(len, warmup_bp);
     if warmup_bp < len {
         let mut trigger_params = HighPassParams::default();
@@ -400,7 +400,7 @@ pub fn bandpass_with_kernel(
         )?;
     }
 
-    // Signal: allocate with warm prefix and fill only valid suffix
+    
     let first_trig = trigger.iter().position(|x| !x.is_nan()).unwrap_or(len);
     let warm_sig = warmup_bp.max(first_trig);
     let mut signal = alloc_with_nan_prefix(len, warm_sig);
@@ -467,21 +467,21 @@ pub fn bandpass_into_slice(
         return Err(BandPassError::OutputLengthMismatch { expected: len, got: *[bp_dst.len(), bpn_dst.len(), sig_dst.len(), trig_dst.len()].iter().min().unwrap_or(&0) });
     }
 
-    // workspace: hp
+    
     let mut hp_params = HighPassParams::default();
     hp_params.period = Some(hp_period);
     let hp = highpass(&HighPassInput::from_slice(data, hp_params))?.values;
 
-    // Warmup: need a finite HP triplet (hp[i], hp[i-1], hp[i-2]) to seed the 2nd-order IIR.
+    
     let first_valid_hp = hp.iter().position(|&x| !x.is_nan()).unwrap_or(len);
     let warm_bp = first_valid_hp.saturating_add(2).max(2).min(len);
 
-    // constants
+    
     let beta = (2.0 * std::f64::consts::PI / period as f64).cos();
     let gamma = (2.0 * std::f64::consts::PI * bandwidth / period as f64).cos();
     let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
 
-    // compute bp directly into bp_dst; seed from the first finite triplet
+    
     let bp_start = warm_bp.saturating_sub(2);
     unsafe {
         match chosen {
@@ -500,12 +500,12 @@ pub fn bandpass_into_slice(
         }
     }
 
-    // enforce NaN prefix minimally
+    
     for v in &mut bp_dst[..warm_bp] {
         *v = f64::NAN;
     }
 
-    // normalized
+    
     for v in &mut bpn_dst[..warm_bp] {
         *v = f64::NAN;
     }
@@ -521,7 +521,7 @@ pub fn bandpass_into_slice(
         bpn_dst[i] = if peak != 0.0 { v / peak } else { 0.0 };
     }
 
-    // trigger into trig_dst via highpass - only process valid portion (zero-copy)
+    
     for v in trig_dst.iter_mut() {
         *v = f64::NAN;
     }
@@ -529,7 +529,7 @@ pub fn bandpass_into_slice(
         let mut trigger_params = HighPassParams::default();
         trigger_params.period = Some(trigger_period);
         let trig_inp = HighPassInput::from_slice(&bpn_dst[warm_bp..], trigger_params);
-        // Reuse the same kernel family selection for consistency
+        
         crate::indicators::moving_averages::highpass::highpass_into_slice(
             &mut trig_dst[warm_bp..],
             &trig_inp,
@@ -537,7 +537,7 @@ pub fn bandpass_into_slice(
         )?;
     }
 
-    // warm for signal
+    
     let first_trig = trig_dst.iter().position(|x| !x.is_nan()).unwrap_or(len);
     let warm_sig = warm_bp.max(first_trig);
     for v in &mut sig_dst[..warm_sig] {
@@ -560,22 +560,22 @@ pub fn bandpass_into_slice(
 
 #[inline(always)]
 pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    // Safe, FMA‑friendly, loop‑unrolled scalar kernel
-    //
-    // Recurrence:
-    //   out[i] = a*(hp[i] - hp[i-2]) + c*out[i-1] + d*out[i-2]
-    // where a = 0.5*(1 - alpha), c = beta*(1 + alpha), d = -alpha.
-    //
-    // Notes:
-    // - Keeps scalar path safe (no unsafe/raw pointers).
-    // - Hoists invariants and uses mul_add to enable FMA fusion.
-    // - Unrolls by 4, then 2, then 1 to reduce loop overhead.
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     let len = hp.len();
     if len == 0 {
         return;
     }
 
-    // Seed preserves existing semantics
+    
     out[0] = hp[0];
     if len == 1 {
         return;
@@ -585,45 +585,45 @@ pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &m
         return;
     }
 
-    // Hoisted coefficients
+    
     let a = 0.5 * (1.0 - alpha);
     let c = beta * (1.0 + alpha);
     let d = -alpha;
 
-    // Running state of previous outputs
+    
     let mut y_im2 = out[0];
     let mut y_im1 = out[1];
 
-    // Main unrolled loop by 4
+    
     let mut i = 2usize;
     while i + 3 < len {
-        // i
+        
         let delta0 = hp[i] - hp[i - 2];
         let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
         out[i] = y0;
 
-        // i+1
+        
         let delta1 = hp[i + 1] - hp[i - 1];
         let y1 = d.mul_add(y_im1, c.mul_add(y0, a * delta1));
         out[i + 1] = y1;
 
-        // i+2
+        
         let delta2 = hp[i + 2] - hp[i];
         let y2 = d.mul_add(y0, c.mul_add(y1, a * delta2));
         out[i + 2] = y2;
 
-        // i+3
+        
         let delta3 = hp[i + 3] - hp[i + 1];
         let y3 = d.mul_add(y1, c.mul_add(y2, a * delta3));
         out[i + 3] = y3;
 
-        // advance state
+        
         y_im2 = y2;
         y_im1 = y3;
         i += 4;
     }
 
-    // Remainder by 2
+    
     while i + 1 < len {
         let delta0 = hp[i] - hp[i - 2];
         let y0 = d.mul_add(y_im2, c.mul_add(y_im1, a * delta0));
@@ -638,7 +638,7 @@ pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &m
         i += 2;
     }
 
-    // Tail 1
+    
     if i < len {
         let delta = hp[i] - hp[i - 2];
         out[i] = d.mul_add(y_im2, c.mul_add(y_im1, a * delta));
@@ -648,8 +648,8 @@ pub fn bandpass_scalar(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn bandpass_avx2(hp: &[f64], period: usize, alpha: f64, beta: f64, out: &mut [f64]) {
-    // Unsafe, bounds-check-free variant using raw pointers and mul_add.
-    // This keeps the exact scalar recurrence but removes index checks.
+    
+    
     unsafe { bandpass_scalar_unchecked(hp, alpha, beta, out) }
 }
 
@@ -674,25 +674,25 @@ pub fn bandpass_avx512_long(hp: &[f64], period: usize, alpha: f64, beta: f64, ou
 /// SIMD: stubs; scalar stream is the reference. Streaming kernel matches batch after warmup.
 #[derive(Debug, Clone)]
 pub struct BandPassStream {
-    // Keep public API the same; period retained for introspection.
+    
     period: usize,
 
-    // Precomputed coefficients for the 2nd‑order IIR recurrence:
-    //   y[n] = c0*(hp[n] - hp[n-2]) + c1*y[n-1] + c2*y[n-2]
-    c0: f64, // 0.5 * (1 - alpha)
-    c1: f64, // beta * (1 + alpha)
-    c2: f64, // -alpha
+    
+    
+    c0: f64, 
+    c1: f64, 
+    c2: f64, 
 
-    // High-pass stage in streaming form
+    
     hp_stream: crate::indicators::highpass::HighPassStream,
 
-    // Minimal delay line for hp and output y (=bp)
+    
     hp_z1: f64,
     hp_z2: f64,
     y_z1: f64,
     y_z2: f64,
 
-    // Count of finite HP samples observed; seeds y[0]=hp[0], y[1]=hp[1]
+    
     hp_valid: u8,
 }
 
@@ -708,23 +708,23 @@ impl BandPassStream {
             return Err(BandPassError::InvalidBandwidth { bandwidth });
         }
 
-        // High-pass period as in the batch path
+        
         let hp_period = (4.0 * period as f64 / bandwidth).round() as usize;
         if hp_period < 2 {
             return Err(BandPassError::HpPeriodTooSmall { hp_period });
         }
 
-        // Build HP stream first
+        
         let mut hp_params = HighPassParams::default();
         hp_params.period = Some(hp_period);
         let hp_stream = crate::indicators::highpass::HighPassStream::try_new(hp_params)?;
 
-        // Precompute band‑pass constants once
+        
         use std::f64::consts::PI;
         let beta = (2.0 * PI / period as f64).cos();
         let gamma = (2.0 * PI * bandwidth / period as f64).cos();
 
-        // Same alpha as batch (Ehlers form). Use algebraically identical variant with fewer divisions.
+        
         #[inline(always)]
         fn alpha_from_gamma(gamma: f64) -> f64 {
             let g2 = gamma * gamma;
@@ -733,7 +733,7 @@ impl BandPassStream {
         }
         let alpha = alpha_from_gamma(gamma);
 
-        // Hoist coefficients for the hot loop
+        
         let c0 = 0.5 * (1.0 - alpha);
         let c1 = beta * (1.0 + alpha);
         let c2 = -alpha;
@@ -758,16 +758,16 @@ impl BandPassStream {
     pub fn update(&mut self, value: f64) -> f64 {
         let hp = self.hp_stream.update(value);
 
-        // Do not poison state if HP is not yet finite
+        
         if !hp.is_finite() {
             return f64::NAN;
         }
 
-        // Seed: y[0] = hp[0], y[1] = hp[1]; still return NaN during these two steps
+        
         if self.hp_valid < 2 {
             let y = hp;
 
-            // rotate delays after computing the seed
+            
             self.hp_z2 = self.hp_z1;
             self.hp_z1 = hp;
 
@@ -778,14 +778,14 @@ impl BandPassStream {
             return f64::NAN;
         }
 
-        // Steady‑state recurrence (FMA‑friendly):
-        // y = c2*y[n-2] + c1*y[n-1] + c0*(hp - hp[n-2])
+        
+        
         let delta = hp - self.hp_z2;
         let y = self
             .c2
             .mul_add(self.y_z2, self.c1.mul_add(self.y_z1, self.c0 * delta));
 
-        // rotate delays
+        
         self.hp_z2 = self.hp_z1;
         self.hp_z1 = hp;
 
@@ -976,7 +976,7 @@ fn expand_grid(r: &BandPassBatchRange) -> Vec<BandPassParams> {
     out
 }
 
-// ========================= Python CUDA VRAM handle (CAI v3 + DLPack) =========================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "BandPassDeviceArrayF32", unsendable)]
 pub struct BandPassDeviceArrayF32Py {
@@ -1886,7 +1886,7 @@ mod tests {
             );
         }
         for (i, &value) in result.signal[start..].iter().enumerate() {
-            // Skip NaN values (shouldn't happen for last 5 values, but being defensive)
+            
             if value.is_nan() {
                 continue;
             }
@@ -1907,7 +1907,7 @@ mod tests {
                 value
             );
         }
-        // Only check that non-NaN values are finite (warmup period contains NaNs)
+        
         for val in &result.bp {
             if !val.is_nan() {
                 assert!(val.is_finite(), "bp value not finite: {}", val);
@@ -2031,7 +2031,7 @@ mod tests {
         let res = bandpass_with_kernel(&input, kernel)?;
         assert_eq!(res.bp.len(), candles.close.len());
 
-        // Find the first non-NaN index for each output
+        
         let first_bp = res
             .bp
             .iter()
@@ -2053,7 +2053,7 @@ mod tests {
             .position(|x| !x.is_nan())
             .unwrap_or(res.trigger.len());
 
-        // After warmup, values should not be NaN
+        
         let warmup_end = first_bp.max(first_bpn).max(first_sig).max(first_trig);
         if warmup_end < res.bp.len() {
             for i in warmup_end..res.bp.len() {
@@ -2098,7 +2098,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_bandpass_no_poison(
         test_name: &str,
@@ -2109,7 +2109,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to increase coverage
+        
         let test_params = vec![
             BandPassParams {
                 period: Some(10),
@@ -2118,7 +2118,7 @@ mod tests {
             BandPassParams {
                 period: Some(20),
                 bandwidth: Some(0.3),
-            }, // default
+            }, 
             BandPassParams {
                 period: Some(30),
                 bandwidth: Some(0.4),
@@ -2130,27 +2130,27 @@ mod tests {
             BandPassParams {
                 period: Some(5),
                 bandwidth: Some(0.1),
-            }, // edge case: small period
+            }, 
             BandPassParams {
                 period: Some(100),
                 bandwidth: Some(0.8),
-            }, // edge case: large period
+            }, 
         ];
 
         for params in test_params {
             let input = BandPassInput::from_candles(&candles, "close", params.clone());
             let output = bandpass_with_kernel(&input, kernel)?;
 
-            // Check every value in all output vectors for poison patterns
+            
             for (i, &val) in output.bp.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp at index {} with params {:?}",
@@ -2158,7 +2158,7 @@ mod tests {
                 );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp at index {} with params {:?}",
@@ -2166,7 +2166,7 @@ mod tests {
                 );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp at index {} with params {:?}",
@@ -2175,7 +2175,7 @@ mod tests {
                 }
             }
 
-            // Check bp_normalized
+            
             for (i, &val) in output.bp_normalized.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2205,7 +2205,7 @@ mod tests {
                 }
             }
 
-            // Check signal
+            
             for (i, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2235,7 +2235,7 @@ mod tests {
                 }
             }
 
-            // Check trigger
+            
             for (i, &val) in output.trigger.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2264,12 +2264,12 @@ mod tests {
                 );
                 }
             }
-        } // close the params loop
+        } 
 
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_bandpass_no_poison(
         _test_name: &str,
@@ -2313,7 +2313,7 @@ mod tests {
 
         assert_eq!(batch_output.bp.len(), stream_values.len());
         for (i, (&b, &s)) in batch_output.bp.iter().zip(stream_values.iter()).enumerate() {
-            // Skip comparison during warmup when batch returns NaN but stream returns values
+            
             if b.is_nan() {
                 continue;
             }
@@ -2342,7 +2342,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: period 2-50, bandwidth 0.1-0.9, data length period..400
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2350,7 +2350,7 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                (0.1f64..=0.9f64), // Valid bandwidth range avoiding edge cases
+                (0.1f64..=0.9f64), 
             )
         });
 
@@ -2361,24 +2361,24 @@ mod tests {
             };
             let input = BandPassInput::from_slice(&data, params);
 
-            // Get outputs from the kernel being tested
+            
             let result = bandpass_with_kernel(&input, kernel)?;
-            // Get reference outputs from scalar kernel
+            
             let ref_result = bandpass_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: All outputs should have same length as input
+            
             prop_assert_eq!(result.bp.len(), data.len());
             prop_assert_eq!(result.bp_normalized.len(), data.len());
             prop_assert_eq!(result.signal.len(), data.len());
             prop_assert_eq!(result.trigger.len(), data.len());
 
-            // Calculate expected warmup based on highpass calculation
+            
             let hp_period = ((4.0 * period as f64) / bandwidth).round() as usize;
             let expected_warmup = hp_period.saturating_sub(1).max(2);
 
-            // Property 2: Strict warmup period validation - values should be NaN
+            
             if data.len() >= expected_warmup {
-                // Check strict NaN during warmup (no flexibility)
+                
                 for i in 0..(expected_warmup.saturating_sub(1)).min(data.len()) {
                     prop_assert!(
                         result.bp[i].is_nan(),
@@ -2389,7 +2389,7 @@ mod tests {
                 }
             }
 
-            // Property 3: All non-NaN values should be finite
+            
             for i in 0..data.len() {
                 if !result.bp[i].is_nan() {
                     prop_assert!(
@@ -2425,7 +2425,7 @@ mod tests {
                 }
             }
 
-            // Property 4: Signal values must be exactly -1, 0, or 1
+            
             for i in 0..data.len() {
                 let sig = result.signal[i];
                 if !sig.is_nan() {
@@ -2438,7 +2438,7 @@ mod tests {
                 }
             }
 
-            // Property 5: bp_normalized should be bounded by [-1, 1]
+            
             for i in 0..data.len() {
                 let norm = result.bp_normalized[i];
                 if !norm.is_nan() {
@@ -2451,15 +2451,15 @@ mod tests {
                 }
             }
 
-            // Property 6: Constant data should produce bp approaching 0 (relaxed tolerance)
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9)
                 && data.len() > expected_warmup + 20
             {
-                // After sufficient warmup, bp should be near 0 for constant input
+                
                 let check_start = (expected_warmup + 10).min(data.len() - 1);
                 for i in check_start..data.len() {
                     if !result.bp[i].is_nan() {
-                        // Use relative tolerance for numerical stability
+                        
                         let tolerance = 1e-6 * data[0].abs().max(1.0);
                         prop_assert!(
                             result.bp[i].abs() < tolerance,
@@ -2472,8 +2472,8 @@ mod tests {
                 }
             }
 
-            // Property 7: Signal generation logic verification
-            // Signal should be: 1 when bp_normalized < trigger, -1 when >, 0 when ==
+            
+            
             for i in 0..data.len() {
                 let bn = result.bp_normalized[i];
                 let tr = result.trigger[i];
@@ -2481,7 +2481,7 @@ mod tests {
 
                 if !bn.is_nan() && !tr.is_nan() && !sig.is_nan() {
                     if (bn - tr).abs() < 1e-12 {
-                        // Equal case
+                        
                         prop_assert_eq!(
                             sig,
                             0.0,
@@ -2510,8 +2510,8 @@ mod tests {
                 }
             }
 
-            // Property 8: Recursive filter stability - no explosion
-            // Check that values don't grow unbounded
+            
+            
             if data.len() > 50 {
                 let last_quarter_start = (data.len() * 3) / 4;
                 let mut max_abs_bp = 0.0f64;
@@ -2524,7 +2524,7 @@ mod tests {
                     max_abs_input = max_abs_input.max(data[i].abs());
                 }
 
-                // bp should not explode relative to input magnitude
+                
                 if max_abs_input > 0.0 {
                     let amplification = max_abs_bp / max_abs_input;
                     prop_assert!(
@@ -2535,9 +2535,9 @@ mod tests {
                 }
             }
 
-            // Property 9: Edge case validation - specific behavior for extreme parameters
+            
             if period == 2 {
-                // Minimum period should still produce valid output after warmup
+                
                 let non_nan_count = result.bp.iter().filter(|&&x| !x.is_nan()).count();
                 prop_assert!(
                     non_nan_count >= data.len().saturating_sub(expected_warmup),
@@ -2545,7 +2545,7 @@ mod tests {
                 );
             }
 
-            // Property 10: Kernel consistency - compare with scalar kernel
+            
             for i in 0..data.len() {
                 let bp = result.bp[i];
                 let bp_ref = ref_result.bp[i];
@@ -2556,7 +2556,7 @@ mod tests {
                 let trig = result.trigger[i];
                 let trig_ref = ref_result.trigger[i];
 
-                // Check bp consistency
+                
                 if !bp.is_finite() || !bp_ref.is_finite() {
                     prop_assert_eq!(
                         bp.to_bits(),
@@ -2576,7 +2576,7 @@ mod tests {
                     );
                 }
 
-                // Check bp_normalized consistency
+                
                 if !bp_norm.is_finite() || !bp_norm_ref.is_finite() {
                     prop_assert_eq!(
                         bp_norm.to_bits(),
@@ -2596,7 +2596,7 @@ mod tests {
                     );
                 }
 
-                // Check signal consistency (exact match required)
+                
                 if !sig.is_nan() && !sig_ref.is_nan() {
                     prop_assert_eq!(
                         sig,
@@ -2615,7 +2615,7 @@ mod tests {
                     );
                 }
 
-                // Check trigger consistency
+                
                 if !trig.is_finite() || !trig_ref.is_finite() {
                     prop_assert_eq!(
                         trig.to_bits(),
@@ -2684,7 +2684,7 @@ mod tests {
 
         assert_eq!(bp_slice.len(), c.close.len());
 
-        // Optional: Test known last 5 values for one column (bp)
+        
         let expected = [
             -236.23678021132827,
             -247.4846395608195,
@@ -2723,7 +2723,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2731,30 +2731,30 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations - more comprehensive coverage
+        
         let output = BandPassBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 50, 5) // 10 periods: 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
-            .bandwidth_range(0.1, 0.9, 0.1) // 9 bandwidths: 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9
+            .period_range(5, 50, 5) 
+            .bandwidth_range(0.1, 0.9, 0.1) 
             .apply_candles(&c, "close")?;
 
-        // This creates 90 parameter combinations (10 periods × 9 bandwidths)
+        
 
-        // Check every value in all output vectors for poison patterns
+        
         for row_idx in 0..output.rows {
-            let params = &output.combos[row_idx]; // Get params for this row
+            let params = &output.combos[row_idx]; 
             let (bp_row, bpn_row, sig_row, trg_row) = output.row_slices(row_idx).unwrap();
 
-            // Check bp values
+            
             for (col_idx, &val) in bp_row.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
@@ -2762,7 +2762,7 @@ mod tests {
                 );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
@@ -2770,7 +2770,7 @@ mod tests {
                 );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) in bp at row {} col {} with params {:?}",
@@ -2779,7 +2779,7 @@ mod tests {
                 }
             }
 
-            // Check bp_normalized values
+            
             for (col_idx, &val) in bpn_row.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2809,7 +2809,7 @@ mod tests {
                 }
             }
 
-            // Check signal values
+            
             for (col_idx, &val) in sig_row.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2839,7 +2839,7 @@ mod tests {
                 }
             }
 
-            // Check trigger values
+            
             for (col_idx, &val) in trg_row.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2873,7 +2873,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2886,7 +2886,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ========================= Python Bindings =========================
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "bandpass")]
@@ -3017,7 +3017,7 @@ pub fn bandpass_batch_py<'py>(
     }
 }
 
-// ========================= Python CUDA Bindings =========================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "bandpass_cuda_batch_dev")]
 #[pyo3(signature = (close_f32, period_range, bandwidth_range, device_id=0))]
@@ -3141,14 +3141,14 @@ pub fn bandpass_cuda_many_series_one_param_dev_py<'py>(
     Ok(d)
 }
 
-// ========================= WASM Bindings =========================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct BandPassJsResult {
-    pub values: Vec<f64>, // [bp..., bpn..., signal..., trigger...]
-    pub rows: usize,      // 4
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -3187,8 +3187,8 @@ pub struct BandPassBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct BandPassBatchJsOutput {
-    pub values: Vec<f64>, // concatenated in order: bp rows, then bpn rows, then signal rows, then trigger rows
-    pub rows: usize,      // 4 * combos
+    pub values: Vec<f64>, 
+    pub rows: usize,      
     pub cols: usize,
     pub combos: Vec<BandPassParams>,
 }
@@ -3208,7 +3208,7 @@ pub fn bandpass_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
     let rows = out.rows;
     let cols = out.cols;
 
-    // concatenate by blocks: all bp rows, all bpn rows, all signal rows, all trigger rows
+    
     let total = rows
         .checked_mul(cols)
         .and_then(|v| v.checked_mul(4))
@@ -3219,7 +3219,7 @@ pub fn bandpass_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
     values.extend_from_slice(&out.signal);
     values.extend_from_slice(&out.trigger);
 
-    // Create output matching test expectations
+    
     let js_output = js_sys::Object::new();
     js_sys::Reflect::set(
         &js_output,
@@ -3244,7 +3244,7 @@ pub fn bandpass_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
     Ok(JsValue::from(js_output))
 }
 
-// ========================= Fast API with Aliasing Detection =========================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "bandpass_batch_metadata")]
@@ -3262,7 +3262,7 @@ pub fn bandpass_batch_metadata_js(
     };
     let combos = expand_grid(&sweep);
 
-    // Return flat array of [period, bandwidth, period, bandwidth, ...]
+    
     let mut flat = Vec::with_capacity(combos.len() * 2);
     for combo in &combos {
         flat.push(combo.period.unwrap() as f64);
@@ -3292,9 +3292,9 @@ pub fn bandpass_into(
         return Err(JsValue::from_str("null pointer in bandpass_into"));
     }
 
-    // Check for aliasing - input must not overlap with any output
-    // We check if input pointer equals any output pointer (simple aliasing check)
-    // A more thorough check would verify no overlapping ranges, but pointer equality catches the most common case
+    
+    
+    
     if in_ptr == bp_ptr as *const f64
         || in_ptr == bpn_ptr as *const f64
         || in_ptr == sig_ptr as *const f64
@@ -3305,7 +3305,7 @@ pub fn bandpass_into(
         ));
     }
 
-    // Check output pointers don't alias with each other
+    
     let out_ptrs = [bp_ptr, bpn_ptr, sig_ptr, trg_ptr];
     for i in 0..out_ptrs.len() {
         for j in i + 1..out_ptrs.len() {
@@ -3342,7 +3342,7 @@ pub fn bandpass_into(
     }
 }
 
-// ========================= Memory Management =========================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]

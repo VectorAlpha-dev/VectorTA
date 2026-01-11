@@ -1,14 +1,14 @@
-// Integration tests for CUDA HWMA kernels
 
-use my_project::indicators::moving_averages::hwma::{
+
+use vector_ta::indicators::moving_averages::hwma::{
     hwma_batch_with_kernel, HwmaBatchRange, HwmaBuilder, HwmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, moving_averages::CudaHwma};
+use vector_ta::cuda::{cuda_available, moving_averages::CudaHwma};
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -44,7 +44,7 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let sweep = HwmaBatchRange {
         na: (0.10, 0.40, 0.10),
         nb: (0.05, 0.25, 0.05),
-        // Keep `nc` in a numerically stable range for FP32 vs FP64 comparisons.
+        
         nc: (0.05, 0.10, 0.05),
     };
 
@@ -64,7 +64,7 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda hwma batch result");
 
-    // GPU is FP32 and uses CUDA fast-math; compare against f64 scalar with a mixed tolerance.
+    
     let (atol, rtol) = (3.0e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;

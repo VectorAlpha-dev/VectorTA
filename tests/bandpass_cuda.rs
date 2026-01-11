@@ -1,17 +1,17 @@
-// Integration tests for CUDA Band-Pass kernels
 
-use my_project::indicators::bandpass::{
+
+use vector_ta::indicators::bandpass::{
     bandpass_batch_with_kernel, bandpass_with_kernel, BandPassBatchRange, BandPassInput,
     BandPassParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::bandpass_wrapper::CudaBandpass;
+use vector_ta::cuda::bandpass_wrapper::CudaBandpass;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -103,8 +103,8 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 2048usize; // length
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -116,7 +116,7 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     let bandwidth = 0.3f64;
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
-    // CPU baseline per series (quantize inputs to match GPU FP32 path)
+    
     let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_bp_tm = vec![f64::NAN; cols * rows];
     let mut cpu_bpn_tm = vec![f64::NAN; cols * rows];

@@ -8,8 +8,8 @@
 //! - NON_BLOCKING stream; async copies and pinned buffers where helpful
 //!
 //! Kernels expected:
-//! - "maaq_batch_f32"                          // one-series × many-params (recurrence)
-//! - "maaq_multi_series_one_param_f32"         // many-series × one-param (time-major)
+//! - "maaq_batch_f32"                          
+//! - "maaq_multi_series_one_param_f32"         
 //!
 //! Notes:
 //! - MAAQ is a recurrence/IIR style indicator. Each thread/block scans time
@@ -33,19 +33,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use cust::error::CudaError;
 
-// -------- Kernel selection policy (kept minimal for a recurrence kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    // One thread per combo, sequential over time
+    
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    // One thread per series (1D). 2D variants not provided for MAAQ currently.
+    
     OneD { block_x: u32 },
 }
 

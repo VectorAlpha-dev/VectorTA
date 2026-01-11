@@ -1,11 +1,11 @@
 use std::os::raw::{c_double, c_int};
 
-// Use the auto-generated bindings
+
 use crate::*;
 
-// We don't need to redeclare the functions - they're already in the generated bindings
-// Just create safe wrappers using the existing declarations
-// Remove all the extern declarations since they're in the generated bindings
+
+
+
 /*
     pub fn TA_SMA(
         startIdx: c_int,
@@ -383,7 +383,7 @@ use crate::*;
 
 */
 
-// Safe wrapper functions for TA-LIB indicators
+
 pub unsafe fn talib_sma(
     input: &[f64],
     period: i32,
@@ -407,7 +407,7 @@ pub unsafe fn talib_sma(
         return Err(format!("TA_SMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -438,7 +438,7 @@ pub unsafe fn talib_ema(
         return Err(format!("TA_EMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -469,7 +469,7 @@ pub unsafe fn talib_rsi(
         return Err(format!("TA_RSI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -509,7 +509,7 @@ pub unsafe fn talib_bbands(
         return Err(format!("TA_BBANDS failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_upper[i] = f64::NAN;
         output_middle[i] = f64::NAN;
@@ -550,7 +550,7 @@ pub unsafe fn talib_macd(
         return Err(format!("TA_MACD failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_macd[i] = f64::NAN;
         output_signal[i] = f64::NAN;
@@ -587,7 +587,7 @@ pub unsafe fn talib_atr(
         return Err(format!("TA_ATR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -630,7 +630,7 @@ pub unsafe fn talib_stoch(
         return Err(format!("TA_STOCH failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -639,7 +639,7 @@ pub unsafe fn talib_stoch(
     Ok(())
 }
 
-// AD - Accumulation/Distribution Line
+
 pub unsafe fn talib_ad(
     high: &[f64],
     low: &[f64],
@@ -667,7 +667,7 @@ pub unsafe fn talib_ad(
         return Err(format!("TA_AD failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -675,7 +675,7 @@ pub unsafe fn talib_ad(
     Ok(())
 }
 
-// ADOSC - Accumulation/Distribution Oscillator
+
 pub unsafe fn talib_adosc(
     high: &[f64],
     low: &[f64],
@@ -707,7 +707,7 @@ pub unsafe fn talib_adosc(
         return Err(format!("TA_ADOSC failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -715,7 +715,7 @@ pub unsafe fn talib_adosc(
     Ok(())
 }
 
-// ADX - Average Directional Movement Index
+
 pub unsafe fn talib_adx(
     high: &[f64],
     low: &[f64],
@@ -743,7 +743,7 @@ pub unsafe fn talib_adx(
         return Err(format!("TA_ADX failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -751,7 +751,7 @@ pub unsafe fn talib_adx(
     Ok(())
 }
 
-// ADXR - Average Directional Movement Index Rating
+
 pub unsafe fn talib_adxr(
     high: &[f64],
     low: &[f64],
@@ -779,7 +779,7 @@ pub unsafe fn talib_adxr(
         return Err(format!("TA_ADXR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -787,7 +787,7 @@ pub unsafe fn talib_adxr(
     Ok(())
 }
 
-// APO - Absolute Price Oscillator
+
 pub unsafe fn talib_apo(
     input: &[f64],
     fast_period: i32,
@@ -815,7 +815,7 @@ pub unsafe fn talib_apo(
         return Err(format!("TA_APO failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -823,7 +823,7 @@ pub unsafe fn talib_apo(
     Ok(())
 }
 
-// AROON - Aroon
+
 pub unsafe fn talib_aroon(
     high: &[f64],
     low: &[f64],
@@ -851,7 +851,7 @@ pub unsafe fn talib_aroon(
         return Err(format!("TA_AROON failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_down[i] = f64::NAN;
         output_up[i] = f64::NAN;
@@ -860,7 +860,7 @@ pub unsafe fn talib_aroon(
     Ok(())
 }
 
-// AROONOSC - Aroon Oscillator
+
 pub unsafe fn talib_aroonosc(
     high: &[f64],
     low: &[f64],
@@ -886,7 +886,7 @@ pub unsafe fn talib_aroonosc(
         return Err(format!("TA_AROONOSC failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -894,7 +894,7 @@ pub unsafe fn talib_aroonosc(
     Ok(())
 }
 
-// BOP - Balance of Power
+
 pub unsafe fn talib_bop(
     open: &[f64],
     high: &[f64],
@@ -922,7 +922,7 @@ pub unsafe fn talib_bop(
         return Err(format!("TA_BOP failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -930,7 +930,7 @@ pub unsafe fn talib_bop(
     Ok(())
 }
 
-// CCI - Commodity Channel Index
+
 pub unsafe fn talib_cci(
     high: &[f64],
     low: &[f64],
@@ -958,7 +958,7 @@ pub unsafe fn talib_cci(
         return Err(format!("TA_CCI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -966,7 +966,7 @@ pub unsafe fn talib_cci(
     Ok(())
 }
 
-// CMO - Chande Momentum Oscillator
+
 pub unsafe fn talib_cmo(
     input: &[f64],
     period: i32,
@@ -990,7 +990,7 @@ pub unsafe fn talib_cmo(
         return Err(format!("TA_CMO failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -998,7 +998,7 @@ pub unsafe fn talib_cmo(
     Ok(())
 }
 
-// DEMA - Double Exponential Moving Average
+
 pub unsafe fn talib_dema(
     input: &[f64],
     period: i32,
@@ -1022,7 +1022,7 @@ pub unsafe fn talib_dema(
         return Err(format!("TA_DEMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1030,7 +1030,7 @@ pub unsafe fn talib_dema(
     Ok(())
 }
 
-// DX - Directional Movement Index
+
 pub unsafe fn talib_dx(
     high: &[f64],
     low: &[f64],
@@ -1058,7 +1058,7 @@ pub unsafe fn talib_dx(
         return Err(format!("TA_DX failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1066,7 +1066,7 @@ pub unsafe fn talib_dx(
     Ok(())
 }
 
-// PLUS_DI - Plus Directional Indicator
+
 pub unsafe fn talib_plus_di(
     high: &[f64],
     low: &[f64],
@@ -1094,7 +1094,7 @@ pub unsafe fn talib_plus_di(
         return Err(format!("TA_PLUS_DI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1102,7 +1102,7 @@ pub unsafe fn talib_plus_di(
     Ok(())
 }
 
-// MINUS_DI - Minus Directional Indicator
+
 pub unsafe fn talib_minus_di(
     high: &[f64],
     low: &[f64],
@@ -1130,7 +1130,7 @@ pub unsafe fn talib_minus_di(
         return Err(format!("TA_MINUS_DI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1138,7 +1138,7 @@ pub unsafe fn talib_minus_di(
     Ok(())
 }
 
-// PLUS_DM - Plus Directional Movement
+
 pub unsafe fn talib_plus_dm(
     high: &[f64],
     low: &[f64],
@@ -1164,7 +1164,7 @@ pub unsafe fn talib_plus_dm(
         return Err(format!("TA_PLUS_DM failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1172,7 +1172,7 @@ pub unsafe fn talib_plus_dm(
     Ok(())
 }
 
-// MINUS_DM - Minus Directional Movement
+
 pub unsafe fn talib_minus_dm(
     high: &[f64],
     low: &[f64],
@@ -1198,7 +1198,7 @@ pub unsafe fn talib_minus_dm(
         return Err(format!("TA_MINUS_DM failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1206,7 +1206,7 @@ pub unsafe fn talib_minus_dm(
     Ok(())
 }
 
-// KAMA - Kaufman Adaptive Moving Average
+
 pub unsafe fn talib_kama(
     input: &[f64],
     period: i32,
@@ -1230,7 +1230,7 @@ pub unsafe fn talib_kama(
         return Err(format!("TA_KAMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1238,7 +1238,7 @@ pub unsafe fn talib_kama(
     Ok(())
 }
 
-// LINEARREG - Linear Regression
+
 pub unsafe fn talib_linearreg(
     input: &[f64],
     period: i32,
@@ -1262,7 +1262,7 @@ pub unsafe fn talib_linearreg(
         return Err(format!("TA_LINEARREG failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1270,7 +1270,7 @@ pub unsafe fn talib_linearreg(
     Ok(())
 }
 
-// MEDPRICE - Median Price
+
 pub unsafe fn talib_medprice(
     high: &[f64],
     low: &[f64],
@@ -1294,7 +1294,7 @@ pub unsafe fn talib_medprice(
         return Err(format!("TA_MEDPRICE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1302,7 +1302,7 @@ pub unsafe fn talib_medprice(
     Ok(())
 }
 
-// MFI - Money Flow Index
+
 pub unsafe fn talib_mfi(
     high: &[f64],
     low: &[f64],
@@ -1332,7 +1332,7 @@ pub unsafe fn talib_mfi(
         return Err(format!("TA_MFI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1340,7 +1340,7 @@ pub unsafe fn talib_mfi(
     Ok(())
 }
 
-// MIDPOINT - Midpoint over period
+
 pub unsafe fn talib_midpoint(
     input: &[f64],
     period: i32,
@@ -1364,7 +1364,7 @@ pub unsafe fn talib_midpoint(
         return Err(format!("TA_MIDPOINT failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1372,7 +1372,7 @@ pub unsafe fn talib_midpoint(
     Ok(())
 }
 
-// MIDPRICE - Midpoint Price over period
+
 pub unsafe fn talib_midprice(
     high: &[f64],
     low: &[f64],
@@ -1398,7 +1398,7 @@ pub unsafe fn talib_midprice(
         return Err(format!("TA_MIDPRICE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1406,7 +1406,7 @@ pub unsafe fn talib_midprice(
     Ok(())
 }
 
-// MOM - Momentum
+
 pub unsafe fn talib_mom(
     input: &[f64],
     period: i32,
@@ -1430,7 +1430,7 @@ pub unsafe fn talib_mom(
         return Err(format!("TA_MOM failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1438,7 +1438,7 @@ pub unsafe fn talib_mom(
     Ok(())
 }
 
-// NATR - Normalized Average True Range
+
 pub unsafe fn talib_natr(
     high: &[f64],
     low: &[f64],
@@ -1466,7 +1466,7 @@ pub unsafe fn talib_natr(
         return Err(format!("TA_NATR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1474,7 +1474,7 @@ pub unsafe fn talib_natr(
     Ok(())
 }
 
-// OBV - On Balance Volume
+
 pub unsafe fn talib_obv(
     input: &[f64],
     volume: &[f64],
@@ -1498,7 +1498,7 @@ pub unsafe fn talib_obv(
         return Err(format!("TA_OBV failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1506,7 +1506,7 @@ pub unsafe fn talib_obv(
     Ok(())
 }
 
-// PPO - Percentage Price Oscillator
+
 pub unsafe fn talib_ppo(
     input: &[f64],
     fast_period: i32,
@@ -1534,7 +1534,7 @@ pub unsafe fn talib_ppo(
         return Err(format!("TA_PPO failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1542,7 +1542,7 @@ pub unsafe fn talib_ppo(
     Ok(())
 }
 
-// ROC - Rate of change
+
 pub unsafe fn talib_roc(
     input: &[f64],
     period: i32,
@@ -1566,7 +1566,7 @@ pub unsafe fn talib_roc(
         return Err(format!("TA_ROC failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1574,7 +1574,7 @@ pub unsafe fn talib_roc(
     Ok(())
 }
 
-// ROCP - Rate of change Percentage
+
 pub unsafe fn talib_rocp(
     input: &[f64],
     period: i32,
@@ -1598,7 +1598,7 @@ pub unsafe fn talib_rocp(
         return Err(format!("TA_ROCP failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1606,7 +1606,7 @@ pub unsafe fn talib_rocp(
     Ok(())
 }
 
-// ROCR - Rate of change ratio
+
 pub unsafe fn talib_rocr(
     input: &[f64],
     period: i32,
@@ -1630,7 +1630,7 @@ pub unsafe fn talib_rocr(
         return Err(format!("TA_ROCR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1638,7 +1638,7 @@ pub unsafe fn talib_rocr(
     Ok(())
 }
 
-// SAR - Parabolic SAR
+
 pub unsafe fn talib_sar(
     high: &[f64],
     low: &[f64],
@@ -1666,7 +1666,7 @@ pub unsafe fn talib_sar(
         return Err(format!("TA_SAR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1674,7 +1674,7 @@ pub unsafe fn talib_sar(
     Ok(())
 }
 
-// STDDEV - Standard Deviation
+
 pub unsafe fn talib_stddev(
     input: &[f64],
     period: i32,
@@ -1700,7 +1700,7 @@ pub unsafe fn talib_stddev(
         return Err(format!("TA_STDDEV failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1708,7 +1708,7 @@ pub unsafe fn talib_stddev(
     Ok(())
 }
 
-// STOCHF - Stochastic Fast
+
 pub unsafe fn talib_stochf(
     high: &[f64],
     low: &[f64],
@@ -1742,7 +1742,7 @@ pub unsafe fn talib_stochf(
         return Err(format!("TA_STOCHF failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -1751,7 +1751,7 @@ pub unsafe fn talib_stochf(
     Ok(())
 }
 
-// STOCHRSI - Stochastic Relative Strength Index
+
 pub unsafe fn talib_stochrsi(
     input: &[f64],
     period: i32,
@@ -1783,7 +1783,7 @@ pub unsafe fn talib_stochrsi(
         return Err(format!("TA_STOCHRSI failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -1792,7 +1792,7 @@ pub unsafe fn talib_stochrsi(
     Ok(())
 }
 
-// TEMA - Triple Exponential Moving Average
+
 pub unsafe fn talib_tema(
     input: &[f64],
     period: i32,
@@ -1816,7 +1816,7 @@ pub unsafe fn talib_tema(
         return Err(format!("TA_TEMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1824,7 +1824,7 @@ pub unsafe fn talib_tema(
     Ok(())
 }
 
-// TRIMA - Triangular Moving Average
+
 pub unsafe fn talib_trima(
     input: &[f64],
     period: i32,
@@ -1848,7 +1848,7 @@ pub unsafe fn talib_trima(
         return Err(format!("TA_TRIMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1856,7 +1856,7 @@ pub unsafe fn talib_trima(
     Ok(())
 }
 
-// TRIX - 1-day Rate-Of-Change (ROC) of a Triple Smooth EMA
+
 pub unsafe fn talib_trix(
     input: &[f64],
     period: i32,
@@ -1880,7 +1880,7 @@ pub unsafe fn talib_trix(
         return Err(format!("TA_TRIX failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1888,7 +1888,7 @@ pub unsafe fn talib_trix(
     Ok(())
 }
 
-// TSF - Time Series Forecast
+
 pub unsafe fn talib_tsf(
     input: &[f64],
     period: i32,
@@ -1912,7 +1912,7 @@ pub unsafe fn talib_tsf(
         return Err(format!("TA_TSF failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1920,7 +1920,7 @@ pub unsafe fn talib_tsf(
     Ok(())
 }
 
-// ULTOSC - Ultimate Oscillator
+
 pub unsafe fn talib_ultosc(
     high: &[f64],
     low: &[f64],
@@ -1952,7 +1952,7 @@ pub unsafe fn talib_ultosc(
         return Err(format!("TA_ULTOSC failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1960,7 +1960,7 @@ pub unsafe fn talib_ultosc(
     Ok(())
 }
 
-// VAR - Variance
+
 pub unsafe fn talib_var(
     input: &[f64],
     period: i32,
@@ -1986,7 +1986,7 @@ pub unsafe fn talib_var(
         return Err(format!("TA_VAR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1994,7 +1994,7 @@ pub unsafe fn talib_var(
     Ok(())
 }
 
-// WCLPRICE - Weighted Close Price
+
 pub unsafe fn talib_wclprice(
     high: &[f64],
     low: &[f64],
@@ -2020,7 +2020,7 @@ pub unsafe fn talib_wclprice(
         return Err(format!("TA_WCLPRICE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2028,7 +2028,7 @@ pub unsafe fn talib_wclprice(
     Ok(())
 }
 
-// WILLR - Williams' %R
+
 pub unsafe fn talib_willr(
     high: &[f64],
     low: &[f64],
@@ -2056,7 +2056,7 @@ pub unsafe fn talib_willr(
         return Err(format!("TA_WILLR failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2064,7 +2064,7 @@ pub unsafe fn talib_willr(
     Ok(())
 }
 
-// WMA - Weighted Moving Average
+
 pub unsafe fn talib_wma(
     input: &[f64],
     period: i32,
@@ -2088,7 +2088,7 @@ pub unsafe fn talib_wma(
         return Err(format!("TA_WMA failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2096,7 +2096,7 @@ pub unsafe fn talib_wma(
     Ok(())
 }
 
-// LINEARREG_SLOPE - Linear Regression Slope
+
 pub unsafe fn talib_linearreg_slope(
     input: &[f64],
     period: i32,
@@ -2120,7 +2120,7 @@ pub unsafe fn talib_linearreg_slope(
         return Err(format!("TA_LINEARREG_SLOPE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2128,7 +2128,7 @@ pub unsafe fn talib_linearreg_slope(
     Ok(())
 }
 
-// LINEARREG_INTERCEPT - Linear Regression Intercept
+
 pub unsafe fn talib_linearreg_intercept(
     input: &[f64],
     period: i32,
@@ -2152,7 +2152,7 @@ pub unsafe fn talib_linearreg_intercept(
         return Err(format!("TA_LINEARREG_INTERCEPT failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2160,7 +2160,7 @@ pub unsafe fn talib_linearreg_intercept(
     Ok(())
 }
 
-// LINEARREG_ANGLE - Linear Regression Angle
+
 pub unsafe fn talib_linearreg_angle(
     input: &[f64],
     period: i32,
@@ -2184,7 +2184,7 @@ pub unsafe fn talib_linearreg_angle(
         return Err(format!("TA_LINEARREG_ANGLE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2192,7 +2192,7 @@ pub unsafe fn talib_linearreg_angle(
     Ok(())
 }
 
-// TYPPRICE - Typical Price
+
 pub unsafe fn talib_typprice(
     high: &[f64],
     low: &[f64],
@@ -2218,7 +2218,7 @@ pub unsafe fn talib_typprice(
         return Err(format!("TA_TYPPRICE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2226,7 +2226,7 @@ pub unsafe fn talib_typprice(
     Ok(())
 }
 
-// AVGPRICE - Average Price
+
 pub unsafe fn talib_avgprice(
     open: &[f64],
     high: &[f64],
@@ -2254,7 +2254,7 @@ pub unsafe fn talib_avgprice(
         return Err(format!("TA_AVGPRICE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2262,7 +2262,7 @@ pub unsafe fn talib_avgprice(
     Ok(())
 }
 
-// TRANGE - True Range
+
 pub unsafe fn talib_trange(
     high: &[f64],
     low: &[f64],
@@ -2288,7 +2288,7 @@ pub unsafe fn talib_trange(
         return Err(format!("TA_TRANGE failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2296,7 +2296,7 @@ pub unsafe fn talib_trange(
     Ok(())
 }
 
-// MIN - Lowest value over a period
+
 pub unsafe fn talib_min(
     input: &[f64],
     period: i32,
@@ -2320,7 +2320,7 @@ pub unsafe fn talib_min(
         return Err(format!("TA_MIN failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2328,7 +2328,7 @@ pub unsafe fn talib_min(
     Ok(())
 }
 
-// MAX - Highest value over a period
+
 pub unsafe fn talib_max(
     input: &[f64],
     period: i32,
@@ -2352,7 +2352,7 @@ pub unsafe fn talib_max(
         return Err(format!("TA_MAX failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2360,7 +2360,7 @@ pub unsafe fn talib_max(
     Ok(())
 }
 
-// SUM - Summation
+
 pub unsafe fn talib_sum(
     input: &[f64],
     period: i32,
@@ -2384,7 +2384,7 @@ pub unsafe fn talib_sum(
         return Err(format!("TA_SUM failed with code {:?}", ret));
     }
 
-    // Fill the beginning with NaN
+    
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }

@@ -1,14 +1,14 @@
-// Integration tests for CUDA Keltner Channels wrapper
 
-use my_project::indicators::keltner::{
+
+use vector_ta::indicators::keltner::{
     keltner_with_kernel, KeltnerBatchBuilder, KeltnerInput, KeltnerParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaKeltner};
+use vector_ta::cuda::{cuda_available, CudaKeltner};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,18 +46,18 @@ fn keltner_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let src = close.clone();
 
-    let sweep = my_project::indicators::keltner::KeltnerBatchRange {
+    let sweep = vector_ta::indicators::keltner::KeltnerBatchRange {
         period: (10, 32, 3),
         multiplier: (1.0, 2.0, 0.5),
     };
 
-    // CPU baseline
+    
     let cpu = KeltnerBatchBuilder::new()
         .period_range(10, 32, 3)
         .multiplier_range(1.0, 2.0, 0.5)
         .apply_slice(&high, &low, &close, &src)?;
 
-    // GPU
+    
     let (h_f32, l_f32, c_f32, s_f32): (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) = (
         high.iter().map(|&v| v as f32).collect(),
         low.iter().map(|&v| v as f32).collect(),
@@ -145,7 +145,7 @@ fn keltner_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let period = 20usize;
     let mult = 2.0f64;
 
-    // CPU baseline per series
+    
     let mut upper_tm = vec![f64::NAN; cols * rows];
     let mut middle_tm = vec![f64::NAN; cols * rows];
     let mut lower_tm = vec![f64::NAN; cols * rows];
@@ -178,7 +178,7 @@ fn keltner_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         }
     }
 
-    // GPU
+    
     let to_f32 = |v: &Vec<f64>| v.iter().map(|&x| x as f32).collect::<Vec<f32>>();
     let (hf, lf, cf, sf) = (
         to_f32(&high_tm),

@@ -1,16 +1,16 @@
-// Integration tests for CUDA VOSC kernels
 
-use my_project::indicators::vosc::{
+
+use vector_ta::indicators::vosc::{
     vosc_batch_with_kernel, vosc_with_kernel, VoscBatchRange, VoscData, VoscInput, VoscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaVosc;
+use vector_ta::cuda::CudaVosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -81,8 +81,8 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 16usize; // series
-    let rows = 8192usize; // time
+    let cols = 16usize; 
+    let rows = 8192usize; 
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 3)..rows {
@@ -96,7 +96,7 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         long_period: Some(34),
     };
 
-    // CPU reference per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut v = vec![f64::NAN; rows];

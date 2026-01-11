@@ -297,7 +297,7 @@ impl CudaPivot {
         None
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn pivot_batch_dev(
         &self,
         high: &[f32],
@@ -323,12 +323,12 @@ impl CudaPivot {
         }
         let n_combos = combos.len();
 
-        // Determine if any mode needs 'open' (2=Demark, 4=Woodie)
+        
         let need_o_any = combos
             .iter()
             .any(|p| matches!(p.mode.unwrap_or(3), 2 | 4));
 
-        // VRAM estimate: 3 or 4 inputs + modes + outputs (9 * combos * n)
+        
         let inputs_arrays: usize = 3 + if need_o_any { 1 } else { 0 };
         let bytes_inputs = inputs_arrays
             .checked_mul(n)
@@ -354,7 +354,7 @@ impl CudaPivot {
         let d_high = DeviceBuffer::from_slice(high).map_err(CudaPivotError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low).map_err(CudaPivotError::Cuda)?;
         let d_close = DeviceBuffer::from_slice(close).map_err(CudaPivotError::Cuda)?;
-        // Upload open only if any mode needs it; otherwise reuse d_close as a safe placeholder
+        
         let d_open_opt = if need_o_any {
             Some(DeviceBuffer::from_slice(open).map_err(CudaPivotError::Cuda)?)
         } else {
@@ -403,7 +403,7 @@ impl CudaPivot {
             BatchKernelPolicy::Auto => 256,
         };
         let grid_x = ((n as u32) + block_x - 1) / block_x;
-        // Single launch; kernel loops over all combos internally; grid.y = 1
+        
         let gx = grid_x.max(1);
         let grid_dims = (gx, 1, 1);
         let block_dims = (block_x, 1, 1);
@@ -435,7 +435,7 @@ impl CudaPivot {
                 .launch(&func, grid, block, 0, args)
                 .map_err(CudaPivotError::Cuda)?;
         }
-        // Record selection once
+        
         unsafe {
             (*(self as *const _ as *mut CudaPivot)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -448,7 +448,7 @@ impl CudaPivot {
         Ok(())
     }
 
-    // ---------- Many-series × one param (time-major) ----------
+    
     pub fn pivot_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -474,7 +474,7 @@ impl CudaPivot {
                 "time-major inputs must all be cols*rows".into(),
             ));
         }
-        // Per-series first_valid based on required fields
+        
         let need_o = mode == 2 || mode == 4;
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
@@ -504,7 +504,7 @@ impl CudaPivot {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate: 3 or 4 inputs + first_valids + outputs (9 planes)
+        
         let inputs_arrays: usize = 3 + if need_o { 1 } else { 0 };
         let inputs_elems = inputs_arrays
             .checked_mul(elems)
@@ -528,7 +528,7 @@ impl CudaPivot {
         let d_high = DeviceBuffer::from_slice(high_tm).map_err(CudaPivotError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_tm).map_err(CudaPivotError::Cuda)?;
         let d_close = DeviceBuffer::from_slice(close_tm).map_err(CudaPivotError::Cuda)?;
-        // Upload open only when needed; otherwise reuse d_close as a safe placeholder
+        
         let d_open_opt = if need_o {
             Some(DeviceBuffer::from_slice(open_tm).map_err(CudaPivotError::Cuda)?)
         } else {
@@ -624,12 +624,12 @@ impl CudaPivot {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_LEN: usize = 1_000_000; // 1m points
+    const ONE_LEN: usize = 1_000_000; 
     const MANY_ROWS: usize = 200_000;
     const MANY_COLS: usize = 128;
 
@@ -749,7 +749,7 @@ pub mod benches {
 
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaPivot::new(0).expect("cuda pivot");
-        // Generate time-major OHLC
+        
         let mut h_tm = vec![f32::NAN; MANY_ROWS * MANY_COLS];
         let mut l_tm = vec![f32::NAN; MANY_ROWS * MANY_COLS];
         let mut c_tm = vec![f32::NAN; MANY_ROWS * MANY_COLS];
@@ -793,7 +793,7 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let combos = 5usize; // modes 0..4
+        let combos = 5usize; 
         vec![
             CudaBenchScenario::new(
                 "pivot",

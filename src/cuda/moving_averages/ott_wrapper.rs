@@ -16,7 +16,7 @@
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
-// Reuse CWMA-style enums for parity
+
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::cuda::moving_averages::{
     CudaEma, CudaKama, CudaNama, CudaSma, CudaVpwma, CudaVwma, CudaWilders, CudaZlema,
@@ -239,7 +239,7 @@ impl CudaOtt {
         }
     }
 
-    // ---------------------- Public API ----------------------
+    
 
     pub fn ott_batch_dev(
         &self,
@@ -250,7 +250,7 @@ impl CudaOtt {
             return Err(CudaOttError::InvalidInput("empty price input".into()));
         }
         let cols = prices_f32.len();
-        // Validate there is at least one finite value
+        
         if prices_f32.iter().all(|v| !v.is_finite()) {
             return Err(CudaOttError::InvalidInput("all values are NaN".into()));
         }
@@ -282,15 +282,15 @@ impl CudaOtt {
             ));
         }
 
-        // Stage prices once
+        
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(cols) }?;
         unsafe { d_prices.async_copy_from(prices_f32, &self.stream) }?;
 
-        // Allocate output and prefill qNaN
+        
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, out_elems)?;
 
-        // Get kernel functions
+        
         let mut f_var: Option<Function> = self.module.get_function("ott_from_var_batch_f32").ok();
         let mut f_apply = self
             .module
@@ -299,9 +299,9 @@ impl CudaOtt {
                 name: "ott_apply_single_f32",
             })?;
 
-        // Fast path: if this sweep is entirely VAR, launch the integrated batch kernel once.
-        // This avoids the extremely slow per-combo (n_combos=1) loop and matches the
-        // "one series x many params" batch intent.
+        
+        
+        
         let all_var = combos.iter().all(|p| {
             p.ma_type
                 .as_deref()
@@ -364,13 +364,13 @@ impl CudaOtt {
             }
         }
 
-        // Reusable 1-element device buffers for var path
+        
         let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
         let mut d_percent = unsafe { DeviceBuffer::<f32>::uninitialized(1) }
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
 
-        // Host-side MA selector for generic path
+        
         let selector = CudaMaSelector::new(self.device_id as usize);
 
         for (row_idx, p) in combos.iter().enumerate() {
@@ -384,9 +384,9 @@ impl CudaOtt {
                 unsafe { d_out.as_device_ptr().offset(row_offset as isize) };
 
             if ma_type.eq_ignore_ascii_case("VAR") {
-                // Prefer integrated VAR path if available
+                
                 if let Some(ref mut func) = f_var {
-                    // Copy scalars
+                    
                     unsafe { d_period.async_copy_from(&[period as i32], &self.stream) }
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     unsafe { d_percent.async_copy_from(&[percent], &self.stream) }
@@ -414,7 +414,7 @@ impl CudaOtt {
                             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     }
                 } else {
-                    // Fallback: compute VAR via selector (not ideal if selector lacks VAR)
+                    
                     let dev = selector
                         .ma_to_device("VAR", CudaMaData::SliceF32(prices_f32), period)
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -425,11 +425,11 @@ impl CudaOtt {
                         percent,
                         out_row_ptr.as_raw(),
                     )?;
-                    // Ensure kernel completion before dropping dev buffer
+                    
                     self.stream.synchronize()?;
                 }
             } else {
-                // Generic path: compute MA then apply OTT
+                
                 let dev = selector
                     .ma_to_device(ma_type, CudaMaData::SliceF32(prices_f32), period)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -503,13 +503,13 @@ impl CudaOtt {
         let percent = params.percent.unwrap_or(1.4) as f32;
         let ma_type = params.ma_type.as_deref().unwrap_or("VAR");
 
-        // Output buffer
+        
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
         self
             .memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, expected_elems)?;
 
         if ma_type.eq_ignore_ascii_case("VAR") {
-            // VAR-integrated path
+            
             let mut d_in =
                 unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
             unsafe { d_in.async_copy_from(data_tm_f32, &self.stream) }?;
@@ -539,8 +539,8 @@ impl CudaOtt {
                 self.stream.launch(&mut func, grid, block, 0, args)?;
             }
         } else {
-            // Compute MA on device with the appropriate wrapper, many-series time-major
-            // Fallback support for common MA types
+            
+            
             let ma_dev = if ma_type.eq_ignore_ascii_case("EMA") {
                 let p = crate::indicators::moving_averages::ema::EmaParams {
                     period: Some(period),
@@ -590,7 +590,7 @@ impl CudaOtt {
                     "vwma requires candles+volume; not supported in this path".into(),
                 ));
             } else if ma_type.eq_ignore_ascii_case("VPWMA") {
-                // Needs power; use default power=0.382 for parity with selector
+                
                 let p = crate::indicators::moving_averages::vpwma::VpwmaParams {
                     period: Some(period),
                     power: Some(0.382),
@@ -620,7 +620,7 @@ impl CudaOtt {
                 )));
             };
 
-            // Launch apply-many over rows
+            
             let mut func = self
                 .module
                 .get_function("ott_many_series_one_param_f32")
@@ -655,7 +655,7 @@ impl CudaOtt {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

@@ -36,7 +36,7 @@ pub enum CudaWavetrendError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (parity with ALMA style) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -107,7 +107,7 @@ impl CudaWavetrend {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wavetrend_kernel.ptx"));
-        // High optimization with context-derived target, then graceful fallbacks.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -244,7 +244,7 @@ impl CudaWavetrend {
         } = Self::prepare_batch_inputs(data_f32, sweep)?;
         let rows = combos.len();
 
-        // VRAM estimate and guard
+        
         let sizeof_f32 = std::mem::size_of::<f32>();
         let sizeof_i32 = std::mem::size_of::<i32>();
         let prices_bytes = Self::checked_mul(series_len, sizeof_f32, "prices_bytes")?;
@@ -344,7 +344,7 @@ impl CudaWavetrend {
         Ok((rows, cols, batch.combos))
     }
 
-    // Optional pinned-host fast path (keeps API semantics identical elsewhere)
+    
     pub fn wavetrend_batch_into_host_locked_f32(
         &self,
         data_f32: &[f32],
@@ -484,7 +484,7 @@ impl CudaWavetrend {
             .get_function("wavetrend_batch_f32")
             .map_err(|_| CudaWavetrendError::MissingKernelSymbol { name: "wavetrend_batch_f32" })?;
 
-        // Occupancy-based suggestion
+        
         let auto_block_x = {
             let (bs, _mg) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
             bs.clamp(32, 1024)
@@ -494,7 +494,7 @@ impl CudaWavetrend {
             BatchKernelPolicy::Auto => auto_block_x,
         };
 
-        // Full rows in one launch; enforce device limit
+        
         let dev = Device::get_device(self.device_id)?;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let wanted_grid_x = ((rows as u32) + block_x - 1) / block_x;
@@ -512,7 +512,7 @@ impl CudaWavetrend {
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Record selection for diagnostics
+        
         unsafe {
             (*(self as *const _ as *mut CudaWavetrend)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -721,7 +721,7 @@ impl CudaWavetrend {
         Ok(combos)
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn wavetrend_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -732,7 +732,7 @@ impl CudaWavetrend {
         let (first_valids, ch, avg, ma, factor) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate: inputs + first_valids + 3 outputs
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaWavetrendError::InvalidInput("rows*cols overflow".into()))?;
@@ -818,7 +818,7 @@ impl CudaWavetrend {
         Ok(())
     }
 
-    // Pinned-host fast path for many-series time-major outputs
+    
     pub fn wavetrend_many_series_one_param_time_major_into_host_locked_f32(
         &self,
         data_tm_f32: &[f32],
@@ -881,7 +881,7 @@ impl CudaWavetrend {
             ));
         }
         let need = ch.max(avg).max(ma) as usize;
-        // Per-series first-valid indices
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<i32> = None;
@@ -931,7 +931,7 @@ impl CudaWavetrend {
                 name: "wavetrend_many_series_one_param_time_major_f32",
             })?;
 
-        // Occupancy-based suggestion for block size
+        
         let auto_block_x = {
             let (bs, _mg) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
             bs.clamp(32, 1024)
@@ -983,7 +983,7 @@ impl CudaWavetrend {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        // Record selection and maybe log
+        
         unsafe {
             (*(self as *const _ as *mut CudaWavetrend)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -993,7 +993,7 @@ impl CudaWavetrend {
     }
 }
 
-// ---------- Bench profiles (batch only) ----------
+
 
 pub mod benches {
     use super::*;
@@ -1007,7 +1007,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        // 3 outputs
+        
         let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

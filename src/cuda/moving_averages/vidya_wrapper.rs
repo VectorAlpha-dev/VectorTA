@@ -47,7 +47,7 @@ pub enum CudaVidyaError {
     NotImplemented,
 }
 
-// -------- Policy (kept simple; one block per combo/series) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -92,12 +92,12 @@ pub struct CudaVidya {
     context: std::sync::Arc<Context>,
     device_id: u32,
     policy: CudaVidyaPolicy,
-    // Introspection
+    
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Device caps
+    
     max_grid_x: usize,
 }
 
@@ -158,7 +158,7 @@ impl CudaVidya {
         self.device_id
     }
 
-    // ---------- Batch (one-series × many-params) ----------
+    
 
     pub fn vidya_batch_dev(
         &self,
@@ -230,7 +230,7 @@ impl CudaVidya {
         let mut d_prefix_sum: Option<DeviceBuffer<f64>> = None;
         let mut d_prefix_sum2: Option<DeviceBuffer<f64>> = None;
         if use_prefix {
-            // Host prefix sums of x and x^2 (NaN treated as 0) to enable O(1) rolling stats.
+            
             let mut prefix_sum: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
             let mut prefix_sum2: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
             prefix_sum.push(0.0f64);
@@ -291,7 +291,7 @@ impl CudaVidya {
         })
     }
 
-    // ---------- Many-series (time-major, one param) ----------
+    
 
     pub fn vidya_many_series_one_param_time_major_dev(
         &self,
@@ -365,7 +365,7 @@ impl CudaVidya {
         })
     }
 
-    // ---------- Internal launches ----------
+    
 
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
@@ -403,7 +403,7 @@ impl CudaVidya {
         }
         self.maybe_log_batch_debug();
 
-        // Chunk by device grid.x cap
+        
         let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
         for (start, len) in Self::grid_chunks(n_combos, cap) {
             let gx = len as u32;
@@ -472,7 +472,7 @@ impl CudaVidya {
             .get_function("vidya_batch_prefix_f32")
             .map_err(|_| CudaVidyaError::MissingKernelSymbol { name: "vidya_batch_prefix_f32" })?;
 
-        // Warp-scan kernel: fixed one-warp block for best utilization.
+        
         const BLOCK_X: u32 = 32;
         unsafe {
             (*(self as *const _ as *mut CudaVidya)).last_batch =
@@ -552,7 +552,7 @@ impl CudaVidya {
         }
         self.maybe_log_many_debug();
 
-        // One block per series (compat 1D launch)
+        
         let gx = num_series as u32;
         let gy = 1u32;
         let gz = 1u32;
@@ -590,7 +590,7 @@ impl CudaVidya {
         Ok(())
     }
 
-    // ---------- Prep helpers ----------
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -703,7 +703,7 @@ impl CudaVidya {
         })
     }
 
-    // ---------- Utilities ----------
+    
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -781,7 +781,7 @@ impl CudaVidya {
     }
 }
 
-// ---------- Prep structs ----------
+
 
 struct PreparedVidyaBatch {
     combos: Vec<VidyaParams>,
@@ -835,7 +835,7 @@ fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
     out
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;
@@ -849,7 +849,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * 4;
-        let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * 8; // two f64 prefix buffers
+        let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * 8; 
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4;
         in_bytes + prefix_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -908,7 +908,7 @@ pub mod benches {
         let first_valid = price.iter().position(|&x| !x.is_nan()).unwrap_or(0);
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
 
-        // Precompute prefix sums of x and x^2 once for the benchmark state.
+        
         let mut prefix_sum: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
         let mut prefix_sum2: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
         prefix_sum.push(0.0f64);

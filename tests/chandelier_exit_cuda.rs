@@ -1,15 +1,15 @@
-// CUDA tests for Chandelier Exit (CE)
 
-use my_project::indicators::chandelier_exit::{
+
+use vector_ta::indicators::chandelier_exit::{
     ce_batch_with_kernel, CeBatchRange, ChandelierExitBuilder, ChandelierExitData,
     ChandelierExitInput, ChandelierExitParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaChandelierExit};
+use vector_ta::cuda::{cuda_available, CudaChandelierExit};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -34,7 +34,7 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
         return Ok(());
     }
 
-    // Synthesize H/L/C with valid prefix
+    
     let len = 8192usize;
     let mut close = vec![f64::NAN; len];
     for i in 4..len {
@@ -57,7 +57,7 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     };
     let cpu = ce_batch_with_kernel(&high, &low, &close, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU
+    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -68,7 +68,7 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     assert_eq!(combos.len() * 2, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
 
-    // Copy back and compare
+    
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
     let tol = 5e-4;
@@ -123,7 +123,7 @@ fn chandelier_exit_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     let mult = 3.0f64;
     let use_close = true;
 
-    // CPU baseline per series
+    
     let mut cpu_long_tm = vec![f64::NAN; cols * rows];
     let mut cpu_short_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -160,7 +160,7 @@ fn chandelier_exit_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    // GPU
+    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

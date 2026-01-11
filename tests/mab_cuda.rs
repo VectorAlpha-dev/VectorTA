@@ -1,13 +1,13 @@
-// Integration tests for CUDA MAB kernels
 
-use my_project::indicators::mab::{mab, mab_batch, MabBatchRange, MabInput, MabParams};
+
+use vector_ta::indicators::mab::{mab, mab_batch, MabBatchRange, MabInput, MabParams};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaMab;
+use vector_ta::cuda::moving_averages::CudaMab;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -45,7 +45,7 @@ fn mab_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
         slow_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
     };
-    let cpu = mab_batch(&price, &sweep)?; // CPU reference
+    let cpu = mab_batch(&price, &sweep)?; 
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaMab::new(0).expect("CudaMab::new");
@@ -92,8 +92,8 @@ fn mab_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[mab_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; // series
-    let rows = 1024usize; // length
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -110,7 +110,7 @@ fn mab_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         slow_ma_type: Some("sma".into()),
     };
 
-    // CPU per series
+    
     let mut up_cpu = vec![f64::NAN; cols * rows];
     let mut mid_cpu = vec![f64::NAN; cols * rows];
     let mut lo_cpu = vec![f64::NAN; cols * rows];

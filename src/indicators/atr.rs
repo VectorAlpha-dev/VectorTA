@@ -201,7 +201,7 @@ pub enum AtrError {
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("atr: Invalid kernel type for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    // Back-compat variants used elsewhere in the repo
+    
     #[error("Invalid length for ATR calculation (length={length}).")]
     InvalidLength { length: usize },
     #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
@@ -217,7 +217,7 @@ fn first_valid_hlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     let len = close.len();
     let mut i = 0;
     while i < len {
-        // valid only if all three are not NaN at i
+        
         if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
             break;
         }
@@ -536,13 +536,13 @@ unsafe fn atr_simd128(high: &[f64], low: &[f64], close: &[f64], length: usize, o
     use core::arch::wasm32::*;
 
     // For now, use scalar implementation as ATR's sequential nature
-    // makes SIMD optimization complex. This maintains API parity with ALMA.
-    // Future optimization could process multiple true ranges in parallel
-    // for batch operations.
+    
+    
+    
     atr_scalar(high, low, close, length, out);
 }
 
-// -- AVX2/AVX512 always point to scalar; structuring for parity/stub compatibility --
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn atr_compute_into_avx2(
@@ -562,7 +562,7 @@ unsafe fn atr_compute_into_avx2(
     let warm = first + length - 1;
     let alpha = 1.0 / (length as f64);
 
-    // ---- seed (scalar; length is typically small and sequential-dep anyway) ----
+    
     let mut sum_tr = *high.get_unchecked(first) - *low.get_unchecked(first);
     if warm > first {
         let mut i = first + 1;
@@ -590,32 +590,32 @@ unsafe fn atr_compute_into_avx2(
     let mut rma = sum_tr / (length as f64);
     *out.get_unchecked_mut(warm) = rma;
 
-    // ---- rolling phase ----
+    
     let mut i = warm + 1;
     let n = out.len();
 
-    // constants/masks
+    
     let mask_abs = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fff_ffff_ffff_ffffu64 as i64));
 
-    // vector block of 4
+    
     while i + 3 < n {
         let v_hi = _mm256_loadu_pd(high.as_ptr().add(i));
         let v_lo = _mm256_loadu_pd(low.as_ptr().add(i));
-        // prev close vector is [close[i-1], close[i], close[i+1], close[i+2]]
+        
         let v_pc = _mm256_loadu_pd(close.as_ptr().add(i - 1));
 
-        // hl = hi - lo
+        
         let v_hl = _mm256_sub_pd(v_hi, v_lo);
-        // hc = |hi - prev_close|
+        
         let v_hc = _mm256_and_pd(_mm256_sub_pd(v_hi, v_pc), mask_abs);
-        // lc = |lo - prev_close|
+        
         let v_lc = _mm256_and_pd(_mm256_sub_pd(v_lo, v_pc), mask_abs);
 
-        // tr = max(hl, hc, lc)
+        
         let v_m1 = _mm256_max_pd(v_hl, v_hc);
         let v_tr = _mm256_max_pd(v_m1, v_lc);
 
-        // spill 4 TRs and sequentially update RMA
+        
         let mut buf = [0.0f64; 4];
         _mm256_storeu_pd(buf.as_mut_ptr(), v_tr);
 
@@ -634,7 +634,7 @@ unsafe fn atr_compute_into_avx2(
         i += 4;
     }
 
-    // scalar tail
+    
     if i < n {
         let mut prev_c = *close.get_unchecked(i - 1);
         while i < n {
@@ -677,7 +677,7 @@ unsafe fn atr_compute_into_avx512(
     let warm = first + length - 1;
     let alpha = 1.0 / (length as f64);
 
-    // ---- seed (scalar) ----
+    
     let mut sum_tr = *high.get_unchecked(first) - *low.get_unchecked(first);
     if warm > first {
         let mut i = first + 1;
@@ -705,17 +705,17 @@ unsafe fn atr_compute_into_avx512(
     let mut rma = sum_tr / (length as f64);
     *out.get_unchecked_mut(warm) = rma;
 
-    // ---- rolling phase ----
+    
     let mut i = warm + 1;
     let n = out.len();
 
-    // 0x7FFF... mask to clear sign bit
+    
     let mask_abs = _mm512_castsi512_pd(_mm512_set1_epi64(0x7fff_ffff_ffff_ffffu64 as i64));
 
     while i + 7 < n {
         let v_hi = _mm512_loadu_pd(high.as_ptr().add(i));
         let v_lo = _mm512_loadu_pd(low.as_ptr().add(i));
-        let v_pc = _mm512_loadu_pd(close.as_ptr().add(i - 1)); // prev-close lane-wise
+        let v_pc = _mm512_loadu_pd(close.as_ptr().add(i - 1)); 
 
         let v_hl = _mm512_sub_pd(v_hi, v_lo);
         let v_hc = _mm512_and_pd(_mm512_sub_pd(v_hi, v_pc), mask_abs);
@@ -727,7 +727,7 @@ unsafe fn atr_compute_into_avx512(
         let mut buf = [0.0f64; 8];
         _mm512_storeu_pd(buf.as_mut_ptr(), v_tr);
 
-        // sequential RMA across the 8-lane block
+        
         rma = (-alpha).mul_add(rma, rma) + alpha * buf[0];
         *out.get_unchecked_mut(i) = rma;
 
@@ -755,7 +755,7 @@ unsafe fn atr_compute_into_avx512(
         i += 8;
     }
 
-    // scalar tail
+    
     if i < n {
         let mut prev_c = *close.get_unchecked(i - 1);
         while i < n {
@@ -814,16 +814,16 @@ pub unsafe fn atr_avx512_long(
     atr_compute_into_avx512(high, low, close, length, 0, out)
 }
 
-// Streaming object for rolling ATR (like AlmaStream)
+
 #[derive(Debug, Clone)]
 pub struct AtrStream {
     length: usize,
-    alpha: f64,        // 1.0 / length
-    prev_close: f64,   // NaN until first close
-    rma: f64,          // last ATR (NaN until seeded)
-    warm_sum: f64,     // sum(TR) over the first `length` samples only
-    warm_count: usize, // how many TRs we've accumulated so far
-    seeded: bool,      // true once warm_count == length
+    alpha: f64,        
+    prev_close: f64,   
+    rma: f64,          
+    warm_sum: f64,     
+    warm_count: usize, 
+    seeded: bool,      
 }
 
 impl AtrStream {
@@ -855,10 +855,10 @@ impl AtrStream {
             "Streaming ATR assumes finite inputs; prefilter NaNs/Infs upstream if needed",
         );
 
-        // True Range:
-        //  - First bar: TR = high - low
-        //  - Subsequent: TR = max(high, prev_close) - min(low, prev_close)
-        // This avoids abs() and matches the textbook/Wilder definition.
+        
+        
+        
+        
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
@@ -875,18 +875,18 @@ impl AtrStream {
             up - dn
         };
 
-        // Update prev_close for the next tick before early-returns.
+        
         self.prev_close = close;
 
-        // Warmup: accumulate the arithmetic mean of the first `length` TRs.
+        
         if !self.seeded {
             self.warm_sum += tr;
             self.warm_count += 1;
 
             if self.warm_count == self.length {
-                // First ATR is the simple average of the first N TRs (Wilder).
-                // Subsequent ATRs follow RMA/SMMA with α = 1/N:
-                // ATR_t = ATR_{t-1} + α * (TR_t - ATR_{t-1})
+                
+                
+                
                 self.rma = self.warm_sum * self.alpha;
                 self.seeded = true;
                 return Some(self.rma);
@@ -894,14 +894,14 @@ impl AtrStream {
             return None;
         }
 
-        // Steady-state RMA (Wilder's smoothing, α = 1/length)
-        // Use FMA form for precision & speed: rma' = α*(tr - rma) + rma
+        
+        
         self.rma = self.alpha.mul_add(tr - self.rma, self.rma);
         Some(self.rma)
     }
 }
 
-// Batch/param sweep types for parity with alma.rs
+
 
 #[derive(Clone, Debug)]
 pub struct AtrBatchRange {
@@ -992,7 +992,7 @@ fn expand_grid(r: &AtrBatchRange) -> Vec<AtrParams> {
             .map(|l| AtrParams { length: Some(l) })
             .collect()
     } else {
-        // reversed bounds support
+        
         let mut v: Vec<usize> = (end..=start).step_by(step).collect();
         v.reverse();
         v.into_iter()
@@ -1082,17 +1082,17 @@ fn atr_batch_inner_into(
         return Err(AtrError::AllValuesNaN);
     }
 
-    // Precompute TR series once and its prefix sums for fast per-row seeds
+    
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
     unsafe {
         tr.set_len(cols);
     }
-    // Fill with zeros up front to avoid reading uninit in prefix sums
+    
     for v in &mut tr[..] {
         *v = 0.0;
     }
 
-    // Compute TR depending on kernel selection
+    
     match kern_to_simd(kern) {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => unsafe {
@@ -1107,13 +1107,13 @@ fn atr_batch_inner_into(
         }
     }
 
-    // Prefix sums of TR to seed RMA in O(1) per row
+    
     let mut ps = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols + 1);
     unsafe {
         ps.set_len(cols + 1);
     }
     ps[0] = 0.0;
-    // Keep prefix align with indices: ps[i+1] = sum_{j=0..i} tr[j]
+    
     for i in 0..cols {
         ps[i + 1] = ps[i] + tr[i];
     }
@@ -1121,12 +1121,12 @@ fn atr_batch_inner_into(
     let do_row = |row: usize, dst: &mut [f64]| {
         let length = combos[row].length.unwrap();
         let warm = first + length - 1;
-        // ensure warmup prefix
+        
         for v in &mut dst[..warm] {
             *v = f64::NAN;
         }
 
-        // Seed RMA using prefix sums of TR
+        
         let sum_tr = ps[warm + 1] - ps[first];
         let mut rma = sum_tr / (length as f64);
         dst[warm] = rma;
@@ -1191,28 +1191,28 @@ fn atr_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    // Step 1: Allocate uninitialized matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Find first valid index across all three arrays
+    
     let first_valid = first_valid_hlc(high, low, close);
 
-    // Step 2: Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first_valid + c.length.unwrap() - 1) // ATR warmup period includes leading NaNs
+        .map(|c| first_valid + c.length.unwrap() - 1) 
         .collect();
 
-    // Step 3: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute TR once + prefix sums
+    
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
     unsafe {
         tr.set_len(cols);
@@ -1239,7 +1239,7 @@ fn atr_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| {
         let length = combos[row].length.unwrap();
         let warm = first_valid + length - 1;
-        // RMA seed from prefix sums
+        
         let sum_tr = ps[warm + 1] - ps[first_valid];
         let mut rma = sum_tr / (length as f64);
         out_row[warm] = rma;
@@ -1273,7 +1273,7 @@ fn atr_batch_inner(
         }
     }
 
-    // Step 5: Reclaim as Vec<f64>
+    
     let final_values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1589,21 +1589,21 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_atr_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare a modest input slice from the CSV used by existing tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = AtrInput::with_default_candles(&candles);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = atr(&input)?;
 
-        // Preallocate output and compute via new into API
+        
         let mut out = vec![0.0f64; candles.close.len()];
         atr_into(&input, &mut out)?;
 
         assert_eq!(baseline.values.len(), out.len());
 
-        // Helper: exact for NaNs (bit match) and tight epsilon for finite
+        
         fn eq_or_nan_bits(a: f64, b: f64) -> bool {
             if !a.is_finite() || !b.is_finite() {
                 a.to_bits() == b.to_bits()
@@ -1670,7 +1670,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to increase coverage
+        
         let test_lengths = vec![2, 5, 10, 14, 20, 50, 100, 200];
 
         for length in test_lengths {
@@ -1724,23 +1724,23 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic OHLC data with proper constraints
+        
         let strat = (2usize..=50)
             .prop_flat_map(|length| {
-                // First choose the data length, then generate vectors of that exact size
+                
                 (length..400).prop_flat_map(move |data_len| {
                     (
-                        // High prices
+                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        // Low prices (will be adjusted to be <= high)
+                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        // Close prices (will be adjusted to be between low and high)
+                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
@@ -1750,7 +1750,7 @@ mod tests {
                 })
             })
             .prop_map(|(high_raw, low_raw, close_raw, length)| {
-                // Ensure OHLC constraints are met
+                
                 let len = high_raw.len();
                 assert_eq!(low_raw.len(), len);
                 assert_eq!(close_raw.len(), len);
@@ -1760,11 +1760,11 @@ mod tests {
                 let mut close = Vec::with_capacity(len);
 
                 for i in 0..len {
-                    // Ensure low <= high
+                    
                     let h = high_raw[i].max(low_raw[i]);
                     let l = high_raw[i].min(low_raw[i]);
 
-                    // Ensure close is between low and high
+                    
                     let c = close_raw[i].max(l).min(h);
 
                     high.push(h);
@@ -1783,15 +1783,15 @@ mod tests {
                 };
                 let input = AtrInput::from_slices(&high, &low, &close, params);
 
-                // Get outputs from kernel under test and reference scalar
+                
                 let AtrOutput { values: out } = atr_with_kernel(&input, kernel)?;
                 let AtrOutput { values: ref_out } = atr_with_kernel(&input, Kernel::Scalar)?;
 
-                // Check output length matches input
+                
                 prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                // Test 1: Warmup validation - first (length-1) values should be NaN
-                // This assumes clean input data with no leading NaNs
+                
+                
                 for i in 0..(length - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1801,7 +1801,7 @@ mod tests {
                     );
                 }
 
-                // Test 2: Non-negative values - ATR measures volatility, must be >= 0
+                
                 for (i, &val) in out.iter().enumerate().skip(length - 1) {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1813,8 +1813,8 @@ mod tests {
                     }
                 }
 
-                // Test 3: Bounded by maximum true range in the data
-                // Calculate actual maximum true range (not just high-low)
+                
+                
                 let mut max_true_range = 0.0f64;
                 for i in 0..high.len() {
                     let tr = if i == 0 {
@@ -1828,7 +1828,7 @@ mod tests {
                     max_true_range = max_true_range.max(tr);
                 }
 
-                // ATR is an exponential average, so it should never exceed the max true range
+                
                 for (i, &val) in out.iter().enumerate().skip(length - 1) {
                     if !val.is_nan() && val.is_finite() {
                         prop_assert!(
@@ -1841,12 +1841,12 @@ mod tests {
                     }
                 }
 
-                // Test 4: Kernel consistency - all kernels should produce identical results
+                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Handle NaN/infinite values
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1859,7 +1859,7 @@ mod tests {
                         continue;
                     }
 
-                    // Check ULP difference for finite values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1874,16 +1874,16 @@ mod tests {
                     );
                 }
 
-                // Test 5: Constant price convergence - when all prices are identical
-                // Check if all high, low, and close values are the same
+                
+                
                 let first_price = high[0];
                 let is_constant = high.iter().all(|&h| (h - first_price).abs() < 1e-10)
                     && low.iter().all(|&l| (l - first_price).abs() < 1e-10)
                     && close.iter().all(|&c| (c - first_price).abs() < 1e-10);
 
                 if is_constant {
-                    // For constant prices, ATR should converge to 0
-                    // Check the last few values after sufficient iterations
+                    
+                    
                     if out.len() >= length * 3 {
                         let last_values = &out[out.len().saturating_sub(5)..];
                         for &val in last_values {
@@ -1898,12 +1898,12 @@ mod tests {
                     }
                 }
 
-                // Test 6: RMA smoothness property - ATR should change smoothly
-                // Check that consecutive ATR values don't jump erratically
+                
+                
                 if out.len() >= length + 10 {
                     for i in (length + 1)..out.len() {
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
-                            // Calculate true range for current period
+                            
                             let tr = {
                                 let hl = high[i] - low[i];
                                 let hc = (high[i] - close[i - 1]).abs();
@@ -1911,8 +1911,8 @@ mod tests {
                                 hl.max(hc).max(lc)
                             };
 
-                            // ATR uses RMA: new_atr = old_atr + (tr - old_atr) / length
-                            // So the change should be bounded by |tr - old_atr| / length
+                            
+                            
                             let expected_change_bound = (tr - out[i - 1]).abs() / length as f64;
                             let actual_change = (out[i] - out[i - 1]).abs();
 
@@ -1927,9 +1927,9 @@ mod tests {
                     }
                 }
 
-                // Test 7: Single period edge case
+                
                 if length == 1 {
-                    // For length=1, ATR should equal the true range exactly
+                    
                     for i in 0..out.len() {
                         if !out[i].is_nan() {
                             let tr = if i == 0 {
@@ -2027,14 +2027,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple diverse parameter ranges to increase coverage
+        
         let test_configs = vec![
-            (2, 10, 1),    // Small lengths with step 1
-            (5, 25, 5),    // Medium lengths with step 5
-            (10, 50, 10),  // Larger lengths with step 10
-            (14, 140, 14), // Default-based multiples
-            (50, 200, 50), // Large lengths
-            (100, 100, 0), // Single large length
+            (2, 10, 1),    
+            (5, 25, 5),    
+            (10, 50, 10),  
+            (14, 140, 14), 
+            (50, 200, 50), 
+            (100, 100, 0), 
         ];
 
         for (start, end, step) in test_configs {
@@ -2108,12 +2108,12 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ============= Python and WASM Bindings =============
+
 
 #[cfg(feature = "python")]
 use pyo3::create_exception;
 
-// Custom Python exceptions for each AtrError variant
+
 #[cfg(feature = "python")]
 create_exception!(atr, InvalidLengthError, PyValueError);
 #[cfg(feature = "python")]
@@ -2185,7 +2185,7 @@ impl From<AtrError> for PyErr {
     }
 }
 
-// Local CUDA device array Python wrapper with CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::atr_wrapper::DeviceArrayF32Atr;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2716,7 +2716,7 @@ pub fn atr_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, can write directly
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             atr_into_slice(out, &input, Kernel::Auto).map_err(|e| JsError::new(&e.to_string()))?;
         }
@@ -2749,7 +2749,7 @@ pub fn atr_batch_into(
             length: (length_start, length_end, length_step),
         };
 
-        // Compute dimensions
+        
         let combos = expand_grid(&range);
         let rows = combos.len();
         let cols = len;
@@ -2757,18 +2757,18 @@ pub fn atr_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsError::new("atr_batch_into: rows*cols overflow"))?;
 
-        // Check for aliasing
+        
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
-            // Use temporary buffer if there's aliasing
+            
             let output = atr_batch_with_kernel(high, low, close, &range, Kernel::Auto)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
             out_slice.copy_from_slice(&output.values);
         } else {
-            // No aliasing, compute directly into output buffer
+            
             let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
 
-            // Select kernel for batch operations
+            
             let kernel = match detect_best_batch_kernel() {
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx512Batch => Kernel::Avx512,
@@ -2778,7 +2778,7 @@ pub fn atr_batch_into(
                 _ => Kernel::Scalar,
             };
 
-            // Use atr_batch_inner_into to write directly to output
+            
             atr_batch_inner_into(high, low, close, &range, kernel, false, out_slice)
                 .map_err(|e| JsError::new(&e.to_string()))?;
         }
@@ -2787,7 +2787,7 @@ pub fn atr_batch_into(
     }
 }
 
-// Streaming context for WASM
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 #[deprecated(
@@ -2831,8 +2831,8 @@ impl AtrContext {
     }
 }
 
-// Python module registration for custom exceptions
-// This should be called from the main module initialization
+
+
 #[cfg(feature = "python")]
 pub fn register_atr_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(

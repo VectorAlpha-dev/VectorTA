@@ -140,7 +140,7 @@ impl CudaChandelierExit {
     }
 
     fn expand_grid(range: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, CudaCeError> {
-        // Mirror scalar expand_ce (use_close is static in the sweep)
+        
         fn axis_usize(t: (usize, usize, usize)) -> Result<Vec<usize>, CudaCeError> {
             if t.2 == 0 || t.0 == t.1 { return Ok(vec![t.0]); }
             let (start, end, step) = (t.0, t.1, t.2);
@@ -222,7 +222,7 @@ impl CudaChandelierExit {
         }
     }
 
-    // Public policy controls for parity with ALMA/CWMA wrappers
+    
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.policy_batch = p;
     }
@@ -271,7 +271,7 @@ impl CudaChandelierExit {
             .module
             .get_function("chandelier_exit_batch_f32")
             .map_err(|_| CudaCeError::MissingKernelSymbol { name: "chandelier_exit_batch_f32" })?;
-        // Environment override wins; else policy; else 256
+        
         let block_x_env = std::env::var("CE_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
@@ -313,7 +313,7 @@ impl CudaChandelierExit {
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)?;
-            // Record selection for debug parity
+            
             (*(self as *const _ as *mut CudaChandelierExit)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
@@ -335,7 +335,7 @@ impl CudaChandelierExit {
         let combos = Self::expand_grid(sweep)?;
         let use_close = sweep.use_close.0;
         let first_valid = Self::first_valid(use_close, high, low, close)?;
-        // Ensure all combos are feasible
+        
         for prm in &combos {
             let p = prm.period.unwrap_or(22);
             if p == 0 {
@@ -350,7 +350,7 @@ impl CudaChandelierExit {
             }
         }
 
-        // VRAM estimate: 3 inputs + params + outputs (2 rows per combo)
+        
         let rows = combos.len();
         let in_bytes = (3usize)
             .checked_mul(len)
@@ -374,7 +374,7 @@ impl CudaChandelierExit {
             .unwrap_or(64 * 1024 * 1024);
         Self::ensure_fit(req, headroom)?;
 
-        // Device buffers
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..len], &self.stream) }?;
@@ -469,7 +469,7 @@ impl CudaChandelierExit {
                 &mut o as *mut _ as *mut c_void,
             ];
             self.stream.launch(&func, grid, block, 0, &mut args)?;
-            // Record selection for debug parity
+            
             (*(self as *const _ as *mut CudaChandelierExit)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
@@ -497,7 +497,7 @@ impl CudaChandelierExit {
         }
         if period == 0 { return Err(CudaCeError::InvalidInput("period must be >=1".into())); }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -523,7 +523,7 @@ impl CudaChandelierExit {
             }
         }
 
-        // VRAM: 3 inputs + first_valids + outputs (2 matrices)
+        
         let triple = 3usize
             .checked_mul(cols)
             .and_then(|x| x.checked_mul(rows))
@@ -565,7 +565,7 @@ impl CudaChandelierExit {
         })
     }
 
-    // Fast path: batch (one series × many params) with device-resident inputs
+    
     pub fn chandelier_exit_batch_from_device_dev(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -583,7 +583,7 @@ impl CudaChandelierExit {
             ));
         }
 
-        // VRAM estimate: params + outputs (inputs already on device)
+        
         let rows = periods.len();
         let param_bytes = rows
             .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
@@ -602,11 +602,11 @@ impl CudaChandelierExit {
             .unwrap_or(64 * 1024 * 1024);
         Self::ensure_fit(req, headroom)?;
 
-        // Upload params asynchronously on our stream
+        
         let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(periods, &self.stream) }?;
         let d_mults: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(mults, &self.stream) }?;
 
-        // Output buffer
+        
         let elems_out = rows
             .checked_mul(len)
             .and_then(|x| x.checked_mul(2))
@@ -614,7 +614,7 @@ impl CudaChandelierExit {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
-        // Launch using existing policies
+        
         self.launch_batch(
             d_high,
             d_low,
@@ -672,7 +672,7 @@ impl CudaChandelierExit {
         )
     }
 
-    // Fast path: many-series, one param (time-major) with device-resident inputs and first_valids
+    
     pub fn chandelier_exit_many_series_one_param_time_major_from_device_dev(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -688,7 +688,7 @@ impl CudaChandelierExit {
         if cols == 0 || rows == 0 { return Err(CudaCeError::InvalidInput("empty matrix".into())); }
         if period == 0 { return Err(CudaCeError::InvalidInput("period must be >=1".into())); }
 
-        // VRAM: outputs only
+        
         let req = 2usize
             .checked_mul(cols)
             .and_then(|x| x.checked_mul(rows))
@@ -729,7 +729,7 @@ impl CudaChandelierExit {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -923,8 +923,8 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        // 3 inputs + params + 2 outputs per combo + 64MB headroom.
-        let combos = 15usize; // period: 10..50 step 10 (5) x mult: 2.0..3.0 step 0.5 (3) x use_close: (true) (1)
+        
+        let combos = 15usize; 
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let param_bytes = combos * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = 2 * combos * ONE_SERIES_LEN * std::mem::size_of::<f32>();

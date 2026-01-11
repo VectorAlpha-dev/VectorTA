@@ -31,16 +31,16 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaTilsonError {
-    // Typed CUDA error
+    
     Cuda(#[from] CudaError),
-    // Resource/launch issues
+    
     OutOfMemory { required: usize, free: usize, headroom: usize },
     MissingKernelSymbol { name: &'static str },
     LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
     InvalidPolicy(&'static str),
     DeviceMismatch { buf: u32, current: u32 },
     NotImplemented,
-    // Validation
+    
     InvalidInput(String),
 }
 

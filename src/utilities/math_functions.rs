@@ -4,8 +4,8 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, LN_2, PI};
 
 #[inline(always)]
 pub fn atan_fast(z: f64) -> f64 {
-    // cubic minimax on |z|≤1  —— see: Nic Taylor, DSPRelated 2017
-    // atan(z) ≈ z*π/4 + z*(|z|‑1)*(0.2447 + 0.0663*|z|)
+    
+    
     const C0: f64 = 0.2447;
     const C1: f64 = 0.0663;
     const PIO4: f64 = std::f64::consts::FRAC_PI_4;
@@ -13,10 +13,10 @@ pub fn atan_fast(z: f64) -> f64 {
 
     let a = z.abs();
     if a <= 1.0 {
-        let t = C1.mul_add(a, C0); // C0 + C1·a
-        PIO4.mul_add(z, z.mul_add(a - 1.0, t)) // FMA chain
+        let t = C1.mul_add(a, C0); 
+        PIO4.mul_add(z, z.mul_add(a - 1.0, t)) 
     } else {
-        // atan(z) = π/2 − atan(1/z)
+        
         let inv = 1.0 / z;
         let t = C1.mul_add(inv.abs(), C0);
         let base = PIO4.mul_add(inv, inv.mul_add(inv.abs() - 1.0, t));

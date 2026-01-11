@@ -1,10 +1,10 @@
-// CUDA kernel for the CCI Cycle indicator (one-series × many-params and many-series × one-param).
-//
-// This version implements drop-in optimizations:
-// - Replace large per-thread local arrays (2×2048) with small ring buffers sized by CCI_RING_MAX (default 128).
-// - Avoid full-row NaN prefill; only prefill the leading warmup segment.
-// - Reduce modulo/div overhead inside min/max scans via a helper that scans with branchless wrap.
-// - Keep f32 math and fused ops; avoid fp64 paths.
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -16,14 +16,14 @@
 
 namespace { __device__ inline bool is_finitef(float x) { return !isnan(x) && !isinf(x); } }
 
-// Tunable upper bound for per-thread rings. Must be >= the largest L you intend to support.
-// 128 comfortably covers L <= ~64 while keeping local memory minimal.
+
+
 #ifndef CCI_RING_MAX
 #define CCI_RING_MAX 128
 #endif
 
-// Scan a ring window [have elements] starting at 'start' (oldest) to get min/max.
-// Uses one modulo for the start, then branchless wrap to avoid a % in the inner loop.
+
+
 __device__ inline void scan_minmax_ring(const float* __restrict__ ring,
                                         int L, int have, int start,
                                         float &mn, float &mx)
@@ -44,7 +44,7 @@ __device__ inline void scan_minmax_ring(const float* __restrict__ ring,
     }
 }
 
-// One series × many params (row-major output: rows=n_combos, cols=len)
+
 extern "C" __global__ void cci_cycle_batch_f32(
     const float* __restrict__ prices,
     int len,
@@ -62,18 +62,18 @@ extern "C" __global__ void cci_cycle_batch_f32(
         const float factor = factors[row];
         float* row_out     = out + static_cast<size_t>(row) * len;
 
-        // Validate early; if invalid, fill NaNs once and continue.
+        
         if (L <= 0 || L > len) {
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
-        const int needed = L * 2; // match scalar guard
+        const int needed = L * 2; 
         if (len - first_valid < needed) {
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
         if (L > CCI_RING_MAX) {
-            // Oversized L: preserve semantics by outputting NaN row.
+            
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
@@ -84,11 +84,11 @@ extern "C" __global__ void cci_cycle_batch_f32(
         const float beta_s  = 1.0f - alpha_s;
         const float alpha_l = 2.0f / (L + 1.0f);
         const float beta_l  = 1.0f - alpha_l;
-        const int   smma_p  = max(1, (int)rintf(sqrtf((float)L))); // cheaper than llroundf
+        const int   smma_p  = max(1, (int)rintf(sqrtf((float)L))); 
 
-        // ---- Initial SMA and MAD for CCI at index first_valid + L - 1 ----
+        
         const int i0 = first_valid;
-        const int i1 = first_valid + L; // exclusive
+        const int i1 = first_valid + L; 
         float sum = 0.0f;
         for (int i = i0; i < i1; ++i) sum += prices[i];
         float sma = sum * invL;
@@ -98,39 +98,39 @@ extern "C" __global__ void cci_cycle_batch_f32(
 
         const int out_start = first_valid + L - 1;
 
-        // Only pre-fill the leading NaNs; the loop below writes the rest.
+        
         for (int i = 0; i < out_start; ++i) row_out[i] = CUDART_NAN_F;
 
         float denom = 0.015f * (sum_abs * invL);
         float cci   = (denom == 0.0f) ? 0.0f : ((prices[out_start] - sma) / denom);
 
-        // EMA(short/long) states over CCI
+        
         float ema_s = cci;
         float ema_l = cci;
 
-        // SMMA state over double-EMA
+        
         float smma        = CUDART_NAN_F;
         float smma_sum    = 0.0f;
         int   smma_count  = 0;
         bool  smma_inited = false;
 
-        // Smoothers for stochastics
+        
         float prev_f1  = CUDART_NAN_F;
         float prev_pf  = CUDART_NAN_F;
         float prev_out = CUDART_NAN_F;
 
-        // Per-thread rings (on-chip for L<=CCI_RING_MAX)
+        
         float ccis_ring[CCI_RING_MAX]; int ccis_valid = 0;
         float  pf_ring[CCI_RING_MAX];  int  pf_valid  = 0;
 
         for (int i = out_start; i < len; ++i) {
-            // Rolling SMA for CCI
+            
             const float entering = prices[i];
             const float exiting  = prices[i - L];
             sum = sum - exiting + entering;
             sma = sum * invL;
 
-            // Re-scan MAD over the current L-window (preserves scalar semantics)
+            
             float sabs = 0.0f;
             const int wstart = i + 1 - L;
             #pragma unroll
@@ -142,12 +142,12 @@ extern "C" __global__ void cci_cycle_batch_f32(
             float denom2 = 0.015f * (sabs * invL);
             float cci2   = (denom2 == 0.0f) ? 0.0f : ((entering - sma) / denom2);
 
-            // EMA short/long on CCI (fused)
+            
             ema_s = fmaf(beta_s, ema_s, alpha_s * cci2);
             ema_l = fmaf(beta_l, ema_l, alpha_l * cci2);
-            const float de = ema_s + ema_s - ema_l; // double-EMA
+            const float de = ema_s + ema_s - ema_l; 
 
-            // Wilder-style SMMA over double-EMA
+            
             if (!smma_inited) {
                 if (is_finitef(de)) {
                     smma_sum += de;
@@ -160,15 +160,15 @@ extern "C" __global__ void cci_cycle_batch_f32(
                 smma = (smma * (smma_p - 1) + de) / (float)smma_p;
             }
 
-            // Maintain ccis ring
+            
             const int pos = i % L;
-            ccis_ring[pos] = smma;            // may be NaN before smma_inited
+            ccis_ring[pos] = smma;            
             if (ccis_valid < L) ccis_valid++;
 
-            // First stochastic (on ccis)
+            
             float pf = CUDART_NAN_F;
             {
-                const int have  = ccis_valid;                    // elements available
+                const int have  = ccis_valid;                    
                 int start = (i - have + 1) % L; if (start < 0) start += L;
                 float mn1, mx1;
                 scan_minmax_ring(ccis_ring, L, have, start, mn1, mx1);
@@ -188,10 +188,10 @@ extern "C" __global__ void cci_cycle_batch_f32(
                 }
             }
 
-            // Maintain pf ring
+            
             pf_ring[pos] = pf; if (pf_valid < L) pf_valid++;
 
-            // Second stochastic (on pf) -> final output
+            
             float out_i = CUDART_NAN_F;
             {
                 const int have  = pf_valid;
@@ -217,7 +217,7 @@ extern "C" __global__ void cci_cycle_batch_f32(
     }
 }
 
-// Many-series × one-param (time-major). One thread per series (row), sequential in time.
+
 extern "C" __global__ void cci_cycle_many_series_one_param_f32(
     const float* __restrict__ data_tm,
     int cols,
@@ -227,7 +227,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
     float factor,
     float* __restrict__ out_tm
 ) {
-    const int rid = blockIdx.x * blockDim.x + threadIdx.x; // series id
+    const int rid = blockIdx.x * blockDim.x + threadIdx.x; 
     if (rid >= rows) return;
 
     const int L = length;
@@ -255,7 +255,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
 
     const float* prices = data_tm + (size_t)rid * cols;
 
-    // Initial window
+    
     const int i0 = first_valid;
     const int i1 = first_valid + L;
     float sum = 0.0f;
@@ -279,7 +279,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
     float  pf_ring[CCI_RING_MAX];  int  pf_valid  = 0;
 
     for (int i = out_start; i < cols; ++i) {
-        // rolling SMA + MAD
+        
         const float entering = prices[i];
         const float exiting  = prices[i - L];
         sum = sum - exiting + entering;
@@ -295,7 +295,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
         denom = 0.015f * (sabs * invL);
         cci   = (denom == 0.0f) ? 0.0f : ((entering - sma) / denom);
 
-        // EMA short/long
+        
         ema_s = fmaf(beta_s, ema_s, alpha_s * cci);
         ema_l = fmaf(beta_l, ema_l, alpha_l * cci);
         const float de = ema_s + ema_s - ema_l;
@@ -304,10 +304,10 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
             if (is_finitef(de)) { smma_sum += de; if (++smma_count >= smma_p) { smma = smma_sum / (float)smma_p; smma_inited = true; } }
         } else { smma = (smma * (smma_p - 1) + de) / (float)smma_p; }
 
-        // maintain ccis ring
+        
         const int pos = i % L; ccis_ring[pos] = smma; if (ccis_valid < L) ccis_valid++;
 
-        // first stochastic
+        
         float pf = CUDART_NAN_F;
         {
             const int have  = ccis_valid;
@@ -322,10 +322,10 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
             }
         }
 
-        // maintain pf ring
+        
         pf_ring[pos] = pf; if (pf_valid < L) pf_valid++;
 
-        // second stochastic
+        
         float out_i = CUDART_NAN_F;
         {
             const int have  = pf_valid; float mn2, mx2; int start = (i - have + 1) % L; if (start < 0) start += L;

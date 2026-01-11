@@ -69,13 +69,13 @@ use std::sync::Arc;
 fn first_valid_diff_index(price: &[f64], volume: &[f64], first_valid_idx: usize) -> usize {
     let mut i = first_valid_idx.saturating_add(1);
     while i < price.len() {
-        // diff computable at i if price[i], price[i-1], volume[i] are all non-NaN
+        
         if !price[i].is_nan() && !price[i - 1].is_nan() && !volume[i].is_nan() {
             return i;
         }
         i += 1;
     }
-    price.len() // no computable diff in range
+    price.len() 
 }
 
 impl<'a> AsRef<[f64]> for EfiInput<'a> {
@@ -264,9 +264,9 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
         });
     }
 
-    let warm = first_valid_diff_index(price, volume, first); // exact warmup prefix
+    let warm = first_valid_diff_index(price, volume, first); 
     let chosen = match kernel {
-        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -338,7 +338,7 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 
     let warm = first_valid_diff_index(price, volume, first);
     let chosen = match kern {
-        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -354,7 +354,7 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
         }
     }
 
-    // Set exact warmup prefix after compute (ALMA pattern)
+    
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -374,22 +374,22 @@ pub fn efi_scalar(
         return;
     }
 
-    // Find exact first index where diff is computable: price[i], price[i-1], volume[i] all finite
+    
     let start = first_valid_diff_index(price, volume, first_valid_idx);
     if start >= len {
-        return; // nothing computable
+        return; 
     }
 
     let alpha = 2.0 / (period as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Use raw pointers to remove bounds checks in the hot loop.
+    
     unsafe {
         let p_ptr = price.as_ptr();
         let v_ptr = volume.as_ptr();
         let o_ptr = out.as_mut_ptr();
 
-        // Seed with raw diff at the first valid index
+        
         let p_cur = *p_ptr.add(start);
         let p_prev = *p_ptr.add(start - 1);
         let v_cur = *v_ptr.add(start);
@@ -397,17 +397,17 @@ pub fn efi_scalar(
         *o_ptr.add(start) = prev;
         let mut prev_price = p_cur;
 
-        // Main loop: carry last value across invalids; update EMA on valid triples
+        
         let mut i = start + 1;
         while i < len {
             let pc = *p_ptr.add(i);
             let vc = *v_ptr.add(i);
 
-            // Fast NaN check: (x == x) is false iff x is NaN
+            
             let valid = (pc == pc) & (prev_price == prev_price) & (vc == vc);
             if valid {
                 let diff = (pc - prev_price) * vc;
-                // FMA where available: alpha*diff + (1-alpha)*prev
+                
                 prev = alpha.mul_add(diff, one_minus_alpha * prev);
             }
             *o_ptr.add(i) = prev;
@@ -500,34 +500,34 @@ impl EfiStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        // First sample: we don't have a previous price for a diff yet.
+        
         if !self.has_last {
             self.last_price = price;
             self.has_last = true;
             return None;
         }
 
-        // Branchless validity for the (price[i], price[i-1], volume[i]) triple.
-        // (x == x) is false iff x is NaN (IEEE-754).
+        
+        
         let valid = (price == price) & (self.last_price == self.last_price) & (volume == volume);
 
-        // Fast path for invalid triple: carry previous EMA or return NaN until seeded.
+        
         if !valid {
             let out = if self.filled { self.prev } else { f64::NAN };
-            self.last_price = price; // keep exact batch semantics
+            self.last_price = price; 
             return Some(out);
         }
 
-        // Raw one-bar force
+        
         let diff = (price - self.last_price) * volume;
 
-        // Seed on first valid triple; afterwards run EMA in error form with FMA
+        
         let out = if !self.filled {
             self.prev = diff;
             self.filled = true;
             diff
         } else {
-            // ema = ema + alpha * (x - ema)
+            
             self.prev = self.alpha.mul_add(diff - self.prev, self.prev);
             self.prev
         };
@@ -607,7 +607,7 @@ pub fn efi_batch_with_kernel(
     k: Kernel,
 ) -> Result<EfiBatchOutput, EfiError> {
     let kernel = match k {
-        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EfiError::InvalidKernelForBatch(other)),
@@ -646,13 +646,13 @@ impl EfiBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Zero step => static; single value
+        
         if step == 0 || start == end {
             return vec![start];
         }
         let mut out = Vec::new();
         if start < end {
-            // Forward range
+            
             let mut v = start;
             while v <= end {
                 out.push(v);
@@ -665,7 +665,7 @@ fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
                 }
             }
         } else {
-            // Reversed bounds supported
+            
             let mut v = start;
             loop {
                 out.push(v);
@@ -733,7 +733,7 @@ fn efi_batch_inner(
 
     let rows = combos.len();
     let cols = price.len();
-    // Guard rows*cols overflow before allocation
+    
     let _cap = rows
         .checked_mul(cols)
         .ok_or(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
@@ -743,7 +743,7 @@ fn efi_batch_inner(
     let warm_prefixes = vec![warm; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
 
-    // expose as &mut [f64] without copying
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -830,7 +830,7 @@ unsafe fn efi_row_avx512_long(
     efi_scalar(price, volume, period, first, out);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "efi")]
 #[pyo3(signature = (price, volume, period, kernel=None))]
@@ -1099,7 +1099,7 @@ pub fn efi_js(price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, 
     };
     let input = EfiInput::from_slices(price, volume, params);
 
-    let mut output = vec![0.0; price.len()]; // Single allocation
+    let mut output = vec![0.0; price.len()]; 
     efi_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1146,7 +1146,7 @@ pub fn efi_into(
         };
         let input = EfiInput::from_slices(price, volume, params);
 
-        // Handle aliasing - check if output overlaps with either input
+        
         if in_price_ptr == out_ptr || in_volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             efi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1201,7 +1201,7 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ====== PYTHON CUDA BINDINGS ======
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -1868,15 +1868,15 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (30, 100, 10),  // Large periods
-            (2, 5, 1),      // Dense small range
-            (10, 10, 0),    // Static period (small)
-            (13, 13, 0),    // Static period (default)
-            (50, 50, 0),    // Static period (large)
-            (7, 21, 7),     // Medium range with larger step
-            (100, 200, 50), // Very large periods
+            (2, 10, 2),     
+            (5, 25, 5),     
+            (30, 100, 10),  
+            (2, 5, 1),      
+            (10, 10, 0),    
+            (13, 13, 0),    
+            (50, 50, 0),    
+            (7, 21, 7),     
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1973,16 +1973,16 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    // Parity test: native into API matches Vec-returning API
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_efi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct synthetic price/volume with an initial NaN to force warmup prefix
+        
         let len = 256usize;
         let mut price = vec![0.0; len];
         let mut volume = vec![0.0; len];
 
-        price[0] = f64::NAN; // ensure first diff warmup shifts at least one position
+        price[0] = f64::NAN; 
         volume[0] = 1_000.0;
         for i in 1..len {
             price[i] = 100.0 + (i as f64) * 0.5;
@@ -1991,10 +1991,10 @@ mod tests {
 
         let input = EfiInput::from_slices(&price, &volume, EfiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = efi(&input)?.values;
 
-        // Into API writes into caller-provided buffer
+        
         let mut out = vec![0.0; len];
         efi_into(&input, &mut out)?;
 

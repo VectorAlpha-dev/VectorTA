@@ -1,12 +1,12 @@
-// Integration tests for CUDA HalfTrend kernels
 
-use my_project::indicators::halftrend::HalfTrendBatchRange;
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::halftrend::HalfTrendBatchRange;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaHalftrend};
+use vector_ta::cuda::{cuda_available, CudaHalftrend};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -54,7 +54,7 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         atr_period: (14, 14, 0),
     };
 
-    // Quantize to f32 to match CUDA inputs
+    
     let hq: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let lq: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let cq: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -87,7 +87,7 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     dev.buy.buf.copy_to(&mut g_bs)?;
     dev.sell.buf.copy_to(&mut g_ss)?;
 
-    let tol = 1e-3; // FP32 tolerance
+    let tol = 1e-3; 
     for idx in 0..need {
         assert!(
             approx_eq(cpu.halftrend[idx], g_ht[idx] as f64, tol),
@@ -109,7 +109,7 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
             "atr_low mismatch at {}",
             idx
         );
-        // buy/sell are sparse; compare only where one is finite
+        
         let cb = cpu.buy_signal[idx];
         let gb = g_bs[idx] as f64;
         if !(cb.is_nan() && gb.is_nan()) {
@@ -132,7 +132,7 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    // Force the wrapper's time-major batch path: rows>=16 && len>=8192.
+    
     let len = 8192usize;
     let mut close = vec![f64::NAN; len];
     for i in 4..len {
@@ -156,7 +156,7 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
         atr_period: (14, 14, 0),
     };
 
-    // Quantize to f32 to match CUDA inputs
+    
     let hq: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let lq: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let cq: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -192,7 +192,7 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
     assert_eq!(rows, cpu.rows);
     assert_eq!(cols, cpu.cols);
 
-    let tol = 1e-3; // FP32 tolerance
+    let tol = 1e-3; 
     for idx in 0..need {
         assert!(
             approx_eq(cpu.halftrend[idx], g_ht[idx] as f64, tol),
@@ -214,7 +214,7 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
             "atr_low mismatch at {}",
             idx
         );
-        // buy/sell are sparse; compare only where one is finite
+        
         let cb = cpu.buy_signal[idx];
         let gb = g_bs[idx] as f64;
         if !(cb.is_nan() && gb.is_nan()) {
@@ -263,7 +263,7 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     let atr_period = 14usize;
     let ch = 2.0f64;
 
-    // CPU per series using single-row batch helper
+    
     let mut cpu_ht_tm = vec![f64::NAN; cols * rows];
     let mut cpu_tr_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -281,7 +281,7 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             channel_deviation: (ch, ch, 0.0),
             atr_period: (atr_period, atr_period, 0),
         };
-        // Quantize baseline to f32 domain
+        
         let hq: Vec<f64> = h.iter().map(|&v| (v as f32) as f64).collect();
         let lq: Vec<f64> = l.iter().map(|&v| (v as f32) as f64).collect();
         let cq: Vec<f64> = c.iter().map(|&v| (v as f32) as f64).collect();
@@ -337,7 +337,7 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-// Helper: call private slices variant via inline (keeps test in sync if API changes)
+
 #[allow(dead_code)]
 fn halftrend_batch_with_kernel_slices_internal(
     high: &[f64],
@@ -346,7 +346,7 @@ fn halftrend_batch_with_kernel_slices_internal(
     sweep: &HalfTrendBatchRange,
     kern: Kernel,
 ) -> Result<HalfTrendBatchOutputLite, Box<dyn std::error::Error>> {
-    // Use the public builder as a simple forwarder
+    
     let out = halftrend_batch_with_kernel_slices_public(high, low, close, sweep, kern)?;
     Ok(HalfTrendBatchOutputLite {
         halftrend: out.halftrend,
@@ -378,9 +378,9 @@ fn halftrend_batch_with_kernel_slices_public(
     close: &[f64],
     sweep: &HalfTrendBatchRange,
     kern: Kernel,
-) -> Result<my_project::indicators::halftrend::HalfTrendBatchOutput, Box<dyn std::error::Error>> {
-    // Expose the private function via builder API
-    let combos_out = my_project::indicators::halftrend::HalfTrendBatchBuilder::new()
+) -> Result<vector_ta::indicators::halftrend::HalfTrendBatchOutput, Box<dyn std::error::Error>> {
+    
+    let combos_out = vector_ta::indicators::halftrend::HalfTrendBatchBuilder::new()
         .amplitude_range(sweep.amplitude.0, sweep.amplitude.1, sweep.amplitude.2)
         .channel_deviation_range(
             sweep.channel_deviation.0,

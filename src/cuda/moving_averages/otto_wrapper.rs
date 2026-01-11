@@ -204,7 +204,7 @@ impl CudaOtto {
         Ok(())
     }
 
-    // ------- Batch (one series × many params) -------
+    
 
     pub fn otto_batch_dev(
         &self,
@@ -245,7 +245,7 @@ impl CudaOtto {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(required, headroom)?;
 
-        // H2D copies (pinned/async for prices + cabs)
+        
         let d_prices = self.htod_copy_f32(prices_f32)?;
         let d_cabs = self.htod_copy_f32(inputs.cabs.as_slice())?;
         let d_ott_periods = DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
@@ -362,7 +362,7 @@ impl CudaOtto {
         Ok(())
     }
 
-    // ------- Many-series × one param (time-major) -------
+    
 
     pub fn otto_many_series_one_param_time_major_dev(
         &self,
@@ -490,7 +490,7 @@ impl CudaOtto {
         Ok(())
     }
 
-    // ---------- Helpers ----------
+    
 
     fn htod_copy_f32(&self, host: &[f32]) -> Result<DeviceBuffer<f32>, CudaOttoError> {
         let mut d: DeviceBuffer<f32> =
@@ -551,7 +551,7 @@ impl CudaOtto {
             v
         };
 
-        // First valid (Pine-style nz -> treat NaN as 0.0 for diffs); still detect all-NaN stream
+        
         let first_valid = prices_f32
             .iter()
             .position(|v| v.is_finite())
@@ -663,8 +663,8 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
 }
 
 fn build_cmo_abs9(prices: &[f32]) -> Vec<f32> {
-    // Match scalar path semantics bit-for-bit by computing in f64 with the
-    // same ring/update ordering, then cast once to f32.
+    
+    
     const P: usize = 9;
     let n = prices.len();
     let mut out = vec![0.0f32; n];

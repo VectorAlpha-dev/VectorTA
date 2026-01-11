@@ -1,14 +1,14 @@
-// Integration tests for CUDA OTTO kernels
 
-use my_project::indicators::otto::{otto_with_kernel, OttoInput, OttoParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::otto::{otto_with_kernel, OttoInput, OttoParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaOtto;
+use vector_ta::cuda::moving_averages::CudaOtto;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -38,7 +38,7 @@ fn otto_cuda_batch_matches_cpu_var_only() -> Result<(), Box<dyn std::error::Erro
         let x = i as f64;
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
-    let sweep = my_project::indicators::otto::OttoBatchRange {
+    let sweep = vector_ta::indicators::otto::OttoBatchRange {
         ott_period: (2, 14, 3),
         ott_percent: (0.6, 0.6, 0.0),
         fast_vidya: (10, 10, 0),
@@ -47,7 +47,7 @@ fn otto_cuda_batch_matches_cpu_var_only() -> Result<(), Box<dyn std::error::Erro
         ma_types: vec!["VAR".into()],
     };
 
-    // CPU baseline for each combo
+    
     let combos = {
         let mut v = Vec::new();
         for p in (sweep.ott_period.0..=sweep.ott_period.1).step_by(sweep.ott_period.2) {
@@ -84,7 +84,7 @@ fn otto_cuda_batch_matches_cpu_var_only() -> Result<(), Box<dyn std::error::Erro
     hott_dev.buf.copy_to(&mut g_hott)?;
     lott_dev.buf.copy_to(&mut g_lott)?;
 
-    let tol = 1e-2; // OTTO is sensitive; allow a modest tolerance
+    let tol = 1e-2; 
     for idx in 0..(len * combos.len()) {
         assert!(
             approx_eq(cpu_hott[idx], g_hott[idx] as f64, tol),
@@ -110,7 +110,7 @@ fn otto_cuda_many_series_one_param_matches_cpu_var_only() -> Result<(), Box<dyn 
         );
         return Ok(());
     }
-    let cols = 300usize; // satisfy warmup requirement slow*fast + 10
+    let cols = 300usize; 
     let rows = 256usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..rows {
@@ -121,7 +121,7 @@ fn otto_cuda_many_series_one_param_matches_cpu_var_only() -> Result<(), Box<dyn 
     }
     let params = OttoParams::default();
 
-    // CPU baseline per series
+    
     let mut cpu_hott_tm = vec![f64::NAN; cols * rows];
     let mut cpu_lott_tm = vec![f64::NAN; cols * rows];
     for s in 0..rows {

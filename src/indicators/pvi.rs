@@ -322,7 +322,7 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         });
     }
 
-    // Compute warmup (first-valid) identical to Vec API
+    
     let first_valid_idx = close
         .iter()
         .zip(volume.iter())
@@ -333,14 +333,14 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
-    // Prefill warmup prefix to match alloc_with_nan_prefix's quiet-NaN
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm = first_valid_idx.min(out.len());
     for v in &mut out[..warm] {
         *v = qnan;
     }
 
-    // Dispatch to the existing compute kernels
+    
     let chosen = match Kernel::Auto {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -404,7 +404,7 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
-    // Helper functions already handle NaN prefix initialization
+    
 
     let chosen = match kern {
         Kernel::Auto => match detect_best_kernel() {
@@ -434,7 +434,7 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         }
     }
 
-    // We only set the warmup prefix to NaN; no other NaNs are filled or imputed.
+    
     for v in &mut dst[..first_valid_idx] {
         *v = f64::NAN;
     }
@@ -475,7 +475,7 @@ pub fn pvi_scalar(
         return;
     }
 
-    // Safe scalar baseline without mul_add
+    
     let mut pvi = initial;
     out[first_valid] = pvi;
 
@@ -506,7 +506,7 @@ pub fn pvi_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64, out: &mut [f64]) {
-    // Unsafe optimized scalar kernel (pointer-based, unrolled, mul_add)
+    
     debug_assert_eq!(close.len(), volume.len());
     debug_assert_eq!(close.len(), out.len());
     let n = close.len();
@@ -534,7 +534,7 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
         let rem = n - (first_valid + 1);
 
         while j + 1 < rem {
-            // step j
+            
             let c0 = *cptr.add(j);
             let v0 = *vptr.add(j);
             if not_nan(c0) && not_nan(v0) && not_nan(prev_close) && not_nan(prev_vol) {
@@ -553,7 +553,7 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
                 }
             }
 
-            // step j+1
+            
             let c1 = *cptr.add(j + 1);
             let v1 = *vptr.add(j + 1);
             if not_nan(c1) && not_nan(v1) && not_nan(prev_close) && not_nan(prev_vol) {
@@ -600,7 +600,7 @@ pub fn pvi_avx512_short(
     initial: f64,
     out: &mut [f64],
 ) {
-    // Stub: delegate to AVX2 optimized scalar path
+    
     pvi_avx2(close, volume, first_valid, initial, out)
 }
 
@@ -613,7 +613,7 @@ pub fn pvi_avx512_long(
     initial: f64,
     out: &mut [f64],
 ) {
-    // Stub: delegate to AVX2 optimized scalar path
+    
     pvi_avx2(close, volume, first_valid, initial, out)
 }
 
@@ -653,27 +653,27 @@ impl PviStream {
     /// - Math mirrors the scalar batch kernel (`pvi += r * pvi`) to preserve rounding/semantics.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        // Fast initialize if this is our first valid observation.
+        
         if let StreamState::Init = self.state {
             return self.init_or_none(close, volume);
         }
 
-        // Fast path: current inputs must be valid; `last_*` are valid by invariant after init.
+        
         if close.is_nan() | volume.is_nan() {
-            // Very rare case → keep it cold.
+            
             return self.cold_invalid(close, volume);
         }
 
         if volume > self.last_volume {
-            // Same math as scalar kernel: r = (c - prev)/prev; pvi += r * pvi
-            // (Avoid mul_add here to mirror scalar rounding exactly.)
+            
+            
             let prev = self.last_close;
             let r = (close - prev) / prev;
             self.curr += r * self.curr;
-            // For AVX-like rounding, one could use: self.curr = f64::mul_add(r, self.curr, self.curr);
+            
         }
 
-        // Advance previouss
+        
         self.last_close = close;
         self.last_volume = volume;
 
@@ -697,8 +697,8 @@ impl PviStream {
     #[cold]
     #[inline(never)]
     fn cold_invalid(&mut self, _close: f64, _volume: f64) -> Option<f64> {
-        // Batch semantics: on an invalid step we emit NaN (via None) and do not change last_* or curr.
-        // (The next valid step resumes using the previous valid last_*.)
+        
+        
         None
     }
 
@@ -934,10 +934,10 @@ fn pvi_batch_inner(
     let rows = combos.len();
     let cols = close.len();
 
-    // 1) allocate rows×cols uninit
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2) write NaN warm prefixes per row
+    
     if rows <= 32 {
         let mut warm = [0usize; 32];
         for i in 0..rows {
@@ -949,15 +949,15 @@ fn pvi_batch_inner(
         init_matrix_prefixes(&mut buf_mu, cols, &warm);
     }
 
-    // 3) prevent drop of the allocation while we lend it out
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
 
-    // 4) invoke the inner writer on the same allocation, cast as f64*
+    
     let out_f: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     pvi_batch_inner_into(close, volume, sweep, kern, parallel, out_f)?;
 
-    // 5) take ownership of the same allocation as Vec<f64> without copies
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1013,7 +1013,7 @@ fn pvi_batch_inner_into(
         });
     }
 
-    // Work on MaybeUninit view to avoid UB
+    
     let out_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1021,10 +1021,10 @@ fn pvi_batch_inner_into(
         )
     };
 
-    // Row-specific batch optimization: precompute multiplicative scale once.
-    // scale[first] = 1.0; for i>first, if valid(prev & curr) then
-    //   scale[i] = scale[i-1] * (1 + (close[i]-prev_close)/prev_close) when volume increases;
-    //   else scale[i] = scale[i-1]. Invalid steps emit NaN but keep accumulator.
+    
+    
+    
+    
     let mut scale = vec![f64::NAN; cols];
     scale[first_valid_idx] = 1.0;
 
@@ -1066,14 +1066,14 @@ fn pvi_batch_inner_into(
     let do_row = |row: usize, dst_row_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
         let iv = combos[row].initial_value.unwrap_or(1000.0);
 
-        // reinterpret row as fully-initialized f64s for writing
+        
         let dst_row: &mut [f64] =
             core::slice::from_raw_parts_mut(dst_row_mu.as_mut_ptr() as *mut f64, dst_row_mu.len());
 
-        // first_valid cell equals initial value
+        
         *dst_row.get_unchecked_mut(first_valid_idx) = iv;
 
-        // Fill post-warmup cells using shared scale
+        
         let mut j = first_valid_idx + 1;
         while j < cols {
             let s = *scale.get_unchecked(j);
@@ -1347,36 +1347,36 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            PviParams::default(), // initial_value: 1000.0
+            PviParams::default(), 
             PviParams {
                 initial_value: Some(100.0),
-            }, // small value
+            }, 
             PviParams {
                 initial_value: Some(500.0),
-            }, // medium-small
+            }, 
             PviParams {
                 initial_value: Some(5000.0),
-            }, // medium-large
+            }, 
             PviParams {
                 initial_value: Some(10000.0),
-            }, // large value
+            }, 
             PviParams {
                 initial_value: Some(0.0),
-            }, // edge case: zero
+            }, 
             PviParams {
                 initial_value: Some(1.0),
-            }, // edge case: one
+            }, 
             PviParams {
                 initial_value: Some(-1000.0),
-            }, // edge case: negative
+            }, 
             PviParams {
                 initial_value: Some(999999.0),
-            }, // very large
+            }, 
             PviParams {
                 initial_value: None,
-            }, // None (uses default)
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1385,12 +1385,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1425,21 +1425,21 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[test]
     fn test_pvi_into_matches_api() {
-        // Use the repository's existing CSV dataset for parity.
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("load candles");
 
         let input = PviInput::from_candles(&candles, "close", "volume", PviParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = pvi(&input).expect("pvi baseline").values;
 
-        // No-allocation path
+        
         let mut into_out = vec![0.0f64; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1447,7 +1447,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, use the existing helper to avoid symbol clashes
+            
             pvi_into_slice(&mut into_out, &input, Kernel::Auto).expect("pvi_into_slice");
         }
 
@@ -1476,19 +1476,19 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with realistic market conditions
+        
         let strat = (
-            // Close prices between -1e6 and 1e6 (filtered for finite values)
+            
             prop::collection::vec(
                 (-1e6f64..1e6f64).prop_filter("finite close", |x| x.is_finite() && x.abs() > 1e-10),
                 10..400,
             ),
-            // Volume data between 0 and 1e6 (filtered for finite, non-negative values)
+            
             prop::collection::vec(
                 (0f64..1e6f64).prop_filter("finite volume", |x| x.is_finite()),
                 10..400,
             ),
-            // Initial value between 100 and 10000
+            
             100f64..10000f64,
         )
             .prop_filter("same length", |(close, volume, _)| {
@@ -1503,27 +1503,27 @@ mod tests {
                 };
                 let input = PviInput::from_slices(&close_data, &volume_data, params);
 
-                // Get outputs from different kernels - handle potential errors gracefully
+                
                 let output = match pvi_with_kernel(&input, kernel) {
                     Ok(o) => o,
-                    Err(_) => return Ok(()), // Skip this test case if PVI fails (e.g., not enough valid data)
+                    Err(_) => return Ok(()), 
                 };
                 let out = &output.values;
 
                 let scalar_output = match pvi_with_kernel(&input, Kernel::Scalar) {
                     Ok(o) => o,
-                    Err(_) => return Ok(()), // Skip this test case if PVI fails
+                    Err(_) => return Ok(()), 
                 };
                 let ref_out = &scalar_output.values;
 
-                // Find first valid index
+                
                 let first_valid_idx = close_data
                     .iter()
                     .zip(volume_data.iter())
                     .position(|(&c, &v)| !c.is_nan() && !v.is_nan());
 
                 if let Some(first_idx) = first_valid_idx {
-                    // Property 1: First valid value should equal initial_value
+                    
                     if !out[first_idx].is_nan() {
                         prop_assert!(
                             (out[first_idx] - initial_value).abs() < 1e-9,
@@ -1534,7 +1534,7 @@ mod tests {
                         );
                     }
 
-                    // Property 2: PVI should remain constant when volume doesn't increase
+                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                             if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
@@ -1549,7 +1549,7 @@ mod tests {
                         }
                     }
 
-                    // Property 3: PVI should only change when volume increases
+                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                             if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
@@ -1567,7 +1567,7 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Verify change calculation accuracy
+                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan()
                             && i > 0
@@ -1595,7 +1595,7 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Kernel consistency - all kernels should produce identical results
+                    
                     for i in 0..out.len() {
                         if out[i].is_nan() && ref_out[i].is_nan() {
                             continue;
@@ -1610,7 +1610,7 @@ mod tests {
                         );
                     }
 
-                    // Property 6: No poison values
+                    
                     for (i, &val) in out.iter().enumerate() {
                         if !val.is_nan() {
                             let bits = val.to_bits();
@@ -1626,7 +1626,7 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Constant volume should keep PVI at initial value
+                    
                     if volume_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                         for &val in out.iter().skip(first_idx) {
                             if !val.is_nan() {
@@ -1639,7 +1639,7 @@ mod tests {
                         }
                     }
 
-                    // Property 8: With monotonic increasing volume AND price changes, PVI should change
+                    
                     let is_monotonic_increasing = volume_data
                         .windows(2)
                         .all(|w| !w[0].is_nan() && !w[1].is_nan() && w[1] > w[0]);
@@ -1651,7 +1651,7 @@ mod tests {
                                 && !close_data[i].is_nan()
                                 && !close_data[i - 1].is_nan()
                             {
-                                // PVI changes when BOTH volume increases AND price changes
+                                
                                 if (close_data[i] - close_data[i - 1]).abs() > 1e-10 {
                                     prop_assert!(
 										(out[i] - last_valid_pvi).abs() > 1e-10,
@@ -1664,8 +1664,8 @@ mod tests {
                         }
                     }
 
-                    // Property 9: Test behavior when close[i-1] is not near zero (avoid division by zero)
-                    // The implementation doesn't explicitly handle division by zero, so we test normal cases
+                    
+                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !volume_data[i].is_nan()
                             && !volume_data[i - 1].is_nan()
@@ -1674,14 +1674,14 @@ mod tests {
                             && !close_data[i - 1].is_nan()
                             && close_data[i - 1].abs() > 1e-10
                         {
-                            // Only test when close[i-1] is NOT near zero
-                            // Verify the percentage change calculation is mathematically correct
+                            
+                            
                             if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                                 let expected_change = ((close_data[i] - close_data[i - 1])
                                     / close_data[i - 1])
                                     * out[i - 1];
                                 let expected_pvi = out[i - 1] + expected_change;
-                                // This duplicates Property 4 but ensures we avoid division by zero edge cases
+                                
                                 prop_assert!(
 									(out[i] - expected_pvi).abs() < 1e-9 || out[i].is_infinite(),
 									"PVI calculation should be correct or handle extreme values at index {}",
@@ -1691,10 +1691,10 @@ mod tests {
                         }
                     }
 
-                    // Property 10: PVI values should remain finite and reasonable
+                    
                     for (i, &val) in out.iter().enumerate() {
                         if !val.is_nan() {
-                            // PVI should remain finite (not infinite)
+                            
                             prop_assert!(
                                 val.is_finite(),
                                 "PVI should be finite, but got {} at index {}",
@@ -1702,9 +1702,9 @@ mod tests {
                                 i
                             );
 
-                            // With positive initial value and reasonable price changes,
-                            // PVI shouldn't become negative (though mathematically possible with extreme drops)
-                            // Only check this for reasonable values to avoid edge cases
+                            
+                            
+                            
                             if initial_value > 0.0
                                 && val.is_finite()
                                 && val.abs() < initial_value * 100.0
@@ -1796,16 +1796,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various initial_value sweep configurations
+        
         let test_configs = vec![
-            (100.0, 500.0, 100.0),       // Small values
-            (1000.0, 5000.0, 1000.0),    // Default range
-            (10000.0, 50000.0, 10000.0), // Large values
-            (900.0, 1100.0, 50.0),       // Dense range around default
-            (0.0, 100.0, 25.0),          // Edge case: starting at zero
-            (-1000.0, 1000.0, 500.0),    // Edge case: negative to positive
-            (1.0, 10.0, 1.0),            // Very small values
-            (999999.0, 1000001.0, 1.0),  // Very large values
+            (100.0, 500.0, 100.0),       
+            (1000.0, 5000.0, 1000.0),    
+            (10000.0, 50000.0, 10000.0), 
+            (900.0, 1100.0, 50.0),       
+            (0.0, 100.0, 25.0),          
+            (-1000.0, 1000.0, 500.0),    
+            (1.0, 10.0, 1.0),            
+            (999999.0, 1000001.0, 1.0),  
         ];
 
         for (cfg_idx, &(start, end, step)) in test_configs.iter().enumerate() {
@@ -1824,7 +1824,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2031,7 +2031,7 @@ pub fn pvi_into(
         };
         let input = PviInput::from_slices(close, volume, params);
 
-        // Check for aliasing
+        
         if close_ptr == out_ptr || volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             pvi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -2151,7 +2151,7 @@ pub fn pvi_batch_into(
     }
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

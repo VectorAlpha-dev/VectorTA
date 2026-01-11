@@ -1,8 +1,8 @@
-// === UMA (Ultimate Moving Average) – warp-cooperative kernels (FP32) ===
-//
-// Default behavior preserves accuracy (uses powf). Optional fast paths are gated
-// by UMA_PRECOMPUTE_LOG2 / UMA_FAST_TRANSCENDENTALS / UMA_USE_LDG.
-// Launch each kernel with blockDim.x = 32 (one warp per block).
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,25 +12,25 @@
 #include <math.h>
 #include <float.h>
 
-// ----------------------------- compile-time knobs -----------------------------
+
 #ifndef UMA_WARP_SIZE
 #define UMA_WARP_SIZE 32
 #endif
 
-// Maximum per-combo `max_length` for which we precompute `log2(k)` in shared memory.
-// Keeping this modest avoids large shared allocations that could hurt occupancy.
+
+
 #ifndef UMA_SHARED_LOG2_MAX
 #define UMA_SHARED_LOG2_MAX 512
 #endif
 
-// Maximum table size for precomputed log2(k) in constant memory.
-// 8192 -> 8193 floats (~32.1KB), within 64KB constant cache budget (Ada).
+
+
 #ifndef UMA_LOG2_TABLE_SIZE
 #define UMA_LOG2_TABLE_SIZE 8192
 #endif
 
 #if defined(UMA_PRECOMPUTE_LOG2)
-__constant__ float UMA_LOG2_TABLE[UMA_LOG2_TABLE_SIZE + 1]; // index from 0..N
+__constant__ float UMA_LOG2_TABLE[UMA_LOG2_TABLE_SIZE + 1]; 
 #endif
 
 #if defined(UMA_USE_LDG)
@@ -39,7 +39,7 @@ __constant__ float UMA_LOG2_TABLE[UMA_LOG2_TABLE_SIZE + 1]; // index from 0..N
   #define UMA_RO_LOAD(ptr) (*(ptr))
 #endif
 
-// ----------------------------- small utilities -------------------------------
+
 static __device__ __forceinline__ bool is_nan(float v) { return isnan(v); }
 
 static __device__ __forceinline__ float clampf(float x, float lo, float hi) {
@@ -51,7 +51,7 @@ static __device__ __forceinline__ float load_tm(
     return UMA_RO_LOAD(&data[t * num_series + series_idx]);
 }
 
-// Warp reduction (sum) over an arbitrary active-lane mask.
+
 static __device__ __forceinline__ float warp_reduce_sum(float v, unsigned mask) {
 #pragma unroll
     for (int off = UMA_WARP_SIZE >> 1; off > 0; off >>= 1) {
@@ -60,19 +60,19 @@ static __device__ __forceinline__ float warp_reduce_sum(float v, unsigned mask) 
     return v;
 }
 
-// Fast/precise weight computation.
-// base in [1..len], p in R
+
+
 static __device__ __forceinline__ float uma_weight_pow(int base, float p) {
-    // powf is extremely costly and dominates UMA runtime. The CPU reference uses
-    // exp(p * ln(k)) with a LUT; on GPU we approximate with fast log2/exp2.
-    //
-    // This intentionally trades a small amount of numeric precision for a large
-    // speedup; UMA tests already use tolerant thresholds for FP32 sensitivity.
+    
+    
+    
+    
+    
     const float l2 = __log2f((float)base);
     return exp2f(p * l2);
 }
 
-// ----------------------------- RSI helpers (unchanged semantics) -------------
+
 static __device__ __forceinline__ float compute_rsi(
     const float* __restrict__ data, int start, int end, int period) {
 
@@ -114,13 +114,13 @@ static __device__ __forceinline__ float compute_rsi(
     return rsi;
 }
 
-// Compute ONLY the last Wilder RSI value for the window [start..end) and period.
-//
-// This mirrors `compute_rsi(...)` semantics, but avoids an O(window) scalar loop by
-// evaluating the Wilder smoothing recurrence in closed form:
-//   avg = beta^n * avg0 + alpha * sum_{k=0..n-1} beta^k * v_{last-k}
-//
-// For UMA's use-case the window is at most 2*period, so n <= period-1.
+
+
+
+
+
+
+
 static __device__ __forceinline__ float compute_rsi_last_warp(
     const float* __restrict__ data, int start, int end, int period,
     int lane, int lanes, unsigned mask) {
@@ -128,12 +128,12 @@ static __device__ __forceinline__ float compute_rsi_last_warp(
     if (period <= 1) return 50.0f;
     const int len = end - start;
     if (len <= period) return 50.0f;
-    const int m = len - 1; // number of diffs
+    const int m = len - 1; 
 
     const float alpha = 1.0f / (float)period;
     const float beta  = 1.0f - alpha;
 
-    // ---- Initial mean over first `period` diffs (t=1..period) ----
+    
     float up0_part = 0.0f;
     float dn0_part = 0.0f;
     int ok0 = 1;
@@ -157,25 +157,25 @@ static __device__ __forceinline__ float compute_rsi_last_warp(
     const float avg_up0 = up0 * alpha;
     const float avg_dn0 = dn0 * alpha;
 
-    // Number of Wilder smoothing steps after the initial mean.
+    
     const int tail_len = m - period;
     if (tail_len <= 0) {
         const float denom0 = avg_up0 + avg_dn0;
         return (denom0 == 0.0f) ? 50.0f : (100.0f * avg_up0 / denom0);
     }
 
-    // ---- Weighted tail sum (t = m - k, k=0..tail_len-1) ----
-    // Weights are beta^k. Use fast exp2/log2 to avoid powf.
+    
+    
     const float log2_beta = __log2f(beta);
-    const float beta_step = exp2f((float)lanes * log2_beta); // beta^{lanes}
-    float pow_b = exp2f((float)lane * log2_beta);            // beta^{lane}
+    const float beta_step = exp2f((float)lanes * log2_beta); 
+    float pow_b = exp2f((float)lane * log2_beta);            
 
     float up_tail_part = 0.0f;
     float dn_tail_part = 0.0f;
     int ok1 = 1;
     for (int k = lane; k < tail_len; k += lanes) {
-        const int t = m - k;           // diff index in [1..m]
-        const int idx = start + t;     // cur index
+        const int t = m - k;           
+        const int idx = start + t;     
         const float cur = UMA_RO_LOAD(&data[idx]);
         const float prev = UMA_RO_LOAD(&data[idx - 1]);
         if (!isfinite(cur) || !isfinite(prev)) {
@@ -195,7 +195,7 @@ static __device__ __forceinline__ float compute_rsi_last_warp(
     const float dn_tail = warp_reduce_sum(dn_tail_part, mask);
     if (!all_ok1) return 50.0f;
 
-    const float beta_tail = exp2f((float)tail_len * log2_beta); // beta^{tail_len}
+    const float beta_tail = exp2f((float)tail_len * log2_beta); 
     const float avg_up = fmaf(beta_tail, avg_up0, alpha * up_tail);
     const float avg_dn = fmaf(beta_tail, avg_dn0, alpha * dn_tail);
 
@@ -245,7 +245,7 @@ static __device__ __forceinline__ float compute_rsi_tm(
     return rsi;
 }
 
-// ----------------------------- Batch kernel (one series per combo) ----------
+
 extern "C" __global__ __launch_bounds__(UMA_WARP_SIZE, 8)
 void uma_batch_f32(const float* __restrict__ prices,
                    const float* __restrict__ volumes,
@@ -276,7 +276,7 @@ void uma_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    // Parallel NaN initialization
+    
     for (int i = lane; i < series_len; i += lanes) {
         raw_out[base + i] = NAN;
         final_out[base + i] = NAN;
@@ -285,7 +285,7 @@ void uma_batch_f32(const float* __restrict__ prices,
     if (first_valid >= series_len) return;
     __syncwarp(mask);
 
-    // Sliding sum/std state – lane0 keeps state; we broadcast per-step bits we need.
+    
     float length_f = (float)max_len;
     float sum = 0.0f, sum_sq = 0.0f;
     int count = 0;
@@ -293,12 +293,12 @@ void uma_batch_f32(const float* __restrict__ prices,
     const int warm_raw = first_valid + max_len - 1;
 
     for (int i = first_valid; i < series_len; ++i) {
-        int proceed = 0;  // 0=skip, 1=use RSI path, 2=use volume path
+        int proceed = 0;  
         int len_r = 0;
         int window_start_weights = 0;
         float p = 0.0f;
         float price_now_lane0 = 0.0f;
-        // --- lane0: scalar control path, sliding mean/std, adaptive length, choose MF path
+        
         if (lane == 0) {
             const float price_now = UMA_RO_LOAD(&prices[i]);
             price_now_lane0 = price_now;
@@ -320,9 +320,9 @@ void uma_batch_f32(const float* __restrict__ prices,
                 const float mean = sum / (float)max_len;
                 float var = sum_sq / (float)max_len - mean * mean;
                 var = fmaxf(var, 0.0f);
-                // Avoid sqrtf in the hot loop: compare squared distance to variance-scaled thresholds.
-                // Inner band: |x-mean| <= 0.25*std  <=> (x-mean)^2 <= (0.25^2)*var = 0.0625*var (inclusive)
-                // Outer band: |x-mean| >  1.75*std  <=> (x-mean)^2 >  (1.75^2)*var = 3.0625*var (strict)
+                
+                
+                
                 if (isfinite(var) && isfinite(mean)) {
                     const float diff = price_now - mean;
                     const float diff2 = diff * diff;
@@ -338,7 +338,7 @@ void uma_batch_f32(const float* __restrict__ prices,
                     if (len_r < 1)       len_r = 1;
 
                     if (i + 1 >= len_r) {
-                        // Decide MF source
+                        
                         bool try_volume = false;
                         if (has_volume && volumes != nullptr) {
                             const float vol_now = UMA_RO_LOAD(&volumes[i]);
@@ -350,13 +350,13 @@ void uma_batch_f32(const float* __restrict__ prices,
                     }
                 }
             }
-            // set weights window start here once len_r known
+            
             if (proceed) {
                 window_start_weights = i + 1 - len_r;
             }
         }
 
-        // Broadcast control decisions / parameters from lane0
+        
         proceed               = __shfl_sync(mask, proceed, 0);
         len_r                 = __shfl_sync(mask, len_r, 0);
         window_start_weights  = __shfl_sync(mask, window_start_weights, 0);
@@ -364,17 +364,17 @@ void uma_batch_f32(const float* __restrict__ prices,
 
         if (!proceed) continue;
 
-        // ----- Compute MF (momentum factor) -----
+        
         float mf = 50.0f;
         if (proceed == 2) {
-            // Volume-based MF over len_mf in [2..len_r], window [i+1-len_mf .. i]
+            
             int len_mf = len_r;
             int available = (i + 1) - first_valid;
             if (len_mf > available) len_mf = available;
 
             if (len_mf >= 2) {
                 const int start_mf = (i + 1) - len_mf;
-                // each lane processes indices j in [start_mf+1 .. i]
+                
                 float up_part = 0.0f, down_part = 0.0f;
                 int ok = 1;
 
@@ -392,7 +392,7 @@ void uma_batch_f32(const float* __restrict__ prices,
                         else if (delta < 0.0f) down_part += vol_j;
                     }
                 }
-                // All lanes must be OK
+                
                 const int all_ok = __all_sync(mask, ok);
                 float up_vol   = warp_reduce_sum(up_part, mask);
                 float down_vol = warp_reduce_sum(down_part, mask);
@@ -400,36 +400,36 @@ void uma_batch_f32(const float* __restrict__ prices,
                     const float denom_vol = up_vol + down_vol;
                     if (denom_vol > 0.0f) mf = 100.0f * up_vol / denom_vol;
                 } else {
-                    // fall back to RSI if bad data encountered
+                    
                     proceed = 1;
                 }
             } else {
-                // not enough data -> fall back to RSI
+                
                 proceed = 1;
             }
         }
 
         if (proceed == 1) {
-            // RSI over [max(0, i+1-2*len_r) .. i+1), period=len_r
+            
             int window_start_rsi = (i + 1) - (len_r * 2);
             if (window_start_rsi < 0) window_start_rsi = 0;
             const int window_end = i + 1;
             mf = compute_rsi_last_warp(prices, window_start_rsi, window_end, len_r, lane, lanes, mask);
         }
 
-        // ----- Power weights exponent p -----
-        // Match CPU reference: mf_scaled = 2*mf - 100; p = accelerator + abs(mf_scaled) * 0.04
+        
+        
         const float mf_scaled = fmaf(mf, 2.0f, -100.0f);
         p = fmaf(fabsf(mf_scaled), 0.04f, accelerator);
 
-        // ----- Warp-cooperative weighted sum over len_r -----
+        
         float ws_part = 0.0f, wt_part = 0.0f;
-        // guard window_start_weights may be < 0 for very early i, but proceed ensures i+1>=len_r.
+        
         for (int j = lane; j < len_r; j += lanes) {
             const int idx = window_start_weights + j;
             const float v = UMA_RO_LOAD(&prices[idx]);
             if (!is_nan(v)) {
-                const int base_pow = len_r - j;  // in [1..len_r]
+                const int base_pow = len_r - j;  
                 const float w = uma_weight_pow(base_pow, p);
                 ws_part = fmaf(v, w, ws_part);
                 wt_part += w;
@@ -444,11 +444,11 @@ void uma_batch_f32(const float* __restrict__ prices,
             raw_out[base + i] = result;
         }
         __syncwarp(mask);
-    } // time loop
+    } 
 
-    // ----------------- Smoothing stage -----------------
+    
     if (smooth_len <= 1) {
-        // parallel copy raw -> final
+        
         for (int i = lane; i < series_len; i += lanes) {
             final_out[base + i] = raw_out[base + i];
         }
@@ -456,7 +456,7 @@ void uma_batch_f32(const float* __restrict__ prices,
     }
 
     const int warm_smooth = (first_valid + max_len - 1) + smooth_len - 1;
-    if (warm_smooth >= series_len) return; // keep NaNs (no smoothed values produced)
+    if (warm_smooth >= series_len) return; 
 
     if (lane == 0) {
         const int lookback = smooth_len - 1;
@@ -492,7 +492,7 @@ void uma_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ----------------------------- Time-major many-series kernel -----------------
+
 extern "C" __global__ __launch_bounds__(UMA_WARP_SIZE, 8)
 void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const float* __restrict__ volumes_tm,
@@ -518,7 +518,7 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (fv < 0) fv = 0;
     if (fv >= series_len) return;
 
-    // Clear outputs in parallel (for this series only)
+    
     for (int t = lane; t < series_len; t += lanes) {
         const int idx = t * num_series + series_idx;
         raw_out_tm[idx] = NAN;
@@ -535,7 +535,7 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int warm_raw = fv + max_length - 1;
 
     for (int i = fv; i < series_len; ++i) {
-        int proceed = 0; // 0=skip, 1=RSI, 2=volume
+        int proceed = 0; 
         int len_r = 0;
         int window_start_weights = 0;
         float p = 0.0f;
@@ -636,15 +636,15 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
             int window_start_rsi = (i + 1) - (len_r * 2);
             if (window_start_rsi < 0) window_start_rsi = 0;
             const int window_end = i + 1;
-            // For now, reuse the scalar TM helper for correctness; the no-volume bench
-            // uses the batch kernel. Keep this path conservative.
+            
+            
             if (lane == 0) {
                 mf = compute_rsi_tm(prices_tm, num_series, series_idx, window_start_rsi, window_end, len_r);
             }
             mf = __shfl_sync(mask, mf, 0);
         }
 
-        // Match CPU reference: mf_scaled = 2*mf - 100; p = accelerator + abs(mf_scaled) * 0.04
+        
         const float mf_scaled = fmaf(mf, 2.0f, -100.0f);
         const float p_local = fmaf(fabsf(mf_scaled), 0.04f, accelerator);
 
@@ -671,7 +671,7 @@ void uma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         __syncwarp(mask);
     }
 
-    // Smoothing
+    
     if (smooth_length <= 1) {
         for (int t = fv + lane; t < series_len; t += lanes) {
             const int idx = t * num_series + series_idx;

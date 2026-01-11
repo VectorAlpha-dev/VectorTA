@@ -1,9 +1,9 @@
-// CUDA kernel for DMA (Dickson Moving Average) computations.
-//
-// This kernel mirrors the scalar DMA implementation but executes each parameter
-// combination on the GPU. Each block processes one parameter set and walks the
-// series sequentially, keeping fidelity with the adaptive EMA search while
-// still benefiting from device-side residency for large batch sweeps.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -17,11 +17,11 @@ static __device__ __forceinline__ float sum_read(float s, float c) { return s + 
 
 static __device__ __forceinline__ float wsum_norm_i32(int p) {
     long long t = (long long)p * (p + 1);
-    // exact divide-by-2 for integers; convert with round-to-nearest
+    
     return __int2float_rn((int)(t >> 1));
 }
 
-// legacy weighted_sum_norm(fp32) removed; now using exact integer wsum_norm_i32
+
 
 static __device__ __forceinline__ void kahan_add(float value, float& sum, float& comp) {
     float y = value - comp;
@@ -30,16 +30,16 @@ static __device__ __forceinline__ void kahan_add(float value, float& sum, float&
     sum = t;
 }
 
-// Quantized closed-form best-gain for the adaptive EMA.
-// Matches argmin over {0, 0.1, 0.2, ..., ema_gain_limit*0.1} used in the loop.
+
+
 static __device__ __forceinline__
 float dma_quantized_best_gain(float x,
                               float e0_prev,
                               float ec_prev,
                               float alpha_e,
                               int   ema_gain_limit) {
-    // CPU-equivalent two-candidate compare with deterministic tie-break
-    // g in {0, 0.1, ..., ema_gain_limit*0.1}; tie -> lower gridpoint
+    
+    
     const float one_minus_alpha_e = 1.0f - alpha_e;
     const float base  = fmaf(alpha_e, e0_prev, one_minus_alpha_e * ec_prev);
     const float t     = alpha_e * (x - ec_prev);
@@ -49,8 +49,8 @@ float dma_quantized_best_gain(float x,
     if (fabsf(t) <= EPS) return 0.0f;
 
     const float step = 0.1f;
-    const int   limit = ema_gain_limit; // number of 0.1 steps
-    float target = (r / t) / step;      // equals (r/t) * 10
+    const int   limit = ema_gain_limit; 
+    float target = (r / t) / step;      
 
     int i0 = (int)floorf(target);
     if (i0 < 0) i0 = 0; else if (i0 > limit) i0 = limit;
@@ -63,7 +63,7 @@ float dma_quantized_best_gain(float x,
     return (e0 <= e1) ? g0 : g1;
 }
 
-// Compute the updated ec value using the quantized optimal gain.
+
 static __device__ __forceinline__
 float dma_update_ec(float x,
                     float e0_prev,
@@ -80,7 +80,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ hull_lengths,
                    const int* __restrict__ ema_lengths,
                    const int* __restrict__ ema_gain_limits,
-                   const int* __restrict__ hull_types,  // 0 = WMA, 1 = EMA
+                   const int* __restrict__ hull_types,  
                    int series_len,
                    int n_combos,
                    int first_valid,
@@ -90,7 +90,7 @@ void dma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Single-thread execution per combo keeps the logic identical to the scalar path.
+    
     if (threadIdx.x != 0) {
         return;
     }
@@ -121,7 +121,7 @@ void dma_batch_f32(const float* __restrict__ prices,
         out[base_out + i] = NAN;
     }
 
-    // Shared memory scratch ring for diff smoothing.
+    
     extern __shared__ __align__(16) float shared[];
     float* diff_ring = shared;
 
@@ -217,7 +217,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = sum_read(a_half, a_half_c);
                     const float old = prices[i - half];
                     kahan_add(x - old, a_half, a_half_c);
-                    // Rolling WMA weighted-sum update: s_new = s_prev + half * x - a_prev
+                    
                     s_half += fmaf(static_cast<float>(half), x, -a_prev);
                 }
             }
@@ -244,7 +244,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = sum_read(a_full, a_full_c);
                     const float old = prices[i - hull_length];
                     kahan_add(x - old, a_full, a_full_c);
-                    // Rolling WMA weighted-sum update: s_new = s_prev + hull_length * x - a_prev
+                    
                     s_full += fmaf(static_cast<float>(hull_length), x, -a_prev);
                 }
             }
@@ -325,7 +325,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                 if (is_wma) {
                     const float a_prev = sum_read(a_diff, a_diff_c);
                     kahan_add(diff_now - old, a_diff, a_diff_c);
-                    // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
+                    
                     kahan_add(fmaf(static_cast<float>(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
                     hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
@@ -360,10 +360,10 @@ void dma_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Tiled batch kernel: each thread computes one parameter combo over time.
-// Shared memory is partitioned per-thread: [thread][max_sqrt_len].
-// -----------------------------------------------------------------------------
+
+
+
+
 
 template<int TX>
 __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
@@ -612,15 +612,15 @@ __global__ void dma_batch_tiled_f32_tx128(
 }
 }
 
-// Many-series × one-parameter variant. Each block handles one series with
-// time-major layout (rows = time, cols = series). The implementation mirrors
-// the single-series kernel but indexes into the matrix using the series stride.
+
+
+
 extern "C" __global__
 void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int hull_length,
                                    int ema_length,
                                    int ema_gain_limit,
-                                   int hull_type,  // 0 = WMA, 1 = EMA
+                                   int hull_type,  
                                    int series_len,
                                    int num_series,
                                    const int* __restrict__ first_valids,
@@ -657,8 +657,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int half = hull_length / 2;
     const int sqrt_len_clamped = (sqrt_len > 0) ? sqrt_len : 1;
 
-    // Weighted moving average normalizers for half/full/sqrt windows.
-    // Use exact integer normalization converted to fp32.
+    
+    
     const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
     const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length) : 1.0f);
     const float denom_sqrt_f = (sqrt_len_clamped > 0 ? wsum_norm_i32(sqrt_len_clamped) : 1.0f);
@@ -767,7 +767,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_half;
                     const float old = prices_tm[(i - half) * stride + series_idx];
                     kahan_add(x - old, a_half, a_half_c);
-                    // Rolling WMA weighted-sum update: s_new = s_prev + half * x - a_prev
+                    
                     kahan_add(fmaf(static_cast<float>(half), x, -a_prev), s_half, s_half_c);
                 }
             }
@@ -797,7 +797,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_full;
                     const float old = prices_tm[(i - hull_length) * stride + series_idx];
                     kahan_add(x - old, a_full, a_full_c);
-                    // Rolling WMA weighted-sum update: s_new = s_prev + hull_length * x - a_prev
+                    
                     kahan_add(fmaf(static_cast<float>(hull_length), x, -a_prev), s_full, s_full_c);
                 }
             }
@@ -884,7 +884,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
-                    // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
+                    
                     kahan_add(fmaf(static_cast<float>(sqrt_len_clamped), diff_now, -a_prev), s_diff, s_diff_c);
                     hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
@@ -917,10 +917,10 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Many-series tiled 2D kernel: each thread in Y processes one series
-// sequentially; shared memory is partitioned by threadIdx.y.
-// -----------------------------------------------------------------------------
+
+
+
+
 
 template<int TY>
 __device__ void dma_ms1p_tiled_f32_tx1_ty_core(const float* __restrict__ prices_tm,

@@ -821,7 +821,7 @@ pub struct EhlersITrendStream {
     cum_idx: usize,
     // dedicated history for the 4-tap WMA pre-smoother of raw price (x1, x2, x3)
     // decoupled from sum_ring so correctness doesn't depend on max_dc >= 4
-    wma_hist: [f64; 3], // [x1, x2, x3] from most-recent to oldest
+    wma_hist: [f64; 3], 
     prev_it1: f64,
     prev_it2: f64,
     prev_it3: f64,
@@ -866,7 +866,7 @@ impl EhlersITrendStream {
 
     #[inline(always)]
     pub fn update(&mut self, x0: f64) -> Option<f64> {
-        // ── 0) Small helpers / constants ───────────────────────────────────────
+        
         #[inline(always)]
         fn r7(buf: &[f64; 7], p: usize, off: usize) -> f64 {
             let mut idx = p + 7 - off;
@@ -879,24 +879,24 @@ impl EhlersITrendStream {
         const C1: f64 = 0.5769;
         const DIV10: f64 = 0.1;
 
-        // ── 1) 4-tap WMA pre-smoother of raw price (isolated from max_dc) ────
-        // FIR: (4*x0 + 3*x1 + 2*x2 + 1*x3)/10
+        
+        
         let fir_val =
             (4.0 * x0 + 3.0 * self.wma_hist[0] + 2.0 * self.wma_hist[1] + self.wma_hist[2]) * DIV10;
 
-        // roll the 4-tap history: x3 <- x2 <- x1 <- x0
+        
         self.wma_hist[2] = self.wma_hist[1];
         self.wma_hist[1] = self.wma_hist[0];
         self.wma_hist[0] = x0;
 
-        // keep the original raw-price ring alive (not used for math anymore)
+        
         self.sum_ring[self.sum_idx] = x0;
         self.sum_idx += 1;
         if self.sum_idx == self.max_dc {
             self.sum_idx = 0;
         }
 
-        // ── 2) Hilbert transform two-stage bandpass (same as scalar paths) ────
+        
         self.fir_buf[self.ring_ptr] = fir_val;
 
         let fir_0 = r7(&self.fir_buf, self.ring_ptr, 0);
@@ -941,20 +941,20 @@ impl EhlersITrendStream {
         self.prev_i2 = i2_cur;
         self.prev_q2 = q2_cur;
 
-        // Optional mul_add micro-opts could go behind a feature; keep exact by default
+        
         let re_smooth = 0.2 * re_val + 0.8 * self.prev_re;
         let im_smooth = 0.2 * im_val + 0.8 * self.prev_im;
         self.prev_re = re_smooth;
         self.prev_im = im_smooth;
 
-        // use exact atan for stability; reintroduce other fast-path micro-opts
+        
         let mut new_mesa = if re_smooth != 0.0 && im_smooth != 0.0 {
             2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan()
         } else {
             0.0
         };
 
-        // clamp to Ehlers' bounds
+        
         let up_lim = 1.5 * self.prev_mesa;
         if new_mesa > up_lim {
             new_mesa = up_lim;
@@ -970,7 +970,7 @@ impl EhlersITrendStream {
         let sp_val = 0.33 * final_mesa + 0.67 * self.prev_smooth;
         self.prev_smooth = sp_val;
 
-        // integer dominant cycle period in [1, max_dc]
+        
         let mut dcp = (sp_val + 0.5).floor() as usize;
         if dcp == 0 {
             dcp = 1;
@@ -978,8 +978,8 @@ impl EhlersITrendStream {
             dcp = self.max_dc;
         }
 
-        // ── 3) O(1) rolling mean over the last `dcp` prices via prefix-sum ring ─
-        // cum[head] = cum[head-1] + x0  (ring length = max_dc+1)
+        
+        
         let n = self.max_dc + 1;
         let next = if self.cum_idx + 1 == n {
             0
@@ -990,7 +990,7 @@ impl EhlersITrendStream {
         self.cum_ring[next] = cur_sum;
         self.cum_idx = next;
 
-        // sum(last dcp) = cum[head] - cum[head - dcp]  (with wrap)
+        
         let back = if self.cum_idx >= dcp {
             self.cum_idx - dcp
         } else {
@@ -998,22 +998,22 @@ impl EhlersITrendStream {
         };
         let it_val = (cur_sum - self.cum_ring[back]) / dcp as f64;
 
-        // ── 4) 4-tap WMA of IT (same numerator/denominator as before) ────────
+        
         let eit_val = if self.bar < self.warmup_bars {
             x0
         } else {
             (4.0 * it_val + 3.0 * self.prev_it1 + 2.0 * self.prev_it2 + self.prev_it3) * DIV10
         };
 
-        // roll instantaneous-trend taps
+        
         self.prev_it3 = self.prev_it2;
         self.prev_it2 = self.prev_it1;
         self.prev_it1 = it_val;
 
-        // advance 7-tap ring pointer used by the Hilbert stages
+        
         self.ring_ptr = (self.ring_ptr + 1) % 7;
 
-        // warmup gating (unchanged behavior)
+        
         let result = if self.bar < self.warmup_bars {
             None
         } else {
@@ -1122,17 +1122,17 @@ fn ehlers_itrend_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Guard total size to avoid panics/UB on very large grids
+    
     rows
         .checked_mul(cols)
         .ok_or(EhlersITrendError::SizeOverflow {
             context: "rows*cols in batch output matrix",
         })?;
 
-    // Step 1: Allocate uninitialized matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1142,19 +1142,19 @@ fn ehlers_itrend_batch_inner(
         .map(|c| first + c.warmup_bars.unwrap())
         .collect();
 
-    // Step 3: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Step 5: Compute into the buffer
+    
     let result_combos = ehlers_itrend_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Step 6: Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1179,8 +1179,8 @@ fn ehlers_itrend_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
-    // Note: NaN prefixes have already been initialized by the caller
-    // We just need to compute the values
+    
+    
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(EhlersITrendError::InvalidBatchRange);
@@ -1206,12 +1206,12 @@ fn ehlers_itrend_batch_inner_into(
         })?;
     debug_assert_eq!(out.len(), rows * cols);
 
-    // Reinterpret out as MaybeUninit for row processing
+    
     let raw = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Precompute shared 4-tap WMA smoother (fir) once for all rows
+    
     #[inline(always)]
     fn precompute_wma4(src: &[f64]) -> Vec<f64> {
         let n = src.len();
@@ -1228,10 +1228,10 @@ fn ehlers_itrend_batch_inner_into(
 
     let fir_series = precompute_wma4(data);
 
-    // ────────────────────────────────────────────────────────────────────
-    // ❸ closure that writes one row; receives &mut [MaybeUninit<f64>]
-    //     and casts that slice to &mut [f64] for the kernel call
-    // ────────────────────────────────────────────────────────────────────
+    
+    
+    
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let p = &combos[row];
         let warmup = p.warmup_bars.unwrap();
@@ -1240,9 +1240,9 @@ fn ehlers_itrend_batch_inner_into(
         ehlers_itrend_row_scalar_tail_with_fir(data, &fir_series, warmup, max_dc, first, dst);
     };
 
-    // ────────────────────────────────────────────────────────────────────
-    // ❹ run the kernels row-by-row (parallel or serial)
-    // ────────────────────────────────────────────────────────────────────
+    
+    
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1289,10 +1289,10 @@ impl EhlersITrendBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EhlersITrendBatchRange) -> Result<Vec<EhlersITrendParams>, EhlersITrendError> {
-    // Robust expansion rules:
-    // - step == 0 → static singleton if start==end; otherwise InvalidRange
-    // - reversed bounds supported (monotonic decreasing sequence)
-    // - error on empty expansion → InvalidRange
+    
+    
+    
+    
     fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, EhlersITrendError> {
         if step == 0 {
             return if start == end {
@@ -1491,7 +1491,7 @@ fn ehlers_itrend_row_scalar_tail_with_fir(
             dcp = max_dc;
         }
 
-        // mean of last dcp of original data
+        
         sum_ring[sum_idx] = x0;
         sum_idx += 1;
         if sum_idx == max_dc {
@@ -1526,9 +1526,9 @@ fn ehlers_itrend_row_scalar_tail_with_fir(
     }
 }
 
-// ────────────────────────────────────────────────────────────────────
-// Python bindings
-// ────────────────────────────────────────────────────────────────────
+
+
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_itrend")]
 #[pyo3(signature = (data, warmup_bars, max_dc_period, kernel=None))]
@@ -1545,7 +1545,7 @@ pub fn ehlers_itrend_py<'py>(
         warmup_bars: Some(warmup_bars),
         max_dc_period: Some(max_dc_period),
     };
-    // Prefer zero-copy for contiguous input; fallback to a minimal copy for non-contiguous views.
+    
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = EhlersITrendInput::from_slice(slice_in, params);
         py.allow_threads(|| ehlers_itrend_with_kernel(&input, kern).map(|o| o.values))
@@ -1591,7 +1591,7 @@ pub fn ehlers_itrend_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        // map batch→scalar family like alma.rs already does in your file
+        
         let simd = match simd {
             Kernel::ScalarBatch => Kernel::Scalar,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1652,7 +1652,7 @@ pub fn ehlers_itrend_cuda_batch_dev_py(
         cuda.ehlers_itrend_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    // Producing stream is synchronized inside the wrapper; omit `stream` in CAI v3.
+    
     Ok(DeviceArrayF32ITrendPy { inner, guard: cuda })
 }
 
@@ -1700,7 +1700,7 @@ pub fn ehlers_itrend_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32ITrendPy { inner, guard: cuda })
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32ITrendPy handle) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32ITrendPy {
@@ -2277,7 +2277,7 @@ mod tests {
 
                         let bits = val.to_bits();
 
-                        // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                        
                         if bits == 0x11111111_11111111 {
                             panic!(
                                 "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
@@ -2285,7 +2285,7 @@ mod tests {
                             );
                         }
 
-                        // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                        
                         if bits == 0x22222222_22222222 {
                             panic!(
                                 "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
@@ -2293,7 +2293,7 @@ mod tests {
                             );
                         }
 
-                        // Check for make_uninit_matrix poison (0x33333333_33333333)
+                        
                         if bits == 0x33333333_33333333 {
                             panic!(
                                 "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with warmup={}, max_dc={}, source={}",
@@ -2308,7 +2308,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_itrend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2322,14 +2322,14 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // 1 ─ Strategy: pick params first, then a ≥-length vector
-        let strat = (4usize..=15) // warm-up
+        
+        let strat = (4usize..=15) 
             .prop_flat_map(|warmup| {
                 ((warmup + 1)..=64).prop_flat_map(move |max_dc| {
                     (
                         prop::collection::vec(
                             (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                            (warmup + max_dc + 4)..400, // data len
+                            (warmup + max_dc + 4)..400, 
                         ),
                         Just(warmup),
                         Just(max_dc),
@@ -2341,19 +2341,19 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, warmup, max_dc, a, b)| {
-                // -- build common inputs -----------------------------------------
+                
                 let params = EhlersITrendParams {
                     warmup_bars: Some(warmup),
                     max_dc_period: Some(max_dc),
                 };
                 let input = EhlersITrendInput::from_slice(&data, params.clone());
 
-                // run kernels but never unwrap blindly ---------------------------
+                
                 let fast = ehlers_itrend_with_kernel(&input, kernel);
                 let slow = ehlers_itrend_with_kernel(&input, Kernel::Scalar);
 
                 match (fast, slow) {
-                    // ➊ identical error kinds
+                    
                     (Err(e1), Err(e2))
                         if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
                     {
@@ -2362,32 +2362,32 @@ mod tests {
                     (Err(e1), Err(e2)) => {
                         prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2)
                     }
-                    // ➋ disagreement on success / error
+                    
                     (Err(e), Ok(_)) => {
                         prop_assert!(false, "fast errored {e:?} but scalar succeeded")
                     }
                     (Ok(_), Err(e)) => {
                         prop_assert!(false, "scalar errored {e:?} but fast succeeded")
                     }
-                    // ➌ both succeeded ⇒ full invariant suite
+                    
                     (Ok(fast), Ok(reference)) => {
                         let EhlersITrendOutput { values: out } = fast;
                         let EhlersITrendOutput { values: rref } = reference;
 
-                        // streaming path once ----------------------------------
+                        
                         let mut stream = EhlersITrendStream::try_new(params.clone()).unwrap();
                         let mut s_out = Vec::with_capacity(data.len());
                         for &v in &data {
                             s_out.push(stream.update(v).unwrap_or(f64::NAN));
                         }
 
-                        // affine-transformed run once ---------------------------
+                        
                         let transformed: Vec<f64> = data.iter().map(|x| a * x + b).collect();
                         let t_out =
                             ehlers_itrend(&EhlersITrendInput::from_slice(&transformed, params))?
                                 .values;
 
-                        // iterate from warm-up end ------------------------------
+                        
                         let first = data.iter().position(|x| !x.is_nan()).unwrap();
                         let warm = first + warmup;
                         for i in warm..data.len() {
@@ -2396,11 +2396,11 @@ mod tests {
                             let ys = s_out[i];
                             let yt = t_out[i];
 
-                            // 1️⃣ Finiteness check --------------------------
-                            // Ehlers iTrend is an adaptive filter that can produce values
-                            // outside the input window bounds due to its complex filtering
-                            // and phase adjustments. We only check that outputs are finite.
-                            let start = (i + 1).saturating_sub(max_dc); // saturate at 0
+                            
+                            
+                            
+                            
+                            let start = (i + 1).saturating_sub(max_dc); 
                             let look = &data[start..=i];
                             prop_assert!(
                                 y.is_nan() || y.is_finite(),
@@ -2409,20 +2409,20 @@ mod tests {
                                 y
                             );
 
-                            // 2️⃣ Warm-up identity (warmup==1) ---------------
+                            
                             if warmup == 1 && y.is_finite() {
                                 prop_assert!((y - data[i]).abs() <= f64::EPSILON);
                             }
 
-                            // 3️⃣ Constant-series invariance -----------------
+                            
                             if look.iter().all(|v| *v == look[0]) {
                                 prop_assert!((y - look[0]).abs() <= 1e-7);
                             }
 
-                            // 5️⃣ Affine equivariance ------------------------
-                            // The adaptive period estimation uses zero-seeded internal state,
-                            // so affine-equivariance can be violated during early transients.
-                            // Assert only once the state has had time to settle.
+                            
+                            
+                            
+                            
                             let affine_start = warm + max_dc;
                             if i >= affine_start {
                                 let expected = a * y + b;
@@ -2435,21 +2435,21 @@ mod tests {
                                 );
                             }
 
-                            // 6️⃣ Scalar ≡ fast ------------------------------
+                            
                             let ulp = y.to_bits().abs_diff(yr.to_bits());
                             prop_assert!(
                                 (y - yr).abs() <= 1e-7 || ulp <= 4,
                                 "idx {i}: fast={y} ref={yr} ULP={ulp}"
                             );
 
-                            // 7️⃣ Streaming parity ---------------------------
+                            
                             prop_assert!(
                                 (y - ys).abs() <= 1e-7 || (y.is_nan() && ys.is_nan()),
                                 "idx {i}: stream mismatch"
                             );
                         }
 
-                        // 9️⃣ Warm-up sentinel NaNs -------------------------
+                        
                         for j in first..warm {
                             prop_assert!(
                                 out[j].is_nan(),
@@ -2464,7 +2464,7 @@ mod tests {
             })
             .unwrap();
 
-        // 🔟 Error-path smoke tests ---------------------------------------------
+        
         assert!(ehlers_itrend(&EhlersITrendInput::from_slice(
             &[],
             EhlersITrendParams::default()
@@ -2567,14 +2567,14 @@ mod tests {
     fn check_batch_invalid_range(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let data = [1.0, 2.0, 3.0, 4.0];
-        // Invalid due to zero step with unequal bounds → InvalidRange
+        
         let sweep = EhlersITrendBatchRange { warmup_bars: (5, 1, 0), max_dc_period: (10, 10, 0) };
         let res = ehlers_itrend_batch_with_kernel(&data, &sweep, kernel);
         assert!(matches!(res, Err(EhlersITrendError::InvalidRange { .. })));
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2582,20 +2582,20 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            // Test with comprehensive parameter ranges (conservative to avoid existing bug)
+            
             let output = EhlersITrendBatchBuilder::new()
                 .kernel(kernel)
-                .warmup_range(5, 30, 5) // Conservative warmup range: 5 to 30 with step 5
-                .max_dc_range(35, 60, 5) // Conservative max_dc range: 35 to 60 with step 5
+                .warmup_range(5, 30, 5) 
+                .max_dc_range(35, 60, 5) 
                 .apply_candles(&c, source)?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2604,7 +2604,7 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2612,7 +2612,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2620,7 +2620,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2630,11 +2630,11 @@ mod tests {
             }
         }
 
-        // Also test edge cases with specific parameter combinations (conservative to avoid existing bug)
+        
         let edge_case_configs = vec![
-            (5, 10, 1, 15, 50, 5),   // Small warmup, medium max_dc range
-            (20, 30, 5, 40, 60, 10), // Medium warmup, medium max_dc range
-            (5, 15, 2, 20, 40, 3),   // Small ranges with odd steps
+            (5, 10, 1, 15, 50, 5),   
+            (20, 30, 5, 40, 60, 10), 
+            (5, 15, 2, 20, 40, 3),   
         ];
 
         for (warmup_start, warmup_end, warmup_step, max_dc_start, max_dc_end, max_dc_step) in
@@ -2670,7 +2670,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())

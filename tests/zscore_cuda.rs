@@ -1,14 +1,14 @@
-// CUDA integration tests for the Zscore indicator (SMA/stddev path).
 
-use my_project::indicators::zscore::{zscore_batch_with_kernel, ZscoreBatchRange};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::zscore::{zscore_batch_with_kernel, ZscoreBatchRange};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaZscore;
+use vector_ta::cuda::CudaZscore;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -161,7 +161,7 @@ fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 5)..rows {
-            // stagger first_valid per series
+            
             let x = (t as f64) + (s as f64) * 0.3;
             let base = (x * 0.00131).sin() + (x * 0.00071).cos();
             let noise = 0.0005 * ((t + s) % 17) as f64;
@@ -173,7 +173,7 @@ fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let period = 21usize;
     let nbdev = 2.0f64;
 
-    // CPU baseline per series using batch (prefix-based) path to mirror GPU semantics
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

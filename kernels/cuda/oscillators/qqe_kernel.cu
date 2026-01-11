@@ -1,12 +1,12 @@
-// CUDA kernels for QQE (Quantitative Qualitative Estimation)
-//
-// Changes vs. original:
-// - Remove FP64 from hot loops; use float-float (double-single) only for Wilder
-//   running averages to reduce drift on long flats while keeping FP32 throughput.
-// - Fix inter-block race: only blockIdx.x==0 & threadIdx.x==0 performs sequential scan.
-//   Warmup NaNs are filled by threads within a single block (grid.x may be >1 in callers,
-//   but only block 0 will proceed beyond warmup).
-// - Use __ldg() read-only loads for prices to reduce cache pressure.
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -16,9 +16,9 @@
 #include <math.h>
 #include <stdint.h>
 
-// -----------------------
-// Small helpers
-// -----------------------
+
+
+
 
 static __device__ __forceinline__ float ld_ro(const float* p) {
 #if __CUDA_ARCH__ >= 350
@@ -28,15 +28,15 @@ static __device__ __forceinline__ float ld_ro(const float* p) {
 #endif
 }
 
-// canonical quiet-NaN bit pattern as float
+
 static __device__ __forceinline__ float qNaNf() {
     return __uint_as_float(0x7fc00000u);
 }
 
-// ----- float-float ("double-single") helpers using FMA -----
-// We only use these for Wilder's running averages (avg_gain/loss).
 
-struct fpair { float hi, lo; }; // value ~= hi + lo
+
+
+struct fpair { float hi, lo; }; 
 
 static __device__ __forceinline__ fpair make_fpair(float x) { return {x, 0.0f}; }
 
@@ -53,10 +53,10 @@ static __device__ __forceinline__ void quick_two_sum(float a, float b, float &s,
 
 static __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
     p = a * b;
-    e = fmaf(a, b, -p); // exact residual with FMA
+    e = fmaf(a, b, -p); 
 }
 
-// beta * x + alpha * u  (x is double-single)
+
 static __device__ __forceinline__ fpair ds_madd(float beta, const fpair &x, float alpha, float u) {
     float p1, e1; two_prod(beta, x.hi, p1, e1);
     float p2, e2; two_prod(beta, x.lo, p2, e2);
@@ -74,11 +74,11 @@ static __device__ __forceinline__ float ds_val(const fpair &x) {
     return x.hi + x.lo;
 }
 
-// -------------------------------------------------------------
-// Compute QQE for a single series with given parameters (FP32).
-// Note: batch tests allow looser tolerances due to branch sensitivity;
-// prefer FP32 accumulators here for throughput.
-// -------------------------------------------------------------
+
+
+
+
+
 static __device__ __forceinline__ void qqe_compute_series_f32(
     const float* __restrict__ prices,
     int N,
@@ -97,7 +97,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     if (rsi_start >= N) return;
     const int warm = first_valid + rsi_p + ema_p - 2;
 
-    // Wilder RSI initial averages over first rsi_p deltas
+    
     float avg_gain = 0.0f, avg_loss = 0.0f;
     bool bad = false;
     const int init_end = min(first_valid + rsi_p, N - 1);
@@ -109,7 +109,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         if (delta > 0.0f) avg_gain += delta;
         else if (delta < 0.0f) avg_loss -= delta;
     }
-    if (bad) return; // leave filled NaNs
+    if (bad) return; 
 
     const float inv_rsi  = 1.0f / (float)rsi_p;
     const float beta_rsi = 1.0f - inv_rsi;
@@ -117,34 +117,34 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     avg_gain *= inv_rsi;
     avg_loss *= inv_rsi;
 
-    // first RSI value at rsi_start
+    
     float rsi;
     {
         float denom = avg_gain + avg_loss;
         rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
     }
-    // Initialize FAST at rsi_start
+    
     out_fast[rsi_start] = rsi;
-    // If warm <= rsi_start, also seed SLOW here
+    
     if (warm <= rsi_start) out_slow[rsi_start] = rsi;
 
-    // EMA-of-RSI warmup via running mean then recursive EMA
+    
     float running_mean = rsi;
     const float ema_alpha = 2.0f / ((float)ema_p + 1.0f);
     const float ema_beta  = 1.0f - ema_alpha;
     float prev_ema = rsi;
 
-    // QQE Slow line parameters (ATR-of-RSI style)
+    
     const float atr_alpha = 1.0f / 14.0f;
     const float atr_beta  = 1.0f - atr_alpha;
     float wwma = 0.0f;
     float atrrsi = 0.0f;
     float prev_fast_val = rsi;
 
-    // Main scan from rsi_start+1 .. N-1
+    
 #pragma unroll 1
     for (int i = rsi_start + 1; i < N; ++i) {
-        // Wilder RSI update (FP32 with DS accumulators)
+        
         float di   = ld_ro(&prices[i]);
         float dim1 = ld_ro(&prices[i - 1]);
         float delta = di - dim1;
@@ -157,7 +157,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         float denom = avg_gain + avg_loss;
         rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
 
-        // FAST
+        
         float fast_i;
         if (i < rsi_start + ema_p) {
             float n = (float)(i - rsi_start + 1);
@@ -171,10 +171,10 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         out_fast[i] = fast_i;
 
         if (i == warm) {
-            out_slow[i] = fast_i; // anchor slow at warm
+            out_slow[i] = fast_i; 
             prev_fast_val = fast_i;
         } else if (i > warm) {
-            // QQE slow update
+            
             float tr = fabsf(fast_i - prev_fast_val);
             wwma   = fmaf(atr_beta,  wwma,  atr_alpha * tr);
             atrrsi = fmaf(atr_beta, atrrsi, atr_alpha * wwma);
@@ -195,13 +195,13 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     }
 }
 
-// ----------------------------
-// Batch: one series × many params
-// Output layout: rows = 2 * n_combos, cols = series_len
-//   row 2*c     = FAST
-//   row 2*c + 1 = SLOW
-// NOTE: grid.x must be 1; one block per combo. We still guard against >1.
-// ----------------------------
+
+
+
+
+
+
+
 extern "C" __global__ void qqe_batch_f32(
     const float* __restrict__ prices,
     const int*   __restrict__ rsi_periods,
@@ -225,7 +225,7 @@ extern "C" __global__ void qqe_batch_f32(
     float* __restrict__ out_fast = out + row_fast * series_len;
     float* __restrict__ out_slow = out + row_slow * series_len;
 
-    // Warmup NaNs (only up to warm index) – intra-block grid-stride
+    
     int warm = first_valid + rsi_p + ema_p - 2;
     if (warm > series_len) warm = series_len;
     const float nanv = qNaNf();
@@ -233,20 +233,20 @@ extern "C" __global__ void qqe_batch_f32(
         out_fast[idx] = nanv;
         out_slow[idx] = nanv;
     }
-    __syncthreads(); // ensure warmup is visible before potential overwrite at rsi_start
+    __syncthreads(); 
 
-    // Single-thread sequential scan (one block per combo!)
+    
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         qqe_compute_series_f32(prices, series_len, first_valid, rsi_p, ema_p, fast_k, out_fast, out_slow);
     }
 }
 
-// ------------------------------------------------------------
-// Many-series × one-param (time-major)
-// prices_tm: [rows=series_len][cols=num_series]
-// out_tm:    [rows=series_len][cols=2*num_series]  (col s = FAST, col s+num_series = SLOW)
-// NOTE: grid.x should be 1; one block per series. We still guard against >1.
-// ------------------------------------------------------------
+
+
+
+
+
+
 extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
     int rsi_period,
@@ -263,7 +263,7 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
 
     const int fv = first_valids[s];
 
-    // Prefill warmup NaNs for both outputs
+    
     int warm = fv + rsi_period + ema_period - 2;
     if (warm > series_len) warm = series_len;
     const int pitch = 2 * num_series;
@@ -279,7 +279,7 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
     const int rsi_start = fv + rsi_period;
     if (rsi_start >= series_len) return;
 
-    // Wilder RSI init (FP32 + DS)
+    
     float avg_gain_f = 0.0f, avg_loss_f = 0.0f;
     bool bad = false;
     const int init_end = min(fv + rsi_period, series_len - 1);

@@ -49,13 +49,13 @@ pub enum CudaCkspError {
     NotImplemented,
 }
 
-// Simple pair of device arrays for (long, short)
+
 pub struct DeviceArrayF32Pair {
     pub long: DeviceArrayF32,
     pub short: DeviceArrayF32,
 }
 
-// Selection policy skeleton to match ALMA’s explicit/auto pattern.
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -147,7 +147,7 @@ impl CudaCksp {
         }
     }
 
-    // -------- Batch: one series × many params --------
+    
     pub fn cksp_batch_dev(
         &self,
         high: &[f32],
@@ -171,7 +171,7 @@ impl CudaCksp {
             ));
         }
 
-        // Param sanity and gather host vectors
+        
         let mut p_i32 = Vec::with_capacity(combos.len());
         let mut x_f32 = Vec::with_capacity(combos.len());
         let mut q_i32 = Vec::with_capacity(combos.len());
@@ -201,7 +201,7 @@ impl CudaCksp {
             max_q = max_q.max(q);
         }
 
-        // Dynamic shared memory requirement per CTA
+        
         let cap_max = max_q
             .checked_add(1)
             .ok_or_else(|| CudaCkspError::InvalidInput("cap_max overflow".into()))?
@@ -224,7 +224,7 @@ impl CudaCksp {
                 CudaCkspError::InvalidInput("shared memory size overflow".into())
             })?;
 
-        // Check device limit (no opt-in here)
+        
         let dev = Device::get_device(self.device_id)?;
         let max_shmem = dev.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
         if shmem_bytes > max_shmem {
@@ -234,7 +234,7 @@ impl CudaCksp {
             )));
         }
 
-        // VRAM check (inputs + params + outputs + optional preTR buffer)
+        
         let f32_sz = std::mem::size_of::<f32>();
         let i32_sz = std::mem::size_of::<i32>();
         let in_bytes = len
@@ -295,7 +295,7 @@ impl CudaCksp {
             }
         }
 
-        // H2D (async)
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
@@ -307,7 +307,7 @@ impl CudaCksp {
         let mut d_long: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         let mut d_short: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
-        // Optional precompute TR once per series
+        
         let mut d_tr_opt: Option<DeviceBuffer<f32>> = None;
         if use_pretr {
             let mut d_tr = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
@@ -315,7 +315,7 @@ impl CudaCksp {
             d_tr_opt = Some(d_tr);
         }
 
-        // grid.y chunking to respect 65_535
+        
         let rows = combos.len();
         let y_limit = 65_535usize;
         let mut start = 0usize;
@@ -345,9 +345,9 @@ impl CudaCksp {
         }
 
         self.stream.synchronize()?;
-        // Ensure inputs/params stay alive until the stream is fully synchronized.
-        // In optimized builds, Rust may drop unused locals before `synchronize()`,
-        // which can free device buffers while kernels are still running.
+        
+        
+        
         std::mem::drop((d_high, d_low, d_close, d_p, d_x, d_q, d_tr_opt));
 
         Ok((
@@ -406,7 +406,7 @@ impl CudaCksp {
         let grid: GridSize = (1u32, n_rows as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Optional: validate launch configuration against device attributes
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if block_x > max_threads {
@@ -426,11 +426,11 @@ impl CudaCksp {
             let mut cm = cap_max;
             let mut ol = d_long.as_device_ptr().add(start_row * (series_len as usize)).as_raw();
             let mut os = d_short.as_device_ptr().add(start_row * (series_len as usize)).as_raw();
-            // Prepare args for either kernel signature
-            // cksp_batch_f32:        (high, low, close, series_len, first_valid, p_list, x_list, q_list, n_combos, cap_max, out_long, out_short)
-            // cksp_batch_f32_pretr:  (high, low, close, tr,    series_len, first_valid, p_list, x_list, q_list, n_combos, cap_max, out_long, out_short)
+            
+            
+            
 
-            // 12 or 13 pointers depending on kernel
+            
             let mut args_storage: [*mut c_void; 13] = [std::ptr::null_mut(); 13];
             let args: &mut [*mut c_void] = if let Some(dtr) = pass_tr {
                 let mut tp = dtr.as_device_ptr().as_raw();
@@ -475,7 +475,7 @@ impl CudaCksp {
         Ok(())
     }
 
-    // -------- Many-series × one param (time‑major) --------
+    
     pub fn cksp_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -506,11 +506,11 @@ impl CudaCksp {
             return Err(CudaCkspError::InvalidInput("p/q must be > 0".into()));
         }
 
-        // first_valid per series from inputs (high/low/close must be finite)
+        
         let mut first_valids = vec![cols as i32; rows];
         for s in 0..rows {
             for t in 0..cols {
-                let idx = t * rows + s; // time-major stride = rows
+                let idx = t * rows + s; 
                 if high_tm[idx].is_finite() && low_tm[idx].is_finite() && close_tm[idx].is_finite()
                 {
                     first_valids[s] = t as i32;
@@ -619,7 +619,7 @@ impl CudaCksp {
             .get_function("cksp_many_series_one_param_f32")
             .map_err(|_| CudaCkspError::MissingKernelSymbol { name: "cksp_many_series_one_param_f32" })?;
 
-        // dyn-SMEM identical to batch layout
+        
         let cap = cap_max as usize;
         let sh_i32 = cap
             .checked_mul(4usize)
@@ -646,7 +646,7 @@ impl CudaCksp {
             })?;
         let shmem: u32 = shmem_usize.try_into().unwrap_or(u32::MAX);
 
-        // Launch advisor: prefer CUDA's suggestion, but allow explicit override
+        
         let (_grid_hint, advised_block) = func
             .suggested_launch_configuration(shmem_usize, (1024u32, 1u32, 1u32).into())
             .unwrap_or((0, 256));
@@ -657,7 +657,7 @@ impl CudaCksp {
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Optional: validate launch configuration
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if block_x > max_threads {
@@ -697,7 +697,7 @@ impl CudaCksp {
     }
 }
 
-// --- helpers ---
+
 #[inline]
 fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Option<usize> {
     let n = close.len().min(high.len()).min(low.len());
@@ -724,7 +724,7 @@ impl CudaCksp {
             .get_function("tr_from_hlc_f32")
             .map_err(|_| CudaCkspError::MissingKernelSymbol { name: "tr_from_hlc_f32" })?;
 
-        // Parallel grid for TR precompute
+        
         let block_x = 256u32;
         let grid_x = ((series_len.max(0) as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -822,7 +822,7 @@ fn expand_cksp_combos(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CudaCkspErr
     Ok(out)
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

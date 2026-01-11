@@ -104,7 +104,7 @@ impl HighPass2DeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producer synchronizes before returning → omit stream per CAI v3
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -122,8 +122,8 @@ impl HighPass2DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -143,7 +143,7 @@ impl HighPass2DeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let buf = self
             .buf
             .take()
@@ -398,7 +398,7 @@ pub fn highpass_2_pole_with_kernel(
 ) -> Result<HighPass2Output, HighPass2Error> {
     let (data, period, k, first, chosen) = highpass2_prepare(input, kernel)?;
     let warm = warmup_end(first, period);
-    let mut out = alloc_with_nan_prefix(data.len(), first); // Only NaN prefix up to first, not warm
+    let mut out = alloc_with_nan_prefix(data.len(), first); 
 
     unsafe {
         match chosen {
@@ -416,8 +416,8 @@ pub fn highpass_2_pole_with_kernel(
             _ => unreachable!(),
         }
     }
-    // No NaN restoration needed - the kernels properly handle first
-    // and alloc_with_nan_prefix already set the correct NaN prefix
+    
+    
 
     Ok(HighPass2Output { values: out })
 }
@@ -439,10 +439,10 @@ fn highpass_2_pole_with_kernel_into(
         });
     }
     let warm = warmup_end(first, period);
-    // Only fill [0..first) with NaN, not the entire warmup range
-    // The kernel will seed from first and compute the rest
+    
+    
     if first > 0 {
-        // Match alloc_with_nan_prefix quiet-NaN pattern for parity
+        
         let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
         for v in &mut out[..first] {
             *v = qnan;
@@ -463,7 +463,7 @@ fn highpass_2_pole_with_kernel_into(
             _ => unreachable!(),
         }
     }
-    // No NaN restoration needed - the kernels properly handle first
+    
     Ok(())
 }
 
@@ -493,7 +493,7 @@ pub unsafe fn highpass_2_pole_scalar_(
         return;
     }
 
-    // Coefficients: compute trig once using sin_cos to reduce overhead
+    
     let theta = 2.0 * PI * k / (period as f64);
     let (s, c0) = theta.sin_cos();
     let alpha = 1.0 + ((s - 1.0) / c0);
@@ -501,12 +501,12 @@ pub unsafe fn highpass_2_pole_scalar_(
     let one_minus_alpha = 1.0 - alpha;
     let c = (1.0 - 0.5 * alpha) * (1.0 - 0.5 * alpha);
 
-    // Precompute fused-friendly constants
+    
     let cm2 = -2.0 * c;
     let two_1m = 2.0 * one_minus_alpha;
     let neg_oma_sq = -(one_minus_alpha * one_minus_alpha);
 
-    // Seed (preserve NaN prefix [0..first))
+    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -516,47 +516,47 @@ pub unsafe fn highpass_2_pole_scalar_(
         return;
     }
 
-    // Rolling state
+    
     let mut x_im2 = data[first];
     let mut x_im1 = data[first + 1];
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
-    // Pointer walk with 4x unrolled software pipeline
+    
     let mut src = data.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
     let mut rem = n - (first + 2);
 
     while rem >= 4 {
-        // y[i+0]
+        
         let x0 = *src;
         let t0 = cm2.mul_add(x_im1, c * x0);
         let t0 = c.mul_add(x_im2, t0);
         let y0 = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, t0));
         *dst = y0;
 
-        // y[i+1]
+        
         let x1 = *src.add(1);
         let t1 = cm2.mul_add(x0, c * x1);
         let t1 = c.mul_add(x_im1, t1);
         let y1 = two_1m.mul_add(y0, neg_oma_sq.mul_add(y_im1, t1));
         *dst.add(1) = y1;
 
-        // y[i+2]
+        
         let x2 = *src.add(2);
         let t2 = cm2.mul_add(x1, c * x2);
         let t2 = c.mul_add(x0, t2);
         let y2 = two_1m.mul_add(y1, neg_oma_sq.mul_add(y0, t2));
         *dst.add(2) = y2;
 
-        // y[i+3]
+        
         let x3 = *src.add(3);
         let t3 = cm2.mul_add(x2, c * x3);
         let t3 = c.mul_add(x1, t3);
         let y3 = two_1m.mul_add(y2, neg_oma_sq.mul_add(y1, t3));
         *dst.add(3) = y3;
 
-        // rotate state for next block
+        
         x_im2 = x2;
         x_im1 = x3;
         y_im2 = y2;
@@ -567,7 +567,7 @@ pub unsafe fn highpass_2_pole_scalar_(
         rem -= 4;
     }
 
-    // Tail
+    
     while rem > 0 {
         let xi = *src;
         let y = two_1m.mul_add(
@@ -606,7 +606,7 @@ pub unsafe fn highpass_2_pole_avx2(
     debug_assert!(out.len() >= n);
     debug_assert!(period >= 2 && period <= n);
 
-    // ---- pre-compute coefficients ----
+    
     let theta = 2.0 * PI * k / period as f64;
     let (s, c0) = theta.sin_cos();
     let alpha = 1.0 + ((s - 1.0) / c0);
@@ -615,8 +615,8 @@ pub unsafe fn highpass_2_pole_avx2(
     let two_1m = 2.0 * (1.0 - alpha);
     let neg_oma_sq = -(1.0 - alpha) * (1.0 - alpha);
 
-    // ---- seed starting from first ----
-    // Leave [0..first) untouched (NaN)
+    
+    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -626,47 +626,47 @@ pub unsafe fn highpass_2_pole_avx2(
         return;
     }
 
-    // ---- pointer iteration starting from first+2 ----
-    let mut rem = n - (first + 2); // how many samples left
+    
+    let mut rem = n - (first + 2); 
     let mut src = data.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
 
-    // state registers initialized from first values
+    
     let mut x_im2 = data[first];
     let mut x_im1 = data[first + 1];
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
     while rem >= 4 {
-        // y[i+0]
+        
         let x0 = *src;
         let t0 = cm2.mul_add(x_im1, c * x0);
         let t0 = c.mul_add(x_im2, t0);
         let y0 = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, t0));
         *dst = y0;
 
-        // y[i+1]
+        
         let x1 = *src.add(1);
         let t1 = cm2.mul_add(x0, c * x1);
         let t1 = c.mul_add(x_im1, t1);
         let y1 = two_1m.mul_add(y0, neg_oma_sq.mul_add(y_im1, t1));
         *dst.add(1) = y1;
 
-        // y[i+2]
+        
         let x2 = *src.add(2);
         let t2 = cm2.mul_add(x1, c * x2);
         let t2 = c.mul_add(x0, t2);
         let y2 = two_1m.mul_add(y1, neg_oma_sq.mul_add(y0, t2));
         *dst.add(2) = y2;
 
-        // y[i+3]
+        
         let x3 = *src.add(3);
         let t3 = cm2.mul_add(x2, c * x3);
         let t3 = c.mul_add(x1, t3);
         let y3 = two_1m.mul_add(y2, neg_oma_sq.mul_add(y1, t3));
         *dst.add(3) = y3;
 
-        // rotate state
+        
         x_im2 = x2;
         x_im1 = x3;
         y_im2 = y2;
@@ -707,17 +707,17 @@ pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize,
 pub struct HighPass2Stream {
     period: usize,
     k: f64,
-    // precomputed coeffs
+    
     c: f64,
-    cm2: f64,        // == -2.0 * c
-    two_1m: f64,     // == 2.0 * (1 - alpha)
-    neg_oma_sq: f64, // == -(1 - alpha)^2
-    // rolling state
+    cm2: f64,        
+    two_1m: f64,     
+    neg_oma_sq: f64, 
+    
     x_im2: f64,
     x_im1: f64,
     y_im2: f64,
     y_im1: f64,
-    seen: usize, // number of samples observed so far
+    seen: usize, 
 }
 
 impl HighPass2Stream {
@@ -738,24 +738,24 @@ impl HighPass2Stream {
 
         use core::f64::consts::PI;
 
-        // θ = 2π k / period
+        
         let theta = 2.0 * PI * k / (period as f64);
 
-        // Compute sin and cos together; generally cheaper than calling each separately.
+        
         let (s, c0) = theta.sin_cos();
 
-        // Guard against cos≈0 producing INF alpha for pathological parameter choices.
+        
         let cos_guard = if c0.abs() < 1.0e-12 {
             c0.signum() * 1.0e-12
         } else {
             c0
         };
 
-        // α = 1 + (sinθ - 1)/cosθ  ==  (cosθ + sinθ − 1)/cosθ
+        
         let invc = 1.0 / cos_guard;
         let alpha = (s - 1.0).mul_add(invc, 1.0);
 
-        // Precompute constants used every tick
+        
         let one_minus_alpha = 1.0 - alpha;
         let t = 1.0 - 0.5 * alpha;
         let c = t * t;
@@ -792,13 +792,13 @@ impl HighPass2Stream {
     /// the first two internal outputs are pass-throughs of the inputs.
     #[inline(always)]
     pub fn update(&mut self, x_i: f64) -> Option<f64> {
-        // Maintain sane behavior if a data source yields NaN/Inf
+        
         if !x_i.is_finite() {
             self.reset();
             return None;
         }
 
-        // First two samples: pass-through (batch seeds y[first], y[first+1] = x[..])
+        
         let y_i = match self.seen {
             0 => {
                 self.x_im2 = x_i;
@@ -811,8 +811,8 @@ impl HighPass2Stream {
                 x_i
             }
             _ => {
-                // y[i] = c*(x[i] - 2*x[i-1] + x[i-2]) + 2*(1-α)*y[i-1] - (1-α)^2*y[i-2]
-                // Evaluate with two FMA chains to reduce latency and rounding.
+                
+                
                 let dx2 = self
                     .c
                     .mul_add(self.x_im2, self.cm2.mul_add(self.x_im1, self.c * x_i));
@@ -820,7 +820,7 @@ impl HighPass2Stream {
                     .two_1m
                     .mul_add(self.y_im1, self.neg_oma_sq.mul_add(self.y_im2, dx2));
 
-                // Rotate state
+                
                 self.x_im2 = self.x_im1;
                 self.x_im1 = x_i;
                 self.y_im2 = self.y_im1;
@@ -832,7 +832,7 @@ impl HighPass2Stream {
 
         self.seen += 1;
 
-        // Suppress outputs until "warmup_end" = period-1 samples observed
+        
         if self.seen >= self.period {
             Some(y_i)
         } else {
@@ -1062,29 +1062,29 @@ fn highpass_2_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Guard potential overflow for downstream allocations and length math
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(HighPass2Error::SizeOverflow { what: "batch output elements" })?;
 
-    // per-row warmups: first + period - 1
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| warmup_end(first, c.period.unwrap()))
         .collect();
 
-    // 1) allocate and seed prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Optionally precompute second-difference once and reuse across rows
-    // Δ²x[i] = x[i] - 2x[i-1] + x[i-2]
+    
+    
     let dd: Option<Vec<f64>> = if rows >= 2 {
         let mut v = vec![0.0_f64; cols];
         if first + 2 < cols {
-            // compute only where used; prefix doesn't matter
+            
             for i in (first + 2)..cols {
-                // no need for mul_add here; done once per batch
+                
                 v[i] = data[i] - 2.0 * data[i - 1] + data[i - 2];
             }
         }
@@ -1093,7 +1093,7 @@ fn highpass_2_pole_batch_inner(
         None
     };
 
-    // 2) compute rows
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let k = combos[row].k.unwrap();
@@ -1112,7 +1112,7 @@ fn highpass_2_pole_batch_inner(
                 }
             }
         }
-        // The kernels now properly handle first, no NaN restoration needed
+        
     };
 
     if parallel {
@@ -1135,7 +1135,7 @@ fn highpass_2_pole_batch_inner(
         }
     }
 
-    // 3) move out safely
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1193,7 +1193,7 @@ pub unsafe fn highpass_2_pole_row_scalar_dd(
     let two_1m = 2.0 * one_minus_alpha;
     let neg_oma_sq = -(one_minus_alpha * one_minus_alpha);
 
-    // Seed identical to scalar path
+    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -1203,11 +1203,11 @@ pub unsafe fn highpass_2_pole_row_scalar_dd(
         return;
     }
 
-    // Rolling state
+    
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
-    // Pointer walk over dd, starting at first+2
+    
     let mut src = dd.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
     let mut rem = n - (first + 2);
@@ -1282,10 +1282,10 @@ mod tests {
 
     #[test]
     fn test_highpass_2_pole_into_matches_api() {
-        // Build a small but non-trivial slice with a NaN prefix
+        
         let len = 256usize;
         let mut data = vec![0.0f64; len];
-        // Leading NaNs to exercise warmup handling
+        
         data[0] = f64::NAN;
         data[1] = f64::NAN;
         data[2] = f64::NAN;
@@ -1500,17 +1500,17 @@ mod tests {
         use proptest::prelude::*;
         use std::f64::consts::PI;
 
-        // Strategy for generating test parameters and data
-        let strat = (2usize..=50) // period range
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    // Generate realistic data with varying patterns
+                    
                     prop::collection::vec(
                         (-1000f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                        period.max(10)..400, // data length from max(period,10) to 400
+                        period.max(10)..400, 
                     ),
                     Just(period),
-                    0.01f64..0.99f64, // k parameter range (extended to test boundaries)
+                    0.01f64..0.99f64, 
                 )
             });
 
@@ -1522,19 +1522,19 @@ mod tests {
                 };
                 let input = HighPass2Input::from_slice(&data, params);
 
-                // Compute with specified kernel
+                
                 let HighPass2Output { values: out } =
                     highpass_2_pole_with_kernel(&input, kernel).unwrap();
 
-                // Also compute with scalar kernel as reference
+                
                 let HighPass2Output { values: ref_out } =
                     highpass_2_pole_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Basic property: output length equals input length
+                
                 prop_assert_eq!(out.len(), data.len());
 
-                // Property 1: Verify initial seeding behavior
-                // Implementation seeds first two values directly from input
+                
+                
                 if data.len() > 0 && data[0].is_finite() {
                     prop_assert!(
                         (out[0] - data[0]).abs() < 1e-10,
@@ -1552,10 +1552,10 @@ mod tests {
                     );
                 }
 
-                // Property 2: Verify the recursive filter equation for i >= 2
-                // y[i] = c*(x[i] - 2*x[i-1] + x[i-2]) + 2*(1-α)*y[i-1] - (1-α)²*y[i-2]
+                
+                
                 if data.len() >= 3 {
-                    // Calculate filter coefficients
+                    
                     let angle = 2.0 * PI * k / (period as f64);
                     let sin_val = angle.sin();
                     let cos_val = angle.cos();
@@ -1564,7 +1564,7 @@ mod tests {
                     let one_minus_alpha = 1.0 - alpha;
                     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-                    // Verify a few points of the filter equation
+                    
                     for i in 2..(10.min(data.len())) {
                         if data[i].is_finite() && data[i - 1].is_finite() && data[i - 2].is_finite()
                         {
@@ -1583,8 +1583,8 @@ mod tests {
                     }
                 }
 
-                // Property 3: DC removal test (fixed - no permissive OR condition)
-                // For constant input, output should converge toward zero
+                
+                
                 let const_start = data.len().saturating_sub(period * 3);
                 let const_end = data.len();
                 if const_start < const_end && const_end - const_start >= period {
@@ -1594,7 +1594,7 @@ mod tests {
                         let is_constant = window.iter().all(|&x| (x - mean).abs() < 1e-6);
 
                         if is_constant && mean.abs() > 1e-6 {
-                            // For constant input, high-pass output should be near zero at the end
+                            
                             let final_out = out[const_end - 1];
                             let relative_output = final_out.abs() / mean.abs();
                             prop_assert!(relative_output < 0.01,
@@ -1604,20 +1604,20 @@ mod tests {
                     }
                 }
 
-                // Property 4: Step response test
-                // For a significant step change in input, high-pass should produce a transient response
-                // Note: Due to the recursive nature and period, decay may not be monotonic
+                
+                
+                
                 if data.len() > period * 3 {
-                    // Look for large changes in the data
+                    
                     for i in period..(data.len() - period * 2) {
                         if i > 0 && data[i].is_finite() && data[i - 1].is_finite() {
                             let change = (data[i] - data[i - 1]).abs();
                             if change > 200.0 {
-                                // Significant change
-                                // High-pass filter responds to changes
-                                // Check that output shows response to the change
+                                
+                                
+                                
                                 if out[i].is_finite() {
-                                    // Output should show some response to the change
+                                    
                                     prop_assert!(
                                         out[i].abs() > 0.01,
                                         "High-pass should respond to change of {} at index {}",
@@ -1625,21 +1625,21 @@ mod tests {
                                         i
                                     );
                                 }
-                                break; // Only test one step per data set
+                                break; 
                             }
                         }
                     }
                 }
 
-                // Property 5: Frequency response - alternating signal should pass through
-                // Test with a section of alternating values
+                
+                
                 if data.len() > 10 {
                     let alt_start = 5;
                     let alt_end = (alt_start + 8).min(data.len());
                     let mut is_alternating = true;
                     for i in (alt_start + 1)..alt_end {
                         if data[i].is_finite() && data[i - 1].is_finite() {
-                            // Check if signs alternate
+                            
                             if data[i] * data[i - 1] > 0.0 {
                                 is_alternating = false;
                                 break;
@@ -1651,8 +1651,8 @@ mod tests {
                     }
 
                     if is_alternating && alt_end > alt_start + 4 {
-                        // High frequency (alternating) signal should pass through
-                        // Output amplitude should be significant relative to input
+                        
+                        
                         let input_amp = data[alt_start..alt_end]
                             .iter()
                             .filter(|x| x.is_finite())
@@ -1677,13 +1677,13 @@ mod tests {
                     }
                 }
 
-                // Property 6: Cross-kernel consistency check
+                
                 for i in 2..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
                     if !y.is_finite() || !r.is_finite() {
-                        // Both should handle non-finite values the same way
+                        
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
                             "Non-finite mismatch at index {}: {} vs {}",
@@ -1692,7 +1692,7 @@ mod tests {
                             r
                         );
                     } else {
-                        // Check floating point consistency
+                        
                         let abs_diff = (y - r).abs();
                         let rel_diff = if r.abs() > 1e-10 {
                             abs_diff / r.abs()
@@ -1712,8 +1712,8 @@ mod tests {
                     }
                 }
 
-                // Property 7: Filter stability - output should remain bounded
-                // For bounded input, output should not explode
+                
+                
                 let input_bound = data
                     .iter()
                     .filter(|x| x.is_finite())
@@ -1721,10 +1721,10 @@ mod tests {
                     .fold(0.0, f64::max);
 
                 if input_bound > 0.0 && input_bound.is_finite() {
-                    // Theoretical bound for 2-pole high-pass filter
-                    // Maximum gain occurs at Nyquist frequency
-                    // NOTE: 2‑pole high‑pass can exceed 4× for some parameterizations (e.g. k near 1).
-                    // Keep this as a loose stability guard (not an exact gain bound).
+                    
+                    
+                    
+                    
                     let max_gain = 32.0;
                     let expected_bound = input_bound * max_gain;
 
@@ -1742,7 +1742,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Check for poison values
+                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         let bits = val.to_bits();
@@ -1764,9 +1764,9 @@ mod tests {
                     }
                 }
 
-                // Property 9: Boundary k values (near 0 and 1) should still produce valid output
+                
                 if k < 0.02 || k > 0.98 {
-                    // Even at extreme k values, filter should remain stable
+                    
                     let finite_count = out.iter().filter(|x| x.is_finite()).count();
                     let expected_finite = data.iter().filter(|x| x.is_finite()).count();
                     prop_assert!(
@@ -1784,11 +1784,11 @@ mod tests {
         Ok(())
     }
 
-    // Keep the existing simple property test as a fallback for non-proptest builds
+    
     #[cfg(not(feature = "proptest"))]
     fn check_highpass2_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Simple test when proptest feature is not enabled
+        
         let data = vec![5.0; 100];
         let params = HighPass2Params {
             period: Some(10),
@@ -1805,18 +1805,18 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create test data with leading NaNs
+        
         let data = vec![
             f64::NAN,
             f64::NAN,
-            f64::NAN, // First 3 values are NaN
+            f64::NAN, 
             100.0,
             102.0,
             98.0,
             103.0,
             97.0,
             105.0,
-            99.0, // Valid data starts at index 3
+            99.0, 
             101.0,
             104.0,
             96.0,
@@ -1831,7 +1831,7 @@ mod tests {
         let input = HighPass2Input::from_slice(&data, params);
         let output = highpass_2_pole_with_kernel(&input, kernel)?;
 
-        // Check that leading NaNs are preserved
+        
         for i in 0..3 {
             assert!(
                 output.values[i].is_nan(),
@@ -1842,8 +1842,8 @@ mod tests {
             );
         }
 
-        // Check that we have valid output after warmup
-        // first = 3, period = 5, so warmup_end = 3 + 5 - 1 = 7
+        
+        
         for i in 7..data.len() {
             assert!(
                 !output.values[i].is_nan(),
@@ -1853,11 +1853,11 @@ mod tests {
             );
         }
 
-        // Test with into_slice variant to ensure it also respects first
-        let mut out_slice = vec![999.0; data.len()]; // Fill with non-NaN value
+        
+        let mut out_slice = vec![999.0; data.len()]; 
         highpass_2_pole_into(&input, &mut out_slice)?;
 
-        // Check that leading NaNs are preserved
+        
         for i in 0..3 {
             assert!(
                 out_slice[i].is_nan(),
@@ -1894,7 +1894,7 @@ mod tests {
             }
         }
     }
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_highpass2_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1902,60 +1902,60 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations
+        
         let test_cases = vec![
             HighPass2Params {
                 period: Some(48),
                 k: Some(0.707),
-            }, // default
+            }, 
             HighPass2Params {
                 period: Some(10),
                 k: Some(0.3),
-            }, // small period, low k
+            }, 
             HighPass2Params {
                 period: Some(100),
                 k: Some(0.9),
-            }, // large period, high k
+            }, 
             HighPass2Params {
                 period: Some(20),
                 k: Some(0.5),
-            }, // medium values
+            }, 
             HighPass2Params {
                 period: Some(2),
                 k: Some(0.1),
-            }, // minimum period, low k
+            }, 
             HighPass2Params {
                 period: Some(60),
                 k: Some(0.8),
-            }, // larger period
+            }, 
             HighPass2Params {
                 period: Some(30),
                 k: Some(0.2),
-            }, // different combination
+            }, 
             HighPass2Params {
                 period: None,
                 k: None,
-            }, // None values (use defaults)
+            }, 
             HighPass2Params {
                 period: Some(15),
                 k: Some(0.95),
-            }, // edge case high k
+            }, 
         ];
 
         for params in test_cases {
             let input = HighPass2Input::from_candles(&candles, "close", params.clone());
             let output = highpass_2_pole_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1964,7 +1964,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1973,7 +1973,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1987,7 +1987,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_highpass2_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2057,7 +2057,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2065,17 +2065,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
+        
         let batch_configs = vec![
-            // Original test case
+            
             ((10, 30, 10), (0.5, 0.9, 0.2)),
-            // Edge cases
-            ((2, 2, 0), (0.1, 0.1, 0.0)), // Single parameter combo, minimum period
-            ((100, 120, 20), (0.2, 0.8, 0.3)), // Larger periods
-            ((5, 15, 5), (0.1, 0.5, 0.2)), // Small periods, varying k
-            ((20, 60, 20), (0.3, 0.9, 0.3)), // Medium periods
-            ((48, 48, 0), (0.707, 0.707, 0.0)), // Default only
-            ((3, 12, 3), (0.05, 0.95, 0.45)), // Wide k range
+            
+            ((2, 2, 0), (0.1, 0.1, 0.0)), 
+            ((100, 120, 20), (0.2, 0.8, 0.3)), 
+            ((5, 15, 5), (0.1, 0.5, 0.2)), 
+            ((20, 60, 20), (0.3, 0.9, 0.3)), 
+            ((48, 48, 0), (0.707, 0.707, 0.0)), 
+            ((3, 12, 3), (0.05, 0.95, 0.45)), 
         ];
 
         for ((p_start, p_end, p_step), (k_start, k_end, k_step)) in batch_configs {
@@ -2085,9 +2085,9 @@ mod tests {
                 .k_range(k_start, k_end, k_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2097,7 +2097,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -2106,7 +2106,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -2115,7 +2115,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -2129,7 +2129,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2175,18 +2175,18 @@ fn highpass_2_pole_batch_inner_into(
         return Err(HighPass2Error::OutputLengthMismatch { out_len: out.len(), expected });
     }
 
-    // per-row warmups: first + period - 1
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| warmup_end(first, c.period.unwrap()))
         .collect();
 
-    // Reinterpret output slice as MaybeUninit
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Initialize NaN prefixes
+    
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -2201,7 +2201,7 @@ fn highpass_2_pole_batch_inner_into(
             Kernel::Avx2 => highpass_2_pole_row_avx2(data, first, period, k, out_row),
             _ => highpass_2_pole_row_scalar(data, first, period, k, out_row),
         }
-        // The kernels now properly handle first, no NaN restoration needed
+        
     };
 
     if parallel {
@@ -2227,7 +2227,7 @@ fn highpass_2_pole_batch_inner_into(
     Ok(combos)
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass_2_pole")]
 #[pyo3(signature = (data, period, k, kernel=None))]
@@ -2422,7 +2422,7 @@ impl HighPass2StreamPy {
     }
 }
 
-// ================== WASM bindings ==================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64>, JsValue> {
@@ -2432,31 +2432,31 @@ pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64
     };
     let input = HighPass2Input::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     highpass_2_pole_into(&input, &mut output).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn highpass_2_pole_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn highpass_2_pole_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2473,7 +2473,7 @@ pub fn highpass_2_pole_into_wasm(
     period: usize,
     k: f64,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
@@ -2486,18 +2486,18 @@ pub fn highpass_2_pole_into_wasm(
         };
         let input = HighPass2Input::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
+        
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
+            
             let mut temp = vec![0.0; len];
             highpass_2_pole_into(&input, &mut temp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             highpass_2_pole_into(&input, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -2506,7 +2506,7 @@ pub fn highpass_2_pole_into_wasm(
     }
 }
 
-// ================== Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
@@ -2535,7 +2535,7 @@ pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result
         k: config.k_range,
     };
 
-    // match ALMA pattern: run batch detector then map to compute kernel without rayon in WASM
+    
     let batch_kernel = detect_best_batch_kernel();
     let compute_kernel = match batch_kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2557,7 +2557,7 @@ pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2594,10 +2594,10 @@ pub fn highpass_2_pole_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Detect best batch kernel
+        
         let kernel = detect_best_batch_kernel();
 
-        // Map batch kernel to regular kernel for computation
+        
         let compute_kernel = match kernel {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2605,7 +2605,7 @@ pub fn highpass_2_pole_batch_into(
             _ => Kernel::Scalar,
         };
 
-        // Batch computation directly into output buffer
+        
         highpass_2_pole_batch_inner_into(data, &sweep, compute_kernel, true, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

@@ -30,7 +30,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-// Input data enum
+
 #[derive(Debug, Clone)]
 pub enum ObvData<'a> {
     Candles { candles: &'a Candles },
@@ -121,7 +121,7 @@ impl ObvBuilder {
     }
 }
 
-// Error type
+
 #[derive(Debug, Error)]
 pub enum ObvError {
     #[error("obv: Input data slice is empty.")]
@@ -171,7 +171,7 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
         .position(|(c, v)| !c.is_nan() && !v.is_nan())
         .ok_or(ObvError::AllValuesNaN)?;
 
-    // single write of warm prefix; no extra NaN sweep
+    
     let mut out = alloc_with_nan_prefix(close.len(), first);
 
     let chosen = match kernel {
@@ -209,12 +209,12 @@ pub fn obv_into(input: &ObvInput, out: &mut [f64]) -> Result<(), ObvError> {
 
 #[inline]
 pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    // OBV starts at 0 at the first valid bar
+    
     let mut prev_obv = 0.0f64;
     let mut prev_close = close[first_valid];
     out[first_valid] = 0.0;
 
-    // Process remaining elements branchlessly and without indexing on inputs/outputs beyond slice iteration
+    
     let tail_close = &close[first_valid + 1..];
     let tail_volume = &volume[first_valid + 1..];
     let tail_out = &mut out[first_valid + 1..];
@@ -223,7 +223,7 @@ pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
         .iter_mut()
         .zip(tail_close.iter().zip(tail_volume.iter()))
     {
-        // sign in {-1.0, 0.0, +1.0}; NaNs yield 0 (no change)
+        
         let s = ((c > prev_close) as i32 - (c < prev_close) as i32) as f64;
         prev_obv = v.mul_add(s, prev_obv);
         *dst = prev_obv;
@@ -234,8 +234,8 @@ pub fn obv_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn obv_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    // OBV is inherently a prefix-sum with a serial carry; we vectorize the
-    // compare*volume step over 2 lanes at a time while preserving the carry.
+    
+    
     use core::arch::x86_64::*;
     let len = close.len();
     let mut prev_obv = 0.0f64;
@@ -249,14 +249,14 @@ pub unsafe fn obv_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
     let neg_one = _mm_set1_pd(-1.0);
     let zero = _mm_setzero_pd();
 
-    // Process 2 elements per iteration.
+    
     while i + 1 < end {
-        // close[i], close[i+1]
+        
         let c = _mm_loadu_pd(close.as_ptr().add(i));
-        // prev vector = [prev_close, close[i]]
+        
         let prev = _mm_set_pd(*close.get_unchecked(i), prev_close);
 
-        // sign in {-1,0,+1} as doubles, branchless
+        
         let gt = _mm_cmpgt_pd(c, prev);
         let lt = _mm_cmplt_pd(c, prev);
         let pos = _mm_and_pd(gt, one);
@@ -264,24 +264,24 @@ pub unsafe fn obv_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
         let sign = _mm_add_pd(pos, neg);
 
         let vol = _mm_loadu_pd(volume.as_ptr().add(i));
-        let dv = _mm_mul_pd(vol, sign); // [dv0, dv1] = sign*volume (exact for sign in {-1,0,+1})
+        let dv = _mm_mul_pd(vol, sign); 
 
-        // Match scalar update order exactly:
-        //   res0 = prev_obv + dv0
-        //   res1 = res0     + dv1
-        // Doing the additions in this order (rather than (dv0+dv1)+prev)
-        // avoids tiny rounding-order diffs vs scalar/FMA.
+        
+        
+        
+        
+        
         let dv0 = _mm_cvtsd_f64(dv);
         let dv1 = _mm_cvtsd_f64(_mm_unpackhi_pd(dv, dv));
 
         let res0 = dv0 + prev_obv;
         let res1 = dv1 + res0;
 
-        // Store [res0, res1]
+        
         let res = _mm_set_pd(res1, res0);
         _mm_storeu_pd(out.as_mut_ptr().add(i), res);
 
-        // Update carry and prev_close using lane-1
+        
         prev_obv = res1;
 
         let c_hi = _mm_unpackhi_pd(c, c);
@@ -290,21 +290,21 @@ pub unsafe fn obv_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
         i += 2;
     }
 
-    // Tail (0 or 1 element)
+    
     if i < end {
         let c = *close.get_unchecked(i);
         let v = *volume.get_unchecked(i);
         let s = ((c > prev_close) as i32 - (c < prev_close) as i32) as f64;
         prev_obv = v.mul_add(s, prev_obv);
         *out.get_unchecked_mut(i) = prev_obv;
-        // prev_close = c; // not needed after final write
+        
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn obv_avx512(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    // Same micro-kernel as AVX2 (2-lane SSE2) to preserve strict serial carry
+    
     obv_avx2(close, volume, first_valid, out)
 }
 
@@ -418,25 +418,25 @@ impl ObvStream {
     /// - prev_close is advanced on every call (including NaN) to mirror scalar parity
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        // Find first valid observation
+        
         if !self.initialized {
             if !close.is_nan() && !volume.is_nan() {
                 self.prev_close = close;
-                self.prev_obv = 0.0; // OBV starts at 0
+                self.prev_obv = 0.0; 
                 self.initialized = true;
                 return Some(0.0);
             } else {
-                return None; // still warming up
+                return None; 
             }
         }
 
-        // Branchless sign in {-1.0, 0.0, +1.0}; NaN compares are false -> 0.0
+        
         let s = ((close > self.prev_close) as i32 - (close < self.prev_close) as i32) as f64;
 
-        // Mirror scalar kernel exactly: FMA-style mul_add (propagates NaN per IEEE-754)
+        
         self.prev_obv = volume.mul_add(s, self.prev_obv);
 
-        // Always advance prev_close (including NaN) to match batch behavior across NaNs
+        
         self.prev_close = close;
 
         Some(self.prev_obv)
@@ -560,18 +560,18 @@ fn obv_batch_inner(
     let rows = 1usize;
     let cols = close.len();
 
-    // Guard rows*cols against overflow before allocation.
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| ObvError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
 
-    // allocate rows×cols uninit and seed only warm prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &[first]);
 
-    // compute into the backing slice
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, rows * cols) };
@@ -614,7 +614,7 @@ fn obv_batch_inner(
         }
     }
 
-    // materialize Vec<f64> without extra copy
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -653,7 +653,7 @@ fn obv_batch_inner_into(
         .position(|(c, v)| !c.is_nan() && !v.is_nan())
         .ok_or(ObvError::AllValuesNaN)?;
 
-    // seed only warm prefix here since caller buffer is raw
+    
     for v in &mut out[..first] {
         *v = f64::NAN;
     }
@@ -697,7 +697,7 @@ mod tests {
 
         for i in 0..n {
             if i >= 5 {
-                // Produce both up/down/flat segments deterministically
+                
                 let base = 100.0 + ((i as i32 % 11) - 5) as f64;
                 let wiggle = ((i as f64) * 0.03).sin();
                 close[i] = base + wiggle;
@@ -825,7 +825,7 @@ mod tests {
         let close = source_type(&candles, "close");
         let volume = source_type(&candles, "volume");
 
-        // OBV has no parameters, so we just test with default params
+        
         let test_params = vec![ObvParams::default()];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -834,12 +834,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -871,7 +871,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_obv_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(debug_assertions)]
@@ -881,8 +881,8 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // OBV has no parameters, so batch output is always 1 row
-        // We test with different kernels and data configurations
+        
+        
         let test_configs = vec!["Testing OBV batch with default configuration"];
 
         for (cfg_idx, _config_name) in test_configs.iter().enumerate() {
@@ -894,10 +894,10 @@ mod tests {
                 }
 
                 let bits = val.to_bits();
-                let row = idx / output.cols; // Should always be 0 for OBV
+                let row = idx / output.cols; 
                 let col = idx % output.cols;
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -929,7 +929,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -941,9 +941,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate random price and volume data
-        // Note: We generate finite, non-NaN data to test realistic conditions
-        // Volume includes zero to test edge case where no volume is traded
+        
+        
+        
         let strat = prop::collection::vec(
             (
                 (-1e6f64..1e6f64).prop_filter("finite close", |x| x.is_finite()),
@@ -960,13 +960,13 @@ mod tests {
             let ObvOutput { values: out } = obv_with_kernel(&input, kernel)?;
             let ObvOutput { values: ref_out } = obv_with_kernel(&input, Kernel::Scalar)?;
 
-            // Find first valid index - should be 0 since we generate only finite values
+            
             let first_valid = close
                 .iter()
                 .zip(volume.iter())
                 .position(|(c, v)| !c.is_nan() && !v.is_nan());
 
-            // Since we generate only finite values, first_valid should always be Some(0)
+            
             prop_assert_eq!(
                 first_valid,
                 Some(0),
@@ -974,7 +974,7 @@ mod tests {
             );
 
             if let Some(first_idx) = first_valid {
-                // Validate NaN prefix: all values before first_idx should be NaN
+                
                 for i in 0..first_idx {
                     prop_assert!(
                         out[i].is_nan(),
@@ -984,7 +984,7 @@ mod tests {
                     );
                 }
 
-                // Validate output completeness: all values from first_idx onwards should be valid
+                
                 for i in first_idx..out.len() {
                     prop_assert!(
                         !out[i].is_nan(),
@@ -993,7 +993,7 @@ mod tests {
                     );
                 }
 
-                // Property 1: First valid OBV value should be 0
+                
                 prop_assert_eq!(
                     out[first_idx],
                     0.0,
@@ -1002,16 +1002,16 @@ mod tests {
                     out[first_idx]
                 );
 
-                // Property 2: Verify cumulative behavior for subsequent values
-                // Now with explicit check for out[i-1] validity
+                
+                
                 for i in (first_idx + 1)..close.len() {
-                    // Both current and previous values should be valid after first_idx
+                    
                     if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                         let obv_diff = out[i] - out[i - 1];
                         let price_diff = close[i] - close[i - 1];
 
                         if price_diff > 0.0 {
-                            // Price increased, OBV should increase by volume
+                            
                             prop_assert!(
                                 (obv_diff - volume[i]).abs() < 1e-9,
                                 "At index {}: OBV diff {} should equal volume {} (price increased)",
@@ -1020,14 +1020,14 @@ mod tests {
                                 volume[i]
                             );
                         } else if price_diff < 0.0 {
-                            // Price decreased, OBV should decrease by volume
+                            
                             prop_assert!(
 									(obv_diff + volume[i]).abs() < 1e-9,
 									"At index {}: OBV diff {} should equal -volume {} (price decreased)",
 									i, obv_diff, -volume[i]
 								);
                         } else {
-                            // Price unchanged, OBV should remain the same
+                            
                             prop_assert!(
 									obv_diff.abs() < 1e-9,
 									"At index {}: OBV should not change when price is unchanged, diff = {}",
@@ -1037,10 +1037,10 @@ mod tests {
                     }
                 }
 
-                // Property 3: All kernels should produce identical results
+                
                 for i in 0..out.len() {
                     if out[i].is_nan() && ref_out[i].is_nan() {
-                        continue; // Both NaN is fine
+                        continue; 
                     }
                     prop_assert!(
                         (out[i] - ref_out[i]).abs() < 1e-9,
@@ -1051,7 +1051,7 @@ mod tests {
                     );
                 }
 
-                // Property 4: Check for poison values
+                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         let bits = val.to_bits();
@@ -1067,7 +1067,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Test with constant price - OBV should remain at 0
+                
                 if close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
                     for i in first_idx..out.len() {
                         if !out[i].is_nan() {
@@ -1081,7 +1081,7 @@ mod tests {
                     }
                 }
 
-                // Property 6: Monotonic increasing price - OBV should be cumulative sum of volumes
+                
                 if close.windows(2).all(|w| w[1] > w[0]) {
                     let mut expected_obv = 0.0;
                     for i in first_idx..out.len() {
@@ -1098,7 +1098,7 @@ mod tests {
                     }
                 }
 
-                // Property 7: Monotonic decreasing price - OBV should be negative cumulative sum
+                
                 if close.windows(2).all(|w| w[1] < w[0]) {
                     let mut expected_obv = 0.0;
                     for i in first_idx..out.len() {
@@ -1115,8 +1115,8 @@ mod tests {
                     }
                 }
 
-                // Property 8: Explicit test for zero volume cases
-                // When volume is 0, OBV should not change regardless of price movement
+                
+                
                 for i in (first_idx + 1)..close.len() {
                     if volume[i] == 0.0 && i > 0 && !out[i].is_nan() && !out[i - 1].is_nan() {
                         prop_assert!(
@@ -1127,8 +1127,8 @@ mod tests {
                     }
                 }
 
-                // Property 9: OBV bounds check - ensure OBV doesn't exceed reasonable bounds
-                // Given max volume of 1e6 and max length of 400, max absolute OBV should be < 4e8
+                
+                
                 let max_possible_obv = 1e6 * (out.len() as f64);
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
@@ -1206,7 +1206,7 @@ pub fn obv_into_slice(
         }
     }
 
-    // write only the warmup prefix; no further NaN writes
+    
     for v in &mut dst[..first] {
         *v = f64::NAN;
     }
@@ -1295,7 +1295,7 @@ pub fn obv_batch_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    // Accept non-contiguous inputs; copy only when necessary
+    
     let close_slice: &[f64];
     let volume_slice: &[f64];
     let owned_close;
@@ -1314,7 +1314,7 @@ pub fn obv_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // OBV has no parameters, so batch is just single calculation
+    
     let rows: usize = 1;
     let cols = close_slice.len();
 
@@ -1336,12 +1336,12 @@ pub fn obv_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // No parameters to return for OBV
+    
 
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings -----------------
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaObv;
@@ -1440,16 +1440,16 @@ pub fn obv_into(
         let close = std::slice::from_raw_parts(close_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
 
-        // Check for aliasing - OBV can't operate in-place on either input
+        
         if close_ptr == out_ptr || volume_ptr == out_ptr {
-            // Need temporary buffer if output aliases with either input
+            
             let mut temp = vec![0.0; len];
             obv_into_slice(&mut temp, close, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             obv_into_slice(out, close, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1496,7 +1496,7 @@ pub fn obv_batch_into(
         obv_into_slice(out, close, volume, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    Ok(1) // rows
+    Ok(1) 
 }
 
 #[cfg(feature = "wasm")]
@@ -1510,7 +1510,7 @@ pub struct ObvBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = obv_batch)]
 pub fn obv_batch_js(close: &[f64], volume: &[f64]) -> Result<JsValue, JsValue> {
-    // OBV has no parameters, so batch returns single row
+    
     let mut output = vec![0.0; close.len()];
 
     obv_into_slice(&mut output, close, volume, Kernel::Auto)

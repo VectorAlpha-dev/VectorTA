@@ -874,10 +874,10 @@ pub fn pma_into_slice(
         k => k,
     };
 
-    // Compute into provided buffers
+    
     pma_compute_into(data, first, chosen, predict_dst, trigger_dst);
 
-    // Write warmup NaNs (prefix only)
+    
     let warm_end = first + 7 - 1;
     for v in &mut predict_dst[..warm_end] {
         *v = f64::NAN;
@@ -1136,7 +1136,7 @@ pub fn pma_py<'py>(
 
     let input = PmaInput::from_slice(slice_in, PmaParams {});
 
-    // Zero-copy: Vec<f64> -> PyArray1 via into_pyarray
+    
     let out = py
         .allow_threads(|| pma_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1181,16 +1181,16 @@ pub fn pma_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err(PmaError::SizeOverflow { rows, cols }.to_string()))?;
 
-    // Preallocate one flat array; fill directly with our unified inner
+    
     let values_arr = unsafe { PyArray1::<f64>::new(py, [size], false) };
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
     py.allow_threads(|| -> PyResult<()> {
-        // Compute directly into values_slice without intermediate copies
+        
         let first = pma_first_valid_idx(slice_in)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        // NaN warmup for both rows (ALMA-style prefix init)
+        
         let warm = first + 7 - 1;
         let warm_prefixes = [warm; 2];
         let values_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
@@ -1276,9 +1276,9 @@ pub fn pma_cuda_many_series_one_param_dev_py(
     Ok((predict, trigger))
 }
 
-//--------------------------
-// Tests
-//--------------------------
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1436,7 +1436,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with different candle sources since PMA has no other parameters
+        
         let test_sources = vec![
             "close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "volume",
         ];
@@ -1445,7 +1445,7 @@ mod tests {
             let input = PmaInput::from_candles(&candles, source, PmaParams {});
             let output = pma_with_kernel(&input, kernel)?;
 
-            // Check predict values
+            
             for (i, &val) in output.predict.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1478,7 +1478,7 @@ mod tests {
                 }
             }
 
-            // Check trigger values
+            
             for (i, &val) in output.trigger.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1532,29 +1532,29 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate data with at least 7 valid points after the first valid index
+        
         let strat = prop::collection::vec(
             (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-            7..400, // Ensure at least 7 points for PMA to work
+            7..400, 
         );
 
         proptest::test_runner::TestRunner::default().run(&strat, |data| {
             let input = PmaInput::from_slice(&data, PmaParams {});
 
-            // Test kernel consistency - all kernels should produce identical results
+            
             let result = pma_with_kernel(&input, kernel)?;
             let ref_result = pma_with_kernel(&input, Kernel::Scalar)?;
 
-            // Check that both outputs have the correct length
+            
             prop_assert_eq!(result.predict.len(), data.len());
             prop_assert_eq!(result.trigger.len(), data.len());
             prop_assert_eq!(ref_result.predict.len(), data.len());
             prop_assert_eq!(ref_result.trigger.len(), data.len());
 
-            // PMA has a warmup period of 7 (first_valid_idx + 7)
+            
             let warmup_period = 7;
 
-            // Verify NaN pattern in warmup period
+            
             for i in 0..warmup_period {
                 prop_assert!(
                     result.predict[i].is_nan(),
@@ -1568,11 +1568,11 @@ mod tests {
                 );
             }
 
-            // Special case: Test with constant data
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                 && data.len() >= warmup_period
             {
-                // For constant data, PMA should output close to that constant value
+                
                 for i in warmup_period..data.len() {
                     if result.predict[i].is_finite() {
                         prop_assert!(
@@ -1586,9 +1586,9 @@ mod tests {
                 }
             }
 
-            // Compare results between kernels and verify mathematical properties
+            
             for i in warmup_period..data.len() {
-                // Compare predict values between kernels
+                
                 if result.predict[i].is_finite() && ref_result.predict[i].is_finite() {
                     let diff_predict = (result.predict[i] - ref_result.predict[i]).abs();
                     prop_assert!(
@@ -1608,7 +1608,7 @@ mod tests {
                     );
                 }
 
-                // Compare trigger values between kernels
+                
                 if result.trigger[i].is_finite() && ref_result.trigger[i].is_finite() {
                     let diff_trigger = (result.trigger[i] - ref_result.trigger[i]).abs();
                     prop_assert!(
@@ -1628,15 +1628,15 @@ mod tests {
                     );
                 }
 
-                // Verify predict values are within tight bounds of the input window
+                
                 if i >= warmup_period && result.predict[i].is_finite() {
                     let window_start = i.saturating_sub(6);
                     let window_data = &data[window_start..=i];
                     let min_val = window_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                     let max_val = window_data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-                    // Since PMA is predictive (2*wma1 - wma2), it can extrapolate slightly
-                    // But should still be reasonably bounded
+                    
+                    
                     let tolerance = (max_val - min_val).abs() * 0.1 + 1e-9;
                     prop_assert!(
                         result.predict[i] >= min_val - tolerance
@@ -1650,9 +1650,9 @@ mod tests {
                     );
                 }
 
-                // Verify WMA1 calculation for specific positions
+                
                 if i == warmup_period && i >= 6 {
-                    // Calculate WMA1 manually for the first valid position
+                    
                     let wma1_expected = (7.0 * data[i]
                         + 6.0 * data[i - 1]
                         + 5.0 * data[i - 2]
@@ -1662,11 +1662,11 @@ mod tests {
                         + data[i - 6])
                         / 28.0;
 
-                    // At position warmup_period, WMA2 calculation requires 7 WMA1 values
-                    // Since we're at the first position, we can't verify the full predict formula
-                    // But we can at least check the predict is related to wma1_expected
+                    
+                    
+                    
                     if result.predict[i].is_finite() {
-                        // The predict value should be influenced by wma1_expected
+                        
                         let window_start = i.saturating_sub(6);
                         let window = &data[window_start..=i];
                         let window_avg = window.iter().sum::<f64>() / window.len() as f64;
@@ -1682,12 +1682,12 @@ mod tests {
                     }
                 }
 
-                // Verify trigger calculation when we have enough predict values
+                
                 if i >= warmup_period + 3
                     && result.trigger[i].is_finite()
                     && result.predict[i].is_finite()
                 {
-                    // Trigger formula: (4*predict[i] + 3*predict[i-1] + 2*predict[i-2] + predict[i-3]) / 10
+                    
                     if result.predict[i - 1].is_finite()
                         && result.predict[i - 2].is_finite()
                         && result.predict[i - 3].is_finite()
@@ -1710,9 +1710,9 @@ mod tests {
                 }
             }
 
-            // Test edge case: exactly 7 data points
+            
             if data.len() == 7 {
-                // Should have at least one valid output at position 6
+                
                 prop_assert!(
                     result.predict[6].is_finite(),
                     "With exactly 7 points, predict[6] should be finite but got NaN"
@@ -1749,13 +1749,13 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
-        // Should always be a single row, for PMA's batch API
+        
         assert_eq!(output.rows, 1, "Expected exactly 1 row");
         assert_eq!(output.cols, c.close.len());
         assert_eq!(output.predict.len(), c.close.len());
         assert_eq!(output.trigger.len(), c.close.len());
 
-        // Spot check output against direct calculation
+        
         let input = PmaInput::from_candles(&c, "close", PmaParams::default());
         let expected = pma_with_kernel(&input, kernel)?;
 
@@ -1821,7 +1821,7 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test with different candle sources since PMA has no parameters to sweep
+        
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
         for (source_idx, source) in test_sources.iter().enumerate() {
@@ -1829,7 +1829,7 @@ mod tests {
                 .kernel(kernel)
                 .apply_candles(&c, source)?;
 
-            // Check predict values
+            
             for (idx, &val) in output.predict.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1862,7 +1862,7 @@ mod tests {
                 }
             }
 
-            // Check trigger values
+            
             for (idx, &val) in output.trigger.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1912,15 +1912,15 @@ mod tests {
 
     #[test]
     fn test_pma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use existing CSV candles to match repository testing conventions
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = PmaInput::with_default_candles(&candles);
 
-        // Baseline via existing Vec-returning API
+        
         let base = pma_with_kernel(&input, Kernel::Auto)?;
 
-        // Preallocate outputs and compute via into API
+        
         let n = candles.close.len();
         let mut out_predict = vec![0.0; n];
         let mut out_trigger = vec![0.0; n];
@@ -1930,11 +1930,11 @@ mod tests {
             pma_into(&input, &mut out_predict, &mut out_trigger)?;
         }
 
-        // Length parity
+        
         assert_eq!(base.predict.len(), out_predict.len());
         assert_eq!(base.trigger.len(), out_trigger.len());
 
-        // Helper: equality with NaN == NaN and tight epsilon for finite values
+        
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }

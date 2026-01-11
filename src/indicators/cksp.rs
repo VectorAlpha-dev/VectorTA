@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// ========================= Input Structs, AsRef =========================
+
 
 #[derive(Debug, Clone)]
 pub enum CkspData<'a> {
@@ -145,7 +145,7 @@ impl<'a> AsRef<[f64]> for CkspInput<'a> {
     }
 }
 
-// ========================= Output Struct =========================
+
 
 #[derive(Debug, Clone)]
 pub struct CkspOutput {
@@ -153,11 +153,11 @@ pub struct CkspOutput {
     pub short_values: Vec<f64>,
 }
 
-// ========================= Error Type =========================
+
 
 #[derive(Debug, Error)]
 pub enum CkspError {
-    // Inputs
+    
     #[error("cksp: Data is empty")]
     EmptyInputData,
     #[error("cksp: No data (all values are NaN)")]
@@ -171,7 +171,7 @@ pub enum CkspError {
     #[error("cksp: Inconsistent input lengths")]
     InconsistentLengths,
 
-    // Domain params
+    
     #[error("cksp: Invalid param x={x}")]
     InvalidMultiplier { x: f64 },
     #[error("cksp: Invalid param {param}")]
@@ -2375,7 +2375,7 @@ mod tests {
 
             let bits = val.to_bits();
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in long_values",
@@ -2383,7 +2383,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in long_values",
@@ -2391,7 +2391,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in long_values",
@@ -2400,16 +2400,16 @@ mod tests {
             }
         }
 
-        // Check every value for poison patterns in short_values
+        
         for (i, &val) in output.short_values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
+            
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in short_values",
@@ -2417,7 +2417,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in short_values",
@@ -2425,7 +2425,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in short_values",
@@ -2434,7 +2434,7 @@ mod tests {
             }
         }
 
-        // Test with multiple parameter combinations
+        
         let param_combos = vec![
             CkspParams {
                 p: Some(5),
@@ -2457,7 +2457,7 @@ mod tests {
             let input = CkspInput::from_candles(&candles, params.clone());
             let output = cksp_with_kernel(&input, kernel)?;
 
-            // Check long_values
+            
             for (i, &val) in output.long_values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2475,7 +2475,7 @@ mod tests {
                 }
             }
 
-            // Check short_values
+            
             for (i, &val) in output.short_values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2497,7 +2497,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cksp_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2508,17 +2508,17 @@ mod tests {
     fn check_cksp_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with OHLC price data and parameters
+        
         let strat = (1usize..=64).prop_flat_map(|p| {
             (1usize..=20).prop_flat_map(move |q| {
                 (
-                    // Generate realistic OHLC data
+                    
                     prop::collection::vec(
                         (10.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        (p + q)..400, // Ensure enough data for warmup
+                        (p + q)..400, 
                     ),
                     Just(p),
-                    (0.1f64..10.0f64).prop_filter("finite", |x| x.is_finite()), // x parameter
+                    (0.1f64..10.0f64).prop_filter("finite", |x| x.is_finite()), 
                     Just(q),
                 )
             })
@@ -2526,20 +2526,20 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(base_prices, p, x, q)| {
-                // Generate realistic OHLC data from base prices
+                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
                 let mut close = Vec::with_capacity(base_prices.len());
 
                 for (i, price) in base_prices.iter().enumerate() {
-                    let volatility = price * 0.02; // 2% volatility
+                    let volatility = price * 0.02; 
                     let h = price + volatility;
                     let l = price - volatility;
                     high.push(h);
                     low.push(l);
-                    // Close should be between high and low
-                    // Use index for deterministic variation
-                    let close_factor = 0.3 + 0.4 * ((i % 3) as f64 / 2.0); // Varies between 0.3 and 0.7
+                    
+                    
+                    let close_factor = 0.3 + 0.4 * ((i % 3) as f64 / 2.0); 
                     close.push(l + (h - l) * close_factor);
                 }
 
@@ -2550,7 +2550,7 @@ mod tests {
                 };
                 let input = CkspInput::from_slices(&high, &low, &close, params);
 
-                // Test 1: Verify outputs are generated
+                
                 let result = cksp_with_kernel(&input, kernel)?;
                 let CkspOutput {
                     long_values,
@@ -2568,12 +2568,12 @@ mod tests {
                     "Short values length mismatch"
                 );
 
-                // Test 2: Warmup period validation
-                // Find the first non-NaN index to understand actual warmup behavior
+                
+                
                 let first_long_valid = long_values.iter().position(|&v| v.is_finite());
                 let first_short_valid = short_values.iter().position(|&v| v.is_finite());
 
-                // Both should have the same first valid index
+                
                 if let (Some(long_idx), Some(short_idx)) = (first_long_valid, first_short_valid) {
                     prop_assert_eq!(
                         long_idx,
@@ -2583,7 +2583,7 @@ mod tests {
                         short_idx
                     );
 
-                    // Verify NaN values before first valid index
+                    
                     for i in 0..long_idx {
                         prop_assert!(
                             long_values[i].is_nan(),
@@ -2601,15 +2601,15 @@ mod tests {
                         );
                     }
 
-                    // Verify warmup is reasonable based on parameters
-                    // The actual warmup depends on data and should be at least p-1 for ATR
+                    
+                    
                     prop_assert!(
                         long_idx >= p - 1,
                         "Warmup period {} should be at least p - 1 = {}",
                         long_idx,
                         p - 1
                     );
-                    // And should not exceed p + q - 1 (theoretical maximum)
+                    
                     let max_warmup = p + q - 1;
                     prop_assert!(
                         long_idx <= max_warmup,
@@ -2619,7 +2619,7 @@ mod tests {
                     );
                 }
 
-                // Test 3: Non-NaN values after warmup
+                
                 if let Some(first_valid) = first_long_valid {
                     for i in first_valid..close.len() {
                         prop_assert!(
@@ -2637,7 +2637,7 @@ mod tests {
                     }
                 }
 
-                // Test 4: Kernel consistency (compare with scalar)
+                
                 if kernel != Kernel::Scalar {
                     let scalar_result = cksp_with_kernel(&input, Kernel::Scalar)?;
                     let CkspOutput {
@@ -2652,7 +2652,7 @@ mod tests {
                         let short_val = short_values[i];
                         let scalar_short_val = scalar_short[i];
 
-                        // Check ULP difference for long values
+                        
                         if long_val.is_finite() && scalar_long_val.is_finite() {
                             let long_bits = long_val.to_bits();
                             let scalar_long_bits = scalar_long_val.to_bits();
@@ -2668,7 +2668,7 @@ mod tests {
                             );
                         }
 
-                        // Check ULP difference for short values
+                        
                         if short_val.is_finite() && scalar_short_val.is_finite() {
                             let short_bits = short_val.to_bits();
                             let scalar_short_bits = scalar_short_val.to_bits();
@@ -2686,10 +2686,10 @@ mod tests {
                     }
                 }
 
-                // Test 5: Mathematical properties and bounds checking
+                
                 let start_idx = first_long_valid.unwrap_or(0);
                 if start_idx < close.len() {
-                    // Calculate rough ATR estimate for bounds checking
+                    
                     let mut max_tr: f64 = 0.0;
                     for j in start_idx.saturating_sub(p)..start_idx {
                         if j < high.len() {
@@ -2698,12 +2698,12 @@ mod tests {
                         }
                     }
 
-                    // Find price range for bounds checking (use entire data, not just from start)
+                    
                     let price_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let price_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
 
                     for i in start_idx..close.len() {
-                        // Both stops should be finite (not NaN or infinite)
+                        
                         prop_assert!(
                             long_values[i].is_finite(),
                             "Long stop should be finite at idx {}: {}",
@@ -2717,10 +2717,10 @@ mod tests {
                             short_values[i]
                         );
 
-                        // Stops should be within reasonable bounds
-                        // Use a generous margin to account for extreme market conditions
+                        
+                        
                         let price_range = price_max - price_min;
-                        let margin = price_range * 2.0; // Allow stops to be within 2x the price range
+                        let margin = price_range * 2.0; 
 
                         prop_assert!(
                             long_values[i] <= price_max + margin,
@@ -2742,12 +2742,12 @@ mod tests {
                     }
                 }
 
-                // Test 6: Edge case - period = 1 and q = 1
+                
                 if p == 1 && q == 1 {
-                    // With minimal periods, stops should react quickly to price changes
+                    
                     let start_check = first_long_valid.unwrap_or(0).saturating_add(1);
                     for i in start_check..close.len() {
-                        // With minimal parameters, the stops should exist and be finite
+                        
                         prop_assert!(
                             long_values[i].is_finite(),
                             "Long stop should be finite with p=1,q=1 at idx {}: {}",
@@ -2761,13 +2761,13 @@ mod tests {
                             short_values[i]
                         );
 
-                        // With p=1 and q=1, stops should be very close to recent high/low
-                        // Since ATR period is 1, the stop should be within 1 ATR of recent extremes
+                        
+                        
                         let recent_high = high[i];
                         let recent_low = low[i];
                         let recent_range = recent_high - recent_low;
 
-                        // Long stop should be below recent high
+                        
                         prop_assert!(
                             long_values[i] <= recent_high,
                             "With p=1,q=1: Long stop {} should be <= recent high {} at idx {}",
@@ -2776,7 +2776,7 @@ mod tests {
                             i
                         );
 
-                        // Short stop should be above recent low
+                        
                         prop_assert!(
                             short_values[i] >= recent_low,
                             "With p=1,q=1: Short stop {} should be >= recent low {} at idx {}",
@@ -2785,14 +2785,14 @@ mod tests {
                             i
                         );
 
-                        // With minimal parameters and extreme multipliers, stops can vary widely
-                        // Just ensure they remain finite
-                        // The actual bounds depend heavily on the ATR multiplier x
+                        
+                        
+                        
                     }
                 }
 
-                // Test 8: ATR multiplier (x) effect
-                // Compare with a smaller x value to verify stops widen with larger x
+                
+                
                 if x > 1.0 {
                     let smaller_x = x * 0.5;
                     let params_small = CkspParams {
@@ -2807,7 +2807,7 @@ mod tests {
                             short_values: short_small,
                         } = result_small;
 
-                        // After warmup, stops with larger x should be wider apart than with smaller x
+                        
                         if let Some(start) = first_long_valid {
                             let sample_points = 5.min((close.len() - start) / 2);
                             for offset in 0..sample_points {
@@ -2816,11 +2816,11 @@ mod tests {
                                     let spread_large = (short_values[idx] - long_values[idx]).abs();
                                     let spread_small = (short_small[idx] - long_small[idx]).abs();
 
-                                    // In most cases, larger x should produce wider spreads
-                                    // But this isn't always guaranteed due to rolling window effects
-                                    // So we only check this as a general trend, not a strict rule
+                                    
+                                    
+                                    
                                     if spread_small > 0.0 {
-                                        // Just verify both spreads are reasonable
+                                        
                                         prop_assert!(
 											spread_large > 0.0 && spread_small > 0.0,
 											"At idx {}: Both spreads should be positive: large={}, small={}",
@@ -2835,8 +2835,8 @@ mod tests {
                     }
                 }
 
-                // Test 9: Rolling window (q) effect
-                // Compare with different q values to verify smoothing effect
+                
+                
                 if q > 2 && p < 10 {
                     let smaller_q = 1;
                     let params_small_q = CkspParams {
@@ -2851,7 +2851,7 @@ mod tests {
                             short_values: short_small_q,
                         } = result_small_q;
 
-                        // Calculate smoothness metric: sum of absolute differences between consecutive values
+                        
                         let start = (p + q).max(p + smaller_q);
                         if start + 10 < close.len() {
                             let mut volatility_large_q = 0.0;
@@ -2866,8 +2866,8 @@ mod tests {
                                 }
                             }
 
-                            // Larger q often produces smoother stops, but not always
-                            // Just verify that both have reasonable volatility
+                            
+                            
                             prop_assert!(
                                 volatility_large_q.is_finite() && volatility_small_q.is_finite(),
                                 "Volatilities should be finite: large_q={}, small_q={}",
@@ -2878,29 +2878,29 @@ mod tests {
                     }
                 }
 
-                // Test 7: Constant price property
+                
                 if base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
-                    // With constant prices, ATR should approach the fixed volatility we added
+                    
                     let last_idx = close.len() - 1;
-                    let min_converge_idx = first_long_valid.unwrap_or(0) + p * 2; // Allow 2x period for convergence
+                    let min_converge_idx = first_long_valid.unwrap_or(0) + p * 2; 
                     if last_idx > min_converge_idx {
                         let constant_price = base_prices[0];
-                        let constant_volatility = constant_price * 0.02; // From our OHLC generation
+                        let constant_volatility = constant_price * 0.02; 
 
-                        // With constant prices, the stops should converge to:
-                        // Long stop ≈ high - x * ATR ≈ (price + volatility) - x * (2 * volatility)
-                        // Short stop ≈ low + x * ATR ≈ (price - volatility) + x * (2 * volatility)
+                        
+                        
+                        
 
                         let expected_long =
                             constant_price + constant_volatility - x * (2.0 * constant_volatility);
                         let expected_short =
                             constant_price - constant_volatility + x * (2.0 * constant_volatility);
 
-                        // Check convergence at the end
+                        
                         let long_val = long_values[last_idx];
                         let short_val = short_values[last_idx];
 
-                        // Allow 20% tolerance for convergence
+                        
                         let tolerance = constant_price * 0.2;
 
                         prop_assert!(
@@ -2921,7 +2921,7 @@ mod tests {
 							tolerance
 						);
 
-                        // Also check stabilization
+                        
                         if last_idx >= 3 {
                             let long_stable = (long_values[last_idx] - long_values[last_idx - 1])
                                 .abs()
@@ -3012,7 +3012,7 @@ mod tests {
         let params = CkspParams {
             p: Some(2),
             x: Some(1.0),
-            q: Some(0), // Invalid q = 0
+            q: Some(0), 
         };
         let input = CkspInput::from_slices(&high, &low, &close, params);
         let res = cksp_with_kernel(&input, kernel);
@@ -3088,7 +3088,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -3096,17 +3096,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CkspBatchBuilder::new()
             .kernel(kernel)
-            .p_range(5, 25, 5) // Test p values: 5, 10, 15, 20, 25
-            .x_range(0.5, 2.5, 0.5) // Test x values: 0.5, 1.0, 1.5, 2.0, 2.5
-            .q_range(5, 20, 5) // Test q values: 5, 10, 15, 20
+            .p_range(5, 25, 5) 
+            .x_range(0.5, 2.5, 0.5) 
+            .q_range(5, 20, 5) 
             .apply_candles(&c)?;
 
-        // Check every value in the entire batch matrix for poison patterns - long_values
+        
         for (idx, &val) in output.long_values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -3115,7 +3115,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3123,7 +3123,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3131,7 +3131,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3140,9 +3140,9 @@ mod tests {
             }
         }
 
-        // Check every value in the entire batch matrix for poison patterns - short_values
+        
         for (idx, &val) in output.short_values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -3151,7 +3151,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3159,7 +3159,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3167,7 +3167,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3179,7 +3179,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -3210,28 +3210,28 @@ mod tests {
 
     #[test]
     fn test_cksp_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the same dataset as other tests for realism
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Build input with default params
+        
         let input = CkspInput::from_candles(&candles, CkspParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = cksp(&input)?;
 
-        // Preallocate outputs and compute via into-API
+        
         let n = candles.close.len();
         let mut out_long = vec![0.0; n];
         let mut out_short = vec![0.0; n];
 
-        // Native into API (guarded away when building for wasm)
+        
         #[cfg(not(feature = "wasm"))]
         {
             cksp_into(&input, &mut out_long, &mut out_short)?;
         }
 
-        // If building with wasm feature, fall back to into_slices helper for parity check
+        
         #[cfg(feature = "wasm")]
         {
             cksp_into_slices(&mut out_long, &mut out_short, &input, Kernel::Auto)?;
@@ -3265,7 +3265,7 @@ mod tests {
     }
 }
 
-// ========================= Python Bindings =========================
+
 
 #[cfg(feature = "python")]
 #[inline(always)]
@@ -3278,7 +3278,7 @@ fn cksp_prepare(
     q: usize,
     kernel: Kernel,
 ) -> Result<(usize, Kernel), CkspError> {
-    // Validate parameters first (before data checks)
+    
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
@@ -3286,7 +3286,7 @@ fn cksp_prepare(
         return Err(CkspError::InvalidMultiplier { x });
     }
 
-    // Now check data
+    
     let size = close.len();
     if size == 0 {
         return Err(CkspError::EmptyInputData);

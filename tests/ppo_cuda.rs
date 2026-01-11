@@ -1,16 +1,16 @@
-// Integration tests for CUDA PPO kernels
 
-use my_project::indicators::ppo::{
+
+use vector_ta::indicators::ppo::{
     ppo_batch_with_kernel, ppo_with_kernel, PpoBatchRange, PpoData, PpoInput, PpoParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::ppo_wrapper::CudaPpo;
+use vector_ta::cuda::oscillators::ppo_wrapper::CudaPpo;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -156,7 +156,7 @@ fn ppo_cuda_many_series_one_param_matches_cpu_sma() -> Result<(), Box<dyn std::e
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -221,7 +221,7 @@ fn ppo_cuda_many_series_one_param_matches_cpu_ema() -> Result<(), Box<dyn std::e
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    // CPU baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

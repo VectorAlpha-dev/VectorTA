@@ -2857,12 +2857,12 @@ pub fn alma_cuda_many_series_one_param_dev_py(
 
 #[cfg(feature = "python")]
 pub fn register_alma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
-    // CPU
+    
     m.add_function(wrap_pyfunction!(alma_py, m)?)?;
     m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
     m.add_class::<AlmaStreamPy>()?;
 
-    // CUDA (feature-gated at compile time)
+    
     #[cfg(feature = "cuda")]
     {
         m.add_class::<DeviceArrayF32Py>()?;

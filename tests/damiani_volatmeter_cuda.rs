@@ -1,14 +1,14 @@
-// CUDA integration tests for Damiani Volatmeter
 
-use my_project::indicators::damiani_volatmeter::{
+
+use vector_ta::indicators::damiani_volatmeter::{
     damiani_volatmeter_batch_with_kernel, DamianiVolatmeterBatchRange,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaDamianiVolatmeter};
+use vector_ta::cuda::{cuda_available, CudaDamianiVolatmeter};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,19 +67,19 @@ fn damiani_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = vec![0f32; dev_arr.len()];
     dev_arr.buf.copy_to(&mut gpu).expect("copy damiani results");
 
-    // Validate warmup/NaN prefix and shapes; spot-check finiteness after warmup.
+    
     for (row, params) in cpu.combos.iter().enumerate() {
         let base_vol = (2 * row) * cpu.cols;
         let base_anti = (2 * row + 1) * cpu.cols;
         let vol = cpu.vol_for(params).unwrap();
         let anti = cpu.anti_for(params).unwrap();
-        // Compute CPU warmup (NaN prefix length)
+        
         let cpu_warm_vol = vol.iter().position(|v| v.is_finite()).unwrap_or(vol.len());
         let cpu_warm_anti = anti
             .iter()
             .position(|v| v.is_finite())
             .unwrap_or(anti.len());
-        // GPU warmup
+        
         let gpu_vol_slice = &gpu[base_vol..base_vol + cpu.cols];
         let gpu_anti_slice = &gpu[base_anti..base_anti + cpu.cols];
         let gpu_warm_vol = gpu_vol_slice
@@ -100,7 +100,7 @@ fn damiani_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             "warmup prefix mismatch (anti) for row {}",
             row
         );
-        // Spot-check a small suffix for finiteness
+        
         for i in (cpu.cols.saturating_sub(64))..cpu.cols {
             assert!(
                 gpu_vol_slice[i].is_finite() || vol[i].is_nan(),

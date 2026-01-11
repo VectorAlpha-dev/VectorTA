@@ -39,18 +39,18 @@ fn env_warps_per_block() -> u32 {
         .unwrap_or(4)
 }
 
-// ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
-    // Only one plain path today; preserved for parity and tests
+    
     Auto,
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
-    // Only one 1D path today; preserved for parity and tests
+    
     Auto,
     OneD { block_x: u32 },
 }
@@ -70,7 +70,7 @@ impl Default for CudaTemaPolicy {
     }
 }
 
-// Introspection (selected at last launch)
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },

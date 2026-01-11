@@ -21,8 +21,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
-// ---- Helpers (module scope) ----
-const H2D_PINNED_THRESHOLD_BYTES: usize = 128 * 1024 * 1024; // 128 MiB heuristic
+
+const H2D_PINNED_THRESHOLD_BYTES: usize = 128 * 1024 * 1024; 
 
 #[inline]
 fn round_block_x_to_warp(x: u32) -> u32 {
@@ -56,7 +56,7 @@ pub enum CudaEmvError {
     NotImplemented,
 }
 
-// Minimal policy surface mirroring common wrappers
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -126,7 +126,7 @@ impl CudaEmv {
             }
         };
 
-        // Favor L1 cache by default for read-mostly workloads
+        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -249,7 +249,7 @@ impl CudaEmv {
         Ok(())
     }
 
-    // ---- Batch path (one series × many params; EMV has no params) ----
+    
 
     fn validate_batch_inputs(
         high: &[f32],
@@ -289,7 +289,7 @@ impl CudaEmv {
 
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Block size policy: env EMV_BLOCK_X or occupancy suggestion; warp-align
+        
         let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
@@ -327,7 +327,7 @@ impl CudaEmv {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        // Introspection: record selected batch kernel
+        
         unsafe {
             let this = self as *const _ as *mut CudaEmv;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x });
@@ -346,7 +346,7 @@ impl CudaEmv {
         let (first, len) = Self::validate_batch_inputs(high, low, volume)?;
         let _ = self.assert_current_device();
 
-        // VRAM estimate: 3 inputs + 1 output
+        
         let elem = std::mem::size_of::<f32>();
         let in_elems = len
             .checked_mul(3)
@@ -355,7 +355,7 @@ impl CudaEmv {
         let bytes = in_elems
             .checked_mul(elem)
             .ok_or_else(|| CudaEmvError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaEmvError::OutOfMemory {
@@ -370,7 +370,7 @@ impl CudaEmv {
             }
         }
 
-        // Adaptive H2D strategy (pinned+async for small, direct for large)
+        
         let d_high = self.copy_to_device_adaptive_f32(high)?;
         let d_low  = self.copy_to_device_adaptive_f32(low)?;
         let d_vol  = self.copy_to_device_adaptive_f32(volume)?;
@@ -379,12 +379,12 @@ impl CudaEmv {
         self.launch_batch_kernel(&d_high, &d_low, &d_vol, len, 1, first, &mut d_out)?;
 
         self.stream.synchronize()?;
-        // Selection introspection optional; launcher already logged.
+        
 
         Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
     }
 
-    // ---- Many-series × one-param (time-major) ----
+    
 
     fn prepare_first_valids_hlv_tm(
         high_tm: &[f32],
@@ -405,7 +405,7 @@ impl CudaEmv {
             return Err(CudaEmvError::InvalidInput("matrix shape mismatch".into()));
         }
 
-        // Row‑major sweep with early exit once all series have two valids
+        
         let mut first = vec![-1i32; cols];
         let mut have_second = vec![false; cols];
         let mut remaining_first = cols;
@@ -450,10 +450,10 @@ impl CudaEmv {
             .get_function("emv_many_series_one_param_f32")
             .map_err(|_| CudaEmvError::MissingKernelSymbol { name: "emv_many_series_one_param_f32" })?;
 
-        // Favor L1 for read‑mostly kernel as well
+        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Block size policy: env EMV_BLOCK_X or occupancy suggestion; warp-align
+        
         let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
@@ -490,7 +490,7 @@ impl CudaEmv {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        // Introspection: record selected many-series kernel
+        
         unsafe {
             let this = self as *const _ as *mut CudaEmv;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -509,7 +509,7 @@ impl CudaEmv {
     ) -> Result<DeviceArrayF32, CudaEmvError> {
         let first_valids = Self::prepare_first_valids_hlv_tm(high_tm, low_tm, vol_tm, cols, rows)?;
 
-        // VRAM estimate: 3 inputs + first_valids + out
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaEmvError::InvalidInput("rows*cols overflow".into()))?;
@@ -567,7 +567,7 @@ impl CudaEmv {
             &mut d_out_tm,
         )?;
         self.stream.synchronize()?;
-        // Selection introspection optional; launcher already logged.
+        
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -577,7 +577,7 @@ impl CudaEmv {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};

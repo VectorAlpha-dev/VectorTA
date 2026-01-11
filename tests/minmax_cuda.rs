@@ -1,17 +1,17 @@
-// Integration tests for CUDA MinMax kernels
 
-use my_project::indicators::minmax::{
+
+use vector_ta::indicators::minmax::{
     minmax_batch_with_kernel, MinmaxBatchRange, MinmaxParams, MinmaxInput, minmax_with_kernel,
 };
-// Minimal import fixes: primary import above already brings needed items
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::minmax_wrapper::CudaMinmax;
+use vector_ta::cuda::minmax_wrapper::CudaMinmax;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -138,7 +138,7 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     }
     let order = 9usize;
 
-    // CPU baseline per series
+    
     let mut cpu_is_min = vec![f64::NAN; cols * rows];
     let mut cpu_is_max = vec![f64::NAN; cols * rows];
     let mut cpu_last_min = vec![f64::NAN; cols * rows];

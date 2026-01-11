@@ -45,7 +45,7 @@ pub enum CudaCwmaError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (mirrors ALMA) --------
+
 
 /// Whether each thread computes one output or two outputs in fused fashion.
 #[derive(Clone, Copy, Debug)]
@@ -91,7 +91,7 @@ impl Default for CudaCwmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 /// Introspection for the selected batch kernel at last launch.
 #[derive(Clone, Copy, Debug)]
@@ -133,7 +133,7 @@ impl CudaCwma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cwma_kernel.ptx"));
-        // JIT preference: determine target from context + O2, then fall back.
+        
         let mut jit_vec: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),

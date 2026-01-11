@@ -311,7 +311,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
                 Kernel::Scalar | Kernel::ScalarBatch => {
                     dti_simd128(high, low, r, s, u, first_valid_idx, dst)
                 }
-                _ => dti_scalar(high, low, r, s, u, first_valid_idx, dst), // graceful fallback on WASM
+                _ => dti_scalar(high, low, r, s, u, first_valid_idx, dst), 
             }
         }
         #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
@@ -329,7 +329,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
         }
     }
 
-    // Warmup prefix: only set what must be NaN
+    
     for v in &mut dst[..=first_valid_idx] {
         *v = f64::NAN;
     }
@@ -398,7 +398,7 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
                 Kernel::Scalar | Kernel::ScalarBatch => {
                     dti_simd128(high, low, r, s, u, first_valid_idx, &mut out)
                 }
-                _ => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out), // graceful fallback on WASM
+                _ => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out), 
             }
             return Ok(DtiOutput { values: out });
         }
@@ -484,9 +484,9 @@ unsafe fn dti_simd128(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // DTI algorithm requires sequential processing due to EMA dependencies
-    // Each value depends on the previous, making SIMD parallelization ineffective
-    // Fall back to scalar implementation
+    
+    
+    
     dti_scalar(high, low, r, s, u, first_valid_idx, out);
 }
 
@@ -524,7 +524,7 @@ pub fn dti_avx2(
         let vs_b = _mm_set1_pd(as1);
         let vu_b = _mm_set1_pd(au1);
 
-        // lane0 = numerator (x), lane1 = denominator (|x|)
+        
         let mut v_er = _mm_set1_pd(0.0);
         let mut v_es = _mm_set1_pd(0.0);
         let mut v_eu = _mm_set1_pd(0.0);
@@ -544,11 +544,11 @@ pub fn dti_avx2(
 
             let dh = hi0 - hi_1;
             let dl = lo0 - lo_1;
-            // x = max(dh,0) - max(-dl,0)
+            
             let x = half * (dh.abs() + dh) - half * (dl.abs() - dl);
             let ax = x.abs();
 
-            let vx = _mm_set_pd(ax, x); // [ax, x] => tmp[0]=x (num), tmp[1]=ax (den)
+            let vx = _mm_set_pd(ax, x); 
 
             v_er = _mm_add_pd(_mm_mul_pd(vr_a, vx), _mm_mul_pd(vr_b, v_er));
             v_es = _mm_add_pd(_mm_mul_pd(vs_a, v_er), _mm_mul_pd(vs_b, v_es));
@@ -581,7 +581,7 @@ pub fn dti_avx512(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // Reuse AVX2 2-lane dual-chain kernel; EMA is sequential across time
+    
     dti_avx2(high, low, r, s, u, first_valid_idx, out)
 }
 
@@ -759,7 +759,7 @@ fn dti_row_avx512_from_base(
     start: usize,
     out: &mut [f64],
 ) {
-    // Reuse AVX2 dual-chain kernel
+    
     dti_row_avx2_from_base(x, ax, r, s, u, start, out)
 }
 
@@ -819,10 +819,10 @@ pub fn dti_row_avx512_long(
     unsafe { dti_avx512_long(high, low, r, s, u, first_valid_idx, out) }
 }
 
-// Commented out duplicate function - already defined above
-// #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-// #[inline]
-// unsafe fn dti_simd128(high: &[f64], low: &[f64], r: usize, s: usize, u: usize, first_valid_idx: usize, out: &mut [f64]) {
+
+
+
+
 /*
     use core::arch::wasm32::*;
 
@@ -1007,7 +1007,7 @@ pub fn dti_row_avx512_long(
         i += 1;
     }
 */
-// End of commented out duplicate function
+
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline(always)]
@@ -1094,7 +1094,7 @@ impl DtiStream {
             let x_price = x_hmu - x_lmd;
             let x_price_abs = x_price.abs();
 
-            // Residual-form EMA updates (FMA-friendly via mul_add)
+            
             self.e0_r = (x_price - self.e0_r).mul_add(self.alpha_r, self.e0_r);
             self.e0_s = (self.e0_r - self.e0_s).mul_add(self.alpha_s, self.e0_s);
             self.e0_u = (self.e0_s - self.e0_u).mul_add(self.alpha_u, self.e0_u);
@@ -1170,9 +1170,9 @@ impl DtiStream {
 
 #[inline(always)]
 fn fast_div_approx(num: f64, den: f64) -> f64 {
-    // Guard degenerate cases exactly as call sites do.
+    
     debug_assert!(den != 0.0);
-    // Seed from f32 reciprocal if in representable range; otherwise fall back to exact divide.
+    
     let ad = den.abs();
     if ad <= f32::MAX as f64 && ad >= f32::MIN_POSITIVE as f64 {
         let r0 = (1.0f32 / den as f32) as f64;
@@ -1319,7 +1319,7 @@ pub fn dti_batch_py<'py>(
     Ok(dict)
 }
 
-// -------------------- Python CUDA bindings --------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaDti;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1327,7 +1327,7 @@ use crate::cuda::oscillators::dti_wrapper::DeviceArrayF32Dti;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-// Local CUDA device array Python wrapper with CAI v3 + DLPack (DTI-specific)
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DtiDeviceArrayF32Py {
@@ -2742,8 +2742,8 @@ mod tests {
                 prop_assert!(out[0].is_nan(), "First value should be NaN");
                 // Note: out[1] can be non-NaN and non-zero if there's a price difference
 
-                // Property 3: Values mathematically bounded between -100 and 100
-                // DTI formula: 100.0 * e0_u / e1_u, so bounded to ±100
+                
+                
                 let finite_values: Vec<f64> =
                     out.iter().copied().filter(|v| v.is_finite()).collect();
                 if !finite_values.is_empty() {
@@ -2752,7 +2752,7 @@ mod tests {
                         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                     let min_val = finite_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
 
-                    // DTI is mathematically bounded to ±100 with small epsilon for floating-point
+                    
                     prop_assert!(
                         max_val <= 100.0001 && min_val >= -100.0001,
                         "DTI values exceed mathematical bounds: [{:.6}, {:.6}]",
@@ -2761,7 +2761,7 @@ mod tests {
                     );
                 }
 
-                // Property 4: Kernel consistency - different kernels should produce nearly identical results
+                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -2790,8 +2790,8 @@ mod tests {
                     }
                 }
 
-                // Property 5: Monotonic response to strong trends
-                // DTI should be positive in uptrends, negative in downtrends
+                
+                
                 let is_strong_uptrend = high
                     .windows(5)
                     .all(|w| w.windows(2).all(|pair| pair[1] > pair[0] * 1.001))
@@ -2831,7 +2831,7 @@ mod tests {
                     }
                 }
 
-                // Property 6: No poison values (debug only)
+                
                 #[cfg(debug_assertions)]
                 for (i, &val) in out.iter().enumerate() {
                     if val.is_nan() {
@@ -2849,8 +2849,8 @@ mod tests {
                     );
                 }
 
-                // Property 7: Parameter validation
-                // When r=s=u=1, DTI should respond very quickly to price changes
+                
+                
                 if r == 1 && s == 1 && u == 1 && out.len() > 10 {
                     let responsive_values: Vec<f64> = out[2..10]
                         .iter()
@@ -2863,8 +2863,8 @@ mod tests {
                     );
                 }
 
-                // Property 8: Zero volatility case
-                // When high == low for all values, DTI should be 0 after warmup
+                
+                
                 let is_zero_volatility = high
                     .iter()
                     .zip(low.iter())
@@ -2882,8 +2882,8 @@ mod tests {
                     }
                 }
 
-                // Property 9: Constant spread case
-                // When high - low is constant and prices are stable, DTI should converge to 0
+                
+                
                 if high.len() >= 10 {
                     let spreads: Vec<f64> =
                         high.iter().zip(low.iter()).map(|(h, l)| h - l).collect();
@@ -2892,7 +2892,7 @@ mod tests {
                         .iter()
                         .all(|&s| (s - first_spread).abs() < first_spread * 0.01);
 
-                    // Check if prices are relatively stable (small changes)
+                    
                     let high_changes: Vec<f64> =
                         high.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
                     let low_changes: Vec<f64> =
@@ -2921,8 +2921,8 @@ mod tests {
                     }
                 }
 
-                // Property 10: Sign correspondence
-                // Consistent price rises should yield positive DTI, consistent falls should yield negative
+                
+                
                 if high.len() >= 10 {
                     let high_rising = high
                         .windows(5)
@@ -3057,19 +3057,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)
-            (1, 5, 1, 1, 5, 1, 1, 5, 1),    // Small ranges, all params
-            (5, 15, 5, 5, 15, 5, 5, 15, 5), // Medium ranges, step 5
-            (10, 30, 10, 10, 20, 10, 5, 15, 5), // Mixed ranges
-            (14, 14, 0, 10, 10, 0, 1, 10, 1), // Static r,s, sweep u
-            (1, 20, 5, 10, 10, 0, 5, 5, 0), // Sweep r, static s,u
-            (20, 50, 15, 15, 30, 15, 10, 20, 10), // Large ranges
-            (2, 6, 2, 8, 12, 2, 3, 9, 3),   // Different steps
-            (50, 100, 25, 30, 60, 30, 20, 40, 20), // Very large ranges
-            (14, 14, 0, 5, 20, 5, 5, 20, 5), // Default r, sweep s,u
-            (5, 5, 0, 5, 5, 0, 1, 10, 1),   // Static r,s, sweep u only
+            
+            (1, 5, 1, 1, 5, 1, 1, 5, 1),    
+            (5, 15, 5, 5, 15, 5, 5, 15, 5), 
+            (10, 30, 10, 10, 20, 10, 5, 15, 5), 
+            (14, 14, 0, 10, 10, 0, 1, 10, 1), 
+            (1, 20, 5, 10, 10, 0, 5, 5, 0), 
+            (20, 50, 15, 15, 30, 15, 10, 20, 10), 
+            (2, 6, 2, 8, 12, 2, 3, 9, 3),   
+            (50, 100, 25, 30, 60, 30, 20, 40, 20), 
+            (14, 14, 0, 5, 20, 5, 5, 20, 5), 
+            (5, 5, 0, 5, 5, 0, 1, 10, 1),   
         ];
 
         for (cfg_idx, &(r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)) in
@@ -3092,7 +3092,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3151,7 +3151,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -3178,7 +3178,7 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    // Ensure the zero-allocation API matches the Vec-returning API, including NaN warmups.
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_dti_into_matches_api() -> Result<(), Box<dyn Error>> {
@@ -3190,10 +3190,10 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let input = DtiInput::with_default_candles(&candles);
 
-        // Baseline via existing API
+        
         let baseline = dti(&input)?;
 
-        // Zero-allocation path
+        
         let mut out = vec![0.0f64; candles.close.len()];
         dti_into(&input, &mut out)?;
 

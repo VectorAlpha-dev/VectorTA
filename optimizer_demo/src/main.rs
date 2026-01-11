@@ -25,7 +25,7 @@ async fn main() {
 }
 
 async fn optimize(Json(req): Json<OptimizeRequest>) -> Json<serde_json::Value> {
-    // If GPU selected but non-ALMA types chosen, fall back to CPU backend
+    
     let wants_gpu = matches!(req.backend, Backend::Gpu);
     let fast_ty = req.fast_type.clone().unwrap_or_else(|| "alma".to_string()).to_ascii_lowercase();
     let slow_ty = req.slow_type.clone().unwrap_or_else(|| "alma".to_string()).to_ascii_lowercase();

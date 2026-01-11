@@ -1,16 +1,16 @@
-// Integration tests for CUDA MAC-Z kernels
 
-use my_project::indicators::macz::{
+
+use vector_ta::indicators::macz::{
     macz_batch_with_kernel_vol, macz_with_kernel, MaczBatchRange, MaczInput, MaczParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaMacz;
+use vector_ta::cuda::moving_averages::CudaMacz;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -69,7 +69,7 @@ fn macz_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut hist_host = vec![0f32; hist_dev.len()];
     hist_dev.buf.copy_to(&mut hist_host)?;
 
-    let tol = 5e-3; // Allow FP32 drift (MAC-Z is numerically sensitive)
+    let tol = 5e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = hist_host[idx] as f64;
@@ -116,7 +116,7 @@ fn macz_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         gamma: Some(0.02),
     };
 
-    // CPU baseline per series
+    
     let mut cpu_hist_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -126,7 +126,7 @@ fn macz_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             v[t] = volume_tm[t * cols + s];
         }
         let input = MaczInput {
-            data: my_project::indicators::macz::MaczData::SliceWithVolume {
+            data: vector_ta::indicators::macz::MaczData::SliceWithVolume {
                 data: &p,
                 volume: &v,
             },

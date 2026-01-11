@@ -283,9 +283,9 @@ pub fn devstop_into(input: &DevStopInput, out: &mut [f64]) -> Result<(), DevStop
 
 #[inline(always)]
 fn devstop_warmup(first: usize, period: usize) -> usize {
-    // high/low rolling(2) warm = first + (2-1)
-    // MA(deviation) over range adds + (period-1)
-    // final rolling extrema over base adds + (period-1)
+    
+    
+    
     first + 2 * period - 1
 }
 
@@ -366,7 +366,7 @@ pub fn devstop_into_slice(
     input: &DevStopInput,
     _kernel: Kernel,
 ) -> Result<(), DevStopError> {
-    // Extract data without re-validating (caller should have validated)
+    
     let (high, low) = match &input.data {
         DevStopData::Candles {
             candles,
@@ -380,26 +380,26 @@ pub fn devstop_into_slice(
     };
     let len = high.len();
 
-    // Quick validation of dst length
+    
     if dst.len() != len {
         return Err(DevStopError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
-    // Find first valid index
+    
     let fh = high.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let fl = low.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let first = fh.min(fl);
 
-    // Get parameters
+    
     let period = input.get_period();
     let mult = input.get_mult();
     let devtype = input.get_devtype();
     let is_long = input.get_direction().eq_ignore_ascii_case("long");
     let ma_type = input.get_ma_type();
 
-    // Dispatch to classic kernels for common cases
+    
     if devtype == 0 {
-        // Population standard deviation
+        
         if ma_type == "sma" || ma_type == "SMA" {
             return unsafe {
                 devstop_scalar_classic_sma(high, low, period, mult, is_long, first, dst)
@@ -411,9 +411,9 @@ pub fn devstop_into_slice(
         }
     }
 
-    // Build range with warm prefix only, no full NaN fill
+    
     let mut range = alloc_with_nan_prefix(len, first + 1);
-    // rolling(2) max/min without allocating temp vectors
+    
     if first + 1 < len {
         let mut prev_h = high[first];
         let mut prev_l = low[first];
@@ -430,7 +430,7 @@ pub fn devstop_into_slice(
         }
     }
 
-    // These produce one allocation each; unavoidable given their APIs
+    
     let avtr = ma(&ma_type, MaData::Slice(&range), input.get_period())
         .map_err(|e| DevStopError::DevStopCalculation(format!("ma: {e:?}")))?;
     let dev_values = {
@@ -444,29 +444,29 @@ pub fn devstop_into_slice(
         deviation(&di).map_err(|e| DevStopError::DevStopCalculation(format!("deviation: {e:?}")))?
     };
 
-    // Stream final into dst with a deque. No `base` or `final_values` Vec.
-    // Keep only last `period` base values in a small ring.
+    
+    
     use std::collections::VecDeque;
     let period = input.get_period();
-    let start_base = first + period; // base becomes defined here
-    let start_final = start_base + period - 1; // final rolling extrema defined here
+    let start_base = first + period; 
+    let start_final = start_base + period - 1; 
     let warm = devstop_warmup(first, period);
 
-    // dst already allocated by caller; write only valid tail, leave warmup untouched.
-    // For Python/WASM paths we'll allocate dst via alloc_with_nan_prefix(warm) to avoid writes here.
+    
+    
     let mut dq: VecDeque<usize> = VecDeque::with_capacity(period + 1);
     let mut ring: Vec<f64> = vec![f64::NAN; period];
 
     for i in start_base..len {
         let base = if is_long {
-            // long: high - avtr - mult*dev
+            
             if high[i].is_nan() || avtr[i].is_nan() || dev_values[i].is_nan() {
                 f64::NAN
             } else {
                 high[i] - avtr[i] - mult * dev_values[i]
             }
         } else {
-            // short: low + avtr + mult*dev
+            
             if low[i].is_nan() || avtr[i].is_nan() || dev_values[i].is_nan() {
                 f64::NAN
             } else {
@@ -474,10 +474,10 @@ pub fn devstop_into_slice(
             }
         };
 
-        // store in ring
+        
         ring[i % period] = base;
 
-        // update deque for rolling max/min over `base`
+        
         if is_long {
             while let Some(&j) = dq.back() {
                 let bj = ring[j % period];
@@ -498,7 +498,7 @@ pub fn devstop_into_slice(
             }
         }
         dq.push_back(i);
-        // drop out-of-window
+        
         let cut = i + 1 - period;
         while let Some(&j) = dq.front() {
             if j < cut {
@@ -512,13 +512,13 @@ pub fn devstop_into_slice(
             if let Some(&j) = dq.front() {
                 dst[i] = ring[j % period];
             } else {
-                // If deque is empty (all NaN or insufficient data), output NaN
+                
                 dst[i] = f64::NAN;
             }
         }
     }
 
-    // Ensure warm prefix stays NaN
+    
     for v in &mut dst[..warm.min(len)] {
         *v = f64::NAN;
     }
@@ -529,7 +529,7 @@ pub fn devstop_with_kernel(
     input: &DevStopInput,
     kernel: Kernel,
 ) -> Result<DevStopOutput, DevStopError> {
-    // Validate input once to get length and first
+    
     let (high, low) = match &input.data {
         DevStopData::Candles {
             candles,
@@ -566,17 +566,17 @@ pub fn devstop_with_kernel(
         });
     }
 
-    // Resolve kernel once
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    // Allocate output without NaN prefix (devstop_into_slice/fused kernels set warmup)
+    
     let _warm = devstop_warmup(first, period);
     let mut out = vec![0.0; len];
 
-    // Pass resolved kernel directly
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -594,7 +594,7 @@ pub fn devstop_with_kernel(
     Ok(DevStopOutput { values: out })
 }
 
-// Old scalar implementation - kept for reference but not used
+
 #[inline]
 pub fn devstop_scalar(
     high: &[f64],
@@ -618,7 +618,7 @@ pub fn devstop_avx2(
     input: &DevStopInput,
     out: &mut [f64],
 ) {
-    // Fast path: classic stddev with SMA/EMA → use fused scalar kernel for speed/correctness
+    
     let devtype = input.get_devtype();
     let is_long = input.get_direction().eq_ignore_ascii_case("long");
     let mult = input.get_mult();
@@ -715,7 +715,7 @@ pub fn devstop_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Default to Scalar for any other kernel
+        _ => Kernel::Scalar, 
     };
     devstop_batch_par_slice(high, low, sweep, simd)
 }
@@ -961,7 +961,7 @@ fn devstop_batch_inner(
         .ok_or(DevStopError::AllValuesNaN)?;
     let first = fh.min(fl);
 
-    // Check we have enough data for the largest period's warmup
+    
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     let max_warmup = devstop_warmup(first, max_p);
     let needed = max_warmup
@@ -988,7 +988,7 @@ fn devstop_batch_inner(
         }); 
     }
 
-    // Uninitialized matrix, then warm prefixes per row
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warms: Vec<usize> = combos
         .iter()
@@ -996,12 +996,12 @@ fn devstop_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // Into-slice compute per row without touching warm prefix again
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Convert batch kernel to regular kernel for row processing
+    
     let simd_kern = match kern {
         Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx512Batch => {
@@ -1024,10 +1024,10 @@ fn devstop_batch_inner(
                 Kernel::Scalar
             }
         }
-        k => k, // Pass through non-batch kernels
+        k => k, 
     };
 
-    // Row-specific optimized batch for classic stddev + SMA/EMA
+    
     let all_classic = combos.iter().all(|c| {
         let dt = c.devtype.unwrap_or(0);
         let mt = c.ma_type.as_ref().map(|s| s.as_str()).unwrap_or("sma");
@@ -1036,7 +1036,7 @@ fn devstop_batch_inner(
 
     if all_classic {
         let len = cols;
-        // Precompute 2-bar range r and prefix sums over finite values only
+        
         let mut r = vec![f64::NAN; len];
         if first + 1 < len {
             let mut prev_h = high[first];
@@ -1053,7 +1053,7 @@ fn devstop_batch_inner(
                 prev_l = l;
             }
         }
-        // Exclusive prefix sums for sum, sumsq, and finite count
+        
         let mut p1 = vec![0.0f64; len + 1];
         let mut p2 = vec![0.0f64; len + 1];
         let mut pc = vec![0usize; len + 1];
@@ -1087,7 +1087,7 @@ fn devstop_batch_inner(
             }
             let start_final = start_base + period - 1;
 
-            // EMA state
+            
             let mut ema = 0.0f64;
             let mut use_ema = ma_type.eq_ignore_ascii_case("ema");
             let (alpha, beta) = if use_ema {
@@ -1107,7 +1107,7 @@ fn devstop_batch_inner(
                 }
             }
 
-            // Monotonic deque over base with capacity = period
+            
             let mut base_ring = vec![f64::NAN; period];
             let mut dq_buf = vec![0usize; period];
             let mut dq_head = 0usize;
@@ -1269,7 +1269,7 @@ fn devstop_batch_inner(
             data: DevStopData::SliceHL(high, low),
             params: prm.clone(),
         };
-        // compute only; warm prefix already set by init_matrix_prefixes
+        
         devstop_into_slice(dst_row_mu, &input, simd_kern)?;
         Ok(())
     };
@@ -1280,7 +1280,7 @@ fn devstop_batch_inner(
             use rayon::prelude::*;
             out.par_chunks_mut(cols)
                 .enumerate()
-                .try_for_each(|(r, sl)| do_row(r, sl))?; // propagate error
+                .try_for_each(|(r, sl)| do_row(r, sl))?; 
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -1382,39 +1382,39 @@ pub unsafe fn devstop_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct DevStopStream {
-    // params
+    
     period: usize,
     mult: f64,
-    devtype: u8,   // 0=stddev, 1=mean abs (approx), 2=median abs (approx)
-    is_long: bool, // direction
-    is_ema: bool,  // MA kind
+    devtype: u8,   
+    is_long: bool, 
+    is_ema: bool,  
 
-    // 2-bar range state
+    
     prev_h: f64,
     prev_l: f64,
     have_prev: bool,
 
-    // sliding window over range r_t = max(h_t,h_{t-1}) - min(l_t,l_{t-1})
-    r_ring: Box<[f64]>, // len = period
-    r_head: usize,      // next position to overwrite
+    
+    r_ring: Box<[f64]>, 
+    r_head: usize,      
     r_filled: bool,
-    sum: f64,   // Σ r (finite only)
-    sum2: f64,  // Σ r^2
-    cnt: usize, // #finite r in window
+    sum: f64,   
+    sum2: f64,  
+    cnt: usize, 
 
-    // EMA over r (boot with SMA of available prefill to match classic)
+    
     ema: f64,
     ema_booted: bool,
-    alpha: f64, // 2/(period+1)
-    beta: f64,  // 1 - alpha
+    alpha: f64, 
+    beta: f64,  
 
-    // base window + monotonic deque for rolling extrema over base (period)
-    base_ring: Box<[f64]>, // len = period
-    dq_idx: Box<[usize]>,  // circular deque storing absolute indices
+    
+    base_ring: Box<[f64]>, 
+    dq_idx: Box<[usize]>,  
     dq_head: usize,
     dq_len: usize,
 
-    // absolute time index (0-based)
+    
     t: usize,
 }
 
@@ -1477,7 +1477,7 @@ impl DevStopStream {
     /// Warmup for streaming (first=0): emits after index t >= 2*period - 1.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        // ----- 1) build 2-bar range r_t -----
+        
         let mut r_new = f64::NAN;
         if self.have_prev
             && high.is_finite()
@@ -1497,7 +1497,7 @@ impl DevStopStream {
         self.prev_l = low;
         self.have_prev = true;
 
-        // ----- 2) slide window statistics over r -----
+        
         let p = self.period;
         if self.r_filled {
             let old = self.r_ring[self.r_head];
@@ -1518,7 +1518,7 @@ impl DevStopStream {
             self.cnt += 1;
         }
 
-        // ----- 3) update EMA if needed (boot with SMA of current ring) -----
+        
         if self.is_ema {
             if !self.ema_booted {
                 if self.t + 1 >= self.period {
@@ -1534,7 +1534,7 @@ impl DevStopStream {
             }
         }
 
-        // ----- 4) compute avtr and deviation (O(1)) -----
+        
         let base_val = if self.t + 1 >= self.period {
             let (avtr, sigma) = if self.cnt == 0 {
                 (f64::NAN, f64::NAN)
@@ -1553,9 +1553,9 @@ impl DevStopStream {
             };
 
             let dev = match self.devtype {
-                0 => sigma,                         // stddev (exact)
-                1 => sigma * fast_mean_abs_ratio(), // ≈ mean |r - mean|
-                2 => sigma * fast_mad_ratio(),      // ≈ MAD
+                0 => sigma,                         
+                1 => sigma * fast_mean_abs_ratio(), 
+                2 => sigma * fast_mad_ratio(),      
                 _ => sigma,
             };
 
@@ -1576,7 +1576,7 @@ impl DevStopStream {
             f64::NAN
         };
 
-        // ----- 5) push base into monotonic deque (rolling max/min over last p bases) -----
+        
         let i = self.t;
         if self.t + 1 >= self.period {
             let slot = i % p;
@@ -1605,12 +1605,12 @@ impl DevStopStream {
                     }
                 }
             }
-            // push i
+            
             let push_pos = (self.dq_head + self.dq_len) % p;
             self.dq_idx[push_pos] = i;
             self.dq_len += 1;
 
-            // pop expired
+            
             let cut = i + 1 - p;
             while self.dq_len > 0 {
                 let j = self.dq_idx[self.dq_head];
@@ -1623,7 +1623,7 @@ impl DevStopStream {
             }
         }
 
-        // ----- 6) emit after full warmup (start_final = period + (period-1)) -----
+        
         let out = if self.t + 1 >= (2 * self.period) {
             if self.dq_len > 0 {
                 let j = self.dq_idx[self.dq_head];
@@ -1640,20 +1640,20 @@ impl DevStopStream {
     }
 }
 
-// ---------- Fast-math helpers for O(1) approximations ----------
+
 #[inline(always)]
 fn fast_mean_abs_ratio() -> f64 {
-    // For normal data: E|X-μ| = σ * sqrt(2/π) (~0.79788456)
+    
     0.797_884_560_802_865_4_f64
 }
 
 #[inline(always)]
 fn fast_mad_ratio() -> f64 {
-    // MAD ≈ σ / 1.4826   (i.e., MAD*1.4826 ≈ σ for normal data)
+    
     1.0 / 1.482_602_218_505_602_f64
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "devstop")]
 #[pyo3(signature = (high, low, period, mult, devtype, direction, ma_type, kernel=None))]
@@ -1764,8 +1764,8 @@ pub fn devstop_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // Delegate to the core Rust batch API so Python batch semantics (warmup, errors)
-    // exactly match Rust and WASM devstop_batch_* bindings.
+    
+    
     let out = py
         .allow_threads(|| devstop_batch_with_kernel(h, l, &sweep, kern))
         .map_err(|e| {
@@ -1818,7 +1818,7 @@ pub fn devstop_batch_py<'py>(
     Ok(d)
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = devstop)]
 pub fn devstop_js(
@@ -1834,12 +1834,12 @@ pub fn devstop_js(
         return Err(JsValue::from_str("length mismatch"));
     }
 
-    // Check for all NaN input early
+    
     if high.iter().all(|&x| x.is_nan()) && low.iter().all(|&x| x.is_nan()) {
         return Err(JsValue::from_str("All values are NaN"));
     }
 
-    // Validate period early
+    
     if period == 0 {
         return Err(JsValue::from_str("Invalid period"));
     }
@@ -1849,7 +1849,7 @@ pub fn devstop_js(
         return Err(JsValue::from_str("Invalid period"));
     }
 
-    // Find first valid value
+    
     let fh = high.iter().position(|x| !x.is_nan());
     let fl = low.iter().position(|x| !x.is_nan());
     let first = match (fh, fl) {
@@ -1870,14 +1870,14 @@ pub fn devstop_js(
     };
     let input = DevStopInput::from_slices(high, low, params);
     let mut out = vec![0.0; high.len()];
-    // In WASM, always use Scalar kernel since SIMD isn't available
+    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::Scalar
     } else {
         detect_best_kernel()
     };
     devstop_into_slice(&mut out, &input, kernel).map_err(|e| {
-        // Convert error messages to match test expectations
+        
         let msg = e.to_string();
         if msg.contains("InvalidPeriod") {
             JsValue::from_str("Invalid period")
@@ -1937,7 +1937,7 @@ pub fn devstop_into_js(
             ma_type: Some(ma_type.to_string()),
         };
         let input = DevStopInput::from_slices(h, l, params);
-        // In WASM, always use Scalar kernel since SIMD isn't available
+        
         let kernel = if cfg!(target_arch = "wasm32") {
             Kernel::Scalar
         } else {
@@ -1981,7 +1981,7 @@ pub fn devstop_batch_unified_js(
         mult: cfg.mult_range,
         devtype: cfg.devtype_range,
     };
-    // In WASM, always use ScalarBatch kernel since SIMD isn't available
+    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::ScalarBatch
     } else {
@@ -1999,7 +1999,7 @@ pub fn devstop_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "devstop_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, mult_range, devtype_range, direction="long", device_id=0))]
@@ -2116,12 +2116,12 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
         });
     }
 
-    // Indices & warmup math
-    let start_base = first + period; // first index where base is defined
-    let start_final = start_base + period - 1; // first index where final rolling extrema is defined
-    let warm = start_final; // all < start_final => NaN
+    
+    let start_base = first + period; 
+    let start_final = start_base + period - 1; 
+    let warm = start_final; 
 
-    // NaN warm prefix (and truncate if warm > len)
+    
     let warm_end = warm.min(len);
     for j in 0..warm_end {
         *dst.get_unchecked_mut(j) = f64::NAN;
@@ -2143,14 +2143,14 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
         }
     }
 
-    // Prefill range ring: r[k] for k in [first+1 .. start_base-1] (period-1 items)
+    
     let mut r_ring = vec![f64::NAN; period];
     let mut r_ins_pos = 0usize;
     let mut r_inserted = 0usize;
 
-    let mut sum = 0.0f64; // Σ r
-    let mut sum2 = 0.0f64; // Σ r^2
-    let mut cnt = 0usize; // number of finite r's currently in ring
+    let mut sum = 0.0f64; 
+    let mut sum2 = 0.0f64; 
+    let mut cnt = 0usize; 
 
     let mut prev_h = *high.get_unchecked(first);
     let mut prev_l = *low.get_unchecked(first);
@@ -2179,7 +2179,7 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
     }
     r_ins_pos = (period - 1) % period;
 
-    // EMA state (initialized with SMA of available prefill; matches classic_ema boot)
+    
     let mut ema = if EMA {
         if cnt > 0 {
             sum / (cnt as f64)
@@ -2196,10 +2196,10 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
     };
     let beta = if EMA { 1.0 - alpha } else { 0.0 };
 
-    // Monotonic deque for rolling extrema over `base`
+    
     let mut base_ring = vec![f64::NAN; period];
     let cap = period;
-    let mut dq_buf = vec![0usize; cap]; // absolute indices
+    let mut dq_buf = vec![0usize; cap]; 
     let mut dq_head = 0usize;
     let mut dq_len = 0usize;
     #[inline(always)]
@@ -2228,12 +2228,12 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
         *len += 1;
     }
 
-    // Main streaming loop (one pass)
+    
     for i in start_base..len {
         let h = *high.get_unchecked(i);
         let l = *low.get_unchecked(i);
 
-        // 2-bar range using (i-1, i)
+        
         let r_new = if h.is_nan() || l.is_nan() || prev_h.is_nan() || prev_l.is_nan() {
             f64::NAN
         } else {
@@ -2244,7 +2244,7 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
         prev_h = h;
         prev_l = l;
 
-        // Sliding update of Σr and Σr^2
+        
         let had_full = r_inserted >= period;
         let old = if had_full {
             *r_ring.get_unchecked(r_ins_pos)
@@ -2256,7 +2256,7 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
             sum2 -= old * old;
             cnt -= 1;
         }
-        // Insert new
+        
         *r_ring.get_unchecked_mut(r_ins_pos) = r_new;
         r_ins_pos = (r_ins_pos + 1) % period;
         r_inserted += 1;
@@ -2266,28 +2266,28 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
             cnt += 1;
         }
 
-        // Update EMA (if enabled)
+        
         if EMA && r_new.is_finite() {
             ema = r_new.mul_add(alpha, beta * ema);
         }
 
-        // Compute avtr and stddev
+        
         let (avtr, sigma) = if cnt == 0 {
             (f64::NAN, f64::NAN)
         } else if EMA {
             let inv = 1.0 / (cnt as f64);
-            let e1 = sum * inv; // E[r]
-            let e2 = sum2 * inv; // E[r^2]
+            let e1 = sum * inv; 
+            let e2 = sum2 * inv; 
             let var = max0(e2 - (2.0 * ema) * e1 + ema * ema);
             (ema, var.sqrt())
         } else {
             let inv = 1.0 / (cnt as f64);
-            let mean = sum * inv; // E[r]
-            let var = max0((sum2 - (sum * sum) * inv) * inv); // E[r^2] - (E[r])^2
+            let mean = sum * inv; 
+            let var = max0((sum2 - (sum * sum) * inv) * inv); 
             (mean, var.sqrt())
         };
 
-        // Base value
+        
         let base = if is_long {
             if h.is_nan() || avtr.is_nan() || sigma.is_nan() {
                 f64::NAN
@@ -2302,7 +2302,7 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
             }
         };
 
-        // Store base and update deque
+        
         let bslot = i % period;
         *base_ring.get_unchecked_mut(bslot) = base;
         if is_long {
@@ -2328,13 +2328,13 @@ unsafe fn devstop_scalar_classic_fused<const EMA: bool>(
         }
         dq_push_back(&mut dq_buf, dq_head, &mut dq_len, cap, i);
 
-        // Drop expired
+        
         let cut = i + 1 - period;
         while dq_len > 0 && dq_idx_at(&dq_buf, dq_head, cap, 0) < cut {
             dq_pop_front(&mut dq_head, &mut dq_len, cap);
         }
 
-        // Emit final value
+        
         if i >= start_final {
             let out = if dq_len > 0 {
                 let j = dq_idx_at(&dq_buf, dq_head, cap, 0);
@@ -2385,7 +2385,7 @@ mod tests {
 
     #[test]
     fn test_devstop_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a small but non-trivial HL series (~256 points)
+        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -2400,10 +2400,10 @@ mod tests {
 
         let input = DevStopInput::from_slices(&high, &low, DevStopParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let DevStopOutput { values: expected } = devstop(&input)?;
 
-        // New no-allocation API: preallocate and compute in-place
+        
         let mut got = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2411,13 +2411,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // On wasm builds, native devstop_into is provided via wasm_bindgen; skip here.
+            
             return Ok(());
         }
 
         assert_eq!(expected.len(), got.len());
 
-        // Treat NaN == NaN; otherwise require tight equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -2676,11 +2676,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             DevStopParams::default(),
-            // Minimum period
+            
             DevStopParams {
                 period: Some(2),
                 mult: Some(0.0),
@@ -2688,7 +2688,7 @@ mod tests {
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
             },
-            // Small period with various multipliers
+            
             DevStopParams {
                 period: Some(5),
                 mult: Some(0.5),
@@ -2703,7 +2703,7 @@ mod tests {
                 direction: Some("short".to_string()),
                 ma_type: Some("ema".to_string()),
             },
-            // Medium periods with different devtypes
+            
             DevStopParams {
                 period: Some(10),
                 mult: Some(0.0),
@@ -2725,7 +2725,7 @@ mod tests {
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
             },
-            // Default period (20) variations
+            
             DevStopParams {
                 period: Some(20),
                 mult: Some(0.0),
@@ -2747,7 +2747,7 @@ mod tests {
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
             },
-            // Large periods
+            
             DevStopParams {
                 period: Some(50),
                 mult: Some(0.5),
@@ -2762,7 +2762,7 @@ mod tests {
                 direction: Some("long".to_string()),
                 ma_type: Some("sma".to_string()),
             },
-            // Very large period
+            
             DevStopParams {
                 period: Some(100),
                 mult: Some(0.0),
@@ -2785,12 +2785,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2852,7 +2852,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2863,26 +2863,26 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data with more realistic scenarios
+        
         let strat = (2usize..=50)
             .prop_flat_map(|period| {
                 (
-                    // Generate base price and volatility
+                    
                     (100.0f64..5000.0f64, 0.01f64..0.1f64),
                     Just(period),
-                    0.0f64..3.0f64,  // mult range
-                    0usize..=2,      // devtype range (0: stddev, 1: mean abs, 2: median abs)
-                    prop::bool::ANY, // direction (true = long, false = short)
-                    // MA type selection
+                    0.0f64..3.0f64,  
+                    0usize..=2,      
+                    prop::bool::ANY, 
+                    
                     prop::sample::select(vec!["sma", "ema", "wma", "hma", "dema"]),
                 )
             })
             .prop_flat_map(
                 move |(base_price_vol, period, mult, devtype, is_long, ma_type)| {
                     let (base_price, volatility) = base_price_vol;
-                    let data_len = period + 10 + (period * 3); // Ensure enough data for warmup
+                    let data_len = period + 10 + (period * 3); 
 
-                    // Generate more realistic price data with trends and volatility
+                    
                     let price_strategy = prop::collection::vec(
                         (-volatility..volatility)
                             .prop_map(move |change| base_price * (1.0 + change)),
@@ -2890,8 +2890,8 @@ mod tests {
                     );
 
                     (
-                        price_strategy.clone(), // For high calculation
-                        price_strategy,         // For low calculation
+                        price_strategy.clone(), 
+                        price_strategy,         
                         Just(period),
                         Just(mult),
                         Just(devtype),
@@ -2905,15 +2905,15 @@ mod tests {
             .run(
                 &strat,
                 |(high_base, low_base, period, mult, devtype, is_long, ma_type)| {
-                    // Create high/low with realistic spread
+                    
                     let len = high_base.len().min(low_base.len());
                     let mut high = vec![0.0; len];
                     let mut low = vec![0.0; len];
 
                     for i in 0..len {
-                        // Ensure high >= low with realistic spread (0.1% to 2% typically)
+                        
                         let mid = (high_base[i] + low_base[i]) / 2.0;
-                        let spread = mid * 0.001 * (1.0 + (i as f64 * 0.1).sin().abs()); // Variable spread
+                        let spread = mid * 0.001 * (1.0 + (i as f64 * 0.1).sin().abs()); 
                         high[i] = mid + spread;
                         low[i] = mid - spread;
                     }
@@ -2933,7 +2933,7 @@ mod tests {
                     };
                     let input = DevStopInput::from_slices(&high, &low, params.clone());
 
-                    // Test with specified kernel
+                    
                     let result = devstop_with_kernel(&input, kernel);
                     prop_assert!(
                         result.is_ok(),
@@ -2942,17 +2942,17 @@ mod tests {
                     );
                     let out = result.unwrap().values;
 
-                    // Test with scalar reference kernel
+                    
                     let ref_result = devstop_with_kernel(&input, Kernel::Scalar);
                     prop_assert!(ref_result.is_ok(), "Reference calculation failed");
                     let ref_out = ref_result.unwrap().values;
 
-                    // Property 1: Output length should match input length
+                    
                     prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                    // Property 2: Warmup period handling - be less rigid
-                    // Just verify that we have NaN values early and finite values later
-                    let expected_warmup = period * 2; // Approximate
+                    
+                    
+                    let expected_warmup = period * 2; 
                     let has_early_nans = out.iter().take(period).any(|&x| x.is_nan());
                     let has_late_finites =
                         out.iter().skip(expected_warmup + 5).any(|&x| x.is_finite());
@@ -2968,12 +2968,12 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Kernel consistency - compare with scalar reference
+                    
                     for i in 0..out.len() {
                         let y = out[i];
                         let r = ref_out[i];
 
-                        // Both should be NaN or both should be finite
+                        
                         if y.is_nan() != r.is_nan() {
                             prop_assert!(
                                 false,
@@ -2984,7 +2984,7 @@ mod tests {
                             );
                         }
 
-                        // Check finite value consistency
+                        
                         if y.is_finite() && r.is_finite() {
                             let abs_diff = (y - r).abs();
                             let rel_diff = if r.abs() > 1e-10 {
@@ -3004,10 +3004,10 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Multiplier effect
-                    // Higher multiplier should generally mean stops further from price
+                    
+                    
                     if mult > 0.1 && out.len() > expected_warmup + 10 {
-                        // Compare with zero multiplier version
+                        
                         let params_zero = DevStopParams {
                             period: Some(period),
                             mult: Some(0.0),
@@ -3019,7 +3019,7 @@ mod tests {
                         if let Ok(result_zero) = devstop_with_kernel(&input_zero, Kernel::Scalar) {
                             let out_zero = result_zero.values;
 
-                            // Count how many times the stop with multiplier is further from price
+                            
                             let mut further_count = 0;
                             let mut total_count = 0;
 
@@ -3027,12 +3027,12 @@ mod tests {
                                 if out[i].is_finite() && out_zero[i].is_finite() {
                                     total_count += 1;
                                     if direction == "long" {
-                                        // For long, higher mult should give lower (further) stops
+                                        
                                         if out[i] <= out_zero[i] {
                                             further_count += 1;
                                         }
                                     } else {
-                                        // For short, higher mult should give higher (further) stops
+                                        
                                         if out[i] >= out_zero[i] {
                                             further_count += 1;
                                         }
@@ -3040,7 +3040,7 @@ mod tests {
                                 }
                             }
 
-                            // At least 90% of the time, multiplier should increase stop distance
+                            
                             if total_count > 0 {
                                 let ratio = further_count as f64 / total_count as f64;
                                 prop_assert!(
@@ -3052,11 +3052,11 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Special case - flat candles (high == low)
-                    // Test a subset with flat candles
+                    
+                    
                     if len > 20 {
                         let mut flat_high = high.clone();
-                        let mut flat_low = high.clone(); // Same as high
+                        let mut flat_low = high.clone(); 
                         for i in 10..20.min(len) {
                             flat_high[i] = 1000.0;
                             flat_low[i] = 1000.0;
@@ -3067,19 +3067,19 @@ mod tests {
                             DevStopInput::from_slices(&flat_high, &flat_low, flat_params);
                         let flat_result = devstop_with_kernel(&flat_input, kernel);
 
-                        // Should not error on flat candles
+                        
                         prop_assert!(
                             flat_result.is_ok(),
                             "DevStop should handle flat candles (high==low)"
                         );
                     }
 
-                    // Property 6: Deviation type parameter is being used
-                    // Simply verify that the devtype parameter affects the calculation
-                    // Different deviation types may produce similar results with certain data patterns
-                    // which is mathematically valid, so we just verify the parameter is processed
+                    
+                    
+                    
+                    
                     if out.len() > expected_warmup + 10 && mult > 0.5 {
-                        // Test that all three deviation types can be calculated without error
+                        
                         for test_devtype in 0..=2 {
                             let params_test = DevStopParams {
                                 period: Some(period),
@@ -3097,7 +3097,7 @@ mod tests {
                                 test_devtype
                             );
 
-                            // Verify output has the correct structure
+                            
                             if let Ok(output) = result_test {
                                 prop_assert_eq!(
                                     output.values.len(),
@@ -3109,8 +3109,8 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Stop movement logic
-                    // The stops should behave sensibly - not jumping erratically
+                    
+                    
                     if out.len() > expected_warmup + period {
                         let mut max_jump = 0.0;
                         let mut jump_count = 0;
@@ -3120,20 +3120,20 @@ mod tests {
                                 let jump = (out[i] - out[i - 1]).abs();
                                 let relative_jump = jump / out[i - 1].abs().max(1.0);
 
-                                // Track the maximum jump
+                                
                                 if relative_jump > max_jump {
                                     max_jump = relative_jump;
                                 }
 
-                                // Count large jumps (more than 20% change)
+                                
                                 if relative_jump > 0.2 {
                                     jump_count += 1;
                                 }
                             }
                         }
 
-                        // Stops shouldn't jump more than 50% in a single step typically
-                        // (unless we have extreme price movements)
+                        
+                        
                         prop_assert!(
                             max_jump < 0.5 || jump_count < 5,
                             "Stop values jumping too much: max jump = {:.1}%, large jumps = {}",
@@ -3229,7 +3229,7 @@ mod tests {
             .devtype_range(0, 2, 1)
             .apply_slices(high, low)?;
 
-        let expected_combos = 5 * 5 * 3; // 5 periods * 5 mults * 3 devtypes
+        let expected_combos = 5 * 5 * 3; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -3246,16 +3246,16 @@ mod tests {
         let high = &c.high;
         let low = &c.low;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, mult_start, mult_end, mult_step, devtype_start, devtype_end, devtype_step)
-            (2, 10, 2, 0.0, 2.0, 0.5, 0, 2, 1), // Small periods with mult variations
-            (5, 25, 5, 0.0, 1.0, 0.25, 0, 0, 0), // Medium periods, single devtype
-            (30, 60, 15, 1.0, 3.0, 1.0, 1, 1, 0), // Large periods, mean abs dev
-            (2, 5, 1, 0.0, 0.5, 0.1, 2, 2, 0),  // Dense small range, median abs dev
-            (10, 20, 2, 0.5, 2.5, 0.5, 0, 2, 2), // Medium range, all devtypes
-            (20, 20, 0, 0.0, 3.0, 0.3, 0, 2, 1), // Single period, mult sweep
-            (5, 50, 15, 1.0, 1.0, 0.0, 0, 2, 1), // Wide period range, single mult
+            
+            (2, 10, 2, 0.0, 2.0, 0.5, 0, 2, 1), 
+            (5, 25, 5, 0.0, 1.0, 0.25, 0, 0, 0), 
+            (30, 60, 15, 1.0, 3.0, 1.0, 1, 1, 0), 
+            (2, 5, 1, 0.0, 0.5, 0.1, 2, 2, 0),  
+            (10, 20, 2, 0.5, 2.5, 0.5, 0, 2, 2), 
+            (20, 20, 0, 0.0, 3.0, 0.3, 0, 2, 1), 
+            (5, 50, 15, 1.0, 1.0, 0.0, 0, 2, 1), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step, d_start, d_end, d_step)) in

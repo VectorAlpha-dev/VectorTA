@@ -251,11 +251,11 @@ pub fn rsi_with_kernel(input: &RsiInput, kernel: Kernel) -> Result<RsiOutput, Rs
 /// - Uses `Kernel::Auto` for dispatch.
 #[cfg(not(feature = "wasm"))]
 pub fn rsi_into(input: &RsiInput, out: &mut [f64]) -> Result<(), RsiError> {
-    // Reuse the validated, kernel-dispatched slice implementation.
+    
     rsi_into_slice(out, input, Kernel::Auto)?;
 
-    // Overwrite warmup prefix with the same quiet-NaN pattern used by
-    // `alloc_with_nan_prefix` to ensure exact parity of warmup semantics.
+    
+    
     let data: &[f64] = match &input.data {
         RsiData::Candles { candles, source } => source_type(candles, source),
         RsiData::Slice(sl) => sl,
@@ -341,7 +341,7 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
 
     rsi_compute_into(data, period, first, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first + period;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -352,12 +352,12 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
 
 #[inline(always)]
 unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Preconditions handled by caller.
+    
     let len = data.len();
     let inv_p = 1.0 / (period as f64);
     let beta = 1.0 - inv_p;
 
-    // Warmup: accumulate raw gains/losses over the first `period` deltas.
+    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     let mut has_nan = false;
@@ -373,12 +373,12 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         if delta > 0.0 {
             avg_gain += delta;
         } else if delta < 0.0 {
-            avg_loss -= delta; // delta negative
+            avg_loss -= delta; 
         }
         i += 1;
     }
 
-    // Initial RSI at index (first + period) if exists.
+    
     let idx0 = first + period;
     if has_nan {
         avg_gain = f64::NAN;
@@ -399,10 +399,10 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         }
     }
 
-    // Recursive updates (Wilder smoothing) with 2x unrolling and mul_add.
+    
     let mut j = idx0 + 1;
     while j + 1 < len {
-        // step j
+        
         let d1 = data[j] - data[j - 1];
         let g1 = if d1 > 0.0 { d1 } else { 0.0 };
         let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
@@ -415,7 +415,7 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
             100.0 * avg_gain / denom1
         };
 
-        // step j + 1
+        
         let d2 = data[j + 1] - data[j];
         let g2 = if d2 > 0.0 { d2 } else { 0.0 };
         let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
@@ -431,7 +431,7 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         j += 2;
     }
 
-    // Tail element
+    
     if j < len {
         let d = data[j] - data[j - 1];
         let g = if d > 0.0 { d } else { 0.0 };
@@ -447,7 +447,7 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
     }
 }
 
-// --- Batch grid/range support ---
+
 
 #[derive(Clone, Debug)]
 pub struct RsiBatchRange {
@@ -639,20 +639,20 @@ fn rsi_batch_inner(
             step: 1,
         })?;
 
-    // Use uninitialized memory for performance
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute per-step rectified deltas and their prefix sums for reuse across rows
+    
     let mut gains = vec![0.0f64; cols];
     let mut losses = vec![0.0f64; cols];
     for i in (first + 1)..cols {
@@ -678,7 +678,7 @@ fn rsi_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            // Row-specific optimized scalar using shared rectified deltas
+            
             Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
                 let inv_p = 1.0 / (period as f64);
                 let beta = 1.0 - inv_p;
@@ -702,7 +702,7 @@ fn rsi_batch_inner(
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
-                        // j
+                        
                         let g1 = gains[j];
                         let l1 = losses[j];
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
@@ -714,7 +714,7 @@ fn rsi_batch_inner(
                             100.0 * avg_g / denom1
                         };
 
-                        // j+1
+                        
                         let g2 = gains[j + 1];
                         let l2 = losses[j + 1];
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
@@ -770,7 +770,7 @@ fn rsi_batch_inner(
         }
     }
 
-    // Convert back to Vec for return
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -827,18 +827,18 @@ pub fn rsi_batch_inner_into(
         });
     }
 
-    // Treat caller buffer as uninit and initialize ONLY warmup prefixes per row.
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Reinterpret as f64 for compute
+    
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
-    // Shared rectified deltas + prefix sums for reuse across rows
+    
     let mut gains = vec![0.0f64; cols];
     let mut losses = vec![0.0f64; cols];
     for i in (first + 1)..cols {
@@ -887,7 +887,7 @@ pub fn rsi_batch_inner_into(
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
-                        // j
+                        
                         let g1 = gains[j];
                         let l1 = losses[j];
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
@@ -899,7 +899,7 @@ pub fn rsi_batch_inner_into(
                             100.0 * avg_g / denom1
                         };
 
-                        // j+1
+                        
                         let g2 = gains[j + 1];
                         let l2 = losses[j + 1];
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
@@ -1006,7 +1006,7 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 
     let mut j = idx0 + 1;
     while j + 1 < len {
-        // step j
+        
         let d1 = data[j] - data[j - 1];
         let g1 = if d1 > 0.0 { d1 } else { 0.0 };
         let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
@@ -1019,7 +1019,7 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
             100.0 * avg_gain / denom1
         };
 
-        // step j + 1
+        
         let d2 = data[j + 1] - data[j];
         let g2 = if d2 > 0.0 { d2 } else { 0.0 };
         let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
@@ -1073,26 +1073,26 @@ unsafe fn rsi_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     rsi_row_scalar(data, first, period, out)
 }
 
-// --- Streaming RSI (O(1) time & memory), parity with batch scalar ---
-// Decision: Streaming uses precomputed inv_p/beta, no ring buffer; FMA mirrors batch numerics.
+
+
 #[derive(Debug, Clone)]
 pub struct RsiStream {
-    // Params and precomputed constants
+    
     period: usize,
     inv_p: f64,
     beta: f64,
 
-    // Previous price tracking
+    
     has_prev: bool,
     prev: f64,
 
-    // Warm-up accumulation over first `period` deltas
+    
     seed_count: usize,
     sum_gain: f64,
     sum_loss: f64,
     poisoned: bool,
 
-    // Wilder recursion state after seeding
+    
     avg_gain: f64,
     avg_loss: f64,
     seeded: bool,
@@ -1133,7 +1133,7 @@ impl RsiStream {
     /// - non-finite deltas after warm-up have zero effect (treated as 0 change).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Need at least two prices to form a delta
+        
         if !self.has_prev {
             self.prev = value;
             self.has_prev = true;
@@ -1143,13 +1143,13 @@ impl RsiStream {
         let delta = value - self.prev;
         self.prev = value;
 
-        // Seeding path: collect first `period` deltas
+        
         if !self.seeded {
             if !delta.is_finite() {
                 self.poisoned = true;
             }
 
-            // Branchless rectification; NaN -> 0 via max semantics
+            
             let gain = delta.max(0.0);
             let loss = (-delta).max(0.0);
 
@@ -1179,7 +1179,7 @@ impl RsiStream {
             }
         }
 
-        // Steady-state Wilder recursion (FMA mirrors batch numerics)
+        
         let gain = delta.max(0.0);
         let loss = (-delta).max(0.0);
 
@@ -1194,7 +1194,7 @@ impl RsiStream {
     }
 }
 
-// ---- Tests ----
+
 
 #[cfg(test)]
 mod tests {
@@ -1382,16 +1382,16 @@ mod tests {
 
         let test_params = vec![
             RsiParams::default(),
-            RsiParams { period: Some(2) },   // minimum
-            RsiParams { period: Some(5) },   // small
-            RsiParams { period: Some(7) },   // small
-            RsiParams { period: Some(10) },  // small
-            RsiParams { period: Some(14) },  // default/typical
-            RsiParams { period: Some(20) },  // medium
-            RsiParams { period: Some(30) },  // medium
-            RsiParams { period: Some(50) },  // large
-            RsiParams { period: Some(100) }, // very large
-            RsiParams { period: Some(200) }, // extremely large
+            RsiParams { period: Some(2) },   
+            RsiParams { period: Some(5) },   
+            RsiParams { period: Some(7) },   
+            RsiParams { period: Some(10) },  
+            RsiParams { period: Some(14) },  
+            RsiParams { period: Some(20) },  
+            RsiParams { period: Some(30) },  
+            RsiParams { period: Some(50) },  
+            RsiParams { period: Some(100) }, 
+            RsiParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1463,10 +1463,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with realistic market conditions
+        
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
-                // Price data between -1e6 and 1e6 (filtered for finite values)
+                
                 prop::collection::vec(
                     (-1e6f64..1e6f64)
                         .prop_filter("finite price", |x| x.is_finite() && x.abs() > 1e-10),
@@ -1482,17 +1482,17 @@ mod tests {
             };
             let input = RsiInput::from_slice(&data, params);
 
-            // Get results from the kernel being tested
+            
             let RsiOutput { values: out } = rsi_with_kernel(&input, kernel)?;
 
-            // Get reference results from scalar kernel for comparison
+            
             let RsiOutput { values: ref_out } = rsi_with_kernel(&input, Kernel::Scalar)?;
 
-            // Find first non-NaN index
+            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first_valid + period;
 
-            // Property 1: RSI values must be in range [0, 100]
+            
             for (i, &val) in out.iter().enumerate() {
                 if !val.is_nan() {
                     prop_assert!(
@@ -1505,7 +1505,7 @@ mod tests {
                 }
             }
 
-            // Property 2: Warmup period handling
+            
             for i in 0..warmup_end.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1516,7 +1516,7 @@ mod tests {
                 );
             }
 
-            // First non-NaN should be at warmup_end
+            
             if warmup_end < out.len() {
                 prop_assert!(
                     !out[warmup_end].is_nan(),
@@ -1526,7 +1526,7 @@ mod tests {
                 );
             }
 
-            // Property 3: Kernel consistency
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
@@ -1546,7 +1546,7 @@ mod tests {
                 );
             }
 
-            // Property 4: Constant prices should yield RSI = 50
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup_end < out.len() {
                 for i in warmup_end..out.len() {
                     prop_assert!(
@@ -1559,8 +1559,8 @@ mod tests {
                 }
             }
 
-            // Property 5: Monotonic increasing prices should trend toward 100
-            // Use period-adaptive thresholds for more realistic testing
+            
+            
             let strictly_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
             if strictly_increasing && out.len() > warmup_end + 10 {
                 let last_rsi = out[out.len() - 1];
@@ -1581,8 +1581,8 @@ mod tests {
                 );
             }
 
-            // Property 6: Monotonic decreasing prices should trend toward 0
-            // Use period-adaptive thresholds for more realistic testing
+            
+            
             let strictly_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
             if strictly_decreasing && out.len() > warmup_end + 10 {
                 let last_rsi = out[out.len() - 1];
@@ -1603,7 +1603,7 @@ mod tests {
                 );
             }
 
-            // Property 7: No poison values (in debug mode)
+            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in out.iter().enumerate() {
@@ -1625,14 +1625,14 @@ mod tests {
                 }
             }
 
-            // Property 8: Oscillating prices should keep RSI in middle range
-            // Check if prices alternate between increases and decreases
+            
+            
             let mut oscillating = true;
             let mut prev_delta = 0.0;
             for window in data.windows(2) {
                 let delta = window[1] - window[0];
                 if prev_delta != 0.0 && delta != 0.0 {
-                    // Check if signs are different (oscillating)
+                    
                     if (delta > 0.0 && prev_delta > 0.0) || (delta < 0.0 && prev_delta < 0.0) {
                         oscillating = false;
                         break;
@@ -1641,9 +1641,9 @@ mod tests {
                 prev_delta = delta;
             }
 
-            // If we have oscillating prices with sufficient data after warmup
+            
             if oscillating && out.len() > warmup_end + 10 && prev_delta != 0.0 {
-                // RSI should stay in middle range (roughly 40-60)
+                
                 let last_quarter_start = out.len() - (out.len() - warmup_end) / 4;
                 for i in last_quarter_start..out.len() {
                     if !out[i].is_nan() {
@@ -1656,14 +1656,14 @@ mod tests {
                 }
             }
 
-            // Property 9: Mathematical consistency check for a few values
+            
             if warmup_end + 5 < out.len() {
-                // Manually calculate RSI for one point to verify
+                
                 let idx = warmup_end + 3;
                 let mut avg_gain = 0.0;
                 let mut avg_loss = 0.0;
 
-                // Initial average calculation
+                
                 for j in (first_valid + 1)..=(first_valid + period) {
                     let delta = data[j] - data[j - 1];
                     if delta > 0.0 {
@@ -1675,7 +1675,7 @@ mod tests {
                 avg_gain /= period as f64;
                 avg_loss /= period as f64;
 
-                // Update averages using EMA
+                
                 let inv_period = 1.0 / period as f64;
                 let beta = 1.0 - inv_period;
                 for j in (first_valid + period + 1)..=idx {
@@ -1735,15 +1735,15 @@ mod tests {
     fn check_rsi_error_variants(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Test OutputLengthMismatch error
+        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let mut dst = vec![0.0; 3]; // Wrong size
+        let mut dst = vec![0.0; 3]; 
         let params = RsiParams { period: Some(2) };
         let input = RsiInput::from_slice(&data, params);
 
         match rsi_into_slice(&mut dst, &input, kernel) {
             Err(RsiError::OutputLengthMismatch { expected: 5, got: 3 }) => {
-                // Expected error
+                
             }
             other => panic!(
                 "[{}] Expected OutputLengthMismatch error, got {:?}",
@@ -1751,13 +1751,13 @@ mod tests {
             ),
         }
 
-        // Test InvalidKernelForBatch error for batch operations
+        
         let sweep = RsiBatchRange {
             period: (14, 14, 0),
         };
         match rsi_batch_with_kernel(&data, &sweep, Kernel::Scalar) {
             Err(RsiError::InvalidKernelForBatch(Kernel::Scalar)) => {
-                // Expected error
+                
             }
             other => panic!(
                 "[{}] Expected InvalidKernelForBatch error, got {:?}",
@@ -1814,13 +1814,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (7, 21, 7),   // Common RSI periods (weekly)
-            (10, 50, 10), // Extended range
-            (14, 28, 14), // Double default period
+            (2, 10, 2),   
+            (5, 25, 5),   
+            (30, 60, 15), 
+            (2, 5, 1),    
+            (7, 21, 7),   
+            (10, 50, 10), 
+            (14, 28, 14), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1918,7 +1918,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Parity test for the new native into API
+
 #[cfg(test)]
 #[cfg(not(feature = "wasm"))]
 mod into_parity_tests {
@@ -1933,16 +1933,16 @@ mod into_parity_tests {
 
     #[test]
     fn test_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use existing CSV test data to stay consistent with the suite
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = RsiInput::from_candles(&candles, "close", RsiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = rsi(&input)?.values;
 
-        // Preallocate and compute via into-API
+        
         let mut out = vec![0.0; candles.close.len()];
         rsi_into(&input, &mut out)?;
 
@@ -1961,7 +1961,7 @@ mod into_parity_tests {
     }
 }
 
-// --- Python Bindings ---
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "rsi")]

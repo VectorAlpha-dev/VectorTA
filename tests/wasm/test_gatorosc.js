@@ -22,7 +22,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -40,21 +40,21 @@ test.before(async () => {
 test('GatorOsc basic functionality', () => {
     const close = new Float64Array(testData.close);
     
-    // Call with default parameters
+    
     const result = wasm.gatorosc_js(close, 13, 8, 8, 5, 5, 3);
     
-    // Check structure
+    
     assert.strictEqual(result.rows, 4, 'Should have 4 output rows');
     assert.strictEqual(result.cols, close.length, 'Should have same length as input');
     assert.strictEqual(result.values.length, 4 * close.length, 'Should have 4x input length values');
     
-    // Extract individual outputs
+    
     const upper = result.values.slice(0, close.length);
     const lower = result.values.slice(close.length, 2 * close.length);
     const upperChange = result.values.slice(2 * close.length, 3 * close.length);
     const lowerChange = result.values.slice(3 * close.length);
     
-    // Verify upper is positive and lower is negative (after warmup)
+    
     let hasValidUpper = false;
     let hasValidLower = false;
     
@@ -77,7 +77,7 @@ test('GatorOsc fast API (no aliasing)', () => {
     const data = new Float64Array([50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
     const len = data.length;
     
-    // Allocate memory
+    
     const inPtr = wasm.gatorosc_alloc(len);
     const upperPtr = wasm.gatorosc_alloc(len);
     const lowerPtr = wasm.gatorosc_alloc(len);
@@ -85,29 +85,29 @@ test('GatorOsc fast API (no aliasing)', () => {
     const lowerChangePtr = wasm.gatorosc_alloc(len);
     
     try {
-        // Copy input data to WASM memory
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(data, inPtr / 8);
         
-        // Call fast API
+        
         wasm.gatorosc_into(
             inPtr, upperPtr, lowerPtr, upperChangePtr, lowerChangePtr,
             len, 5, 3, 3, 2, 2, 1
         );
         
-        // Recreate memory view in case memory grew
+        
         const memory2 = new Float64Array(wasm.__wasm.memory.buffer);
         
-        // Read results
+        
         const upper = Array.from(memory2.slice(upperPtr / 8, upperPtr / 8 + len));
         const lower = Array.from(memory2.slice(lowerPtr / 8, lowerPtr / 8 + len));
         
-        // Check results exist
+        
         assert(upper.some(v => !isNaN(v)), 'Upper should have some non-NaN values');
         assert(lower.some(v => !isNaN(v)), 'Lower should have some non-NaN values');
         
     } finally {
-        // Free memory
+        
         wasm.gatorosc_free(inPtr, len);
         wasm.gatorosc_free(upperPtr, len);
         wasm.gatorosc_free(lowerPtr, len);
@@ -120,36 +120,36 @@ test('GatorOsc fast API (with aliasing)', () => {
     const data = new Float64Array([50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]);
     const len = data.length;
     
-    // Allocate memory - use input pointer as one of the outputs
+    
     const inPtr = wasm.gatorosc_alloc(len);
     const lowerPtr = wasm.gatorosc_alloc(len);
     const upperChangePtr = wasm.gatorosc_alloc(len);
     const lowerChangePtr = wasm.gatorosc_alloc(len);
     
     try {
-        // Copy input data to WASM memory
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer);
         memory.set(data, inPtr / 8);
         
-        // Call fast API with aliasing (inPtr == upperPtr)
+        
         wasm.gatorosc_into(
-            inPtr, inPtr, lowerPtr, upperChangePtr, lowerChangePtr,  // Use inPtr as upperPtr
+            inPtr, inPtr, lowerPtr, upperChangePtr, lowerChangePtr,  
             len, 5, 3, 3, 2, 2, 1
         );
         
-        // Recreate memory view in case memory grew
+        
         const memory2 = new Float64Array(wasm.__wasm.memory.buffer);
         
-        // Read results
-        const upper = Array.from(memory2.slice(inPtr / 8, inPtr / 8 + len));  // Upper overwrote input
+        
+        const upper = Array.from(memory2.slice(inPtr / 8, inPtr / 8 + len));  
         const lower = Array.from(memory2.slice(lowerPtr / 8, lowerPtr / 8 + len));
         
-        // Check results exist and input was overwritten
+        
         assert(upper.some(v => !isNaN(v)), 'Upper should have some non-NaN values');
         assert(lower.some(v => !isNaN(v)), 'Lower should have some non-NaN values');
         
     } finally {
-        // Free memory
+        
         wasm.gatorosc_free(inPtr, len);
         wasm.gatorosc_free(lowerPtr, len);
         wasm.gatorosc_free(upperChangePtr, len);
@@ -158,26 +158,26 @@ test('GatorOsc fast API (with aliasing)', () => {
 });
 
 test('GatorOsc error handling', () => {
-    // Test with empty data
+    
     assert.throws(() => {
         wasm.gatorosc_js(new Float64Array([]), 13, 8, 8, 5, 5, 3);
     }, /empty|invalid|insufficient/i);
     
-    // Test with all NaN data
+    
     const nanData = new Float64Array(50).fill(NaN);
     assert.throws(() => {
         wasm.gatorosc_js(nanData, 13, 8, 8, 5, 5, 3);
     }, /nan|invalid/i);
     
-    // Test with invalid parameters
+    
     const data = new Float64Array([1, 2, 3, 4, 5]);
     assert.throws(() => {
-        wasm.gatorosc_js(data, 0, 8, 8, 5, 5, 3);  // Zero jaws_length
+        wasm.gatorosc_js(data, 0, 8, 8, 5, 5, 3);  
     }, /invalid|parameter|length/i);
 });
 
 test('GatorOsc batch processing', () => {
-    const close = new Float64Array(testData.close.slice(0, 100));  // Use smaller dataset for batch
+    const close = new Float64Array(testData.close.slice(0, 100));  
     
     const config = {
         jaws_length_range: [10, 15, 5],
@@ -190,7 +190,7 @@ test('GatorOsc batch processing', () => {
     
     const result = wasm.gatorosc_batch(close, config);
     
-    // Check structure
+    
     assert(result.rows > 0, 'Should have parameter combinations');
     assert.strictEqual(result.cols, close.length, 'Should match input length');
     assert.strictEqual(result.outputs, 4, 'Should have 4 outputs');
@@ -198,7 +198,7 @@ test('GatorOsc batch processing', () => {
     assert(Array.isArray(result.combos), 'Should have combos array');
     assert.strictEqual(result.combos.length, result.rows, 'Combos should match rows');
     
-    // Verify each combo has required fields
+    
     for (const combo of result.combos) {
         assert(combo.jaws_length !== undefined, 'Combo should have jaws_length');
         assert(combo.jaws_shift !== undefined, 'Combo should have jaws_shift');
@@ -215,11 +215,11 @@ test('GatorOsc consistency', () => {
         57.0, 58.0, 57.5, 59.0, 60.0, 59.5, 58.0, 57.0, 58.5, 59.0
     ]);
     
-    // Call multiple times with same parameters
+    
     const result1 = wasm.gatorosc_js(data, 5, 3, 3, 2, 2, 1);
     const result2 = wasm.gatorosc_js(data, 5, 3, 3, 2, 2, 1);
     
-    // Results should be identical
+    
     assertArrayClose(
         result1.values, 
         result2.values, 
@@ -229,7 +229,7 @@ test('GatorOsc consistency', () => {
 });
 
 test('GatorOsc memory allocation/deallocation', () => {
-    // Test multiple alloc/free cycles
+    
     for (let i = 0; i < 10; i++) {
         const len = 100 + i * 10;
         const ptr = wasm.gatorosc_alloc(len);
@@ -237,6 +237,6 @@ test('GatorOsc memory allocation/deallocation', () => {
         wasm.gatorosc_free(ptr, len);
     }
     
-    // Test null pointer handling
-    wasm.gatorosc_free(0, 100);  // Should not crash
+    
+    wasm.gatorosc_free(0, 100);  
 });

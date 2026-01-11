@@ -2189,7 +2189,7 @@ pub fn rsmk_batch_py<'py>(
         signal_period: signal_period_range,
     };
 
-    // Calculate dimensions
+    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = main_slice.len();
@@ -2198,27 +2198,27 @@ pub fn rsmk_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err(format!("rsmk: rows*cols overflow (rows={}, cols={})", rows, cols)))?;
 
-    // Pre-allocate output arrays
+    
     let indicator_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let signal_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let indicator_slice = unsafe { indicator_arr.as_slice_mut()? };
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            // Map batch kernels to regular kernels
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => kern, // Use the original if not a batch kernel
+                _ => kern, 
             };
 
             rsmk_batch_inner_into(
@@ -2233,7 +2233,7 @@ pub fn rsmk_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("indicator", indicator_arr.reshape((rows, cols))?)?;
     dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
@@ -2316,13 +2316,13 @@ impl RsmkStreamPy {
     }
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct RsmkResult {
-    pub values: Vec<f64>, // [indicator..., signal...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2392,13 +2392,13 @@ pub fn rsmk_into(
         };
         let input = RsmkInput::from_slices(main, compare, params);
 
-        // Check for aliasing - all pointer combinations
+        
         let in_aliased = in_ptr == indicator_ptr || in_ptr == signal_ptr;
         let compare_aliased = compare_ptr == indicator_ptr || compare_ptr == signal_ptr;
         let outputs_aliased = indicator_ptr == signal_ptr;
 
         if in_aliased || compare_aliased || outputs_aliased {
-            // Use temporary buffers for all aliased cases
+            
             let mut temp_indicator = vec![0.0; len];
             let mut temp_signal = vec![0.0; len];
 
@@ -2408,9 +2408,9 @@ pub fn rsmk_into(
             let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
             let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
 
-            // Copy in correct order to handle overlapping memory
+            
             if outputs_aliased {
-                // If indicator and signal point to same memory, signal wins (copied last)
+                
                 indicator_out.copy_from_slice(&temp_indicator);
                 signal_out.copy_from_slice(&temp_signal);
             } else {
@@ -2418,7 +2418,7 @@ pub fn rsmk_into(
                 signal_out.copy_from_slice(&temp_signal);
             }
         } else {
-            // No aliasing, write directly
+            
             let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
             let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
             rsmk_into_slice(indicator_out, signal_out, &input, Kernel::Auto)
@@ -2448,13 +2448,13 @@ pub fn rsmk_free(ptr: *mut f64, len: usize) {
     }
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy handles) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaRsmk};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyValueError already imported above under `#[cfg(feature = "python")]`.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2599,7 +2599,7 @@ pub fn rsmk_batch_js(main: &[f64], compare: &[f64], config: JsValue) -> Result<J
         .apply_slices(main, compare)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Flatten the 2D arrays into 1D for JavaScript
+    
     let indicators: Vec<f64> = output
         .indicator
         .chunks(output.cols)
@@ -2634,16 +2634,16 @@ mod tests {
 
     #[test]
     fn test_rsmk_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the existing CSV dataset to mirror other tests
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
         let input = RsmkInput::with_default_candles(&candles, &candles);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = rsmk(&input)?;
 
-        // Preallocate outputs and run the new into API
+        
         let n = candles.close.len();
         let mut out_ind = vec![0.0f64; n];
         let mut out_sig = vec![0.0f64; n];
@@ -2654,7 +2654,7 @@ mod tests {
         assert_eq!(out_ind.len(), n);
         assert_eq!(out_sig.len(), n);
 
-        // Helper: NaN == NaN, else exact or tight epsilon
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2809,66 +2809,66 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            RsmkParams::default(), // lookback: 90, period: 3, signal_period: 20
+            RsmkParams::default(), 
             RsmkParams {
                 lookback: Some(1),
                 period: Some(1),
                 signal_period: Some(1),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, // minimum values
+            }, 
             RsmkParams {
                 lookback: Some(10),
                 period: Some(2),
                 signal_period: Some(5),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, // small values
+            }, 
             RsmkParams {
                 lookback: Some(50),
                 period: Some(10),
                 signal_period: Some(15),
                 matype: Some("sma".to_string()),
                 signal_matype: Some("sma".to_string()),
-            }, // medium values
+            }, 
             RsmkParams {
                 lookback: Some(100),
                 period: Some(20),
                 signal_period: Some(30),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("sma".to_string()),
-            }, // large values
+            }, 
             RsmkParams {
                 lookback: Some(200),
                 period: Some(50),
                 signal_period: Some(50),
                 matype: Some("sma".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, // very large values
+            }, 
             RsmkParams {
                 lookback: Some(5),
                 period: Some(20),
                 signal_period: Some(10),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, // edge case: period > lookback
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = RsmkInput::from_candles(&candles, &candles, "close", params.clone());
             let output = rsmk_with_kernel(&input, kernel)?;
 
-            // Check indicator values for poison
+            
             for (i, &val) in output.indicator.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator at index {} \
@@ -2912,15 +2912,15 @@ mod tests {
                 }
             }
 
-            // Check signal values for poison
+            
             for (i, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal at index {} \
@@ -2970,7 +2970,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_rsmk_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2982,20 +2982,20 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data
+        
         let strat = (1usize..=100, 1usize..=50, 1usize..=50).prop_flat_map(
             |(lookback, period, signal_period)| {
-                // Ensure we have enough data for all calculations
-                // Need: lookback + max(period, signal_period) + extra buffer
+                
+                
                 let min_len = lookback + period.max(signal_period) + 50;
                 (min_len..=500usize).prop_flat_map(move |len| {
                     (
-                        // Generate main prices
+                        
                         prop::collection::vec(
                             (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
                         ),
-                        // Generate compare prices
+                        
                         prop::collection::vec(
                             (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
@@ -3021,12 +3021,12 @@ mod tests {
                     };
                     let input = RsmkInput::from_slices(&main, &compare, params.clone());
 
-                    // Handle potential errors gracefully
+                    
                     let output = match rsmk_with_kernel(&input, kernel) {
                         Ok(out) => out,
                         Err(_) => {
-                            // Some parameter combinations may legitimately fail
-                            // Skip this test case
+                            
+                            
                             return Ok(());
                         }
                     };
@@ -3034,34 +3034,34 @@ mod tests {
                     let ref_output = match rsmk_with_kernel(&input, Kernel::Scalar) {
                         Ok(out) => out,
                         Err(_) => {
-                            // If scalar kernel fails, skip this test case
+                            
                             return Ok(());
                         }
                     };
 
-                    // Property 1: Output length should match input length
+                    
                     prop_assert_eq!(output.indicator.len(), main.len());
                     prop_assert_eq!(output.signal.len(), main.len());
 
-                    // Property 2: Warmup period validation
-                    // The first lookback values must be NaN since momentum requires lookback points
-                    // Exception: when main==compare for all values, result can be 0
+                    
+                    
+                    
                     let all_equal = main
                         .iter()
                         .zip(compare.iter())
                         .all(|(a, b)| (a - b).abs() < f64::EPSILON);
 
-                    // Check first lookback values more strictly
+                    
                     for i in 0..lookback.min(main.len()) {
                         if all_equal {
-                            // When main==compare, 0 is valid
+                            
                             prop_assert!(
 							output.indicator[i].is_nan() || output.indicator[i].abs() < 1e-9,
 							"Expected NaN or 0 during warmup at index {} (before lookback {}), got {}",
 							i, lookback, output.indicator[i]
 						);
                         } else {
-                            // Otherwise must be NaN during momentum warmup
+                            
                             prop_assert!(
 							output.indicator[i].is_nan(),
 							"Expected NaN during warmup at index {} (before lookback {}), got {}",
@@ -3070,7 +3070,7 @@ mod tests {
                         }
                     }
 
-                    // Verify we eventually get non-NaN values after warmup
+                    
                     let full_warmup = lookback + period.max(signal_period);
                     if main.len() > full_warmup + 5 {
                         let has_valid =
@@ -3082,8 +3082,8 @@ mod tests {
                         );
                     }
 
-                    // Property 3: When main == compare, log ratio should be 0, momentum should be near 0
-                    // Test with identical inputs
+                    
+                    
                     let identical_params = RsmkParams {
                         lookback: Some(lookback),
                         period: Some(period),
@@ -3093,7 +3093,7 @@ mod tests {
                     };
                     let identical_input = RsmkInput::from_slices(&main, &main, identical_params);
                     if let Ok(identical_output) = rsmk_with_kernel(&identical_input, kernel) {
-                        // After warmup, indicator should be exactly 0 (momentum of ln(1) = 0)
+                        
                         let warmup = lookback.max(period).max(signal_period);
                         for i in warmup..main.len() {
                             if !identical_output.indicator[i].is_nan() {
@@ -3107,8 +3107,8 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Constant ratio test
-                    // If main = k * compare for constant k, momentum should approach 0
+                    
+                    
                     let const_ratio = 2.0;
                     let main_scaled: Vec<f64> = compare.iter().map(|&x| x * const_ratio).collect();
                     let const_params = RsmkParams {
@@ -3120,7 +3120,7 @@ mod tests {
                     };
                     let const_input = RsmkInput::from_slices(&main_scaled, &compare, const_params);
                     if let Ok(const_output) = rsmk_with_kernel(&const_input, kernel) {
-                        // After sufficient data points, momentum should be very close to 0
+                        
                         let warmup = lookback.max(period).max(signal_period);
                         let check_start = (warmup + 10).min(main.len());
                         for i in check_start..main.len() {
@@ -3134,15 +3134,15 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Period edge cases
+                    
                     if period == 1 {
-                        // With period=1, the MA should have minimal smoothing effect
-                        // Just verify it doesn't crash and produces valid output
+                        
+                        
                         prop_assert!(output.indicator.iter().any(|&x| !x.is_nan()));
                     }
 
-                    // Property 6: Kernel consistency
-                    // Compare with scalar kernel results (within ULP tolerance)
+                    
+                    
                     let warmup = lookback.max(period).max(signal_period);
                     for i in warmup..main.len() {
                         let ind = output.indicator[i];
@@ -3150,7 +3150,7 @@ mod tests {
                         let sig = output.signal[i];
                         let ref_sig = ref_output.signal[i];
 
-                        // Check indicator consistency
+                        
                         if !ind.is_nan() && !ref_ind.is_nan() {
                             let ind_bits = ind.to_bits();
                             let ref_ind_bits = ref_ind.to_bits();
@@ -3165,11 +3165,11 @@ mod tests {
                                 ulp_diff
                             );
                         } else {
-                            // Both should be NaN or both should be finite
+                            
                             prop_assert_eq!(ind.is_nan(), ref_ind.is_nan());
                         }
 
-                        // Check signal consistency
+                        
                         if !sig.is_nan() && !ref_sig.is_nan() {
                             let sig_bits = sig.to_bits();
                             let ref_sig_bits = ref_sig.to_bits();
@@ -3188,8 +3188,8 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Signal smoothness (improved with variance calculation)
-                    // Signal should be smoother than indicator (lower variance)
+                    
+                    
                     let indicator_diffs: Vec<f64> = output
                         .indicator
                         .windows(2)
@@ -3218,7 +3218,7 @@ mod tests {
                         && !signal_diffs.is_empty()
                         && indicator_diffs.len() > 10
                     {
-                        // Calculate actual variance
+                        
                         let ind_mean =
                             indicator_diffs.iter().sum::<f64>() / indicator_diffs.len() as f64;
                         let ind_var = indicator_diffs
@@ -3234,7 +3234,7 @@ mod tests {
                             .sum::<f64>()
                             / signal_diffs.len() as f64;
 
-                        // Signal should generally be smoother (lower variance)
+                        
                         if signal_period > 1 && ind_var > 1e-12 {
                             prop_assert!(
                                 sig_var <= ind_var * 1.2 || sig_var < 1e-10,
@@ -3245,8 +3245,8 @@ mod tests {
                         }
                     }
 
-                    // Property 8: Edge cases
-                    // Test with compare containing zeros - EMA should handle gracefully
+                    
+                    
                     let mut compare_with_zero = compare.clone();
                     if compare_with_zero.len() > lookback + 5 {
                         compare_with_zero[lookback + 2] = 0.0;
@@ -3260,9 +3260,9 @@ mod tests {
                         let zero_input =
                             RsmkInput::from_slices(&main, &compare_with_zero, zero_params);
                         if let Ok(zero_output) = rsmk_with_kernel(&zero_input, kernel) {
-                            // EMA skips NaN values to maintain continuity, so we should get valid values
-                            // This is the correct behavior for financial indicators
-                            // Just verify the calculation completes without error
+                            
+                            
+                            
                             prop_assert!(
 							zero_output.indicator.len() == main.len(),
 							"Output length should match input length even with zeros in compare"
@@ -3270,9 +3270,9 @@ mod tests {
                         }
                     }
 
-                    // Test extreme ratios
+                    
                     if main.len() > warmup + 10 {
-                        // Test very large ratio
+                        
                         let large_ratio = 10000.0;
                         let main_large: Vec<f64> =
                             compare.iter().map(|&x| x * large_ratio).collect();
@@ -3286,7 +3286,7 @@ mod tests {
                         let large_input =
                             RsmkInput::from_slices(&main_large, &compare, large_params);
                         if let Ok(large_output) = rsmk_with_kernel(&large_input, kernel) {
-                            // Check that values are reasonable (not infinite)
+                            
                             for i in warmup..main.len() {
                                 if !large_output.indicator[i].is_nan() {
                                     prop_assert!(
@@ -3294,7 +3294,7 @@ mod tests {
 									"Indicator should be finite for large ratios at index {}, got {}",
 									i, large_output.indicator[i]
 								);
-                                    // Momentum of constant large ratio should still be near 0
+                                    
                                     if i > warmup + 10 {
                                         prop_assert!(
 										large_output.indicator[i].abs() < 1.0,
@@ -3366,7 +3366,7 @@ mod tests {
             .apply_slices(main, compare)?;
 
         let def = RsmkParams::default();
-        // Find row matching default parameters
+        
         let default_row = batch
             .combos
             .iter()
@@ -3384,7 +3384,7 @@ mod tests {
         assert_eq!(ind_row.len(), candles.close.len());
         assert_eq!(sig_row.len(), candles.close.len());
 
-        // RSMK with default: last five values should be (close vs close): zeroes or near zero
+        
         let expected = [0.0, 0.0, 0.0, 0.0, 0.0];
         let len = ind_row.len();
         let start_idx = len - 5;
@@ -3401,7 +3401,7 @@ mod tests {
                 "[{test}] default-signal mismatch at idx {i}: {v} vs {expected:?}"
             );
         }
-        // NaN checks for early region
+        
         let max_period = def
             .lookback
             .unwrap()
@@ -3435,15 +3435,15 @@ mod tests {
         let main = &candles.close;
         let compare = &candles.close;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (lookback_range, period_range, signal_period_range)
-            ((10, 20, 5), (2, 5, 1), (5, 10, 5)), // Small ranges
-            ((50, 100, 25), (5, 15, 5), (10, 30, 10)), // Medium ranges
-            ((100, 200, 50), (20, 40, 10), (30, 60, 15)), // Large ranges
-            ((1, 5, 1), (1, 3, 1), (1, 5, 1)),    // Dense small ranges
-            ((90, 90, 0), (3, 3, 0), (20, 20, 0)), // Single value (default)
-            ((200, 250, 25), (50, 70, 10), (50, 100, 25)), // Very large ranges
+            
+            ((10, 20, 5), (2, 5, 1), (5, 10, 5)), 
+            ((50, 100, 25), (5, 15, 5), (10, 30, 10)), 
+            ((100, 200, 50), (20, 40, 10), (30, 60, 15)), 
+            ((1, 5, 1), (1, 3, 1), (1, 5, 1)),    
+            ((90, 90, 0), (3, 3, 0), (20, 20, 0)), 
+            ((200, 250, 25), (50, 70, 10), (50, 100, 25)), 
         ];
 
         for (cfg_idx, &(lookback_range, period_range, signal_period_range)) in
@@ -3460,7 +3460,7 @@ mod tests {
                 )
                 .apply_slices(main, compare)?;
 
-            // Check indicator values for poison
+            
             for (idx, &val) in output.indicator.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3471,7 +3471,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator \
@@ -3515,7 +3515,7 @@ mod tests {
                 }
             }
 
-            // Check signal values for poison
+            
             for (idx, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3526,7 +3526,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal \
@@ -3603,7 +3603,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// === Classic Kernel Implementations ===
+
 
 /// Classic kernel with inline SMA calculations for both indicator and signal
 #[inline]
@@ -3617,7 +3617,7 @@ fn rsmk_classic_sma(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    // Check if we have enough data
+    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3633,11 +3633,11 @@ fn rsmk_classic_sma(
     let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
-    // Calculate indicator (SMA of momentum * 100)
+    
     let mut sum_ind = 0.0;
     let mut count_ind = 0;
 
-    // Initialize first SMA for indicator
+    
     for i in first_valid..(first_valid + period).min(len) {
         if !mom[i].is_nan() {
             sum_ind += mom[i];
@@ -3648,7 +3648,7 @@ fn rsmk_classic_sma(
     if count_ind > 0 && ind_warmup < len {
         indicator[ind_warmup] = (sum_ind / count_ind as f64) * 100.0;
 
-        // Rolling SMA for indicator
+        
         for i in (ind_warmup + 1)..len {
             let old_val = mom[i - period];
             let new_val = mom[i];
@@ -3668,11 +3668,11 @@ fn rsmk_classic_sma(
         }
     }
 
-    // Calculate signal (SMA of indicator)
+    
     let mut sum_sig = 0.0;
     let mut count_sig = 0;
 
-    // Initialize first SMA for signal
+    
     for i in ind_warmup..(ind_warmup + signal_period).min(len) {
         if !indicator[i].is_nan() {
             sum_sig += indicator[i];
@@ -3683,7 +3683,7 @@ fn rsmk_classic_sma(
     if count_sig > 0 && sig_warmup < len {
         signal[sig_warmup] = sum_sig / count_sig as f64;
 
-        // Rolling SMA for signal
+        
         for i in (sig_warmup + 1)..len {
             let old_val = indicator[i - signal_period];
             let new_val = indicator[i];
@@ -3718,7 +3718,7 @@ fn rsmk_classic_ema(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    // Check if we have enough data
+    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3734,11 +3734,11 @@ fn rsmk_classic_ema(
     let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
-    // Calculate indicator (EMA of momentum * 100)
+    
     let alpha_ind = 2.0 / (period as f64 + 1.0);
     let one_minus_alpha_ind = 1.0 - alpha_ind;
 
-    // Initialize EMA for indicator with SMA
+    
     let mut sum_ind = 0.0;
     let mut count_ind = 0;
     for i in first_valid..(first_valid + period).min(len) {
@@ -3752,7 +3752,7 @@ fn rsmk_classic_ema(
         let mut ema_ind = (sum_ind / count_ind as f64) * 100.0;
         indicator[ind_warmup] = ema_ind;
 
-        // Continue EMA for indicator
+        
         for i in (ind_warmup + 1)..len {
             if !mom[i].is_nan() {
                 ema_ind = (alpha_ind * mom[i] * 100.0) + (one_minus_alpha_ind * ema_ind);
@@ -3761,11 +3761,11 @@ fn rsmk_classic_ema(
         }
     }
 
-    // Calculate signal (EMA of indicator)
+    
     let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
     let one_minus_alpha_sig = 1.0 - alpha_sig;
 
-    // Initialize EMA for signal with SMA
+    
     let mut sum_sig = 0.0;
     let mut count_sig = 0;
     for i in ind_warmup..(ind_warmup + signal_period).min(len) {
@@ -3779,7 +3779,7 @@ fn rsmk_classic_ema(
         let mut ema_sig = sum_sig / count_sig as f64;
         signal[sig_warmup] = ema_sig;
 
-        // Continue EMA for signal
+        
         for i in (sig_warmup + 1)..len {
             if !indicator[i].is_nan() {
                 ema_sig = (alpha_sig * indicator[i]) + (one_minus_alpha_sig * ema_sig);
@@ -3803,7 +3803,7 @@ fn rsmk_classic_ema_sma(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    // Check data sufficiency
+    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3820,7 +3820,7 @@ fn rsmk_classic_ema_sma(
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
     if ind_warmup < len {
-        // Seed indicator EMA from SMA of first `period` momentum values (NaN-aware)
+        
         let mut sum = 0.0;
         let mut cnt = 0usize;
         let init_end = (first_valid + period).min(len);
@@ -3838,13 +3838,13 @@ fn rsmk_classic_ema_sma(
             let alpha_ind = 2.0 / (period as f64 + 1.0);
             let mut ema_ind = (sum / cnt as f64) * 100.0;
 
-            // SMA(signal) rolling state
+            
             let mut sum_sig = 0.0;
             let mut cnt_sig = 0usize;
 
             unsafe {
                 *indicator.get_unchecked_mut(ind_warmup) = ema_ind;
-                // Include first indicator into signal window build-up
+                
                 sum_sig += ema_ind;
                 cnt_sig += 1;
 
@@ -3856,7 +3856,7 @@ fn rsmk_classic_ema_sma(
                     }
                     *indicator.get_unchecked_mut(i) = ema_ind;
 
-                    // Update SMA(signal) window
+                    
                     if !ema_ind.is_nan() {
                         sum_sig += ema_ind;
                         cnt_sig += 1;
@@ -3903,7 +3903,7 @@ fn rsmk_classic_sma_ema(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    // Check data sufficiency
+    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3925,11 +3925,11 @@ fn rsmk_classic_sma_ema(
     let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
     let mut acc_sig = 0.0;
     let mut cnt_sig = 0usize;
-    let mut ema_sig = 0.0f64; // set at seed
+    let mut ema_sig = 0.0f64; 
 
     unsafe {
         for i in first_valid..len {
-            // Update indicator SMA window with NaN-skipping
+            
             let v_new = *mom.get_unchecked(i);
             if !v_new.is_nan() {
                 sum_ind += v_new;
@@ -3968,7 +3968,7 @@ fn rsmk_classic_sma_ema(
                     if !ind_val.is_nan() && !ema_sig.is_nan() {
                         ema_sig = (ind_val - ema_sig).mul_add(alpha_sig, ema_sig);
                     } else if !ind_val.is_nan() && ema_sig.is_nan() {
-                        // Recover from NaN seed by snapping to the first finite indicator
+                        
                         ema_sig = ind_val;
                     }
                     *signal.get_unchecked_mut(i) = ema_sig;

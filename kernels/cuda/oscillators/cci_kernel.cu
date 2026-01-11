@@ -1,18 +1,18 @@
-// CUDA kernels for Commodity Channel Index (CCI)
-//
-// Semantics mirror the scalar Rust implementation in src/indicators/cci.rs:
-// - Warmup prefix of NaNs at indices [0 .. first_valid + period - 1)
-// - NaN inputs propagate (any NaN in the active window yields NaN via FP ops)
-// - Denominator zero -> 0.0 (when mean absolute deviation is exactly 0)
-// - FP32 arithmetic for throughput and interoperability with existing wrappers
-//
-// Optimization notes (FP32-only):
-// - One-series × many-params path uses a per-block sliding window cached in
-//   shared memory and block-wide parallel reductions for the seed/MAD.
-// - Rolling sum is updated with Kahan compensation to reduce drift when series
-//   is long, avoiding FP64. For very large periods that exceed a conservative
-//   shared-memory static buffer, we safely fall back to the prior global-memory
-//   scan per step (still correct; performance-lean).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -28,9 +28,9 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// ------------------------------
-// Warp- and block-wide reductions
-// ------------------------------
+
+
+
 __inline__ __device__ float warp_reduce_sum(float v) {
     unsigned mask = 0xFFFFFFFFu;
     for (int offset = warpSize >> 1; offset > 0; offset >>= 1) {
@@ -40,7 +40,7 @@ __inline__ __device__ float warp_reduce_sum(float v) {
 }
 
 __inline__ __device__ float block_reduce_sum(float v) {
-    __shared__ float warp_partials[32]; // supports up to 32 warps per block
+    __shared__ float warp_partials[32]; 
     int lane = threadIdx.x & (warpSize - 1);
     int wid  = threadIdx.x >> 5;
 
@@ -57,7 +57,7 @@ __inline__ __device__ float block_reduce_sum(float v) {
     return out;
 }
 
-// Kahan compensated streaming add: sum += x with carry c
+
 __inline__ __device__ void kahan_add(float x, float &sum, float &c) {
     float y = x - c;
     float t = sum + y;
@@ -65,23 +65,23 @@ __inline__ __device__ void kahan_add(float x, float &sum, float &c) {
     sum = t;
 }
 
-// Conservative static shared window bound for CCI.
-// If period <= CCI_SMEM_MAX, we use the optimized sliding-window path in shared
-// memory. Otherwise we safely fall back to a plain global-memory scan.
+
+
+
 #ifndef CCI_SMEM_MAX
 #define CCI_SMEM_MAX 2048
 #endif
-// Compile-time toggle for the shared-memory sliding-window optimization path.
-// Set to 1 to enable the optimized path (requires tight numeric parity checks
-// in your environment/tests). Default 0 to keep legacy parity by default.
+
+
+
 #ifndef USE_CCI_SMEM_OPT
 #define USE_CCI_SMEM_OPT 1
 #endif
 
-// ----------------------------------------------------------
-// One-series × many-params (batch). Each block processes one param.
-// Optimized with a shared-memory sliding window when period <= CCI_SMEM_MAX.
-// ----------------------------------------------------------
+
+
+
+
 extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
                                           const int*   __restrict__ periods,
                                           int series_len,
@@ -108,17 +108,17 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
     const float inv_p = 1.0f / static_cast<float>(period);
     const int warm = first_valid + period - 1;
 
-    // Warmup prefix [0 .. warm) = NaN.
+    
     for (int i = threadIdx.x; i < warm; i += blockDim.x) out[base + i] = NAN;
     __syncthreads();
 
-    // Fast path: keep rolling window in shared memory; FP32 arithmetic for throughput.
+    
     if (USE_CCI_SMEM_OPT && LIKELY(period <= CCI_SMEM_MAX)) {
         __shared__ float s_win_static[CCI_SMEM_MAX];
         __shared__ float s_sma;
         float* s_win = s_win_static;
 
-        // Seed window [first_valid .. first_valid+period-1]
+        
         {
             const float* p0 = prices + first_valid;
             for (int i = threadIdx.x; i < period; i += blockDim.x) {
@@ -127,17 +127,17 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         }
         __syncthreads();
 
-        // Initial rolling sum (parallel) -> SMA
+        
         float sum_local = 0.0f;
         for (int i = threadIdx.x; i < period; i += blockDim.x) sum_local += s_win[i];
         float sum_total = block_reduce_sum(sum_local);
 
         float sum = sum_total;
-        float csum = 0.0f; // Kahan compensation for rolling sum updates
+        float csum = 0.0f; 
         if (threadIdx.x == 0) s_sma = sum_total * inv_p;
         __syncthreads();
 
-        // First MAD / CCI at warm (parallel MAD reduction)
+        
         {
             const float sma = s_sma;
             float sum_abs_local = 0.0f;
@@ -153,7 +153,7 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         }
         __syncthreads();
 
-        // Rolling with circular buffer in shared memory
+        
         int head = 0;
         for (int t = warm + 1; t < series_len; ++t) {
             if (threadIdx.x == 0) {
@@ -182,10 +182,10 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Fallback path for very large periods: plain global-memory scan per step
-    if (threadIdx.x != 0) return; // keep simple/robust when not using shared window
+    
+    if (threadIdx.x != 0) return; 
 
-    // Fallback path uses pure FP32 arithmetic to match expected tolerances
+    
     float sum = 0.0f;
     const float* p0 = prices + first_valid;
     for (int k = 0; k < period; ++k) sum += p0[k];
@@ -219,17 +219,17 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ----------------------------------------------------------
-// Many-series × one-param (time-major). Each thread handles one series.
-// Minor cleanup: precompute inv_p and mad_scale.
-// ----------------------------------------------------------
+
+
+
+
 extern "C" __global__ void cci_many_series_one_param_f32(
-    const float* __restrict__ prices_tm,   // [row * num_series + series]
+    const float* __restrict__ prices_tm,   
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
-    float* __restrict__ out_tm)            // time-major output
+    float* __restrict__ out_tm)            
 {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
@@ -254,7 +254,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
         return;
     }
 
-    // Warmup prefix
+    
     const int warm = first_valid + period - 1;
     for (int r = 0; r < warm; ++r) col_out[r * num_series] = NAN;
 
@@ -264,7 +264,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
     for (int k = 0; k < period; ++k, p += num_series) kahan_add(*p, sum, csum);
     float sma = sum * inv_p;
 
-    // First MAD / CCI at warm
+    
     {
         float sum_abs = 0.0f, cabs = 0.0f;
         const float* w = col_in + static_cast<size_t>(warm - period + 1) * num_series;
@@ -276,7 +276,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
         *(col_out + static_cast<size_t>(warm) * num_series) = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
     }
 
-    // Rolling
+    
     const float* cur = col_in + static_cast<size_t>(warm + 1) * num_series;
     const float* old = col_in + static_cast<size_t>(first_valid) * num_series;
     float* dst       = col_out + static_cast<size_t>(warm + 1) * num_series;

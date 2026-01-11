@@ -1,15 +1,15 @@
-// CUDA kernels for the Ehlers Error Correcting Exponential Moving Average (ECEMA).
-//
-// Kernels operate on FP32 buffers to match the public API. We keep arithmetic
-// in FP32 but tighten accuracy using FMA and Kahan-style compensated updates
-// on the state variables (EMA and EC), which offers near-FP64 accuracy without
-// FP64 throughput penalties on consumer GPUs.
-// Exposed variants:
-//   * ehlers_ecema_batch_f32                         : legacy one-block-per-combo (thread 0 computes)
-//   * ehlers_ecema_batch_thread_per_combo_f32        : thread-per-combo mapping for better occupancy
-//   * ehlers_ecema_many_series_one_param_time_major_f32 : legacy one-block-per-series (thread 0 computes)
-//   * ehlers_ecema_many_series_one_param_1d_f32      : 1D thread-per-series mapping
-//   * ehlers_ecema_many_series_one_param_2d_f32      : 2D tiled thread-per-series mapping
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -26,7 +26,7 @@ __device__ inline float compute_alpha_f(int length) {
 }
 __device__ inline float compute_beta_f(float a) { return 1.0f - a; }
 
-// Double helpers retained for legacy/plain kernel parity with CPU
+
 __device__ inline double compute_alpha(int length) {
     return 2.0 / (static_cast<double>(length) + 1.0);
 }
@@ -81,13 +81,13 @@ __device__ inline double pick_src(const float* prices, int idx, bool confirmed) 
     return static_cast<double>(prices[source_idx]);
 }
 
-// --- Gain selection helpers: closed-form + grid quantization (step = 0.1) ---
-// Tie-breaking rule: if g* is exactly halfway between two grid points,
-// choose the LOWER one (matches earliest-hit behavior of a scan from -L..+L).
+
+
+
 __device__ __forceinline__ int quantize_to_0p1_tie_down_i(double gstar_times10, int gain_limit_times10) {
-    int gi = __double2int_rd(gstar_times10); // floor
+    int gi = __double2int_rd(gstar_times10); 
     double frac = gstar_times10 - static_cast<double>(gi);
-    if (frac > 0.5) gi += 1; // strictly nearer to upper neighbor; 0.5 keeps floor (lower)
+    if (frac > 0.5) gi += 1; 
     if (gi >  gain_limit_times10) gi =  gain_limit_times10;
     if (gi < -gain_limit_times10) gi = -gain_limit_times10;
     return gi;
@@ -103,15 +103,15 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
     const double base = a * e + (1.0 - a) * p;
     const double d = s - base;
     const double c = a * (s - p);
-    const double sl = c * 0.1; // slope per integer step (k in tenths)
+    const double sl = c * 0.1; 
     const int gL = gain_limit;
 
     if (!isfinite(sl) || fabs(sl) <= DBL_MIN) {
-        // Error independent of gain: original scan picks the first grid value (-gL)
+        
         return static_cast<float>(-0.1 * static_cast<double>(gL));
     }
 
-    const double k_cont = d / sl; // ideal continuous minimizer in integer tenths
+    const double k_cont = d / sl; 
     if (k_cont <= -(static_cast<double>(gL) + 1.0)) {
         return static_cast<float>(-0.1 * static_cast<double>(gL));
     }
@@ -119,7 +119,7 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
         return static_cast<float>(0.1 * static_cast<double>(gL));
     }
 
-    int k0 = __double2int_rd(k_cont); // floor
+    int k0 = __double2int_rd(k_cont); 
     int k1 = k0 + 1;
     if (k0 < -gL) k0 = -gL; else if (k0 > gL) k0 = gL;
     if (k1 < -gL) k1 = -gL; else if (k1 > gL) k1 = gL;
@@ -127,7 +127,7 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
     const double e0 = fabs(d - sl * static_cast<double>(k0));
     const double e1 = fabs(d - sl * static_cast<double>(k1));
 
-    const int k_best = (e1 < e0) ? k1 : k0; // tie -> lower (k0)
+    const int k_best = (e1 < e0) ? k1 : k0; 
     return static_cast<float>(0.1 * static_cast<double>(k_best));
 }
 
@@ -186,7 +186,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
     const float nan_f = NAN;
 
     if (threadIdx.x == 0) {
-        // Validate early; decide if we will return before compute
+        
         if (length <= 0 || gain_limit <= 0) { 
             for (int i = 0; i < series_len; ++i) out[base + i] = nan_f; 
         }
@@ -213,7 +213,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
 
     const int warm = pine_mode ? first_valid : first_valid + length - 1;
     if (warm >= series_len) {
-        // Invalid warm; fill all NaN in parallel and return
+        
         for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
             out[base + idx] = nan_f;
         }
@@ -221,7 +221,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Valid path: only pre-fill prefix [0, warm)
+    
     for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = nan_f;
     }
@@ -272,9 +272,9 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Thread-per-combo batch kernel: each thread processes a unique (length,gain_limit)
-// pair sequentially over time. Improves occupancy vs. the legacy one-block-per-combo
-// variant while preserving identical numerical behaviour.
+
+
+
 extern "C" __global__
 void ehlers_ecema_batch_thread_per_combo_f32(const float* __restrict__ prices,
                                              const int* __restrict__ lengths,
@@ -403,13 +403,13 @@ void ehlers_ecema_many_series_one_param_time_major_f32(
 
     const int warm = pine_mode ? first_valid : first_valid + length - 1;
     if (warm >= series_len) {
-        // invalid setup: fill entire series and return
+        
         for (int t = threadIdx.x; t < series_len; t += blockDim.x)
             out_tm[t * num_series + series] = nan_f;
         __syncthreads();
         return;
     }
-    // valid path: only prefill [0, warm)
+    
     for (int t = threadIdx.x; t < warm; t += blockDim.x)
         out_tm[t * num_series + series] = nan_f;
     __syncthreads();
@@ -463,7 +463,7 @@ void ehlers_ecema_many_series_one_param_time_major_f32(
     }
 }
 
-// 1D mapping: thread-per-series many-series kernel on time-major layout.
+
 extern "C" __global__
 void ehlers_ecema_many_series_one_param_1d_f32(
     const float* __restrict__ prices_tm,
@@ -535,7 +535,7 @@ void ehlers_ecema_many_series_one_param_1d_f32(
     }
 }
 
-// 2D tiled mapping across series: each thread in the 2D block processes one series.
+
 extern "C" __global__
 void ehlers_ecema_many_series_one_param_2d_f32(
     const float* __restrict__ prices_tm,
@@ -547,10 +547,10 @@ void ehlers_ecema_many_series_one_param_2d_f32(
     unsigned char confirmed_flag,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    // Convert 2D thread index into a linear series index across grid tiles.
+    
     const int tx = blockDim.x;
     const int ty = blockDim.y;
-    const int series_per_grid_row = gridDim.x * tx; // series covered by one grid.y slice
+    const int series_per_grid_row = gridDim.x * tx; 
     const int local_series = threadIdx.y * tx + threadIdx.x;
     const int series = blockIdx.y * series_per_grid_row + blockIdx.x * tx + local_series;
     if (series >= num_series) { return; }

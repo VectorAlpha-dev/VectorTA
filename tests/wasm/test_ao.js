@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -44,17 +44,17 @@ test('AO with default parameters', () => {
     const { high, low } = testData;
     const result = wasm.ao_js(high, low, 5, 34);
     
-    // WASM returns Float64Array, not regular Array
+    
     assert.ok(result instanceof Float64Array || Array.isArray(result));
     assert.strictEqual(result.length, high.length);
     
-    // Check warmup period
-    const warmupPeriod = 34; // long_period
+    
+    const warmupPeriod = 34; 
     for (let i = 0; i < warmupPeriod - 1; i++) {
         assert.ok(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
     }
     
-    // Values after warmup should not be NaN
+    
     for (let i = warmupPeriod - 1; i < result.length; i++) {
         assert.ok(isFinite(result[i]), `Value at index ${i} should be finite`);
     }
@@ -70,7 +70,7 @@ test('AO matches expected values from Rust tests', () => {
         expected.defaultParams.long_period
     );
     
-    // Check last 5 values match expected with tolerance
+    
     const last5 = Array.from(result.slice(-5));
     assertArrayClose(last5, expected.last5Values, 1e-4, 'AO last 5 values mismatch');
 });
@@ -86,7 +86,7 @@ test('AO with empty input', () => {
 
 test('AO with mismatched lengths', () => {
     const high = new Float64Array([10.0, 20.0, 30.0]);
-    const low = new Float64Array([5.0, 15.0]); // Different length
+    const low = new Float64Array([5.0, 15.0]); 
     
     assert.throws(
         () => wasm.ao_js(high, low, 5, 34),
@@ -98,19 +98,19 @@ test('AO with invalid periods', () => {
     const high = new Float64Array(50).fill(100);
     const low = new Float64Array(50).fill(90);
     
-    // Zero short period
+    
     assert.throws(
         () => wasm.ao_js(high, low, 0, 34),
         /Invalid periods/
     );
     
-    // Zero long period
+    
     assert.throws(
         () => wasm.ao_js(high, low, 5, 0),
         /Invalid periods/
     );
     
-    // Short period >= long period
+    
     assert.throws(
         () => wasm.ao_js(high, low, 34, 34),
         /Short period must be less than long period/
@@ -146,7 +146,7 @@ test('AO with leading NaN values', () => {
     const highWithNan = new Float64Array(high);
     const lowWithNan = new Float64Array(low);
     
-    // Add some leading NaNs
+    
     for (let i = 0; i < 5; i++) {
         highWithNan[i] = NaN;
         lowWithNan[i] = NaN;
@@ -156,7 +156,7 @@ test('AO with leading NaN values', () => {
     
     assert.strictEqual(result.length, high.length);
     
-    // First 5 + warmup period should be NaN
+    
     for (let i = 0; i < 5 + 34 - 1; i++) {
         assert.ok(isNaN(result[i]));
     }
@@ -170,7 +170,7 @@ test('AO with constant prices', () => {
     
     const result = wasm.ao_js(high, low, 5, 34);
     
-    // With constant prices, AO should be 0 after warmup
+    
     const warmup = 34;
     for (let i = warmup; i < length; i++) {
         assert.ok(Math.abs(result[i]) < 1e-10, 
@@ -180,20 +180,20 @@ test('AO with constant prices', () => {
 
 test('AO in trending market', () => {
     const length = 100;
-    // Create uptrending data
+    
     const high = new Float64Array(length);
     const low = new Float64Array(length);
     
     for (let i = 0; i < length; i++) {
-        const price = 100 + i; // Uptrending
+        const price = 100 + i; 
         high[i] = price + 5;
         low[i] = price - 5;
     }
     
     const result = wasm.ao_js(high, low, 5, 34);
     
-    // In a strong uptrend, AO should be positive after initial period
-    // Check last 10 values are positive
+    
+    
     for (let i = result.length - 10; i < result.length; i++) {
         assert.ok(result[i] > 0, `AO should be positive in uptrend at index ${i}`);
     }
@@ -204,15 +204,15 @@ test('AO batch calculation with single parameters', () => {
     
     const result = wasm.ao_batch_js(
         high, low,
-        5, 5, 0,   // short_period range (single value)
-        34, 34, 0  // long_period range (single value)
+        5, 5, 0,   
+        34, 34, 0  
     );
     
-    // Batch returns flat array
+    
     assert.ok(result instanceof Float64Array || Array.isArray(result));
     assert.strictEqual(result.length, high.length);
     
-    // Should match single calculation
+    
     const singleResult = wasm.ao_js(high, low, 5, 34);
     assertArrayClose(
         Array.from(result), 
@@ -224,30 +224,30 @@ test('AO batch calculation with single parameters', () => {
 
 test('AO batch calculation with parameter sweep', () => {
     const { high, low } = testData;
-    const dataLen = Math.min(high.length, 100); // Use smaller subset for speed
+    const dataLen = Math.min(high.length, 100); 
     const highSubset = high.slice(0, dataLen);
     const lowSubset = low.slice(0, dataLen);
     
     const result = wasm.ao_batch_js(
         highSubset, lowSubset,
-        3, 7, 2,    // short: 3, 5, 7
-        20, 30, 5   // long: 20, 25, 30
+        3, 7, 2,    
+        20, 30, 5   
     );
     
-    // Should have 3 * 3 = 9 combinations
+    
     const expectedRows = 3 * 3;
     assert.strictEqual(result.length, expectedRows * dataLen);
 });
 
 test('AO batch metadata', () => {
-    // For short_period 3-7 step 2 and long_period 20-30 step 5
+    
     const meta = wasm.ao_batch_metadata_js(3, 7, 2, 20, 30, 5);
     
     assert.ok(meta instanceof Float64Array || Array.isArray(meta));
-    // 3 short periods * 3 long periods = 9 combos, each has 2 values
+    
     assert.strictEqual(meta.length, 3 * 3 * 2);
     
-    // Check structure (short, long pairs)
+    
     const expectedPairs = [
         [3, 20], [3, 25], [3, 30],
         [5, 20], [5, 25], [5, 30],
@@ -265,15 +265,15 @@ test('AO batch with invalid combinations', () => {
     const highSubset = high.slice(0, 50);
     const lowSubset = low.slice(0, 50);
     
-    // Range where some short >= long (should be filtered out)
+    
     const result = wasm.ao_batch_js(
         highSubset, lowSubset,
-        5, 15, 5,   // short: 5, 10, 15
-        10, 12, 2   // long: 10, 12
+        5, 15, 5,   
+        10, 12, 2   
     );
     
-    // Only valid combos where short < long
-    // Valid: (5,10), (5,12), (10,12)
+    
+    
     const expectedRows = 3;
     assert.strictEqual(result.length, expectedRows * 50);
 });
@@ -294,7 +294,7 @@ test('AO batch (unified API)', () => {
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, high.length);
     
-    // Check combo structure
+    
     assert.strictEqual(result.combos[0].short_period, 5);
     assert.strictEqual(result.combos[0].long_period, 34);
 });
@@ -302,31 +302,31 @@ test('AO batch (unified API)', () => {
 test('AO error handling coverage', () => {
     const { high, low } = testData;
     
-    // AllValuesNaN
+    
     assert.throws(
         () => wasm.ao_js(new Float64Array(10).fill(NaN), new Float64Array(10).fill(NaN), 5, 34),
         /All values are NaN/
     );
     
-    // InvalidPeriods
+    
     assert.throws(
         () => wasm.ao_js(high.slice(0, 50), low.slice(0, 50), 0, 34),
         /Invalid periods/
     );
     
-    // ShortPeriodNotLess
+    
     assert.throws(
         () => wasm.ao_js(high.slice(0, 50), low.slice(0, 50), 34, 34),
         /Short period must be less than long period/
     );
     
-    // NoData
+    
     assert.throws(
         () => wasm.ao_js(new Float64Array([]), new Float64Array([]), 5, 34),
         /empty|no data/i
     );
     
-    // NotEnoughValidData
+    
     assert.throws(
         () => wasm.ao_js(high.slice(0, 10), low.slice(0, 10), 5, 34),
         /Not enough valid data/
@@ -338,25 +338,25 @@ test('AO real-world conditions', () => {
     
     const result = wasm.ao_js(high, low, 5, 34);
     
-    // Check warmup period behavior
-    const warmup = 34; // long_period
     
-    // Values before warmup should be NaN
+    const warmup = 34; 
+    
+    
     for (let i = 0; i < warmup - 1; i++) {
         assert.ok(isNaN(result[i]));
     }
     
-    // Values from warmup onwards should not be NaN
+    
     const validStart = warmup - 1;
     for (let i = validStart; i < result.length; i++) {
         assert.ok(!isNaN(result[i]));
     }
     
-    // Check output properties
+    
     assert.strictEqual(result.length, high.length);
     
-    // AO typically oscillates around zero
-    // Check that we have both positive and negative values
+    
+    
     const validValues = Array.from(result.slice(validStart));
     assert.ok(validValues.some(v => v > 0), 'Should have some positive values');
     assert.ok(validValues.some(v => v < 0), 'Should have some negative values');
@@ -372,6 +372,6 @@ test('AO comparison with Rust', () => {
         expected.defaultParams.long_period
     );
     
-    // TODO: Fix generate_references to support AO's high/low inputs
-    // compareWithRust('ao', Array.from(result), 'hl', expected.defaultParams);
+    
+    
 });

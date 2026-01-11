@@ -1,8 +1,8 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
-// CommonJS wrapper for wasm-bindgen output used by tests in ESM mode
-// Copied from tests/wasm/my_project.js to avoid ESM 'module is not defined' errors
+
+
 const exportsObj = module.exports;
 let imports = {};
 imports['__wbindgen_placeholder__'] = exportsObj;
@@ -122,13 +122,13 @@ function debugString(val) {
 <<<<<<< HEAD
 <<<<<<< HEAD
 =======
-    // primitive types
+    
 >>>>>>> simd-1
 =======
-    // primitive types
+    
 >>>>>>> simd-3
 =======
-    // primitive types
+    
 >>>>>>> simd-4
     const type = typeof val;
     if (type == 'number' || type == 'boolean' || val == null) {
@@ -164,7 +164,7 @@ function debugString(val) {
             return 'Function';
         }
     }
-    // objects
+    
 <<<<<<< HEAD
 <<<<<<< HEAD
 >>>>>>> simd-1
@@ -188,13 +188,13 @@ function debugString(val) {
 <<<<<<< HEAD
 <<<<<<< HEAD
 =======
-    // Test for built-in
+    
 >>>>>>> simd-1
 =======
-    // Test for built-in
+    
 >>>>>>> simd-3
 =======
-    // Test for built-in
+    
 >>>>>>> simd-4
     const builtInMatches = /\[object ([^\]]+)\]/.exec(toString.call(val));
     let className;
@@ -212,13 +212,13 @@ function debugString(val) {
 >>>>>>> simd-3
 =======
 >>>>>>> simd-4
-        // Failed to match the standard '[object ClassName]'
+        
         return toString.call(val);
     }
     if (className == 'Object') {
-        // we're a user defined class or Object
-        // JSON.stringify avoids problems with cycles, and is generally much
-        // easier than looping through ownProperties of `val`.
+        
+        
+        
 <<<<<<< HEAD
 <<<<<<< HEAD
 >>>>>>> simd-1
@@ -254,11 +254,11 @@ let cachedFloat64ArrayMemory0 = null;
 >>>>>>> simd-3
 =======
 >>>>>>> simd-4
-    // errors
+    
     if (val instanceof Error) {
         return `${val.name}: ${val.message}\n${val.stack}`;
     }
-    // TODO we could test for more things here, like `Set`s and `Map`s.
+    
     return className;
 }
 
@@ -299,11 +299,11 @@ const path = require('path');
 const fs = require('fs');
 
 function initSync() {
-    // Use the test-local wasm artifact that pairs with this wrapper
+    
     const wasm_path = path.join(__dirname, 'my_project_bg.wasm');
     const bytes = fs.readFileSync(wasm_path);
     const mod = new WebAssembly.Module(bytes);
-    // Match the original wrapper: provide a basic wbg memory import
+    
     imports.wbg = imports.wbg || { memory: new WebAssembly.Memory({ initial: 7 }) };
     const instance = new WebAssembly.Instance(mod, imports);
     wasm = instance.exports;
@@ -312,7 +312,7 @@ function initSync() {
 
 initSync();
 
-// Export selected VOSC functions used by the tests
+
 exportsObj.vosc_js = function(data, short_period, long_period) {
     const ptr0 = passArrayF64ToWasm0(data, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;

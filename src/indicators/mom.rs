@@ -190,7 +190,7 @@ pub fn mom(input: &MomInput) -> Result<MomOutput, MomError> {
     mom_with_kernel(input, Kernel::Auto)
 }
 
-// New helper function (mirror ALMA pattern)
+
 #[inline(always)]
 fn mom_prepare<'a>(
     input: &'a MomInput,
@@ -1873,7 +1873,7 @@ pub fn register_mom_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaMom;
 #[cfg(all(feature = "python", feature = "cuda"))]

@@ -23,8 +23,8 @@
 //! CUDA wrapper exists; this module now returns more precise errors and hardens batch range
 //! expansion without changing outputs or public API behavior.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -46,13 +46,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -62,17 +62,17 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== DATA STRUCTURES ====================
+
 /// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum TradjemaData<'a> {
@@ -154,7 +154,7 @@ impl<'a> TradjemaInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 #[derive(Copy, Clone, Debug)]
 pub struct TradjemaBuilder {
     length: Option<usize>,
@@ -231,7 +231,7 @@ impl TradjemaBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum TradjemaError {
     #[error("tradjema: Input data slice is empty.")]
@@ -269,7 +269,7 @@ pub enum TradjemaError {
     InvalidKernelForBatch(Kernel),
 }
 
-// ==================== MAIN COMPUTATION ====================
+
 #[inline(always)]
 fn tradjema_prepare<'a>(
     input: &'a TradjemaInput,
@@ -1179,7 +1179,7 @@ impl DeviceArrayF32TradjemaPy {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1200,7 +1200,7 @@ impl DeviceArrayF32TradjemaPy {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -1248,7 +1248,7 @@ impl TradjemaStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn tradjema_into(
@@ -1281,7 +1281,7 @@ pub fn tradjema_into(
             || (out_ptr as *const f64) == high_ptr
             || (out_ptr as *const f64) == low_ptr
         {
-            // aliasing: compute into temp then copy
+            
             let mut tmp = vec![f64::NAN; len];
             tradjema_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1319,7 +1319,7 @@ pub fn tradjema_batch_into(
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        // Build sweep once (same semantics as expand_grid)
+        
         let sweep = TradjemaBatchRange {
             length: (length_start, length_end, length_step),
             mult: (mult_start, mult_end, mult_step),
@@ -1331,11 +1331,11 @@ pub fn tradjema_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        // Directly fill caller's buffer
+        
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Pre-initialize only warm prefixes to NaN to match ALMA's layout contract
-        // (cannot use make_uninit_matrix/init_matrix_prefixes on a foreign buffer)
+        
+        
         let first = close
             .iter()
             .position(|v| !v.is_nan())
@@ -1349,7 +1349,7 @@ pub fn tradjema_batch_into(
             }
         }
 
-        // Compute in-place for all rows
+        
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1388,14 +1388,14 @@ pub fn tradjema_js(
     length: usize,
     mult: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    // Check for empty input first
+    
     if close.is_empty() {
         return Err(JsValue::from_str("Input data slice is empty"));
     }
     if high.len() != low.len() || low.len() != close.len() {
         return Err(JsValue::from_str("length mismatch"));
     }
-    // Validate + compute warm
+    
     if length < 2 || length > close.len() {
         return Err(JsValue::from_str("Invalid length"));
     }
@@ -1411,10 +1411,10 @@ pub fn tradjema_js(
     }
     let warm = first + length - 1;
 
-    // Allocate only the warm prefix as NaN, rest uninitialized then written
+    
     let mut out = alloc_with_nan_prefix(close.len(), warm);
 
-    // Compute in place
+    
     tradjema_compute_into(
         high,
         low,
@@ -1460,7 +1460,7 @@ pub fn tradjema_batch_unified_js(
         mult: cfg.mult_range,
     };
 
-    // Check if arrays are empty
+    
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(JsValue::from_str("Input arrays are empty"));
     }
@@ -1478,7 +1478,7 @@ pub fn tradjema_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct TradjemaBatchRange {
     pub length: (usize, usize, usize),
@@ -1580,7 +1580,7 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
     let (ls, le, lstep) = r.length;
     let (ms, me, mstep) = r.mult;
 
-    // Axis helpers: treat step==0 as static, support reversed bounds.
+    
     #[inline]
     fn axis_usize(start: usize, end: usize, step: usize) -> Vec<usize> {
         if step == 0 {
@@ -1597,7 +1597,7 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
                 }
             }
         } else {
-            // descending
+            
             let mut v = start;
             loop {
                 vals.push(v);
@@ -1622,7 +1622,7 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
             while v <= end {
                 vals.push(v);
                 v += step;
-                // Protect from non-progress due to subnormals
+                
                 if !v.is_finite() { break; }
                 if step.is_sign_negative() { break; }
             }
@@ -1672,16 +1672,16 @@ pub fn tradjema_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Default fallback
+        _ => Kernel::Scalar, 
     };
 
-    // Guard potential overflow before allocation
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        // Attribute to the axis that produced emptiness where possible
+        
         let (ls, le, lstep) = sweep.length;
         let (ms, me, mstep) = sweep.mult;
-        // classify which axis is empty
+        
         let length_empty = (lstep == 0 && ls != le)
             || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
         if length_empty {
@@ -1697,7 +1697,7 @@ pub fn tradjema_batch_with_kernel(
         end: sweep.length.1,
         step: sweep.length.2,
     })?;
-    // Delegate to core implementation (recompute combos inside for warmup init)
+    
     tradjema_batch_inner(high, low, close, sweep, simd, true)
 }
 
@@ -1733,7 +1733,7 @@ fn tradjema_batch_inner_into(
         .position(|v| !v.is_nan())
         .ok_or(TradjemaError::AllValuesNaN)?;
 
-    // Precompute TR once for the entire series; shared across rows
+    
     #[inline(always)]
     fn precompute_tr(high: &[f64], low: &[f64], close: &[f64], first: usize) -> Vec<f64> {
         let n = close.len();
@@ -1770,7 +1770,7 @@ fn tradjema_batch_inner_into(
         }
         let alpha = 2.0 / (length as f64 + 1.0);
 
-        // monotonic deques for TR window
+        
         let cap = length;
         let mut min_vals = vec![0.0f64; cap];
         let mut min_idx = vec![0usize; cap];
@@ -1846,7 +1846,7 @@ fn tradjema_batch_inner_into(
             }
         }
 
-        // seed [first..=warm]
+        
         let mut i = first;
         while i <= warm {
             let v = tr[i];
@@ -1879,7 +1879,7 @@ fn tradjema_batch_inner_into(
         let mut y = a0 * close[warm - 1];
         out[warm] = y;
 
-        // main loop
+        
         i = warm + 1;
         while i < out.len() {
             q_expire(i, length, &mut min_idx, &mut min_head, &mut min_tail, cap);
@@ -1918,7 +1918,7 @@ fn tradjema_batch_inner_into(
         }
     }
 
-    // prefix NaNs already handled by caller via init_matrix_prefixes
+    
     let pre_tr = precompute_tr(high, low, close, first);
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = &combos[row];
@@ -1927,8 +1927,8 @@ fn tradjema_batch_inner_into(
         if length < 2 {
             return;
         }
-        // SIMD selection for batch currently delegates to scalar; reuse shared TR
-        let _ = kern; // keep signature parity
+        
+        let _ = kern; 
         compute_from_tr_into(&pre_tr, close, length, mult, first, dst);
     };
 
@@ -1968,7 +1968,7 @@ fn tradjema_batch_inner(
     let rows = combos.len();
     let cols = close.len();
 
-    // allocate uninit matrix and initialize NaN prefixes per row
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = close
         .iter()
@@ -1980,12 +1980,12 @@ fn tradjema_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // get &mut [f64] from MaybeUninit backing
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // kern is already a regular (non-batch) kernel passed from tradjema_batch_with_kernel
+    
     let combos = tradjema_batch_inner_into(high, low, close, sweep, kern, parallel, out)?;
 
     let values = unsafe {
@@ -2004,7 +2004,7 @@ fn tradjema_batch_inner(
     })
 }
 
-// ==================== UNIT TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2049,11 +2049,11 @@ mod tests {
         let input = TradjemaInput::from_slices(high, low, close, TradjemaParams::default());
         let result = tradjema_with_kernel(&input, kernel)?;
 
-        // Verify output length matches input
+        
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Check that valid values start after warmup period
-        let warmup = 39; // length - 1
+        
+        let warmup = 39; 
         for i in 0..warmup {
             assert!(
                 result.values[i].is_nan(),
@@ -2063,7 +2063,7 @@ mod tests {
             );
         }
 
-        // Check that we have valid values after warmup
+        
         for i in warmup..result.values.len() {
             assert!(
                 !result.values[i].is_nan(),
@@ -2073,7 +2073,7 @@ mod tests {
             );
         }
 
-        // Verify the last 5 values match expected reference values
+        
         let expected_last_five = [
             59395.39322263,
             59388.09683228,
@@ -2118,7 +2118,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let input_data = vec![10.0, 20.0, 30.0];
 
-        // Test length = 0
+        
         let params = TradjemaParams {
             length: Some(0),
             mult: None,
@@ -2131,7 +2131,7 @@ mod tests {
             test_name
         );
 
-        // Test length = 1 (minimum is 2)
+        
         let params = TradjemaParams {
             length: Some(1),
             mult: None,
@@ -2204,7 +2204,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        // Test negative mult
+        
         let params = TradjemaParams {
             length: Some(2),
             mult: Some(-10.0),
@@ -2217,7 +2217,7 @@ mod tests {
             test_name
         );
 
-        // Test NaN mult
+        
         let params = TradjemaParams {
             length: Some(2),
             mult: Some(f64::NAN),
@@ -2242,7 +2242,7 @@ mod tests {
         let low = candles.select_candle_field("low")?;
         let close = candles.select_candle_field("close")?;
 
-        // First pass
+        
         let first_params = TradjemaParams {
             length: Some(20),
             mult: Some(5.0),
@@ -2250,7 +2250,7 @@ mod tests {
         let first_input = TradjemaInput::from_slices(high, low, close, first_params);
         let first_result = tradjema_with_kernel(&first_input, kernel)?;
 
-        // Use output as input for second pass (using close for all OHLC)
+        
         let second_params = TradjemaParams {
             length: Some(20),
             mult: Some(5.0),
@@ -2288,7 +2288,7 @@ mod tests {
         let res = tradjema_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
 
-        // Check NaN handling after warmup
+        
         if res.values.len() > 50 {
             for (i, &val) in res.values[50..].iter().enumerate() {
                 assert!(
@@ -2476,7 +2476,7 @@ mod tests {
                     mult: Some(mult),
                 };
 
-                // Use same data for high/low/close for simplicity
+                
                 let input = TradjemaInput::from_slices(&data, &data, &data, params);
 
                 let TradjemaOutput { values: out } = tradjema_with_kernel(&input, kernel).unwrap();
@@ -2582,7 +2582,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_tradjema_tests!(check_tradjema_property);
 
-    // Batch processing tests
+    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2612,7 +2612,7 @@ mod tests {
             .mult_range(5.0, 15.0, 5.0)
             .apply_candles(&c)?;
 
-        let expected_combos = 4 * 3; // 4 lengths * 3 mults
+        let expected_combos = 4 * 3; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -2709,7 +2709,7 @@ mod tests {
 
     #[test]
     fn test_expand_grid_single_value() {
-        // Test case that's failing in WASM
+        
         let range = TradjemaBatchRange {
             length: (2, 2, 0),
             mult: (10.0, 10.0, 0.0),
@@ -2723,7 +2723,7 @@ mod tests {
         assert_eq!(combos[0].length, Some(2));
         assert_eq!(combos[0].mult, Some(10.0));
 
-        // Another test case from the failing tests
+        
         let range2 = TradjemaBatchRange {
             length: (40, 40, 0),
             mult: (10.0, 10.0, 0.0),
@@ -2744,7 +2744,7 @@ mod tests {
 
     #[test]
     fn test_tradjema_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the same dataset as existing tests to mirror defaults and warmup
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let (h, l, cl) = (
@@ -2755,16 +2755,16 @@ mod tests {
 
         let input = TradjemaInput::from_slices(h, l, cl, TradjemaParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let base = tradjema(&input)?.values;
 
-        // New into API (no allocations)
+        
         let mut out = vec![0.0; cl.len()];
         tradjema_into(&input, &mut out)?;
 
         assert_eq!(base.len(), out.len());
 
-        // Equality check: treat NaN == NaN, otherwise exact equality (paths are identical)
+        
         for i in 0..out.len() {
             let a = base[i];
             let b = out[i];

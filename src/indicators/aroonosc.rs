@@ -201,7 +201,7 @@ pub enum AroonOscError {
     MismatchSliceLength { high_len: usize, low_len: usize },
     #[error("aroonosc: Output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
-    // Batch-specific
+    
     #[error("aroonosc: Invalid range: start={start}, end={end}, step={step}")]
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("aroonosc: Invalid kernel for batch: {0:?}")]
@@ -237,7 +237,7 @@ fn aroon_osc_prepare<'a>(
     }
 
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
-    // Need at least (length+1) values after `first`
+    
     let window = length
         .checked_add(1)
         .ok_or(AroonOscError::InvalidPeriod {
@@ -340,25 +340,25 @@ pub fn aroon_osc_scalar_highlow_into(
 ) {
     let len = low.len();
     let window = length + 1;
-    let start_i = first + length; // window-1 == length
+    let start_i = first + length; 
     if start_i >= len {
         return;
     }
-    // Heuristic: For small windows, a straight rescan is typically fastest.
-    // For larger windows, switch to O(n) monotonic deques for max(high) and min(low).
+    
+    
     if length <= 64 {
-        // Precompute scale for final oscillator value: 100/length.
-        //
-        // Maintain the window's argmax/argmin with occasional rescans only when the
-        // previous extreme falls out of the window. Tie rules are strict (> / <),
-        // preserving earliest-index wins (matching the historical scan behavior).
+        
+        
+        
+        
+        
         let scale = 100.0 / length as f64;
         unsafe {
             let h_ptr = high.as_ptr();
             let l_ptr = low.as_ptr();
             let out_ptr = out.as_mut_ptr();
 
-            // Seed extremes from the first full window [first ..= start_i].
+            
             let mut maxi = first;
             let mut mini = first;
             let mut max = *h_ptr.add(first);
@@ -382,7 +382,7 @@ pub fn aroon_osc_scalar_highlow_into(
             while i < len {
                 let start = i - length;
 
-                // Highest high
+                
                 let bar_h = *h_ptr.add(i);
                 if maxi < start {
                     maxi = start;
@@ -401,7 +401,7 @@ pub fn aroon_osc_scalar_highlow_into(
                     max = bar_h;
                 }
 
-                // Lowest low
+                
                 let bar_l = *l_ptr.add(i);
                 if mini < start {
                     mini = start;
@@ -420,7 +420,7 @@ pub fn aroon_osc_scalar_highlow_into(
                     min = bar_l;
                 }
 
-                // Aroon Osc = 100/length * (high_idx - low_idx)
+                
                 let v = (maxi as f64 - mini as f64) * scale;
                 *out_ptr.add(i) = v.max(-100.0).min(100.0);
                 i += 1;
@@ -429,8 +429,8 @@ pub fn aroon_osc_scalar_highlow_into(
         return;
     }
 
-    // Monotonic deque implementation (safe, ring-buffer based)
-    let cap = window; // max elements kept in each deque
+    
+    let cap = window; 
 
     let mut dq_hi = vec![0usize; cap];
     let mut hi_head = 0usize;
@@ -458,16 +458,16 @@ pub fn aroon_osc_scalar_highlow_into(
         }
     }
 
-    // Warm-up: seed deques with indices [first, start_i)
+    
     for i in first..start_i {
-        // Highs: maintain strictly decreasing values from front to back
+        
         let v_hi = high[i];
         while hi_len > 0 {
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
             if last_val < v_hi {
-                // strict to preserve earliest index on ties
+                
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -478,14 +478,14 @@ pub fn aroon_osc_scalar_highlow_into(
         inc_wrap(&mut hi_tail, cap);
         hi_len += 1;
 
-        // Lows: maintain strictly increasing values from front to back
+        
         let v_lo = low[i];
         while lo_len > 0 {
             let last = dec_wrap(lo_tail, cap);
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
             if last_val > v_lo {
-                // strict to preserve earliest index on ties
+                
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -499,9 +499,9 @@ pub fn aroon_osc_scalar_highlow_into(
 
     let scale = 100.0 / length as f64;
     for i in start_i..len {
-        let start = i - length; // window start index (inclusive)
+        let start = i - length; 
 
-        // Expire outdated indices
+        
         while hi_len > 0 && dq_hi[hi_head] < start {
             inc_wrap(&mut hi_head, cap);
             hi_len -= 1;
@@ -511,14 +511,14 @@ pub fn aroon_osc_scalar_highlow_into(
             lo_len -= 1;
         }
 
-        // Insert current index
+        
         let v_hi = high[i];
         while hi_len > 0 {
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
             if last_val < v_hi {
-                // strict comparison keeps earliest index on ties
+                
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -535,7 +535,7 @@ pub fn aroon_osc_scalar_highlow_into(
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
             if last_val > v_lo {
-                // strict comparison keeps earliest index on ties
+                
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -747,7 +747,7 @@ fn expand_grid(r: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, AroonOscEr
             }
             Ok(v)
         } else {
-            // reversed bounds supported
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -811,7 +811,7 @@ fn aroon_osc_batch_inner(
 
     let len = high.len();
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
-    // largest window = length + 1; first must allow that
+    
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     let needed = max_len
         .checked_add(1)
@@ -834,17 +834,17 @@ fn aroon_osc_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    // Guard rows * cols before allocation
+    
     rows.checked_mul(cols).ok_or(AroonOscError::InvalidRange {
         start: sweep.length.0,
         end: sweep.length.1,
         step: sweep.length.2,
     })?;
 
-    // Step 1: Allocate uninitialized matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: per-row warm prefix = first + length
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -859,7 +859,7 @@ fn aroon_osc_batch_inner(
         .collect::<Result<_, _>>()?;
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Step 4: Convert to mutable slice for computation
+    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -891,7 +891,7 @@ fn aroon_osc_batch_inner(
         }
     }
 
-    // Step 5: Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -968,7 +968,7 @@ fn aroon_osc_batch_inner_into(
         })
         .collect::<Result<_, _>>()?;
 
-    // Initialize warm prefixes to NaN using the standard helper
+    
     let mut out_uninit = unsafe {
         Vec::from_raw_parts(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -979,7 +979,7 @@ fn aroon_osc_batch_inner_into(
     init_matrix_prefixes(&mut out_uninit, cols, &warmup_periods);
     std::mem::forget(out_uninit);
 
-    // Treat `out` as uninitialized for computation
+    
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -988,7 +988,7 @@ fn aroon_osc_batch_inner_into(
     };
 
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| {
-        // compute into a temporary view over the same memory as f64 for the computed tail only
+        
         let dst = unsafe {
             core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len())
         };
@@ -1113,25 +1113,25 @@ pub fn aroon_osc_batch_into_slice(
         return Err(AroonOscError::OutputLengthMismatch { expected: expected_len, got: out.len() });
     }
 
-    // Use the existing inner function
+    
     aroon_osc_batch_inner_into(high, low, sweep, kern, parallel, out)
 }
 
 #[derive(Debug, Clone)]
 pub struct AroonOscStream {
     length: usize,
-    scale: f64, // 100.0 / length
-    cap: usize, // window size = length + 1 (inclusive [t-length, t])
-    t: usize,   // absolute index for the next sample
+    scale: f64, 
+    cap: usize, 
+    t: usize,   
 
-    // Monotonic decreasing deque for highs (max)
+    
     hi_idx: Vec<usize>,
     hi_val: Vec<f64>,
     hi_head: usize,
     hi_tail: usize,
     hi_len: usize,
 
-    // Monotonic increasing deque for lows (min)
+    
     lo_idx: Vec<usize>,
     lo_val: Vec<f64>,
     lo_head: usize,
@@ -1148,7 +1148,7 @@ impl AroonOscStream {
         }
         let cap = length
             .checked_add(1)
-            .ok_or(AroonOscError::InvalidPeriod { period: length, data_len: 0 })?; // inclusive window [t-length, t]
+            .ok_or(AroonOscError::InvalidPeriod { period: length, data_len: 0 })?; 
         Ok(Self {
             length,
             scale: 100.0 / length as f64,
@@ -1267,7 +1267,7 @@ mod tests {
     
     #[test]
     fn test_aroonosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial synthetic candle set
+        
         let n = 256usize;
         let timestamp: Vec<i64> = (0..n as i64).collect();
         let mut open = Vec::with_capacity(n);
@@ -1295,16 +1295,16 @@ mod tests {
         let candles = Candles::new(timestamp, open, high.clone(), low.clone(), close, volume);
         let input = AroonOscInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = aroon_osc(&input)?.values;
 
-        // Into API writes into caller-provided buffer
+        
         let mut out = vec![0.0; n];
         aroon_osc_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: NaN == NaN; otherwise exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1427,7 +1427,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_aroonosc_no_poison(
         test_name: &str,
@@ -1438,14 +1438,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to catch edge cases
+        
         let test_lengths = vec![
-            5,   // Very small period
-            14,  // Default period
-            25,  // Medium period
-            50,  // Large period
-            100, // Very large period
-            200, // Extra large period
+            5,   
+            14,  
+            25,  
+            50,  
+            100, 
+            200, 
         ];
 
         for length in test_lengths {
@@ -1454,23 +1454,23 @@ mod tests {
             };
             let input = AroonOscInput::from_candles(&candles, params);
 
-            // Skip if not enough data for this length
+            
             if candles.close.len() < length {
                 continue;
             }
 
             let output = aroon_osc_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with length {}",
@@ -1478,7 +1478,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with length {}",
@@ -1486,7 +1486,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with length {}",
@@ -1499,7 +1499,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_aroonosc_no_poison(
         _test_name: &str,
@@ -1517,18 +1517,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic test scenarios with various market conditions
+        
         let strat = (2usize..=100)
             .prop_flat_map(|length| {
-                let min_size = (length * 2).max(length + 20); // Ensure enough data for proper testing
+                let min_size = (length * 2).max(length + 20); 
                 let max_size = 400;
                 (
-                    10.0f64..1000.0f64, // Base price
-                    0.0f64..0.1f64,     // Volatility percentage (0% to 10%)
-                    -0.02f64..0.02f64,  // Trend strength (-2% to 2% per period)
-                    min_size..max_size, // Data size
-                    Just(length),       // Period for AroonOsc
-                    0u8..6, // Market type: 0=ranging, 1=uptrend, 2=downtrend, 3=flat, 4=monotonic up, 5=monotonic down
+                    10.0f64..1000.0f64, 
+                    0.0f64..0.1f64,     
+                    -0.02f64..0.02f64,  
+                    min_size..max_size, 
+                    Just(length),       
+                    0u8..6, 
                 )
             })
             .prop_map(
@@ -1536,20 +1536,20 @@ mod tests {
                     let mut high = Vec::with_capacity(size);
                     let mut low = Vec::with_capacity(size);
 
-                    // Generate realistic OHLC data based on market type
+                    
                     for i in 0..size {
                         let time_factor = i as f64 / size as f64;
 
                         let (h, l) = match market_type {
                             0 => {
-                                // Ranging market with sine wave pattern
+                                
                                 let cycle = (time_factor * 4.0 * std::f64::consts::PI).sin();
                                 let price = base_price * (1.0 + cycle * volatility);
                                 let spread = price * volatility * 0.5;
                                 (price + spread, price - spread)
                             }
                             1 => {
-                                // Strong uptrend
+                                
                                 let price = base_price * (1.0 + trend.abs() * i as f64);
                                 let noise = ((i * 17 + 13) % 100) as f64 / 100.0 - 0.5;
                                 let variation = price * volatility * noise * 0.3;
@@ -1557,7 +1557,7 @@ mod tests {
                                 (price + variation + spread, price + variation - spread)
                             }
                             2 => {
-                                // Strong downtrend
+                                
                                 let price = base_price * (1.0 - trend.abs() * i as f64).max(1.0);
                                 let noise = ((i * 23 + 7) % 100) as f64 / 100.0 - 0.5;
                                 let variation = price * volatility * noise * 0.3;
@@ -1565,26 +1565,26 @@ mod tests {
                                 (price + variation + spread, price + variation - spread)
                             }
                             3 => {
-                                // Completely flat market (high = low = constant)
+                                
                                 let price = base_price;
                                 (price, price)
                             }
                             4 => {
-                                // Monotonically increasing
+                                
                                 let price = base_price + (i as f64 * base_price * 0.01);
-                                let spread = price * 0.001; // Very small spread
+                                let spread = price * 0.001; 
                                 (price + spread, price - spread)
                             }
                             _ => {
-                                // Monotonically decreasing
+                                
                                 let price = base_price
                                     - (i as f64 * base_price * 0.005).min(base_price * 0.9);
-                                let spread = price * 0.001; // Very small spread
+                                let spread = price * 0.001; 
                                 (price + spread, price - spread)
                             }
                         };
 
-                        // Ensure high >= low constraint
+                        
                         high.push(h.max(l));
                         low.push(h.min(l));
                     }
@@ -1600,16 +1600,16 @@ mod tests {
                 };
                 let input = AroonOscInput::from_slices_hl(&high, &low, params);
 
-                // Test with specified kernel
+                
                 let result = aroon_osc_with_kernel(&input, kernel)?;
 
-                // Test with scalar reference for comparison
+                
                 let reference = aroon_osc_with_kernel(&input, Kernel::Scalar)?;
 
-                // Verify output length matches input
+                
                 prop_assert_eq!(result.values.len(), high.len(), "Output length mismatch");
 
-                // Check warmup period - first 'length' values should be NaN
+                
                 for i in 0..length {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -1619,12 +1619,12 @@ mod tests {
                     );
                 }
 
-                // Check values after warmup period
+                
                 for i in length..result.values.len() {
                     let val = result.values[i];
                     let ref_val = reference.values[i];
 
-                    // AroonOsc must be in range [-100, 100]
+                    
                     prop_assert!(
                         val >= -100.0 && val <= 100.0,
                         "AroonOsc value {} at index {} out of range [-100, 100]",
@@ -1632,9 +1632,9 @@ mod tests {
                         i
                     );
 
-                    // Check kernel consistency
+                    
                     if val.is_finite() && ref_val.is_finite() {
-                        // Allow small floating point differences
+                        
                         let diff = (val - ref_val).abs();
                         prop_assert!(
                             diff <= 1e-9,
@@ -1645,7 +1645,7 @@ mod tests {
                             diff
                         );
                     } else {
-                        // Both should be NaN or both finite
+                        
                         prop_assert_eq!(
                             val.is_nan(),
                             ref_val.is_nan(),
@@ -1656,12 +1656,12 @@ mod tests {
                         );
                     }
 
-                    // Test AroonOsc-specific properties based on data patterns
+                    
                     let window_start = i.saturating_sub(length);
                     let window_high = &high[window_start..=i];
                     let window_low = &low[window_start..=i];
 
-                    // Property 1: When all values in window are identical (flat), AroonOsc should be 0
+                    
                     if window_high
                         .iter()
                         .all(|&h| (h - window_high[0]).abs() < f64::EPSILON)
@@ -1677,7 +1677,7 @@ mod tests {
 						);
                     }
 
-                    // Property 2: Find position of highest high and lowest low in window
+                    
                     let highest_idx = window_high
                         .iter()
                         .enumerate()
@@ -1692,9 +1692,9 @@ mod tests {
                         .map(|(idx, _)| idx)
                         .unwrap_or(0);
 
-                    // When highest is most recent (at end of window), Aroon Up should be 100
+                    
                     if highest_idx == window_high.len() - 1 {
-                        // AroonOsc should be positive when highest high is most recent
+                        
                         prop_assert!(
 							val >= -100.0 && val <= 100.0,
 							"When highest high is most recent, AroonOsc {} should be valid at index {}",
@@ -1703,9 +1703,9 @@ mod tests {
 						);
                     }
 
-                    // When lowest is most recent (at end of window), Aroon Down should be 100
+                    
                     if lowest_idx == window_low.len() - 1 {
-                        // AroonOsc should be negative when lowest low is most recent
+                        
                         prop_assert!(
 							val >= -100.0 && val <= 100.0,
 							"When lowest low is most recent, AroonOsc {} should be valid at index {}",
@@ -1714,10 +1714,10 @@ mod tests {
 						);
                     }
 
-                    // Property 3: Monotonic sequences should have consistent behavior
+                    
                     if market_type == 4 {
-                        // Monotonically increasing - most recent high should be highest
-                        // AroonOsc should tend to be positive
+                        
+                        
                         prop_assert!(
 							val >= -100.0,
 							"Monotonic increasing should not produce very negative AroonOsc, got {} at index {}",
@@ -1725,8 +1725,8 @@ mod tests {
 							i
 						);
                     } else if market_type == 5 {
-                        // Monotonically decreasing - most recent low should be lowest
-                        // AroonOsc should tend to be negative
+                        
+                        
                         prop_assert!(
 							val <= 100.0,
 							"Monotonic decreasing should not produce very positive AroonOsc, got {} at index {}",
@@ -1735,7 +1735,7 @@ mod tests {
 						);
                     }
 
-                    // Property 4: When extremes are at opposite ends of window (but not in flat markets)
+                    
                     let is_flat_window = window_high
                         .iter()
                         .all(|&h| (h - window_high[0]).abs() < f64::EPSILON)
@@ -1745,7 +1745,7 @@ mod tests {
 
                     if !is_flat_window {
                         if highest_idx == window_high.len() - 1 && lowest_idx == 0 {
-                            // Highest is most recent, lowest is oldest -> AroonOsc should be near 100
+                            
                             prop_assert!(
 								val >= 50.0,
 								"When highest is recent and lowest is old, AroonOsc {} should be positive at index {}",
@@ -1753,7 +1753,7 @@ mod tests {
 								i
 							);
                         } else if lowest_idx == window_low.len() - 1 && highest_idx == 0 {
-                            // Lowest is most recent, highest is oldest -> AroonOsc should be near -100
+                            
                             prop_assert!(
 								val <= -50.0,
 								"When lowest is recent and highest is old, AroonOsc {} should be negative at index {}",
@@ -1764,7 +1764,7 @@ mod tests {
                     }
                 }
 
-                // Verify no poison values (debug builds check these)
+                
                 #[cfg(debug_assertions)]
                 for &val in &result.values {
                     if !val.is_nan() {
@@ -1844,7 +1844,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1852,19 +1852,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to catch edge cases
+        
         let test_configs = vec![
-            // (start, end, step) for length ranges
-            (2, 10, 2),    // Small lengths: 2, 4, 6, 8, 10
-            (5, 25, 5),    // Medium lengths: 5, 10, 15, 20, 25
-            (10, 100, 10), // Large lengths: 10, 20, 30, ..., 100
-            (50, 200, 50), // Very large lengths: 50, 100, 150, 200
-            (14, 14, 0),   // Single parameter (default)
-            (1, 5, 1),     // Edge case: very small lengths 1, 2, 3, 4, 5
+            
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (10, 100, 10), 
+            (50, 200, 50), 
+            (14, 14, 0),   
+            (1, 5, 1),     
         ];
 
         for (start, end, step) in test_configs {
-            // Skip if data is not sufficient for the largest length
+            
             if c.close.len() < end {
                 continue;
             }
@@ -1874,9 +1874,9 @@ mod tests {
                 .length_range(start, end, step)
                 .apply_candles(&c)?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1886,7 +1886,7 @@ mod tests {
                 let col = idx % output.cols;
                 let length = output.combos[row].length.unwrap_or(14);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1894,7 +1894,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1902,7 +1902,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1915,7 +1915,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2050,7 +2050,7 @@ pub fn aroon_osc_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Validate inputs have same length
+    
     if high_slice.len() != low_slice.len() {
         return Err(PyValueError::new_err(format!(
             "High and low arrays must have same length. Got high: {}, low: {}",
@@ -2059,26 +2059,26 @@ pub fn aroon_osc_batch_py<'py>(
         )));
     }
 
-    // Validate kernel parameter before entering allow_threads
+    
     let kern = validate_kernel(kernel, true)?;
 
     let sweep = AroonOscBatchRange {
         length: length_range,
     };
 
-    // Calculate dimensions for pre-allocation
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    // Pre-allocate uninitialized NumPy array for maximum efficiency
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute directly into pre-allocated buffer
+    
     let combos = py
         .allow_threads(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
-            // Resolve kernel for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2094,7 +2094,7 @@ pub fn aroon_osc_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary with zero-copy transfers
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2109,7 +2109,7 @@ pub fn aroon_osc_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct PrimaryCtxGuard {
     dev: i32,

@@ -35,8 +35,8 @@
 //!   The core Rust batch API and single-series bindings remain correct; only the Python
 //!   batch wrapper exhibits this instability.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -52,13 +52,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports with complete helper set
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -71,18 +71,18 @@ use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use std::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::collections::VecDeque;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
+
 impl<'a> AsRef<[f64]> for VolumeAdjustedMaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -95,7 +95,7 @@ impl<'a> AsRef<[f64]> for VolumeAdjustedMaInput<'a> {
     }
 }
 
-// ==================== DATA STRUCTURES ====================
+
 /// Input data enum supporting both raw slices with volume and candle data
 #[derive(Debug, Clone)]
 pub enum VolumeAdjustedMaData<'a> {
@@ -197,7 +197,7 @@ impl<'a> VolumeAdjustedMaInput<'a> {
     }
 }
 
-// ==================== BUILDER API ====================
+
 #[derive(Copy, Clone, Debug)]
 pub struct VolumeAdjustedMaBuilder {
     length: Option<usize>,
@@ -316,7 +316,7 @@ impl VolumeAdjustedMaBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum VolumeAdjustedMaError {
     #[error("volume_adjusted_ma: Input data slice is empty.")]
@@ -352,7 +352,7 @@ pub enum VolumeAdjustedMaError {
     InvalidRange { start: String, end: String, step: String },
 }
 
-// ==================== PREPARATION AND COMPUTE FUNCTIONS ====================
+
 #[inline(always)]
 fn VolumeAdjustedMa_prepare<'a>(
     input: &'a VolumeAdjustedMaInput,
@@ -481,12 +481,12 @@ fn VolumeAdjustedMa_scalar(
     let len = data.len();
     let warmup = first + length - 1;
 
-    // Pre-state for average-volume calculation
-    let mut cum_vol = 0.0f64; // for sample_period == 0
-    let mut win_sum = 0.0f64; // for sample_period  > 0 (rolling)
+    
+    let mut cum_vol = 0.0f64; 
+    let mut win_sum = 0.0f64; 
     let mut win_ready = false;
 
-    // Preload cumulative volume up to (but not including) `warmup` to match original semantics
+    
     if sample_period == 0 {
         let upto = warmup.min(len);
         for j in 0..upto {
@@ -498,16 +498,16 @@ fn VolumeAdjustedMa_scalar(
     }
 
     for i in warmup..len {
-        // Compute average volume
+        
         let avg_volume = if sample_period == 0 {
-            // cumulative average over all bars 0..=i
+            
             let x = vol[i];
             if x.is_finite() {
                 cum_vol += x;
             }
             cum_vol / ((i + 1) as f64)
         } else {
-            // exact average over last `sample_period` bars using a rolling window
+            
             if i + 1 < sample_period {
                 out[i] = f64::NAN;
                 continue;
@@ -536,20 +536,20 @@ fn VolumeAdjustedMa_scalar(
             win_sum / (sample_period as f64)
         };
 
-        // Threshold and reciprocal (avoid division in hot loop)
+        
         let vi_th = avg_volume * vi_factor;
         let inv = if vi_th > 0.0 { 1.0 / vi_th } else { 0.0 };
 
-        // Cap of backward accumulation
+        
         let cap = if strict {
             length.saturating_mul(10).min(i + 1)
         } else {
             length.min(i + 1)
         };
 
-        // Fast-path: when inv == 0, contribution weights are zero => result reduces to p0
+        
         if inv == 0.0 {
-            let nmb = cap; // number of bars we conceptually traversed
+            let nmb = cap; 
             if i >= nmb {
                 let p0 = data[i - nmb];
                 out[i] = if p0.is_finite() { p0 } else { f64::NAN };
@@ -559,7 +559,7 @@ fn VolumeAdjustedMa_scalar(
             continue;
         }
 
-        // Backward accumulation
+        
         let mut weighted_sum = 0.0f64;
         let mut v2i_sum = 0.0f64;
         let mut nmb = 0usize;
@@ -591,7 +591,7 @@ fn VolumeAdjustedMa_scalar(
             idx -= 1;
         }
 
-        // vama = ((length - v2i_sum)*p0 + weighted_sum) / length
+        
         if nmb > 0 && i >= nmb {
             let p0 = data[i - nmb];
             if p0.is_finite() {
@@ -605,7 +605,7 @@ fn VolumeAdjustedMa_scalar(
     }
 }
 
-// ==================== AVX512 SIMD Implementation ====================
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq")]
 unsafe fn VolumeAdjustedMa_avx512(
@@ -628,7 +628,7 @@ unsafe fn VolumeAdjustedMa_avx512(
     let warmup = first + length - 1;
     let len_f = length as f64;
 
-    // rolling/cumulative volume
+    
     let mut cum_vol = 0.0f64;
     let mut win_sum = 0.0f64;
     let mut win_ready = false;
@@ -644,7 +644,7 @@ unsafe fn VolumeAdjustedMa_avx512(
     }
 
     for i in warmup..len {
-        // average volume identical to scalar
+        
         let avg_volume = if sample_period == 0 {
             let vi = *vol.get_unchecked(i);
             if vi.is_finite() {
@@ -683,7 +683,7 @@ unsafe fn VolumeAdjustedMa_avx512(
         let vi_th = avg_volume * vi_factor;
         let inv = if vi_th > 0.0 { 1.0 / vi_th } else { 0.0 };
 
-        // cap mirrors scalar
+        
         let cap = if strict {
             length.saturating_mul(10).min(i + 1)
         } else {
@@ -702,7 +702,7 @@ unsafe fn VolumeAdjustedMa_avx512(
         }
 
         if !strict && cap == length {
-            // Vectorized fixed-width reduction over [i+1-length, i]
+            
             let start = i + 1 - length;
 
             let inv_v = _mm512_set1_pd(inv);
@@ -755,7 +755,7 @@ unsafe fn VolumeAdjustedMa_avx512(
                 *out.get_unchecked_mut(i) = f64::NAN;
             }
         } else {
-            // strict=true (or unusual cap): use scalar-style inner loop with exact early-stop behavior
+            
             let mut weighted_sum = 0.0f64;
             let mut v2i_sum = 0.0f64;
             let mut nmb = 0usize;
@@ -794,7 +794,7 @@ unsafe fn VolumeAdjustedMa_avx512(
     }
 }
 
-// ==================== AVX2 SIMD Implementation ====================
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn VolumeAdjustedMa_avx2(
@@ -826,7 +826,7 @@ unsafe fn VolumeAdjustedMa_avx2(
     let warmup = first + length - 1;
     let len_f = length as f64;
 
-    // rolling/cumulative volume
+    
     let mut cum_vol = 0.0f64;
     let mut win_sum = 0.0f64;
     let mut win_ready = false;
@@ -950,7 +950,7 @@ unsafe fn VolumeAdjustedMa_avx2(
                 *out.get_unchecked_mut(i) = f64::NAN;
             }
         } else {
-            // strict=true (or unusual cap): scalar-style inner for early-stop parity
+            
             let mut weighted_sum = 0.0f64;
             let mut v2i_sum = 0.0f64;
             let mut nmb = 0usize;
@@ -989,7 +989,7 @@ unsafe fn VolumeAdjustedMa_avx2(
     }
 }
 
-// ==================== CORE COMPUTATION FUNCTIONS ====================
+
 #[inline]
 pub fn VolumeAdjustedMa(
     input: &VolumeAdjustedMaInput,
@@ -1062,13 +1062,13 @@ pub fn volume_adjusted_ma_into(
     VolumeAdjustedMa_into_slice(out, input, Kernel::Auto)
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct VolumeAdjustedMaBatchRange {
     pub length: (usize, usize, usize),
     pub vi_factor: (f64, f64, f64),
     pub sample_period: (usize, usize, usize),
-    pub strict: Option<bool>, // None => both {true,false}
+    pub strict: Option<bool>, 
 }
 
 impl Default for VolumeAdjustedMaBatchRange {
@@ -1206,7 +1206,7 @@ fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
         }
         v
     } else {
-        // Support reversed bounds: descending sequence with positive step
+        
         let mut v = Vec::new();
         let mut x = s;
         while x >= e {
@@ -1235,7 +1235,7 @@ fn axis_f64((s, e, st): (f64, f64, f64)) -> Vec<f64> {
     } else {
         while x >= e - 1e-12 {
             v.push(x);
-            x += st; // negative step
+            x += st; 
         }
     }
     v
@@ -1279,7 +1279,7 @@ pub fn VolumeAdjustedMa_batch_with_kernel(
         other if other.is_batch() => other,
         other => return Err(VolumeAdjustedMaError::InvalidKernelForBatch(other)),
     };
-    // Map batch kernel to single kernel used by the row worker
+    
     let simd = match batch {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1362,7 +1362,7 @@ fn VolumeAdjustedMa_batch_inner(
         .ok_or(VolumeAdjustedMaError::AllValuesNaN)?;
     let rows = combos.len();
 
-    // checked rows*cols to avoid potential overflow on extreme sweeps
+    
     if rows.checked_mul(cols).is_none() {
         return Err(VolumeAdjustedMaError::InvalidRange {
             start: rows.to_string(),
@@ -1466,50 +1466,50 @@ fn VolumeAdjustedMa_batch_inner_into_par(
         })
 }
 
-// ==================== STREAMING SUPPORT ====================
-// Decision note: Replace O(n) per update with amortized O(1) streaming kernel preserving batch semantics.
-// Fixed window uses rolling sums; strict path uses a shrinking VecDeque with exact cap and p0 handling.
+
+
+
 #[derive(Debug, Clone)]
 pub struct VolumeAdjustedMaStream {
-    // Params
+    
     length: usize,
     vi_factor: f64,
     strict: bool,
     sample_period: usize,
 
-    // Precomputed
+    
     len_f: f64,
     len_inv: f64,
 
-    // Global index (#updates seen so far)
+    
     n_seen: usize,
 
-    // ---- avg volume state ----
-    // sample_period == 0: cumulative sum / (n_seen)
+    
+    
     cum_vol_sum: f64,
-    // sample_period > 0: ring of finite volumes + rolling sum
+    
     sp_sum: f64,
-    sp_ring: Vec<f64>, // stores finite(vol) i.e., NaN -> 0.0
+    sp_ring: Vec<f64>, 
     sp_pos: usize,
 
-    // ---- p0 history ring ----
-    // We keep the last (cap_for_p0+1) bars so we can fetch p0 = price[i - nmb]
-    // even when inv==0 (strict path uses cap = min(i+1, 10*length)).
+    
+    
+    
     hist_cap: usize,
     hist_p: Vec<f64>,
     hist_v: Vec<f64>,
     hist_pos: usize,
     hist_len: usize,
 
-    // ---- fixed-window accumulators (strict == false) ----
-    // sums over last `length` bars (finite volume only; price·vol only if price finite)
+    
+    
     sum_vol_len: f64,
     sum_pv_len: f64,
 
-    // ---- variable-window accumulators (strict == true) ----
-    // minimal deque of most-recent bars whose finite-volume sum >= target
+    
+    
     deq_p: VecDeque<f64>,
-    deq_v: VecDeque<f64>, // finite(vol) in lockstep with deq_p
+    deq_v: VecDeque<f64>, 
     sum_vol_deq: f64,
     sum_pv_deq: f64,
 }
@@ -1530,9 +1530,9 @@ impl VolumeAdjustedMaStream {
         let strict = p.strict.unwrap_or(true);
         let sp = p.sample_period.unwrap_or(0);
 
-        // History capacity just big enough to replicate scalar p0 semantics:
-        // strict=false => need p0 = data[i-length], so keep length+1
-        // strict=true  => cap = min(i+1, 10*length), need p0 = data[i-cap], so keep 10*length+1
+        
+        
+        
         let hist_cap = if strict {
             length.saturating_mul(10) + 1
         } else {
@@ -1574,7 +1574,7 @@ impl VolumeAdjustedMaStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        // Treat non-finite volumes as zero contribution to weights (matches scalar)
+        
         let v_fin = if volume.is_finite() { volume } else { 0.0 };
         let pv_fin = if price.is_finite() {
             price.mul_add(v_fin, 0.0)
@@ -1582,34 +1582,34 @@ impl VolumeAdjustedMaStream {
             0.0
         };
 
-        // ---- advance global index and write into history ring (for p0) ----
+        
         let pos = self.hist_pos;
         self.hist_p[pos] = price;
-        self.hist_v[pos] = volume; // store original, but we use v_fin in sums
+        self.hist_v[pos] = volume; 
         self.hist_pos = (pos + 1) % self.hist_cap;
         if self.hist_len < self.hist_cap {
             self.hist_len += 1;
         }
 
-        // ---- update avg volume state ----
+        
         self.n_seen += 1;
 
         let avg_volume = if self.sample_period == 0 {
-            // cumulative average over all bars 0..=i (denominator is n_seen)
+            
             self.cum_vol_sum += v_fin;
             self.cum_vol_sum / (self.n_seen as f64)
         } else {
-            // rolling average over last sample_period bars using ring and sum
-            // add new
+            
+            
             self.sp_sum += v_fin;
-            // remove oldest if window full
+            
             if self.n_seen > self.sample_period {
                 self.sp_sum -= self.sp_ring[self.sp_pos];
             }
             self.sp_ring[self.sp_pos] = v_fin;
             self.sp_pos = (self.sp_pos + 1) % self.sample_period;
 
-            // early warmup: need at least sample_period bars
+            
             if self.n_seen < self.sample_period {
                 return Some(f64::NAN);
             }
@@ -1619,13 +1619,13 @@ impl VolumeAdjustedMaStream {
         let vi_th = avg_volume * self.vi_factor;
         let inv = if vi_th > 0.0 { 1.0 / vi_th } else { 0.0 };
 
-        // ---- strict=false: fixed width window of exactly `length` bars ----
+        
         if !self.strict {
-            // Update rolling sums over last `length` bars (exclude p0)
-            // When we have > length bars total, the element at offset (length+1) becomes p0
-            // and the element at offset (length) leaves the included window.
+            
+            
+            
             if self.n_seen > self.length {
-                // idx of the element that **leaves** the included window
+                
                 let cap = self.hist_cap;
                 let leaving_idx = (self.hist_pos + cap - (self.length + 1)) % cap;
                 let v_leave = self.hist_v[leaving_idx];
@@ -1638,7 +1638,7 @@ impl VolumeAdjustedMaStream {
                     }
                 }
             }
-            // Add the newly included element (current bar)
+            
             if v_fin != 0.0 {
                 self.sum_vol_len += v_fin;
                 if price.is_finite() {
@@ -1646,12 +1646,12 @@ impl VolumeAdjustedMaStream {
                 }
             }
 
-            // Need at least `length` bars observed before producing first value
+            
             if self.n_seen < self.length {
                 return Some(f64::NAN);
             }
 
-            // inv==0 fast-path: returns p0
+            
             let cap = self.hist_cap;
             let p0_idx = (self.hist_pos + cap - (self.length + 1)) % cap;
             let p0 = self.hist_p[p0_idx];
@@ -1659,21 +1659,21 @@ impl VolumeAdjustedMaStream {
                 return Some(if p0.is_finite() { p0 } else { f64::NAN });
             }
 
-            // weighted_sum = inv * Σ(price·vol)_last_len
-            // v2i_sum     = inv * Σ(vol)_last_len
+            
+            
             let weighted_sum = self.sum_pv_len * inv;
             let v2i_sum = self.sum_vol_len * inv;
 
             return Some(if p0.is_finite() {
-                // ((length - v2i_sum)*p0 + weighted_sum) / length
+                
                 ((self.len_f - v2i_sum).mul_add(p0, weighted_sum)) * self.len_inv
             } else {
                 f64::NAN
             });
         }
 
-        // ---- strict=true: variable-width by cumulative volume, with CAP = min(n_seen, 10*length) ----
-        // push current bar (maintain deq state even during warmup)
+        
+        
         self.deq_p.push_back(price);
         self.deq_v.push_back(v_fin);
         self.sum_vol_deq += v_fin;
@@ -1681,7 +1681,7 @@ impl VolumeAdjustedMaStream {
             self.sum_pv_deq += pv_fin;
         }
 
-        // Enforce cap on number of bars considered by the scalar loop
+        
         let cap_bars = self.length.saturating_mul(10).min(self.n_seen);
 
         while self.deq_p.len() > cap_bars {
@@ -1693,12 +1693,12 @@ impl VolumeAdjustedMaStream {
             }
         }
 
-        // Need at least `length` bars observed before producing first value
+        
         if self.n_seen < self.length {
             return Some(f64::NAN);
         }
 
-        // inv==0: mirror scalar early-exit => nmb = cap, result = p0 = data[i-cap]
+        
         if inv == 0.0 {
             if cap_bars == 0 || self.hist_len <= cap_bars {
                 return Some(f64::NAN);
@@ -1709,14 +1709,14 @@ impl VolumeAdjustedMaStream {
             return Some(if p0.is_finite() { p0 } else { f64::NAN });
         }
 
-        // Target cumulative volume (in original units) required to meet v2i_sum >= length
-        // inv * S_vol >= length  <=>  S_vol >= length / inv  <=>  S_vol >= length * vi_th
+        
+        
         let target_vol = self.len_f * vi_th;
 
-        // Shrink from the front while we can still satisfy the threshold
+        
         while let (Some(&v_front), Some(&p_front)) = (self.deq_v.front(), self.deq_p.front()) {
             if (self.sum_vol_deq - v_front) >= target_vol {
-                // pop front
+                
                 self.deq_v.pop_front();
                 self.deq_p.pop_front();
                 self.sum_vol_deq -= v_front;
@@ -1728,10 +1728,10 @@ impl VolumeAdjustedMaStream {
             }
         }
 
-        // Number of bars actually included (nmb)
+        
         let nmb = self.deq_p.len();
 
-        // Need p0 = data[i - nmb]; ensure we have it
+        
         if self.hist_len <= nmb {
             return Some(f64::NAN);
         }
@@ -1739,8 +1739,8 @@ impl VolumeAdjustedMaStream {
         let p0_idx = (self.hist_pos + cap - (nmb + 1)) % cap;
         let p0 = self.hist_p[p0_idx];
 
-        // Weighted sum and v2i_sum under current inv.
-        // Accumulate in the same order as scalar (from newest to oldest) to match rounding.
+        
+        
         let mut weighted_sum = 0.0f64;
         let mut v2i_sum = 0.0f64;
         for (&p_i, &v_i) in self.deq_p.iter().rev().zip(self.deq_v.iter().rev()) {
@@ -1761,7 +1761,7 @@ impl VolumeAdjustedMaStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "VolumeAdjustedMa")]
 #[pyo3(signature = (data, volume, length=13, vi_factor=0.67, strict=true, sample_period=0, kernel=None))]
@@ -1826,7 +1826,7 @@ pub fn volume_adjusted_ma_batch_py<'py>(
     eprintln!("[VolumeAdjustedMa_batch_py] using Vec->ndarray path (no PyArray1 prealloc)");
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 
-    // Accept non-contiguous inputs by copying to owned arrays when needed
+    
     let d: &[f64];
     let v: &[f64];
     let owned_d;
@@ -1854,7 +1854,7 @@ pub fn volume_adjusted_ma_batch_py<'py>(
         strict,
     };
 
-    // Expand grid once to size arrays and warms
+    
     let combos = expand_grid_VolumeAdjustedMa(&sweep);
     let rows = combos.len();
     let cols = d.len();
@@ -1862,17 +1862,17 @@ pub fn volume_adjusted_ma_batch_py<'py>(
         return Err(PyValueError::new_err("empty grid or data"));
     }
 
-    // SAFETY/robustness: use a Vec<f64> initialized to NaN, then compute into it with GIL released.
-    // This avoids writing into a NumPy buffer while the GIL is released and eliminates
-    // potential lifetime/aliasing hazards from treating uninitialized memory as MaybeUninit.
-    // Warm prefixes are handled by pre-filling with NaN.
+    
+    
+    
+    
     let first = d
         .iter()
         .position(|x| !x.is_nan())
         .ok_or_else(|| PyValueError::new_err("all data values are NaN"))?;
     let mut buf = vec![f64::NAN; rows * cols];
 
-    // Compute into the same buffer, honoring batch kernel mapping
+    
     let kern = validate_kernel(kernel, true)?;
     let batch = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1885,14 +1885,14 @@ pub fn volume_adjusted_ma_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    // Compute into the Vec while GIL is released
+    
     py.allow_threads(|| VolumeAdjustedMa_batch_inner_into(d, v, &combos, first, simd, &mut buf))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Package metadata like ALMA
+    
     let dict = PyDict::new(py);
     use numpy::PyArray2;
-    // Move the computed buffer into an ndarray without copying, then into NumPy
+    
     let arr2 = ndarray::Array2::from_shape_vec((rows, cols), buf)
         .map_err(|_| PyValueError::new_err("failed to build output array"))?;
     let out_arr2 = arr2.into_pyarray(py);
@@ -2688,7 +2688,7 @@ mod tests {
 
         assert_eq!(result.values.len(), 1);
         // Edge case: with only 1 bar and length=1, we can't calculate the Pine formula
-        // (needs a bar beyond the last included), so NaN is expected
+        
         assert!(result.values[0].is_nan());
         Ok(())
     }
@@ -2709,11 +2709,11 @@ mod tests {
         let input = VolumeAdjustedMaInput::from_slices(&data, &volume, params);
         let result = VolumeAdjustedMa_with_kernel(&input, kernel)?;
 
-        // First values should be NaN (warmup)
+        
         assert!(result.values[0].is_nan());
         assert!(result.values[1].is_nan());
 
-        // After warmup, should have valid values
+        
         for i in 5..result.values.len() {
             assert!(
                 result.values[i].is_finite(),
@@ -2735,22 +2735,22 @@ mod tests {
         let data = &candles.close[..100];
         let volume = &candles.volume[..100];
 
-        // First pass
+        
         let params = VolumeAdjustedMaParams::default();
         let input1 = VolumeAdjustedMaInput::from_slices(data, volume, params.clone());
         let output1 = VolumeAdjustedMa_with_kernel(&input1, kernel)?;
 
-        // Use constant volume for re-input test
+        
         let const_volume = vec![1000.0; output1.values.len()];
 
-        // Second pass using output as input
+        
         let input2 = VolumeAdjustedMaInput::from_slices(&output1.values, &const_volume, params);
         let output2 = VolumeAdjustedMa_with_kernel(&input2, kernel)?;
 
         assert_eq!(output1.values.len(), output2.values.len());
 
-        // Check that values after double warmup are finite
-        let double_warmup = 24; // Approximately 2 * (length - 1)
+        
+        let double_warmup = 24; 
         for i in double_warmup..output2.values.len() {
             assert!(
                 output2.values[i].is_finite() || output2.values[i].is_nan(),
@@ -2783,7 +2783,7 @@ mod tests {
         assert!(result.rows > 0);
         assert_eq!(result.combos.len(), result.rows);
 
-        // Verify each combo has valid parameters
+        
         for combo in &result.combos {
             assert!(combo.length.unwrap() >= 10 && combo.length.unwrap() <= 20);
             assert!(
@@ -2801,17 +2801,17 @@ mod tests {
         let data = &candles.close[..100];
         let volume = &candles.volume[..100];
 
-        // Batch with default params in range
+        
         let range = VolumeAdjustedMaBatchRange::default();
 
         let batch_result = VolumeAdjustedMa_batch_with_kernel(data, volume, &range, kernel)?;
 
-        // Single run with default params
+        
         let single_input =
             VolumeAdjustedMaInput::from_slices(data, volume, VolumeAdjustedMaParams::default());
         let single_result = VolumeAdjustedMa_with_kernel(&single_input, kernel)?;
 
-        // Find default params in batch
+        
         let default_params = VolumeAdjustedMaParams::default();
         let default_row = batch_result.values_for(&default_params);
 
@@ -2821,7 +2821,7 @@ mod tests {
             test_name
         );
 
-        // Compare results
+        
         let batch_values = default_row.unwrap();
         for i in 0..data.len() {
             if single_result.values[i].is_nan() && batch_values[i].is_nan() {
@@ -2867,7 +2867,7 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(data, volume, length, vi_factor, strict, sample_period)| {
-                // Ensure data and volume have same length
+                
                 let min_len = data.len().min(volume.len());
                 let data = &data[..min_len];
                 let volume = &volume[..min_len];
@@ -2890,7 +2890,7 @@ mod tests {
                 );
                 let output = result.unwrap();
 
-                // Property: Output length equals input length
+                
                 prop_assert_eq!(
                     output.values.len(),
                     data.len(),
@@ -2898,7 +2898,7 @@ mod tests {
                     test_name
                 );
 
-                // Property: Warmup period is correctly applied (at least some NaN values at start)
+                
                 let warmup = length - 1;
                 for i in 0..warmup.min(data.len()) {
                     prop_assert!(
@@ -2909,7 +2909,7 @@ mod tests {
                     );
                 }
 
-                // Property: After warmup, values should be finite (not infinite)
+                
                 for i in warmup..data.len() {
                     prop_assert!(
                         output.values[i].is_finite() || output.values[i].is_nan(),
@@ -2920,7 +2920,7 @@ mod tests {
                     );
                 }
 
-                // Property: Compare with scalar implementation for consistency
+                
                 if kernel != Kernel::Scalar {
                     let scalar_result =
                         VolumeAdjustedMa_with_kernel(&input, Kernel::Scalar).unwrap();
@@ -2945,7 +2945,7 @@ mod tests {
         Ok(())
     }
 
-    // ==================== TEST GENERATION MACROS ====================
+    
     macro_rules! generate_all_VolumeAdjustedMa_tests {
         ($($fn:ident),* $(,)?) => {
             paste::paste! {
@@ -3050,12 +3050,12 @@ mod tests {
         Ok(())
     }
 
-    // Generate tests for all kernels
+    
     generate_all_VolumeAdjustedMa_tests!(
         check_VolumeAdjustedMa_accuracy,
         check_VolumeAdjustedMa_slow,
         check_VolumeAdjustedMa_default_candles,
-        // check_VolumeAdjustedMa_no_poison, // Only available in debug builds
+        
         check_VolumeAdjustedMa_streaming,
         check_builder_apply_default,
         check_batch_slice_vs_par,
@@ -3071,7 +3071,7 @@ mod tests {
         check_VolumeAdjustedMa_reinput
     );
 
-    // Generate batch tests
+    
     gen_VolumeAdjustedMa_batch_tests!(check_batch_sweep);
     gen_VolumeAdjustedMa_batch_tests!(check_batch_default_row);
     #[cfg(debug_assertions)]

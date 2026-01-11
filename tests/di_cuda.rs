@@ -1,14 +1,14 @@
-// CUDA DI (+DI, -DI) integration tests
 
-use my_project::indicators::di::{
+
+use vector_ta::indicators::di::{
     di_batch_with_kernel, di_with_kernel, DiBatchRange, DiData, DiInput, DiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaDi};
+use vector_ta::cuda::{cuda_available, CudaDi};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -72,7 +72,7 @@ fn di_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     plus_dev.buf.copy_to(&mut g_plus)?;
     minus_dev.buf.copy_to(&mut g_minus)?;
 
-    let tol = 1e-3; // FP32 path
+    let tol = 1e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c_pl = cpu.plus[idx];
         let g_pl = g_plus[idx] as f64;
@@ -103,8 +103,8 @@ fn di_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         eprintln!("[di_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; // series count
-    let rows = 4096usize; // points per series
+    let cols = 8usize; 
+    let rows = 4096usize; 
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -128,7 +128,7 @@ fn di_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
 
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_plus_tm = vec![f64::NAN; cols * rows];
     let mut cpu_minus_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

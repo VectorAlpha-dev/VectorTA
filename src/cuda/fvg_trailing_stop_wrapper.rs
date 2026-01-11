@@ -304,7 +304,7 @@ impl CudaFvgTs {
             ));
         }
 
-        // Conservative param limits must match kernel constants
+        
         const MAX_LOOK: usize = 256;
         const MAX_W: usize = 256;
         for p in &combos {
@@ -360,7 +360,7 @@ impl CudaFvgTs {
             }
         }
 
-        // Upload invariants
+        
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
@@ -381,7 +381,7 @@ impl CudaFvgTs {
         let d_sw = DeviceBuffer::from_slice(&h_sw)?;
         let d_rs = DeviceBuffer::from_slice(&h_rs)?;
 
-        // Outputs (four matrices: rows=nrows, cols=len)
+        
         let mut d_upper: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
         let mut d_lower: DeviceBuffer<f32> =
@@ -391,7 +391,7 @@ impl CudaFvgTs {
         let mut d_lower_ts: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows_cols) }?;
 
-        // ---- choose launch + shared-mem heuristic ----
+        
         let mut func = self
             .module
             .get_function("fvg_trailing_stop_batch_f32")
@@ -399,13 +399,13 @@ impl CudaFvgTs {
                 name: "fvg_trailing_stop_batch_f32",
             })?;
 
-        // Default block size or policy override
+        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
         };
 
-        // Runtime heuristic: use shared rings only if max(w) ≤ 64
+        
         let max_w: usize = h_sw
             .iter()
             .copied()
@@ -422,15 +422,15 @@ impl CudaFvgTs {
             .unwrap_or(0)
             .max(1);
 
-        // Each thread needs 3 * smem_stride floats; we pack per-thread slices back-to-back.
+        
         let smem_stride: usize = if want_shmem { max_w } else { 0 };
         let bytes_per_thread: usize = 3usize
             .checked_mul(smem_stride)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .unwrap_or(0);
 
-        // If using shared memory, clamp block_x so that dynamic shared memory fits per block.
-        // If query fails, fall back to ~48KB (typical default without opt-in).
+        
+        
         let mut use_shmem_rings = 0i32;
         let mut dynamic_smem_bytes: usize = 0;
 
@@ -819,7 +819,7 @@ pub mod benches {
             unsafe { DeviceBuffer::uninitialized_async(rows_cols, &cuda.stream) }.expect("d_lower_ts");
         cuda.stream.synchronize().expect("fvg_ts sync");
 
-        // Match wrapper launch defaults/heuristics: prefer shared rings for max(w) <= 64.
+        
         let max_w: usize = h_sw
             .iter()
             .copied()

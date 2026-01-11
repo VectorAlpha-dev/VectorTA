@@ -396,8 +396,8 @@ impl CudaDx {
             .map_err(|_| CudaDxError::MissingKernelSymbol { name: match symbol { s => s } })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => {
-                // Keep block_x as a warp-multiple and prefer enough blocks to utilize the GPU
-                // even when the sweep has a modest number of rows (combos).
+                
+                
                 const TARGET_BLOCKS: u32 = 64;
                 let mut bx = ((n_combos as u32 + TARGET_BLOCKS - 1) / TARGET_BLOCKS).max(32);
                 bx = ((bx + 31) / 32) * 32;
@@ -460,9 +460,9 @@ impl CudaDx {
         {
             return Err(CudaDxError::InvalidInput("matrix shape mismatch".into()));
         }
-        // Per-series first_valid detection
+        
         let mut first_valids = vec![rows as i32; cols];
-        // first_valids already populated above; validated below
+        
         for s in 0..cols {
             for t in 0..rows {
                 let idx = t * cols + s;
@@ -508,7 +508,7 @@ impl CudaDx {
             .ok_or(CudaDxError::ArithmeticOverflow { what: "cols * rows" })?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Heuristic: prefer fast kernel only for larger matrices to preserve unit-test parity
+        
         let use_fast = match self.policy.many_series { ManySeriesKernelPolicy::OneD { .. } => false, ManySeriesKernelPolicy::Auto => rows >= 8192 && cols >= 64 };
         self.launch_many_series_symbol(
             if use_fast { "dx_many_series_one_param_time_major_f32_fast" } else { "dx_many_series_one_param_time_major_f32" },
@@ -786,7 +786,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        // 3 precompute arrays + carry + periods + output + headroom
+        
         (3 * LEN_1M + LEN_1M + (LEN_1M / 8) + (LEN_1M * ((64 - 8) / 8 + 1)))
             * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024

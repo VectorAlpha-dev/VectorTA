@@ -7,7 +7,7 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; // shared device array handle
+use crate::cuda::moving_averages::DeviceArrayF32; 
 use crate::indicators::rsx::{RsxBatchRange, RsxParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -169,7 +169,7 @@ impl CudaRsx {
         Ok(())
     }
 
-    // ---------- Batch (one series x many params) ----------
+    
     pub fn rsx_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -182,7 +182,7 @@ impl CudaRsx {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort)
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let in_bytes = prices_f32
@@ -204,12 +204,12 @@ impl CudaRsx {
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaRsxError::InvalidInput("total VRAM size overflow".into()))?;
         let logical_tm = logical_plain
-            .checked_add(out_bytes) // temp out_tm (time-major) + transpose
+            .checked_add(out_bytes) 
             .ok_or_else(|| CudaRsxError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
 
-        // Time-major output + transpose can fix strided row-major stores, but adds an extra full-matrix pass.
-        // Keep it opt-in until it shows consistent wins: set `RSX_USE_TM=1`.
+        
+        
         let prefer_tm = n_combos >= 32 && len >= 4_096;
         let env_tm = env::var("RSX_USE_TM").ok().as_deref() == Some("1");
         let use_tm = prefer_tm && env_tm && Self::will_fit(logical_tm, headroom).is_ok();
@@ -268,7 +268,7 @@ impl CudaRsx {
             .get_function("rsx_batch_f32")
             .map_err(|_| CudaRsxError::MissingKernelSymbol { name: "rsx_batch_f32" })?;
 
-        // One thread per combo per the new kernel mapping.
+        
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -314,7 +314,7 @@ impl CudaRsx {
             .get_function("rsx_batch_tm_f32")
             .map_err(|_| CudaRsxError::MissingKernelSymbol { name: "rsx_batch_tm_f32" })?;
 
-        // One thread per combo (writes time-major; transpose later).
+        
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -376,7 +376,7 @@ impl CudaRsx {
         Ok(())
     }
 
-    // ---------- Many-series x one-param (time-major) ----------
+    
     pub fn rsx_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -399,7 +399,7 @@ impl CudaRsx {
             return Err(CudaRsxError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -420,7 +420,7 @@ impl CudaRsx {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let n = expected;
@@ -495,7 +495,7 @@ impl CudaRsx {
         Ok(())
     }
 
-    // ---------- Helpers ----------
+    
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &RsxBatchRange,
@@ -504,7 +504,7 @@ impl CudaRsx {
         if len == 0 {
             return Err(CudaRsxError::InvalidInput("empty prices".into()));
         }
-        // expand grid mirroring CPU batch rules
+        
         let (start, end, step) = sweep.period;
         let combos = {
             let axis = |triple: (usize, usize, usize)| -> Result<Vec<usize>, CudaRsxError> {
@@ -569,7 +569,7 @@ impl CudaRsx {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -578,7 +578,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
-    const PARAM_SWEEP: usize = 200; // ~200 distinct periods
+    const PARAM_SWEEP: usize = 200; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -736,13 +736,13 @@ pub mod benches {
     }
 }
 
-// ---------- Internal helpers ----------
+
 #[inline]
 unsafe fn to_device_buffer_async<T: cust::memory::DeviceCopy>(
     stream: &Stream,
     host: &[T],
 ) -> Result<DeviceBuffer<T>, CudaRsxError> {
-    const PIN_BYTES: usize = 4 * 1024 * 1024; // 4 MiB threshold
+    const PIN_BYTES: usize = 4 * 1024 * 1024; 
     let bytes = host
         .len()
         .checked_mul(std::mem::size_of::<T>())

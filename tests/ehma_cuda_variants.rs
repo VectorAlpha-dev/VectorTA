@@ -1,16 +1,16 @@
-// Integration tests covering EHMA CUDA kernel variants via explicit policy.
 
-use my_project::indicators::moving_averages::ehma::{
+
+use vector_ta::indicators::moving_averages::ehma::{
     ehma_batch_with_kernel, EhmaBatchRange, EhmaBuilder, EhmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::ehma_wrapper::{
+use vector_ta::cuda::moving_averages::ehma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaEhma, CudaEhmaPolicy, ManySeriesKernelPolicy,
 };
 
@@ -43,7 +43,7 @@ fn gen_time_major_f64(cols: usize, rows: usize) -> Vec<f64> {
     let mut v = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         for t in j..rows {
-            // stagger first_valids
+            
             let x = t as f64 + j as f64 * 0.1;
             v[t * cols + j] = (x * 0.003).cos() + 0.001 * x;
         }
@@ -81,7 +81,7 @@ fn compare_batch(
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    // EHMA uses FP32 accumulation on GPU vs CPU f64; allow modest tolerance
+    
     let (atol, rtol) = (1.0e-4, 1.0e-4);
     for i in 0..host.len() {
         let a = cpu.values[i];
@@ -108,7 +108,7 @@ fn compare_many_series(policy: CudaEhmaPolicy, cols: usize, rows: usize, period:
         period: Some(period),
     };
 
-    // CPU per-series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
@@ -148,7 +148,7 @@ fn compare_many_series(policy: CudaEhmaPolicy, cols: usize, rows: usize, period:
     }
 }
 
-// --------- Tests per-kernel variant ---------
+
 
 #[cfg(feature = "cuda")]
 #[test]

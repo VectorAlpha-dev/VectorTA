@@ -242,8 +242,8 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
-    // SIMD underperforms for BOP on common µarches (div throughput bound),
-    // so Auto short-circuits to Scalar for consistent wins.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -1092,7 +1092,7 @@ mod tests {
 
             let bits = val.to_bits();
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1100,7 +1100,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1108,7 +1108,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1120,7 +1120,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_bop_no_poison(
         _test_name: &str,
@@ -1155,18 +1155,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic OHLC data
+        
         let strat = (50usize..400).prop_flat_map(|size| {
             (
-                // Base price
+                
                 10.0f64..1000.0f64,
-                // Volatility (0% to 10% of base price)
+                
                 0.0f64..0.1f64,
-                // Trend strength (-2% to +2% per candle)
+                
                 -0.02f64..0.02f64,
-                // Generate random movements for each candle (only need 3 values)
+                
                 prop::collection::vec((0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0), size),
-                // Market type: 0=ranging, 1=uptrend, 2=downtrend, 3=flat, 4=volatile
+                
                 0u8..5,
                 Just(size),
             )
@@ -1176,7 +1176,7 @@ mod tests {
             .run(
                 &strat,
                 |(base_price, volatility, trend, random_factors, market_type, size)| {
-                    // Generate realistic OHLC data based on market type
+                    
                     let mut open = Vec::with_capacity(size);
                     let mut high = Vec::with_capacity(size);
                     let mut low = Vec::with_capacity(size);
@@ -1188,10 +1188,10 @@ mod tests {
                         let range = base_price * volatility;
                         let (r1, r2, r3) = random_factors[i];
 
-                        // Determine price movement based on market type
+                        
                         let (o, h, l, c) = match market_type {
                             0 => {
-                                // Ranging market - oscillate around base price
+                                
                                 let wave = (i as f64 * 0.2).sin();
                                 let o = current_price + wave * range;
                                 let movement = range * (r1 - 0.5);
@@ -1201,7 +1201,7 @@ mod tests {
                                 (o, h, l, c)
                             }
                             1 => {
-                                // Uptrend
+                                
                                 let o = current_price;
                                 current_price *= 1.0 + trend.abs();
                                 let c = current_price + range * r1;
@@ -1210,7 +1210,7 @@ mod tests {
                                 (o, h.max(c), l.min(o), c)
                             }
                             2 => {
-                                // Downtrend
+                                
                                 let o = current_price;
                                 current_price *= 1.0 - trend.abs();
                                 let c = current_price - range * r1;
@@ -1219,13 +1219,13 @@ mod tests {
                                 (o, h.max(o), l.min(c), c)
                             }
                             3 => {
-                                // Flat market - minimal movement, sometimes High==Low
+                                
                                 if r1 < 0.3 {
-                                    // 30% chance of High==Low (flat candle)
+                                    
                                     let price = current_price;
                                     (price, price, price, price)
                                 } else {
-                                    // 70% chance of tiny movement
+                                    
                                     let tiny_move = range * 0.01 * (r2 - 0.5);
                                     let o = current_price;
                                     let c = current_price + tiny_move;
@@ -1235,18 +1235,18 @@ mod tests {
                                 }
                             }
                             _ => {
-                                // Volatile market
+                                
                                 let o = current_price;
                                 let big_move = range * 2.0 * (r1 - 0.5);
                                 let c = current_price + big_move;
                                 let h = o.max(c) + range * r2 * 2.0;
                                 let l = o.min(c) - range * r3 * 2.0;
                                 current_price = c;
-                                (o, h, l.max(0.1), c) // Ensure positive prices
+                                (o, h, l.max(0.1), c) 
                             }
                         };
 
-                        // Ensure OHLC constraints are satisfied
+                        
                         let h_final = h.max(o.max(c));
                         let l_final = l.min(o.min(c));
 
@@ -1256,20 +1256,20 @@ mod tests {
                         close.push(c);
                     }
 
-                    // Create BOP input
+                    
                     let params = BopParams::default();
                     let input = BopInput::from_slices(&open, &high, &low, &close, params);
 
-                    // Calculate BOP with test kernel and reference (scalar) kernel
+                    
                     let output = bop_with_kernel(&input, kernel).unwrap();
                     let ref_output = bop_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Validate properties
+                    
                     for i in 0..size {
                         let y = output.values[i];
                         let r = ref_output.values[i];
 
-                        // Property 1: BOP must be in range [-1, 1]
+                        
                         if y.is_finite() {
                             prop_assert!(
                                 y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
@@ -1280,7 +1280,7 @@ mod tests {
                             );
                         }
 
-                        // Property 2: When High == Low, BOP should be 0
+                        
                         let denom = high[i] - low[i];
                         if denom <= 0.0 || denom.abs() < f64::EPSILON {
                             prop_assert!(
@@ -1292,7 +1292,7 @@ mod tests {
                             );
                         }
 
-                        // Property 3: When Close == Open, BOP should be 0 (if High != Low)
+                        
                         if (close[i] - open[i]).abs() < f64::EPSILON && denom > f64::EPSILON {
                             prop_assert!(
                                 y.abs() < 1e-9,
@@ -1303,7 +1303,7 @@ mod tests {
                             );
                         }
 
-                        // Property 4: Verify formula (Close - Open) / (High - Low)
+                        
                         if denom > f64::EPSILON {
                             let expected = (close[i] - open[i]) / denom;
                             prop_assert!(
@@ -1316,7 +1316,7 @@ mod tests {
                             );
                         }
 
-                        // Property 5: Kernel consistency
+                        
                         if !y.is_finite() || !r.is_finite() {
                             prop_assert!(
                                 y.to_bits() == r.to_bits(),
@@ -1339,7 +1339,7 @@ mod tests {
                             );
                         }
 
-                        // Property 6: Special case - flat window (all prices same)
+                        
                         if (open[i] - high[i]).abs() < f64::EPSILON
                             && (open[i] - low[i]).abs() < f64::EPSILON
                             && (open[i] - close[i]).abs() < f64::EPSILON
@@ -1353,9 +1353,9 @@ mod tests {
                             );
                         }
 
-                        // Property 7: Sign consistency
-                        // If Close > Open and High > Low, BOP should be positive
-                        // If Close < Open and High > Low, BOP should be negative
+                        
+                        
+                        
                         if denom > f64::EPSILON {
                             let numerator = close[i] - open[i];
                             if numerator > f64::EPSILON {
@@ -1373,11 +1373,11 @@ mod tests {
                             }
                         }
 
-                        // Property 8: Boundary testing - BOP approaching ±1
-                        // When Close is at High and Open is at Low, BOP should approach 1
-                        // When Close is at Low and Open is at High, BOP should approach -1
+                        
+                        
+                        
                         if denom > f64::EPSILON {
-                            // Test upper boundary: Close ≈ High, Open ≈ Low
+                            
                             if (close[i] - high[i]).abs() < 1e-9 && (open[i] - low[i]).abs() < 1e-9
                             {
                                 prop_assert!(
@@ -1386,7 +1386,7 @@ mod tests {
 								test_name, i, y
 							);
                             }
-                            // Test lower boundary: Close ≈ Low, Open ≈ High
+                            
                             if (close[i] - low[i]).abs() < 1e-9 && (open[i] - high[i]).abs() < 1e-9
                             {
                                 prop_assert!(
@@ -1442,7 +1442,7 @@ mod tests {
         assert_eq!(batch_output.cols, c.close.len());
         assert_eq!(batch_output.rows, 1);
 
-        // Confirm that batch output matches scalar indicator
+        
         let input = BopInput::from_slices(open, high, low, close, BopParams::default());
         let scalar = bop_with_kernel(&input, kernel)?;
 
@@ -1477,7 +1477,7 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1490,14 +1490,14 @@ mod tests {
         let low = source_type(&c, "low");
         let close = source_type(&c, "close");
 
-        // BOP has no parameters, so we just test the single batch row
+        
         let output = BopBatchBuilder::new()
             .kernel(kernel)
             .apply_slices(open, high, low, close)?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -1506,7 +1506,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1514,7 +1514,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1522,7 +1522,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1534,7 +1534,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1548,7 +1548,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_bop_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial OHLC candle set (length 256) with a NaN warmup.
+        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -1572,7 +1572,7 @@ mod tests {
             vol.push(1_000.0 + i as f64);
         }
 
-        // Introduce a NaN prefix to exercise warmup handling.
+        
         open[0] = f64::NAN;
         high[0] = f64::NAN;
         low[0] = f64::NAN;
@@ -1581,14 +1581,14 @@ mod tests {
         let candles = crate::utilities::data_loader::Candles::new(ts, open, high, low, close, vol);
         let input = BopInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = bop(&input)?;
 
-        // Into API writes into caller-provided buffer without allocating
+        
         let mut out = vec![0.0f64; baseline.values.len()];
         bop_into(&input, &mut out)?;
 
-        // Helper treats NaN == NaN as equal; otherwise exact equality.
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1704,13 +1704,13 @@ impl BopDeviceArrayF32Py {
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let ptr = buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Stream omitted: producing CUDA stream is synchronized before return.
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
+        
         (2, self.device_id as i32)
     }
 
@@ -1723,8 +1723,8 @@ impl BopDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1742,9 +1742,9 @@ impl BopDeviceArrayF32Py {
                 }
             }
         }
-        let _ = stream; // producer is synchronized; ignore consumer stream per Array API.
+        let _ = stream; 
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let buf = self
             .buf
             .take()

@@ -247,14 +247,14 @@ pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    
     let warmup_end = first + long - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup_end.min(len)] {
         *v = qnan;
     }
 
-    // Dispatch with Kernel::Auto selection
+    
     let chosen = detect_best_kernel();
     unsafe {
         match chosen {
@@ -1048,30 +1048,30 @@ fn ao_batch_inner(
     // Now safe to allocate - we've validated all error conditions
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.long_period.unwrap() - 1)
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
     let values_len = buf_guard.len();
     let values_cap = buf_guard.capacity();
 
     let values = unsafe {
-        // Create slice for ao_batch_inner_into
+        
         let slice = std::slice::from_raw_parts_mut(values_ptr, values_len);
 
-        // Do the computation - we already validated, so this shouldn't fail
-        // but if it does somehow, we have a memory leak (which shouldn't happen now)
+        
+        
         ao_batch_inner_into(data, sweep, kern, parallel, slice)?;
 
-        // Reclaim as Vec<f64>
+        
         Vec::from_raw_parts(values_ptr, values_len, values_cap)
     };
 
@@ -1138,27 +1138,27 @@ mod tests {
 
     #[test]
     fn test_ao_into_matches_api() {
-        // Prepare a small but non-trivial input (length 256)
+        
         let len = 256;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
-            // Mildly varying series to exercise the rolling sums
+            
             let x = i as f64;
             data.push((x * 0.01).mul_add(1.0, (x * 0.0314159).sin()));
         }
 
         let input = AoInput::from_slice(&data, AoParams::default());
 
-        // Baseline via Vec-returning API
+        
         let base = ao(&input).expect("ao() should succeed");
 
-        // Preallocate output and compute via into-API
+        
         let mut out = vec![0.0f64; len];
         ao_into(&input, &mut out).expect("ao_into() should succeed");
 
         assert_eq!(base.values.len(), out.len());
 
-        // Helper: treat NaN == NaN as equal
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1318,7 +1318,7 @@ mod tests {
         }
         Ok(())
     }
-    // Debug mode test to check for poison values
+    
     #[cfg(debug_assertions)]
     fn check_ao_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1326,44 +1326,44 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            AoParams::default(), // short: 5, long: 34
+            AoParams::default(), 
             AoParams {
                 short_period: Some(2),
                 long_period: Some(10),
-            }, // minimum periods
+            }, 
             AoParams {
                 short_period: Some(3),
                 long_period: Some(20),
-            }, // small periods
+            }, 
             AoParams {
                 short_period: Some(10),
                 long_period: Some(50),
-            }, // medium periods
+            }, 
             AoParams {
                 short_period: Some(20),
                 long_period: Some(100),
-            }, // large periods
+            }, 
             AoParams {
                 short_period: Some(5),
                 long_period: Some(200),
-            }, // very large long period
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = AoInput::from_candles(&candles, "hl2", params.clone());
             let result = ao_with_kernel(&input, kernel)?;
 
-            // Check for poison values in outputs
+            
             for (i, &val) in result.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // Skip expected NaN values in warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1413,7 +1413,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ao_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1425,10 +1425,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test strategy:
-        // - short_period: 1 to 50
-        // - long_period: short_period+1 to 100
-        // - data: random finite values between -1e6 and 1e6
+        
+        
+        
+        
         let strat = (1usize..=50).prop_flat_map(|short_period| {
             ((short_period + 1)..=100).prop_flat_map(move |long_period| {
                 (
@@ -1450,12 +1450,12 @@ mod tests {
                 };
                 let input = AoInput::from_slice(&data, params);
 
-                // Compute AO with the kernel under test
+                
                 let AoOutput { values: out } = ao_with_kernel(&input, kernel).unwrap();
-                // Compute reference with scalar kernel
+                
                 let AoOutput { values: ref_out } = ao_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Warmup period - first (long_period - 1) values should be NaN
+                
                 for i in 0..(long_period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1465,7 +1465,7 @@ mod tests {
                     );
                 }
 
-                // Property 2: After warmup, values should be finite (assuming input is finite)
+                
                 for i in (long_period - 1)..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1475,10 +1475,10 @@ mod tests {
                     );
                 }
 
-                // Property 3: For constant data, AO should be 0 (short SMA = long SMA)
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= long_period
                 {
-                    // All data is constant
+                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
                             out[i].abs() < 1e-9,
@@ -1489,16 +1489,16 @@ mod tests {
                     }
                 }
 
-                // Property 4: Tighter output bounds based on actual window differences
-                // Calculate the maximum possible difference between any short-window average
-                // and any long-window average
+                
+                
+                
                 if data.len() >= long_period {
                     for i in (long_period - 1)..data.len() {
-                        // Calculate actual bounds for this position
+                        
                         let short_start = i + 1 - short_period;
                         let long_start = i + 1 - long_period;
 
-                        // Get min/max in the long window (which contains the short window)
+                        
                         let long_window = &data[long_start..=i];
                         let window_min = long_window.iter().cloned().fold(f64::INFINITY, f64::min);
                         let window_max = long_window
@@ -1506,8 +1506,8 @@ mod tests {
                             .cloned()
                             .fold(f64::NEG_INFINITY, f64::max);
 
-                        // Theoretical maximum: all short values at max, remaining long values at min
-                        // Theoretical minimum: all short values at min, remaining long values at max
+                        
+                        
                         let theoretical_max = window_max - window_min;
 
                         prop_assert!(
@@ -1520,11 +1520,11 @@ mod tests {
                     }
                 }
 
-                // Property 5: Special case - when short_period = 1 and long_period = 2
+                
                 if short_period == 1 && long_period == 2 && data.len() >= 2 {
-                    // Short SMA with period 1 = current value
-                    // Long SMA with period 2 = average of last 2 values
-                    // AO = current - average(last 2)
+                    
+                    
+                    
                     for i in 1..data.len() {
                         let expected = data[i] - (data[i] + data[i - 1]) / 2.0;
                         let actual = out[i];
@@ -1538,13 +1538,13 @@ mod tests {
                     }
                 }
 
-                // Property 6: Trend Monotonicity - for strictly increasing/decreasing data
-                // Check if data is strictly increasing
+                
+                
                 let is_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
                 let is_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
 
                 if is_increasing && data.len() >= long_period {
-                    // For strictly increasing data, AO should be positive (short SMA > long SMA)
+                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
 							out[i] > -1e-9,
@@ -1556,7 +1556,7 @@ mod tests {
                 }
 
                 if is_decreasing && data.len() >= long_period {
-                    // For strictly decreasing data, AO should be negative (short SMA < long SMA)
+                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
 							out[i] < 1e-9,
@@ -1567,15 +1567,15 @@ mod tests {
                     }
                 }
 
-                // Property 7: Linear trend test - for data with constant slope
-                // Check if data forms a linear sequence (arithmetic progression)
+                
+                
                 if data.len() >= 3 {
                     let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
                     let is_linear = diffs.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
 
                     if is_linear && data.len() >= long_period + 10 {
-                        // For linear data, AO should stabilize to a constant value after initial warmup
-                        // Check the last several values are approximately constant
+                        
+                        
                         let stable_start = long_period + 5;
                         if stable_start < data.len() - 1 {
                             let stable_values = &out[stable_start..];
@@ -1595,12 +1595,12 @@ mod tests {
                     }
                 }
 
-                // Property 8: Kernel consistency - all kernels should produce identical results
+                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Check NaN consistency
+                    
                     if y.is_nan() || r.is_nan() {
                         prop_assert!(
                             y.is_nan() && r.is_nan(),
@@ -1613,7 +1613,7 @@ mod tests {
                         continue;
                     }
 
-                    // Check finite value consistency with ULP tolerance
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1685,8 +1685,8 @@ mod tests {
         };
         let input = AoInput::from_slice(&data, params);
 
-        // Create a wrong-sized output buffer
-        let mut wrong_sized_buf = vec![0.0; 10]; // Wrong size
+        
+        let mut wrong_sized_buf = vec![0.0; 10]; 
 
         let result = ao_into_slice(&mut wrong_sized_buf, &input, Kernel::Auto);
         assert!(result.is_err());
@@ -1704,7 +1704,7 @@ mod tests {
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let sweep = AoBatchRange::default();
 
-        // Try to use a non-batch kernel for batch operation
+        
         let result = ao_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(result.is_err());
 
@@ -1735,7 +1735,7 @@ mod tests {
         }
         Ok(())
     }
-    // Debug mode batch test to check for poison values
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1743,14 +1743,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step)
-            (2, 10, 2, 15, 40, 5),     // Small periods
-            (5, 20, 5, 30, 60, 10),    // Medium periods
-            (10, 30, 10, 40, 100, 20), // Large periods
-            (3, 3, 0, 10, 50, 10),     // Static short, sweep long
-            (5, 15, 5, 34, 34, 0),     // Sweep short, static long
+            
+            (2, 10, 2, 15, 40, 5),     
+            (5, 20, 5, 30, 60, 10),    
+            (10, 30, 10, 40, 100, 20), 
+            (3, 3, 0, 10, 50, 10),     
+            (5, 15, 5, 34, 34, 0),     
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -1763,7 +1763,7 @@ mod tests {
 
             let output = ao_batch_with_kernel(source_type(&c, "hl2"), &sweep, kernel)?;
 
-            // Verify each combination
+            
             for (row, combo) in output.combos.iter().enumerate() {
                 let row_start = row * output.cols;
                 let row_end = row_start + output.cols;
@@ -1771,13 +1771,13 @@ mod tests {
 
                 for (col, &val) in row_values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; // Skip expected NaN values
+                        continue; 
                     }
 
                     let bits = val.to_bits();
                     let idx = row * output.cols + col;
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1834,7 +1834,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -1945,7 +1945,7 @@ pub fn ao_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Use kernel validation for safety
+    
     let kern = validate_kernel(kernel, true)?;
 
     let sweep = AoBatchRange {
@@ -1953,33 +1953,33 @@ pub fn ao_batch_py<'py>(
         long_period: long_period_range,
     };
 
-    // 1. Expand grid once to know rows*cols
+    
     let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    // 2. Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // 3. Heavy work without the GIL
+    
     let combos = py
         .allow_threads(|| -> Result<Vec<AoParams>, AoError> {
-            // Compute hl2 using zero-copy allocation
+            
             let hl2 = compute_hl2(high_slice, low_slice)?;
 
-            // Initialize NaN prefixes for each row
+            
             let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warm: Vec<usize> = combos
                 .iter()
                 .map(|c| first + c.long_period.unwrap() - 1)
                 .collect();
 
-            // Convert slice to MaybeUninit for init_matrix_prefixes
+            
             let slice_mu = unsafe {
                 std::slice::from_raw_parts_mut(
                     slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1987,10 +1987,10 @@ pub fn ao_batch_py<'py>(
                 )
             };
 
-            // Initialize NaN prefixes
+            
             init_matrix_prefixes(slice_mu, cols, &warm);
 
-            // Resolve Kernel::Auto to a specific kernel
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2002,12 +2002,12 @@ pub fn ao_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            // Compute batch directly into pre-allocated buffer - no copy needed!
+            
             ao_batch_inner_into(&hl2, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 4. Build dict with the GIL
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2030,7 +2030,7 @@ pub fn ao_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32AoPy {

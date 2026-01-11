@@ -31,7 +31,7 @@ use crate::cuda::cuda_available;
 use crate::cuda::moving_averages::CudaVwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-// VWMA-specific VRAM handle for Python with CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -41,7 +41,7 @@ use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct VwmaDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>, 
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -403,7 +403,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
         let v_ptr = volume.as_ptr();
         let out_ptr = out.as_mut_ptr();
 
-        // 1) initialize window
+        
         let base = first;
         let mut sum = 0.0f64;
         let mut vsum = 0.0f64;
@@ -416,11 +416,11 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
 
         *out_ptr.add(base + period - 1) = sum / vsum;
 
-        // 2) sliding window (unrolled)
+        
         let mut new_idx = base + period;
         let mut old_idx = base;
         while new_idx + 3 < len {
-            // 0
+            
             let pn0 = *p_ptr.add(new_idx);
             let vn0 = *v_ptr.add(new_idx);
             let po0 = *p_ptr.add(old_idx);
@@ -430,7 +430,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
             vsum += vn0 - vo0;
             *out_ptr.add(new_idx) = sum / vsum;
 
-            // 1
+            
             let pn1 = *p_ptr.add(new_idx + 1);
             let vn1 = *v_ptr.add(new_idx + 1);
             let po1 = *p_ptr.add(old_idx + 1);
@@ -440,7 +440,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
             vsum += vn1 - vo1;
             *out_ptr.add(new_idx + 1) = sum / vsum;
 
-            // 2
+            
             let pn2 = *p_ptr.add(new_idx + 2);
             let vn2 = *v_ptr.add(new_idx + 2);
             let po2 = *p_ptr.add(old_idx + 2);
@@ -450,7 +450,7 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
             vsum += vn2 - vo2;
             *out_ptr.add(new_idx + 2) = sum / vsum;
 
-            // 3
+            
             let pn3 = *p_ptr.add(new_idx + 3);
             let vn3 = *v_ptr.add(new_idx + 3);
             let po3 = *p_ptr.add(old_idx + 3);
@@ -482,8 +482,8 @@ pub fn vwma_scalar(price: &[f64], volume: &[f64], period: usize, first: usize, o
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn vwma_avx2(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // SIMD disabled by default: strict non-finite bit-equality checks in property tests
-    // and minimal speedups for short periods. Keep impl for future work.
+    
+    
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -515,7 +515,7 @@ unsafe fn vwma_avx2_impl(
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
 
-    // 1) initialize window
+    
     let base = first;
     let mut sum = 0.0f64;
     let mut vsum = 0.0f64;
@@ -529,11 +529,11 @@ unsafe fn vwma_avx2_impl(
     let mut out_idx = base + period - 1;
     *out.get_unchecked_mut(out_idx) = sum / vsum;
 
-    // 2) sliding window (scalar unrolled)
+    
     let mut new_idx = out_idx + 1;
     let mut old_idx = base;
     while new_idx + 3 < len {
-        // 0
+        
         let pn0 = *p_ptr.add(new_idx);
         let vn0 = *v_ptr.add(new_idx);
         let po0 = *p_ptr.add(old_idx);
@@ -543,7 +543,7 @@ unsafe fn vwma_avx2_impl(
         vsum += vn0 - vo0;
         *out.get_unchecked_mut(new_idx) = sum / vsum;
 
-        // 1
+        
         let pn1 = *p_ptr.add(new_idx + 1);
         let vn1 = *v_ptr.add(new_idx + 1);
         let po1 = *p_ptr.add(old_idx + 1);
@@ -553,7 +553,7 @@ unsafe fn vwma_avx2_impl(
         vsum += vn1 - vo1;
         *out.get_unchecked_mut(new_idx + 1) = sum / vsum;
 
-        // 2
+        
         let pn2 = *p_ptr.add(new_idx + 2);
         let vn2 = *v_ptr.add(new_idx + 2);
         let po2 = *p_ptr.add(old_idx + 2);
@@ -563,7 +563,7 @@ unsafe fn vwma_avx2_impl(
         vsum += vn2 - vo2;
         *out.get_unchecked_mut(new_idx + 2) = sum / vsum;
 
-        // 3
+        
         let pn3 = *p_ptr.add(new_idx + 3);
         let vn3 = *v_ptr.add(new_idx + 3);
         let po3 = *p_ptr.add(old_idx + 3);
@@ -593,7 +593,7 @@ unsafe fn vwma_avx2_impl(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn vwma_avx512(price: &[f64], volume: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // SIMD disabled by default, see note above.
+    
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -628,7 +628,7 @@ unsafe fn vwma_avx512_impl(
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
 
-    // 1) initialize window using 8 lanes
+    
     let base = first;
     let mut sum = 0.0f64;
     let mut vsum = 0.0f64;
@@ -642,11 +642,11 @@ unsafe fn vwma_avx512_impl(
     let mut out_idx = base + period - 1;
     *out.get_unchecked_mut(out_idx) = sum / vsum;
 
-    // 2) sliding window (scalar unrolled)
+    
     let mut new_idx = out_idx + 1;
     let mut old_idx = base;
     while new_idx + 3 < len {
-        // 0
+        
         let pn0 = *p_ptr.add(new_idx);
         let vn0 = *v_ptr.add(new_idx);
         let po0 = *p_ptr.add(old_idx);
@@ -656,7 +656,7 @@ unsafe fn vwma_avx512_impl(
         vsum += vn0 - vo0;
         *out.get_unchecked_mut(new_idx) = sum / vsum;
 
-        // 1
+        
         let pn1 = *p_ptr.add(new_idx + 1);
         let vn1 = *v_ptr.add(new_idx + 1);
         let po1 = *p_ptr.add(old_idx + 1);
@@ -666,7 +666,7 @@ unsafe fn vwma_avx512_impl(
         vsum += vn1 - vo1;
         *out.get_unchecked_mut(new_idx + 1) = sum / vsum;
 
-        // 2
+        
         let pn2 = *p_ptr.add(new_idx + 2);
         let vn2 = *v_ptr.add(new_idx + 2);
         let po2 = *p_ptr.add(old_idx + 2);
@@ -676,7 +676,7 @@ unsafe fn vwma_avx512_impl(
         vsum += vn2 - vo2;
         *out.get_unchecked_mut(new_idx + 2) = sum / vsum;
 
-        // 3
+        
         let pn3 = *p_ptr.add(new_idx + 3);
         let vn3 = *v_ptr.add(new_idx + 3);
         let po3 = *p_ptr.add(old_idx + 3);
@@ -742,7 +742,7 @@ pub fn vwma_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        // Fallback to scalar for any other case
+        
         _ => Kernel::Scalar,
     };
     vwma_batch_par_slice(price, volume, sweep, simd)
@@ -793,7 +793,7 @@ fn expand_grid_vwma(r: &VwmaBatchRange) -> Vec<VwmaParams> {
             .map(|p| VwmaParams { period: Some(p) })
             .collect()
     } else {
-        // reversed bounds supported
+        
         let mut v = Vec::new();
         let mut p = start;
         while p >= end {
@@ -833,7 +833,7 @@ fn vwma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<VwmaBatchOutput, VwmaError> {
-    // ---------- 0. parameter checks ----------
+    
     let combos = expand_grid_vwma(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
@@ -868,7 +868,7 @@ fn vwma_batch_inner(
         });
     }
 
-    // ---------- 1. allocate matrix as MaybeUninit<f64> + write NaN prefixes ----------
+    
     let rows = combos.len();
     let cols = len;
 
@@ -892,11 +892,11 @@ fn vwma_batch_inner(
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm_prefixes) };
 
-    // ---------- 2. row worker (fills one row) ----------
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Cast the `MaybeUninit` slice for this row to a plain `f64` slice.
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -908,12 +908,12 @@ fn vwma_batch_inner(
             Kernel::Avx512 => vwma_row_avx512(price, volume, first, period, out_row),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => vwma_row_scalar(price, volume, first, period, out_row),
-            // Fallback to scalar for any other kernel variant
+            
             _ => vwma_row_scalar(price, volume, first, period, out_row),
         }
     };
 
-    // ---------- 3. run every row ----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -934,7 +934,7 @@ fn vwma_batch_inner(
         }
     }
 
-    // ---------- 4. transmute to Vec<f64> & return ----------
+    
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(VwmaBatchOutput {
         values,
@@ -964,7 +964,7 @@ pub unsafe fn vwma_row_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    // SIMD disabled by default, see note above.
+    
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -993,7 +993,7 @@ pub unsafe fn vwma_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
-    // SIMD disabled by default, see note above.
+    
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -1006,7 +1006,7 @@ pub unsafe fn vwma_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
-    // SIMD disabled by default, see note above.
+    
     vwma_scalar(price, volume, period, first, out)
 }
 
@@ -1041,31 +1041,31 @@ impl VwmaStream {
         })
     }
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        // Write index always points at the oldest slot.
+        
         let idx = self.head;
         let new_w = price * volume;
 
         if !self.filled {
-            // Warm-up: no eviction until the buffer is full.
+            
             self.sum += new_w;
             self.vsum += volume;
 
             self.prices[idx] = price;
             self.volumes[idx] = volume;
 
-            // Advance without modulo
+            
             let next = idx + 1;
             if next == self.period {
                 self.head = 0;
                 self.filled = true;
-                // First valid VWMA becomes available exactly at `period`.
+                
                 return Some(self.sum / self.vsum);
             } else {
                 self.head = next;
                 return None;
             }
         } else {
-            // Steady-state: evict oldest, insert newest.
+            
             let old_p = self.prices[idx];
             let old_v = self.volumes[idx];
             let old_w = old_p * old_v;
@@ -1076,7 +1076,7 @@ impl VwmaStream {
             self.prices[idx] = price;
             self.volumes[idx] = volume;
 
-            // Advance without modulo
+            
             let next = idx + 1;
             self.head = if next == self.period { 0 } else { next };
 
@@ -1130,11 +1130,11 @@ pub fn vwma_batch_inner_into(
     price: &[f64],
     volume: &[f64],
     sweep: &VwmaBatchRange,
-    kern: Kernel, // expect Scalar | Avx2 | Avx512 (not *Batch)
+    kern: Kernel, 
     parallel: bool,
-    out: &mut [f64], // rows*cols, will be filled in place
+    out: &mut [f64], 
 ) -> Result<Vec<VwmaParams>, VwmaError> {
-    // 0) grid + validity
+    
     let combos = expand_grid_vwma(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
@@ -1164,7 +1164,7 @@ pub fn vwma_batch_inner_into(
         });
     }
 
-    // 1) shape + out buffer
+    
     let rows = combos.len();
     let cols = len;
     let expected = rows
@@ -1181,7 +1181,7 @@ pub fn vwma_batch_inner_into(
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // 2) write NaN prefixes per row (zero extra copies)
+    
     let mut warm_prefixes: Vec<usize> = Vec::with_capacity(combos.len());
     for c in &combos {
         let p = c.period.unwrap();
@@ -1193,7 +1193,7 @@ pub fn vwma_batch_inner_into(
     }
     init_matrix_prefixes(out_mu, cols, &warm_prefixes);
 
-    // 3) row worker
+    
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let row_out: &mut [f64] =
@@ -1208,7 +1208,7 @@ pub fn vwma_batch_inner_into(
         }
     };
 
-    // 4) run all rows
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1280,7 +1280,7 @@ mod tests {
 
     #[test]
     fn test_vwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a non-trivial synthetic series
+        
         let n = 256usize;
         let mut prices = Vec::with_capacity(n);
         let mut volumes = Vec::with_capacity(n);
@@ -1293,10 +1293,10 @@ mod tests {
         let params = VwmaParams { period: Some(20) };
         let input = VwmaInput::from_slice(&prices, &volumes, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = vwma(&input)?.values;
 
-        // into() path writes directly into caller-provided buffer
+        
         let mut out = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1304,7 +1304,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, call the slice variant from tests
+            
             vwma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1426,7 +1426,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_vwma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1434,19 +1434,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let test_periods = vec![
-            1,   // Minimum valid period
-            5,   // Small period
-            10,  // Small period
-            20,  // Default period
-            50,  // Large period
-            100, // Very large period
-            200, // Extra large period
+            1,   
+            5,   
+            10,  
+            20,  
+            50,  
+            100, 
+            200, 
         ];
 
         for &period in &test_periods {
-            // Skip if period would be too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
@@ -1460,16 +1460,16 @@ mod tests {
             );
             let output = vwma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1477,7 +1477,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1485,7 +1485,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1498,7 +1498,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_vwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1513,9 +1513,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with appropriate ranges for VWMA
-        // Period: 1-50 (reasonable range for VWMA)
-        // Data length: Must be at least period for valid output
+        
+        
+        
         let strat = (1usize..=50).prop_flat_map(|period| {
             (period..400).prop_flat_map(move |len| {
                 (
@@ -1538,22 +1538,22 @@ mod tests {
 				let params = VwmaParams { period: Some(period) };
 				let input = VwmaInput::from_slice(&prices, &volumes, params);
 
-				// Compute with the specified kernel
+				
 				let VwmaOutput { values: out } = vwma_with_kernel(&input, kernel).unwrap();
-				// Compute reference with scalar kernel for comparison
+				
 				let VwmaOutput { values: ref_out } = vwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Output length must match input
+				
 				prop_assert_eq!(out.len(), prices.len(), "Output length mismatch");
 				prop_assert_eq!(out.len(), volumes.len(), "Output/volume length mismatch");
 
-				// Since we don't inject NaN into input data, first valid index is always 0
+				
 				let first_valid = 0;
 
-				// Calculate warmup period - first non-NaN appears at first_valid + period - 1
+				
 				let warmup_end = first_valid + period - 1;
 
-				// Property 2: Warmup period values must be NaN
+				
 				for i in 0..warmup_end.min(out.len()) {
 					prop_assert!(
 						out[i].is_nan(),
@@ -1563,33 +1563,33 @@ mod tests {
 					);
 				}
 
-				// Check if the data is constant (for Property 6)
+				
 				let is_constant_price = prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
 				let is_constant_volume = volumes.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
 
-				// Property 3: Values after warmup should be finite and within bounds
-				// Start from warmup_end which is the first non-NaN index
+				
+				
 				for i in warmup_end..prices.len() {
 					let y = out[i];
 					let r = ref_out[i];
 
-					// Get the window for this calculation
-					// For index i, the window is from (i - period + 1) to i inclusive
+					
+					
 					let window_start = if i >= period - 1 { i + 1 - period } else { 0 };
 					let window_prices = &prices[window_start..=i];
 					let window_volumes = &volumes[window_start..=i];
 
-					// Calculate bounds - VWMA should be within price range
+					
 					let price_min = window_prices.iter().cloned().fold(f64::INFINITY, f64::min);
 					let price_max = window_prices.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-					// Check if all volumes in window are zero (would cause division by zero)
+					
 					let volume_sum: f64 = window_volumes.iter().sum();
 					let has_valid_volume = volume_sum > 0.0 && volume_sum.is_finite();
 
-					// Property 4: Value bounds check (only when we have valid volume)
+					
 					if y.is_finite() && has_valid_volume {
-						// Use a more forgiving tolerance for floating point comparisons
+						
 						let tolerance = 1e-6 * price_max.abs().max(price_min.abs()).max(1.0);
 						prop_assert!(
 							y >= price_min - tolerance && y <= price_max + tolerance,
@@ -1597,29 +1597,29 @@ mod tests {
 							i, y, price_min, price_max
 						);
 					} else if !has_valid_volume {
-						// When volume sum is 0, we expect NaN (from division by zero)
-						// However, due to sliding window mechanics, we may still have a valid result
-						// if the numerator (sum of price*volume products) is also 0
+						
+						
+						
 
-						// Calculate the actual numerator to understand what should happen
+						
 						let numerator: f64 = window_prices.iter()
 							.zip(window_volumes.iter())
 							.map(|(p, v)| p * v)
 							.sum();
 
 						if numerator == 0.0 || !numerator.is_finite() {
-							// 0/0 case - implementation may return NaN, 0, or -0
+							
 							prop_assert!(
 								!y.is_finite() || y == 0.0 || y == -0.0,
 								"Expected NaN, 0, or -0 for 0/0 case at idx {}, got {}",
 								i, y
 							);
 						} else {
-							// Non-zero numerator with zero denominator should give infinity or NaN
-							// But in a sliding window, this shouldn't actually happen if the implementation
-							// maintains running sums correctly. If we get here, the value is likely
-							// from the previous valid calculation before volumes went to 0.
-							// We'll accept any finite value in the valid price range
+							
+							
+							
+							
+							
 							if y.is_finite() {
 								prop_assert!(
 									y >= price_min - 1e-6 && y <= price_max + 1e-6,
@@ -1630,7 +1630,7 @@ mod tests {
 						}
 					}
 
-					// Property 5: SIMD consistency check
+					
 					if y.is_finite() && r.is_finite() {
 						let y_bits = y.to_bits();
 						let r_bits = r.to_bits();
@@ -1642,7 +1642,7 @@ mod tests {
 							i, y, r, ulp_diff
 						);
 					} else {
-						// For non-finite values, require exact bit match
+						
 						prop_assert_eq!(
 							y.to_bits(),
 							r.to_bits(),
@@ -1651,7 +1651,7 @@ mod tests {
 						);
 					}
 
-					// Property 6: For constant price data, VWMA should converge to that price
+					
 					if is_constant_price && i >= warmup_end + period {
 						let const_price = prices[first_valid];
 						prop_assert!(
@@ -1661,12 +1661,12 @@ mod tests {
 						);
 					}
 
-					// Property 7: Special case for period=1
+					
 					if period == 1 && y.is_finite() {
-						// With period=1, VWMA = price * volume / volume = price
+						
 						let expected_price = prices[i];
 						if expected_price.is_finite() && volumes[i] > 0.0 {
-							// Use relative tolerance for large values
+							
 							let tolerance = (expected_price.abs() * 1e-10).max(1e-9);
 							prop_assert!(
 								(y - expected_price).abs() <= tolerance,
@@ -1676,9 +1676,9 @@ mod tests {
 						}
 					}
 
-					// Property 8: When volume is constant and non-zero, VWMA equals simple moving average
+					
 					if is_constant_volume && volumes[first_valid] > 0.0 && y.is_finite() && has_valid_volume {
-						// Calculate simple moving average
+						
 						let sma: f64 = window_prices.iter().sum::<f64>() / period as f64;
 						prop_assert!(
 							(y - sma).abs() <= 1e-9,
@@ -1688,7 +1688,7 @@ mod tests {
 					}
 				}
 
-				// Property 9: Check that all volumes are non-negative (data generation constraint)
+				
 				for (i, &v) in volumes.iter().enumerate() {
 					if v.is_finite() {
 						prop_assert!(
@@ -1699,8 +1699,8 @@ mod tests {
 					}
 				}
 
-				// Property 10: Volume scaling invariance - VWMA unchanged if all volumes scaled by constant
-				// Test this by comparing VWMA with volumes scaled by 2.0
+				
+				
 				if volumes.iter().all(|&v| v > 0.0 && v.is_finite()) {
 					let scaled_volumes: Vec<f64> = volumes.iter().map(|&v| v * 2.0).collect();
 					let scaled_params = VwmaParams { period: Some(period) };
@@ -1757,8 +1757,8 @@ mod tests {
 
             assert_eq!(row.len(), c.close.len());
 
-            // For illustration, use the known expected values from the previous test.
-            // You may update these with precise reference values if needed.
+            
+            
             let expected = [
                 59201.87047121331,
                 59217.157390630266,
@@ -1797,7 +1797,7 @@ mod tests {
             };
         }
 
-        // Check for poison values in batch output - only runs in debug mode
+        
         #[cfg(debug_assertions)]
         fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
             skip_if_unsupported!(kernel, test);
@@ -1805,18 +1805,18 @@ mod tests {
             let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
             let c = read_candles_from_csv(file)?;
 
-            // Test multiple batch configurations to increase detection coverage
+            
             let batch_configs = vec![
-                (1, 10, 1),    // Edge case: starting from minimum period
-                (5, 25, 5),    // Small range with step 5
-                (10, 30, 10),  // Medium range with larger step
-                (20, 100, 10), // Default start with step 10
-                (50, 200, 50), // Very large periods
-                (1, 5, 1),     // Very small range to test edge cases
+                (1, 10, 1),    
+                (5, 25, 5),    
+                (10, 30, 10),  
+                (20, 100, 10), 
+                (50, 200, 50), 
+                (1, 5, 1),     
             ];
 
             for (start, end, step) in batch_configs {
-                // Skip configurations that would exceed data length
+                
                 if start > c.close.len() {
                     continue;
                 }
@@ -1826,9 +1826,9 @@ mod tests {
                     .period_range(start, end, step)
                     .apply_slice(&c.close, &c.volume)?;
 
-                // Check every value in the entire batch matrix for poison patterns
+                
                 for (idx, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in warmup periods
+                    
                     if val.is_nan() {
                         continue;
                     }
@@ -1838,7 +1838,7 @@ mod tests {
                     let col = idx % output.cols;
                     let period = output.combos[row].period.unwrap_or(0);
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1846,7 +1846,7 @@ mod tests {
                     );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1854,7 +1854,7 @@ mod tests {
                     );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1867,7 +1867,7 @@ mod tests {
             Ok(())
         }
 
-        // Release mode stub - does nothing
+        
         #[cfg(not(debug_assertions))]
         fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
             Ok(())
@@ -2000,12 +2000,12 @@ pub fn vwma_batch_py<'py>(
         period: period_range,
     };
 
-    // precompute shape
+    
     let combos0 = expand_grid_vwma(&sweep);
     let rows = combos0.len();
     let cols = p.len();
 
-    // preallocate numpy target (zero-copy)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -2149,17 +2149,17 @@ pub fn vwma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Detect best kernel and convert to appropriate SIMD kernel for batch
+    
     let kernel = detect_best_batch_kernel();
     let simd_kernel = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        // Fallback to scalar for any other case
+        
         _ => Kernel::Scalar,
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2243,12 +2243,12 @@ pub fn vwma_into_slice(dst: &mut [f64], input: &VwmaInput, kern: Kernel) -> Resu
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 vwma_scalar(price, volume, period, first, dst)
             }
-            // Fallback to scalar for any other kernel variant
+            
             _ => vwma_scalar(price, volume, period, first, dst),
         }
     }
 
-    // Fill warmup with quiet-NaN to match alloc_with_nan_prefix semantics
+    
     let warmup_end = first
         .checked_add(period)
         .and_then(|x| x.checked_sub(1))
@@ -2310,9 +2310,9 @@ pub fn vwma_into(
         };
         let input = VwmaInput::from_slice(prices, volumes, params);
 
-        // Check for aliasing - note that VWMA has two input arrays
+        
         if price_ptr == out_ptr || volume_ptr == out_ptr {
-            // Use temporary buffer if output aliases with either input
+            
             let mut temp = vec![0.0; len];
             vwma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2356,13 +2356,13 @@ pub fn vwma_batch_unified_js(
         period: config.period_range,
     };
 
-    // Detect best kernel for batch operations
+    
     let kernel = detect_best_batch_kernel();
     let simd_kernel = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        // Fallback to scalar for any other case
+        
         _ => Kernel::Scalar,
     };
     let output = vwma_batch_inner(prices, volumes, &sweep, simd_kernel, false)
@@ -2402,7 +2402,7 @@ pub fn vwma_batch_into(
         let combos = expand_grid_vwma(&sweep);
         let rows = combos.len();
 
-        // choose simd like ALMA
+        
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2411,7 +2411,7 @@ pub fn vwma_batch_into(
         };
 
         if (out_ptr as *const f64) == price_ptr || (out_ptr as *const f64) == volume_ptr {
-            // alias-safe: temp then copy once
+            
             let mut tmp = vec![0f64; rows * len];
             vwma_batch_inner_into(prices, volumes, &sweep, simd, false, &mut tmp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

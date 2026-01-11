@@ -8,7 +8,7 @@ export interface BacktestResult {
   maxDrawdown: number
   meanRet?: number
   stdRet?: number
-  // Optional display axes values when using generic axes
+  
   displayX?: number
   displayY?: number
 }
@@ -98,7 +98,7 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
       }
     }
 
-    // Axes
+    
     ctx.fillStyle = '#888'; ctx.font = '12px sans-serif'
     ctx.textAlign = 'center'
     for (let j = 0; j < cols; j++) {
@@ -147,7 +147,7 @@ export function HeatmapChart({ results, metric = 'totalReturn', onCellClick, sel
     const cellW = chartW / cols, cellH = chartH / rows
     if (x >= margin.left && x <= canvas.width - margin.right && y >= margin.top && y <= canvas.height - margin.bottom) {
       const col = Math.floor((x - margin.left) / cellW); const row = Math.floor((y - margin.top) / cellH)
-      // On click, use actual fast/slow for downstream overlay
+      
       const r = results.find(v => (v.displayX ?? v.fastPeriod) === fastPeriods[col] && (v.displayY ?? v.slowPeriod) === slowPeriods[row])
       if (r) onCellClick(r.fastPeriod, r.slowPeriod)
     }

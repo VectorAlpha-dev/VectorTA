@@ -1,10 +1,10 @@
-// CUDA kernels for Ehlers Decycler (input minus 2‑pole high‑pass output).
-//
-// Batch (one series × many params): uses host-precomputed second-difference `diff[i] = x[i]-2x[i-1]+x[i-2]`
-// and per-row coefficients (c, two_1m, neg_oma_sq). Each thread processes grid-strided combos.
-//
-// Many-series × one-param (time-major): processes each series independently; writes NaN during warmup
-// (first_valid .. first_valid+1) and computes out[t] = x[t] - hp[t] for t >= first_valid+2.
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -14,18 +14,18 @@
 #include <math_constants.h>
 
 extern "C" __global__
-void decycler_batch_f32(const float* __restrict__ prices,          // [series_len]
-                        const int*   __restrict__ periods,         // [n_combos] (kept for ABI)
-                        const float* __restrict__ c_vals,          // [n_combos]
-                        const float* __restrict__ two_1m_vals,     // [n_combos]
-                        const float* __restrict__ neg_oma_sq_vals, // [n_combos]
-                        const float* __restrict__ diff,            // [series_len] second difference
+void decycler_batch_f32(const float* __restrict__ prices,          
+                        const int*   __restrict__ periods,         
+                        const float* __restrict__ c_vals,          
+                        const float* __restrict__ two_1m_vals,     
+                        const float* __restrict__ neg_oma_sq_vals, 
+                        const float* __restrict__ diff,            
                         int series_len,
                         int n_combos,
                         int first_valid,
-                        float* __restrict__ out)                   // [n_combos * series_len]
+                        float* __restrict__ out)                   
 {
-    (void)periods; // not used in recurrence, retained for a stable ABI
+    (void)periods; 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     for (int combo = tid; combo < n_combos; combo += blockDim.x * gridDim.x) {
@@ -33,7 +33,7 @@ void decycler_batch_f32(const float* __restrict__ prices,          // [series_le
 
         if (series_len <= 0) continue;
 
-        // If first_valid invalid, fill full row with NaNs
+        
         if (first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out_row[i] = CUDART_NAN_F;
             continue;
@@ -43,46 +43,46 @@ void decycler_batch_f32(const float* __restrict__ prices,          // [series_le
         const float two_1m     = two_1m_vals[combo];
         const float neg_oma_sq = neg_oma_sq_vals[combo];
 
-        // Warmup semantics: NaN for indices < first_valid+2
+        
         const int warm = min(series_len, first_valid + 2);
         for (int i = 0; i < warm; ++i) out_row[i] = CUDART_NAN_F;
 
-        if (first_valid + 1 >= series_len) continue; // nothing beyond warmup
+        if (first_valid + 1 >= series_len) continue; 
 
-        // Seed high-pass internal state from inputs (as in scalar):
+        
         float hp_im2 = prices[first_valid];
         float hp_im1 = prices[first_valid + 1];
 
         for (int t = first_valid + 2; t < series_len; ++t) {
-            // hp[t] = two_1m*hp[t-1] + neg_oma_sq*hp[t-2] + c * diff[t]
+            
             const float s3 = __fmaf_rn(two_1m, hp_im1, c * diff[t]);
             const float hp = __fmaf_rn(neg_oma_sq, hp_im2, s3);
-            // decycler = x[t] - hp[t]
+            
             out_row[t] = prices[t] - hp;
-            // advance state
+            
             hp_im2 = hp_im1;
             hp_im1 = hp;
         }
     }
 }
 
-// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
-// per iteration via an inclusive scan over the 2x2 affine state update:
-//
-//   hp[t] = a1*hp[t-1] + a2*hp[t-2] + u[t]
-//   u[t]  = c * diff[t]
-//
-// State is s[t] = [hp[t], hp[t-1]] and:
-//   s[t] = M*s[t-1] + [u[t], 0]
-//   M = [[a1, a2],
-//        [ 1,  0]]
-//
-// Output: out[t] = x[t] - hp[t], with warmup NaNs for indices < first_valid+2.
-//
-// - blockDim.x must be exactly 32
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 extern "C" __global__
 void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
-                                 const int*   __restrict__ periods,         // unused (ABI)
+                                 const int*   __restrict__ periods,         
                                  const float* __restrict__ c_vals,
                                  const float* __restrict__ two_1m_vals,
                                  const float* __restrict__ neg_oma_sq_vals,
@@ -116,17 +116,17 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
     const float a1     = two_1m_vals[combo];
     const float a2     = neg_oma_sq_vals[combo];
 
-    // Previous state at t0-1 = first_valid+1
+    
     float s0_prev = 0.0f;
     float s1_prev = 0.0f;
     if (lane == 0) {
-        s1_prev = prices[first_valid];     // hp_{t0-2}
-        s0_prev = prices[first_valid + 1]; // hp_{t0-1}
+        s1_prev = prices[first_valid];     
+        s0_prev = prices[first_valid + 1]; 
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
 
-    // Constant state-transition matrix M
+    
     const float m00 = a1;
     const float m01 = a2;
     const float m10 = 1.0f;
@@ -144,8 +144,8 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
             u = c * diff[t];
         }
 
-        // Each lane starts with its step transform: (P, v), where
-        // P = M and v = [u, 0]. For inactive lanes, use identity.
+        
+        
         float p00 = valid ? m00 : 1.0f;
         float p01 = valid ? m01 : 0.0f;
         float p10 = valid ? m10 : 0.0f;
@@ -153,7 +153,7 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
         float v0  = valid ? u   : 0.0f;
         float v1  = 0.0f;
 
-        // Inclusive scan over composed transforms: (P_cur, v_cur) ∘ (P_prev, v_prev)
+        
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float p00_prev = __shfl_up_sync(mask, p00, offset);
@@ -179,7 +179,7 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
             }
         }
 
-        // Apply prefix transform to previous state s_prev
+        
         const float hp0 = fmaf(p00, s0_prev, fmaf(p01, s1_prev, v0));
         const float hp1 = fmaf(p10, s0_prev, fmaf(p11, s1_prev, v1));
 
@@ -194,11 +194,11 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
     }
 }
 
-// Many-series × one-param, time-major layout
+
 extern "C" __global__
-void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm, // [series_len * num_series], time-major
-                                        const int*   __restrict__ first_valids, // [num_series]
-                                        int period,    // kept for ABI
+void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm, 
+                                        const int*   __restrict__ first_valids, 
+                                        int period,    
                                         float c,
                                         float two_1m,
                                         float neg_oma_sq,
@@ -207,7 +207,7 @@ void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm, // 
                                         float* __restrict__ out_tm)
 {
     (void)period;
-    const int stride = num_series; // time-major stride (contiguous in time)
+    const int stride = num_series; 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     for (int s = tid; s < num_series; s += blockDim.x * gridDim.x) {
@@ -218,14 +218,14 @@ void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm, // 
             continue;
         }
 
-        // Warmup: NaNs through fv+1
+        
         const int warm = min(series_len, fv + 2);
         for (int t = 0; t < warm; ++t) {
             out_tm[(size_t)t * (size_t)stride + s] = CUDART_NAN_F;
         }
         if (fv + 1 >= series_len) continue;
 
-        // Seed hp state
+        
         float hp_im2 = prices_tm[(size_t)fv * (size_t)stride + s];
         float hp_im1 = prices_tm[(size_t)(fv + 1) * (size_t)stride + s];
 

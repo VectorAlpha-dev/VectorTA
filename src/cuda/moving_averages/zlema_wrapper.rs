@@ -104,7 +104,7 @@ impl CudaZlema {
         if bx > max_threads_per_block {
             return Err(CudaZlemaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
         }
-        // Conservative grid x check
+        
         let max_grid_x = dev.get_attribute(DevAttr::MaxGridDimX)? as u32;
         if grid.x > max_grid_x {
             return Err(CudaZlemaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
@@ -117,7 +117,7 @@ impl CudaZlema {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/zlema_kernel.ptx"));
-        // JIT options: target from current context (keep default opt level for parity)
+        
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -213,12 +213,12 @@ impl CudaZlema {
             .get_function("zlema_batch_f32")
             .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_batch_f32" })?;
 
-        // Prefer L1 for memory-bound kernels unless user turns it off
+        
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        // Optional manual override; otherwise use occupancy suggestion
+        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -236,7 +236,7 @@ impl CudaZlema {
             ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
         };
 
-        // Validate launch against device limits
+        
         self.validate_launch(grid, block)?;
 
         unsafe {
@@ -266,7 +266,7 @@ impl CudaZlema {
         Ok(())
     }
 
-    // Tiled batch kernel launcher (uses dynamic shared memory based on tile + max_lag)
+    
     fn launch_batch_kernel_tiled(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -288,7 +288,7 @@ impl CudaZlema {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        // Must match kernel default unless overridden at compile time.
+        
         let tile: usize = env::var("ZLEMA_BATCH_TILE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -296,7 +296,7 @@ impl CudaZlema {
             .unwrap_or(1024);
         let shmem_bytes = (tile + (max_lag as usize)) * std::mem::size_of::<f32>();
 
-        // Optional manual override; otherwise occupancy suggestion that accounts for shmem
+        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -313,7 +313,7 @@ impl CudaZlema {
             ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
         };
 
-        // Validate launch against device limits
+        
         self.validate_launch(grid, block)?;
 
         unsafe {
@@ -363,7 +363,7 @@ impl CudaZlema {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        // Optional manual override; rounded up to a multiple of 32 (one warp per combo).
+        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -373,7 +373,7 @@ impl CudaZlema {
         if block_x < 32 {
             block_x = 32;
         }
-        // Round up to a multiple of 32.
+        
         block_x = ((block_x + 31) / 32) * 32;
         if block_x > 1024 {
             block_x = 1024;
@@ -416,7 +416,7 @@ impl CudaZlema {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaZlemaError> {
-        // VRAM estimate and guard (host inputs + params + outputs) with checked arithmetic
+        
         let rows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -431,8 +431,8 @@ impl CudaZlema {
             .and_then(|v| v.checked_mul(sz_f32))
             .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
 
-        // Prefer the warp-scan kernel for batch when available; it has far better occupancy than the
-        // per-combo serial kernels and avoids extra per-combo parameter buffers.
+        
+        
         let n_combos = combos.len();
         let has_warp_scan = self.module.get_function("zlema_batch_warp_scan_f32").is_ok();
         let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
@@ -487,8 +487,8 @@ impl CudaZlema {
             let d_lags = DeviceBuffer::from_slice(&lags)?;
             let d_alphas = DeviceBuffer::from_slice(&alphas)?;
 
-            // Heuristic: use tiled kernel when sweeping many combos or long series.
-            // Default thresholds chosen conservatively; refine with benches if needed.
+            
+            
             let max_lag = *lags.iter().max().unwrap_or(&0);
             let use_tiled = (n_combos >= 64) && (len >= 4096);
 
@@ -551,7 +551,7 @@ impl CudaZlema {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        // Stage Device -> Host into pinned memory asynchronously, then memcpy to out
+        
         let mut pinned = unsafe {
             LockedBuffer::<f32>::uninitialized(expected)
                 .map_err(CudaZlemaError::Cuda)?
@@ -568,7 +568,7 @@ impl CudaZlema {
         Ok((combos.len(), len, combos))
     }
 
-    // ---------- Many-series (time-major) one-param ----------
+    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -605,7 +605,7 @@ impl CudaZlema {
             )));
         }
 
-        // First-valid per series (time-major layout)
+        
         let mut first_valids = vec![0i32; cols];
         for series in 0..cols {
             let mut fv: Option<usize> = None;
@@ -649,12 +649,12 @@ impl CudaZlema {
             .get_function("zlema_many_series_one_param_f32")
             .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_many_series_one_param_f32" })?;
 
-        // Prefer L1 for memory-bound kernels unless disabled
+        
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        // Optional override or occupancy-guided block size
+        
         let block_x_override = env::var("ZLEMA_MS_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -706,7 +706,7 @@ impl CudaZlema {
         period: usize,
         alpha: f32,
     ) -> Result<DeviceArrayF32, CudaZlemaError> {
-        // Optional VRAM check similar to SMA wrapper (with checked arithmetic)
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaZlemaError::InvalidInput("rows*cols overflow".into()))?;
@@ -778,7 +778,7 @@ impl CudaZlema {
         let (first_valids, p, alpha) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, p, alpha)?;
-        // Device -> Host via pinned buffer + async copy
+        
         let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(cols * rows)? };
         unsafe {
             dev.buf.async_copy_to(&mut pinned.as_mut_slice(), &self.stream)?;
@@ -789,7 +789,7 @@ impl CudaZlema {
     }
 }
 
-// ---------- Bench profiles (batch-only) ----------
+
 
 pub mod benches {
     use super::*;

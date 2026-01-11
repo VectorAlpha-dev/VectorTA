@@ -1,13 +1,13 @@
-// CUDA kernels for the Ehlers Instantaneous Trend (ITrend) indicator.
-//
-// Optimized kernels keep numerical behavior aligned with the CPU path while
-// removing the main hot-loop costs on Ada-class GPUs:
-// - O(1) variable-window average via a prefix-sum ring in shared memory
-//   (replaces the per-step O(dcp) accumulation).
-// - Single-thread execution per block (others return immediately) since the
-//   filter is time-recursive; avoids idle threads and barriers.
-// - Robust atan2 for phase computation.
-// - Modulo-free ring access for the size-7 FIR/Hilbert stages.
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -17,13 +17,13 @@
 #include <math.h>
 #include <math_constants.h>
 
-// Provide a portable definition of M_PI when building with toolchains
-// (e.g., MSVC via nvcc) that do not define it by default.
+
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846264338327950288
 #endif
 
-// FMA-based linear interpolation: prev + a * (x - prev)
+
 __device__ __forceinline__ float lerp_fma(float prev, float x, float a) {
     return __fmaf_rn(a, x - prev, prev);
 }
@@ -48,20 +48,20 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
     const int warmup = warmups[combo];
     const int max_dc = max_dcs[combo];
     if (warmup <= 0 || max_dc <= 0 || max_shared_dc <= 0) return;
-    if (max_shared_dc < max_dc) return; // safety: host must allocate >= max_dc shared slots
+    if (max_shared_dc < max_dc) return; 
 
-    // Single-thread-per-block execution model
+    
     if (threadIdx.x != 0) return;
 
-    // Dynamic shared memory holds the prefix-sum ring of length cap (= max_dc)
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ pfx = reinterpret_cast<float*>(shraw);
-    const int cap = max_dc; // we handle dcp==cap with an "old" snapshot to avoid +1 allocation
+    const int cap = max_dc; 
     for (int i = 0; i < cap; ++i) pfx[i] = 0.0f;
 
     const int row_offset = combo * series_len;
 
-    // --- Per-combo state (FP32 hot path) ---
+    
     float fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
     float det_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
     float i1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
@@ -71,9 +71,9 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
     float prev_mesa = 0.0f, prev_smooth = 0.0f;
     float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
 
-    int ring_ptr = 0;  // for the 7-element rings
-    int pidx = 0;      // prefix ring cursor [0, cap)
-    float pcur = 0.0f; // running prefix sum
+    int ring_ptr = 0;  
+    int pidx = 0;      
+    float pcur = 0.0f; 
 
     const int warm_threshold = first_valid + warmup;
     const float c0962 = 0.0962f;
@@ -88,7 +88,7 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
         fir_buf[ring_ptr] = fir_val;
 
-        // modulo-free indices for a ring of size 7
+        
         const int c  = ring_ptr;
         const int c2 = (c >= 2) ? (c - 2) : (c + 5);
         const int c4 = (c >= 4) ? (c - 4) : (c + 3);
@@ -148,7 +148,7 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
             const float phase = atan2f(im_smooth, re_smooth);
             if (phase != 0.0f) new_mesa = (2.0f * CUDART_PI_F) / phase;
         }
-        // limit and smooth period
+        
         const float up_lim  = 1.5f * prev_mesa;
         const float low_lim = 0.67f * prev_mesa;
         new_mesa = clampT(new_mesa, low_lim, up_lim);
@@ -161,8 +161,8 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
-        // ---- O(1) variable-window average via prefix-sum ring (cap=max_dc) ----
-        // Use an "old" snapshot to handle the alias when dcp == cap (avoids +1 shmem).
+        
+        
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
         pcur += x0;
@@ -201,10 +201,10 @@ void ehlers_itrend_many_series_one_param_f32(
 
     const int stride = num_series;
 
-    // Single-thread-per-block execution model
+    
     if (threadIdx.x != 0) return;
 
-    // Dynamic shared memory: prefix-sum ring of length cap (= max_dc)
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ pfx = reinterpret_cast<float*>(shraw);
     const int cap = max_dc;
@@ -219,8 +219,8 @@ void ehlers_itrend_many_series_one_param_f32(
     float prev_mesa = 0.0f, prev_smooth = 0.0f;
     float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
     int ring_ptr = 0;
-    int pidx = 0;      // prefix ring cursor [0, cap)
-    float pcur = 0.0f; // running prefix sum
+    int pidx = 0;      
+    float pcur = 0.0f; 
 
     const int first_valid = first_valids[series_idx];
     const int warm_threshold = first_valid + warmup;
@@ -308,7 +308,7 @@ void ehlers_itrend_many_series_one_param_f32(
         int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
-        // ---- O(1) variable-window average via prefix-sum ring (cap=max_dc) ----
+        
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
         pcur += x0;

@@ -1,17 +1,17 @@
-// Integration tests for CUDA Buff Averages kernels
 
-use my_project::indicators::moving_averages::buff_averages::{
+
+use vector_ta::indicators::moving_averages::buff_averages::{
     buff_averages_batch_with_kernel, buff_averages_with_kernel, BuffAveragesBatchRange,
     BuffAveragesInput, BuffAveragesParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaBuffAverages;
+use vector_ta::cuda::moving_averages::CudaBuffAverages;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -150,7 +150,7 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
     let fast = 10usize;
     let slow = 21usize;
 
-    // CPU baseline per series
+    
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -165,7 +165,7 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
             slow_period: Some(slow),
         };
         let input = BuffAveragesInput {
-            data: my_project::indicators::moving_averages::buff_averages::BuffAveragesData::Slice(
+            data: vector_ta::indicators::moving_averages::buff_averages::BuffAveragesData::Slice(
                 &p,
             ),
             volume: Some(&v),

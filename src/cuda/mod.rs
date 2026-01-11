@@ -421,8 +421,8 @@ pub fn cuda_available() -> bool {
     {
         static CUDA_AVAILABLE_CACHED: OnceLock<bool> = OnceLock::new();
 
-        // Local iteration safety: when building with placeholder PTX or when explicitly
-        // asked to skip CUDA probes, report unavailable to let tests skip gracefully.
+        
+        
         if std::env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1")
             || std::env::var("CUDA_FORCE_SKIP").ok().as_deref() == Some("1")
         {
@@ -440,8 +440,8 @@ pub fn cuda_available() -> bool {
 
             let debug = std::env::var("CUDA_PROBE_DEBUG").ok().as_deref() == Some("1");
 
-            // Initialize the CUDA driver and query devices. Keep this defensive so
-            // it never panics when CUDA is missing.
+            
+            
             if let Err(err) = cust::init(CudaFlags::empty()) {
                 if debug {
                     eprintln!("cuda_available: cust::init failed: {err:?}");
@@ -465,14 +465,14 @@ pub fn cuda_available() -> bool {
                 return false;
             }
 
-            // Probe a minimal kernel launch so test suites can confidently run.
-            // Some environments expose a device but cannot JIT/launch PTX (e.g., mismatched drivers).
-            //
-            // Probe PTX: keep this tiny and try a few PTX versions to stay compatible
-            // across a wide range of installed NVIDIA drivers/toolkits.
-            //
-            // NOTE: Some newer driver stacks are pickier about very old PTX versions.
-            // Try newest-first to avoid false "no device" skips in CI/dev environments.
+            
+            
+            
+            
+            
+            
+            
+            
             const PROBE_PTXS: [&str; 3] = [
                 r#"
                     .version 9.0
@@ -510,9 +510,9 @@ pub fn cuda_available() -> bool {
                 }
             };
 
-            // IMPORTANT: Creating/dropping CUDA contexts is not cheap and can be
-            // fragile under heavy parallel test execution. Cache the result of
-            // this probe so it only runs once per process.
+            
+            
+            
             let _context = match cust::context::Context::new(device) {
                 Ok(c) => c,
                 Err(err) => {

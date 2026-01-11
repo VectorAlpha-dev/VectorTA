@@ -1,16 +1,16 @@
-// Integration tests for CUDA FOSC kernels
 
-use my_project::indicators::fosc::{
+
+use vector_ta::indicators::fosc::{
     fosc_batch_with_kernel, fosc_with_kernel, FoscBatchRange, FoscBuilder, FoscInput, FoscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::fosc_wrapper::CudaFosc;
+use vector_ta::cuda::oscillators::fosc_wrapper::CudaFosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -58,7 +58,7 @@ fn fosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // match original acceptance for parity
+    let tol = 7e-4; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -81,8 +81,8 @@ fn fosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 12usize; // series count
-    let rows = 8192usize; // series length
+    let cols = 12usize; 
+    let rows = 8192usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 7)..rows {
@@ -93,7 +93,7 @@ fn fosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 14usize;
 
-    // CPU baseline per series (row-major flatten)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -128,7 +128,7 @@ fn fosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // match original acceptance for parity
+    let tol = 7e-4; 
     for idx in 0..host.len() {
         assert!(
             approx_eq(cpu_tm[idx], host[idx] as f64, tol),

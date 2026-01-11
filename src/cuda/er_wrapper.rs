@@ -27,7 +27,7 @@ use thiserror::Error;
 #[derive(Clone, Copy, Default)]
 pub(super) struct Float2 { pub x: f32, pub y: f32 }
 
-// Safe because Float2 is plain-old-data with no pointers and #[repr(C)]
+
 unsafe impl cust::memory::DeviceCopy for Float2 {}
 
 #[derive(Debug, Error)]
@@ -155,7 +155,7 @@ impl CudaEr {
                 "no parameter combinations".into(),
             ));
         }
-        // Validate periods
+        
         for c in &combos {
             let p = c.period as usize;
             if p == 0 || p > len {
@@ -189,7 +189,7 @@ impl CudaEr {
     }
 
     fn build_prefix_absdiff_dsf(data_f32: &[f32]) -> Vec<Float2> {
-        // Build DS prefix of abs diffs: prefix[t] = sum_{k=0..t-1} |x[k+1]-x[k]| in double-single
+        
         let n = data_f32.len();
         let mut pref = vec![Float2 { x: 0.0, y: 0.0 }; n];
         let two_sumf = |a: f32, b: f32| -> (f32, f32) {
@@ -217,7 +217,7 @@ impl CudaEr {
 
     #[inline]
     fn chunk_rows(n_rows: usize, len: usize) -> usize {
-        let max_grid_y = 65_000usize; // keep below hardware limit
+        let max_grid_y = 65_000usize; 
         let out_bytes = n_rows
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
@@ -225,7 +225,7 @@ impl CudaEr {
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
         if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize << 20; // ~64MB
+            let headroom = 64usize << 20; 
             if free > headroom {
                 return (free - headroom)
                     .saturating_div(len * std::mem::size_of::<f32>())
@@ -245,10 +245,10 @@ impl CudaEr {
         let len = data_f32.len();
         let n_combos = combos.len();
 
-        // Build DS prefix on host and prefer prefix kernel by default.
+        
         let prefix = Self::build_prefix_absdiff_dsf(data_f32);
 
-        // Estimate VRAM including prefix; if too tight, fallback to rolling DS kernel.
+        
         let bytes_est = len
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_add(n_combos.checked_mul(std::mem::size_of::<i32>())?))
@@ -259,7 +259,7 @@ impl CudaEr {
             return self.er_batch_dev_fallback_rolling(data_f32, &combos, first_valid);
         }
 
-        // Device buffers
+        
         let d_data = DeviceBuffer::from_slice(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
@@ -399,7 +399,7 @@ impl CudaEr {
             return Err(CudaErError::InvalidInput("invalid period".into()));
         }
 
-        // First-valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -425,7 +425,7 @@ impl CudaEr {
             first_valids[s] = fv;
         }
 
-        // Device buffers
+        
         let d_data = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
         let out_bytes = expected
@@ -513,7 +513,7 @@ pub mod benches {
     }
     impl CudaBenchState for ErBatchState {
         fn launch(&mut self) {
-            // Direct kernel launch path
+            
             let func = self
                 .cuda
                 .module

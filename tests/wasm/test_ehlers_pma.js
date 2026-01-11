@@ -22,14 +22,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -39,20 +39,20 @@ test.before(async () => {
 });
 
 test('Ehlers PMA accuracy', () => {
-    // Test Ehlers PMA matches expected values from Rust tests - mirrors check_ehlers_pma_accuracy
+    
     const close = new Float64Array(testData.close);
     
-    // Call the WASM function - returns object with values, rows, cols
+    
     const result = wasm.ehlers_pma(close);
     
-    // Extract predict and trigger from flat result
+    
     const predict = result.values.slice(0, close.length);
     const trigger = result.values.slice(close.length);
     
     assert.strictEqual(predict.length, close.length);
     assert.strictEqual(trigger.length, close.length);
     
-    // Reference values from Rust tests (using close source with TradingView parity)
+    
     const expectedPredictLastFive = [
         59161.97066327,
         59240.51785714,
@@ -68,7 +68,7 @@ test('Ehlers PMA accuracy', () => {
         59220.78227041
     ];
     
-    // Check last 5 values match expected
+    
     assertArrayClose(
         predict.slice(-5),
         expectedPredictLastFive,
@@ -85,17 +85,17 @@ test('Ehlers PMA accuracy', () => {
 });
 
 test('Ehlers PMA default candles', () => {
-    // Test Ehlers PMA with default parameters - mirrors check_ehlers_pma_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.ehlers_pma(close);
     
-    // Should return 2 * length values
+    
     assert.strictEqual(result.values.length, close.length * 2);
 });
 
 test('Ehlers PMA empty input', () => {
-    // Test Ehlers PMA fails with empty input - mirrors check_ehlers_pma_empty_input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -104,7 +104,7 @@ test('Ehlers PMA empty input', () => {
 });
 
 test('Ehlers PMA all NaN values', () => {
-    // Test Ehlers PMA fails with all NaN values - mirrors check_ehlers_pma_all_nan
+    
     const allNan = new Float64Array(20).fill(NaN);
     
     assert.throws(() => {
@@ -113,7 +113,7 @@ test('Ehlers PMA all NaN values', () => {
 });
 
 test('Ehlers PMA insufficient data', () => {
-    // Test Ehlers PMA fails with insufficient data - mirrors check_ehlers_pma_insufficient_data
+    
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
     
     assert.throws(() => {
@@ -122,7 +122,7 @@ test('Ehlers PMA insufficient data', () => {
 });
 
 test('Ehlers PMA very small dataset', () => {
-    // Test Ehlers PMA fails with very small dataset - mirrors check_ehlers_pma_very_small_dataset
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -137,7 +137,7 @@ test('Ehlers PMA very small dataset', () => {
 });
 
 test('Ehlers PMA NaN handling', () => {
-    // Test Ehlers PMA handles NaN values correctly - mirrors check_ehlers_pma_nan_handling
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.ehlers_pma(close);
@@ -147,7 +147,7 @@ test('Ehlers PMA NaN handling', () => {
     assert.strictEqual(predict.length, close.length);
     assert.strictEqual(trigger.length, close.length);
     
-    // After warmup period (20), no NaN values should exist
+    
     if (predict.length > 20) {
         for (let i = 20; i < predict.length; i++) {
             assert(!isNaN(predict[i]), `Found unexpected NaN in predict at index ${i}`);
@@ -157,19 +157,19 @@ test('Ehlers PMA NaN handling', () => {
         }
     }
     
-    // Warmup NaN lengths must mirror Rust tests
-    // Predict warmup: first 13 values are NaN
+    
+    
     for (let i = 0; i < 13; i++) {
         assert(isNaN(predict[i]), `Expected NaN in predict warmup at index ${i}`);
     }
-    // Trigger warmup: first 16 values are NaN
+    
     for (let i = 0; i < 16; i++) {
         assert(isNaN(trigger[i]), `Expected NaN in trigger warmup at index ${i}`);
     }
 });
 
 test('Ehlers PMA with minimum required data', () => {
-    // Test with minimum 14 values required (with 1-bar lag)
+    
     const data = new Float64Array(Array.from({length: 14}, (_, i) => 100.0 + i));
     
     const result = wasm.ehlers_pma(data);
@@ -178,7 +178,7 @@ test('Ehlers PMA with minimum required data', () => {
     const predict = result.values.slice(0, data.length);
     const trigger = result.values.slice(data.length);
     
-    // Should have at least one valid predict value
+    
     const validPredict = [];
     for (let i = 0; i < predict.length; i++) {
         if (!isNaN(predict[i])) {
@@ -189,13 +189,13 @@ test('Ehlers PMA with minimum required data', () => {
 });
 
 test('Ehlers PMA with constant values', () => {
-    // Test with constant input
+    
     const data = new Float64Array(50).fill(100.0);
     
     const result = wasm.ehlers_pma(data);
     const predict = result.values.slice(0, data.length);
     
-    // Find first valid predict value
+    
     let validIdx = -1;
     for (let i = 0; i < predict.length; i++) {
         if (!isNaN(predict[i])) {
@@ -206,19 +206,19 @@ test('Ehlers PMA with constant values', () => {
     
     assert(validIdx !== -1, 'Should have valid predict values');
     
-    // With constant input, predict should stabilize near the constant
+    
     assertClose(predict[validIdx], 100.0, 1e-9, 'Predict should equal constant value');
 });
 
 test('Ehlers PMA crossover detection', () => {
-    // Use 200 candles for crossover detection
+    
     const close = new Float64Array(testData.close.slice(0, 200));
     
     const result = wasm.ehlers_pma(close);
     const predict = result.values.slice(0, close.length);
     const trigger = result.values.slice(close.length);
     
-    // Check for crossovers
+    
     const crossovers = [];
     for (let i = 17; i < predict.length - 1; i++) {
         if (!isNaN(predict[i]) && !isNaN(trigger[i]) && 
@@ -231,20 +231,20 @@ test('Ehlers PMA crossover detection', () => {
         }
     }
     
-    // Should detect at least one crossover in 200 candles
+    
     assert(crossovers.length > 0, 'Should detect at least one crossover in real data');
 });
 
 test('Ehlers PMA with NaN in middle of data', () => {
-    // Create data with NaN early enough that it eventually falls out of the 7-period window
-    // Need at least 25 values: NaN at position 7, and we need 7 more values after the last
-    // value that uses the NaN, plus the warmup period of 13
+    
+    
+    
     const data = new Float64Array(30);
     for (let i = 0; i < data.length; i++) {
         data[i] = 100.0 + i;
     }
     
-    // Put NaN at position 7
+    
     data[7] = NaN;
     
     const result = wasm.ehlers_pma(data);
@@ -252,17 +252,17 @@ test('Ehlers PMA with NaN in middle of data', () => {
     
     const predict = result.values.slice(0, data.length);
     
-    // NaN at position 7 will affect calculations from position 8 through 14 (inclusive)
-    // because at position 14, we use data[13] through data[7] for WMA1
-    // Starting from position 15, the NaN is no longer in the 7-period window
     
-    // Check that NaN appears where expected (warmup + affected region)
+    
+    
+    
+    
     for (let i = 0; i < 15; i++) {
         assert(isNaN(predict[i]), `Expected NaN at index ${i} during warmup/affected period`);
     }
     
-    // Check that calculation resumes after NaN falls out of window
-    // With 30 values and NaN only affecting up to index 14, we should have valid values from 15 onwards
+    
+    
     let hasValidAfterNaN = false;
     for (let i = 15; i < predict.length; i++) {
         if (!isNaN(predict[i])) {

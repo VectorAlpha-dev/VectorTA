@@ -218,7 +218,7 @@ pub fn medprice_with_kernel(
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx);
 
     let chosen = match kernel {
-        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -251,7 +251,7 @@ pub fn medprice_with_kernel(
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn medprice_into(input: &MedpriceInput, out: &mut [f64]) -> Result<(), MedpriceError> {
-    // Delegate to the existing slice-based writer using Kernel::Auto.
+    
     medprice_into_slice(out, input, Kernel::Auto)
 }
 
@@ -283,7 +283,7 @@ pub fn medprice_compute_into(
         .ok_or(MedpriceError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -302,14 +302,14 @@ pub fn medprice_compute_into(
         }
     }
 
-    // Warm prefix NaNs after compute, like ALMA
+    
     out[..first].fill(f64::NAN);
     Ok(())
 }
 
 #[inline]
 pub fn medprice_scalar(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
-    // Write every index >= first. NaN propagation is automatic: (NaN + x) * 0.5 = NaN.
+    
     let n = high.len();
     if first >= n {
         return;
@@ -492,7 +492,7 @@ pub fn medprice_avx512(high: &[f64], low: &[f64], first: usize, out: &mut [f64])
     unsafe { avx512_body(high, low, first, out) }
 }
 
-// Row functions
+
 #[inline(always)]
 pub unsafe fn medprice_row_scalar(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
     medprice_scalar(high, low, first, out)
@@ -522,7 +522,7 @@ pub unsafe fn medprice_row_avx512_long(high: &[f64], low: &[f64], first: usize, 
     medprice_avx512(high, low, first, out)
 }
 
-// Streaming (single-point) stateful
+
 #[derive(Debug, Clone)]
 pub struct MedpriceStream {
     started: bool,
@@ -542,10 +542,10 @@ impl MedpriceStream {
     }
 }
 
-// Batch/grid sweep for "expand_grid" compatibility (for future-proof API parity)
+
 #[derive(Clone, Debug)]
 pub struct MedpriceBatchRange {
-    pub dummy: (usize, usize, usize), // for compatibility
+    pub dummy: (usize, usize, usize), 
 }
 impl Default for MedpriceBatchRange {
     fn default() -> Self {
@@ -656,8 +656,8 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, M
 #[inline(always)]
 fn expand_grid(range: &MedpriceBatchRange) -> Result<Vec<MedpriceParams>, MedpriceError> {
     let rows_axis = axis_usize(range.dummy)?;
-    // MEDPRICE has no tunable parameters; we just validate the range and
-    // emit one default parameter set per expanded row.
+    
+    
     Ok(rows_axis
         .into_iter()
         .map(|_| MedpriceParams::default())
@@ -724,7 +724,7 @@ fn medprice_batch_inner(
     };
 
     let chosen = match kern {
-        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -753,7 +753,7 @@ fn medprice_batch_inner_into(
     _parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<MedpriceParams>, MedpriceError> {
-    // For medprice, we only have one "parameter set" since it has no parameters
+    
     let combos = vec![MedpriceParams::default()];
 
     if high.is_empty() || low.is_empty() {
@@ -771,7 +771,7 @@ fn medprice_batch_inner_into(
         None => return Err(MedpriceError::AllValuesNaN),
     };
 
-    // Since we only have one row, we can use the kernel directly
+    
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => medprice_scalar(high, low, first, out),
@@ -786,9 +786,9 @@ fn medprice_batch_inner_into(
     Ok(combos)
 }
 
-// =============================================================================
-// WASM helper functions
-// =============================================================================
+
+
+
 
 #[inline]
 pub fn medprice_into_slice_raw(
@@ -832,7 +832,7 @@ pub fn medprice_into_slice(
     };
 
     let chosen = match kern {
-        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -855,15 +855,15 @@ pub fn medprice_into_slice(
         }
     }
 
-    // Fill warmup period with NaN
+    
     dst[..first_valid_idx].fill(f64::NAN);
 
     Ok(())
 }
 
-// =============================================================================
-// Python bindings
-// =============================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "medprice")]
@@ -925,19 +925,19 @@ pub fn medprice_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Since medprice has no parameters, we just use a dummy range for validation
+    
     let range_tuple = dummy_range.unwrap_or((0, 0, 0));
     let range = MedpriceBatchRange { dummy: range_tuple };
     let _ = expand_grid(&range).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Always 1 row for medprice in this API, regardless of dummy_range
+    
     let rows: usize = 1;
     let cols: usize = high_slice.len();
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("medprice_batch: rows*cols overflow"))?;
 
-    // Pre-allocate output array for batch operations
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -955,7 +955,7 @@ pub fn medprice_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // For medprice, we don't have any parameters to return
+    
     dict.set_item("params", Vec::<u64>::new().into_pyarray(py))?;
 
     Ok(dict)
@@ -1216,7 +1216,7 @@ mod tests {
 
     #[test]
     fn test_medprice_into_matches_api() {
-        // Build a small-but-nontrivial OHLCV series with NaN warmup
+        
         let n = 256usize;
         let mut ts: Vec<i64> = (0..n as i64).collect();
         let mut open = vec![0.0; n];
@@ -1227,13 +1227,13 @@ mod tests {
 
         for i in 0..n {
             if i < 3 {
-                // Warmup NaNs in high/low
+                
                 high[i] = f64::NAN;
                 low[i] = f64::NAN;
                 open[i] = f64::NAN;
                 close[i] = f64::NAN;
             } else {
-                // Varying prices
+                
                 let x = i as f64;
                 low[i] = 95.0 + (x.sin() * 2.0);
                 high[i] = low[i] + 10.0 + (x.cos());
@@ -1245,10 +1245,10 @@ mod tests {
         let candles = crate::utilities::data_loader::Candles::new(ts.clone(), open, high.clone(), low.clone(), close, vol);
         let input = MedpriceInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = medprice(&input).expect("baseline medprice failed").values;
 
-        // Preallocate destination and compute via into-API
+        
         let mut out = vec![0.0; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1257,7 +1257,7 @@ mod tests {
 
         assert_eq!(baseline.len(), out.len());
 
-        // Equality: NaN == NaN, else exact equality (identical path)
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1274,9 +1274,9 @@ mod tests {
     }
 }
 
-// =============================================================================
-// WASM bindings
-// =============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1324,7 +1324,7 @@ pub fn medprice_into(
         let high = std::slice::from_raw_parts(high_ptr, len);
         let low = std::slice::from_raw_parts(low_ptr, len);
 
-        // Check if any input pointer equals output pointer (aliasing)
+        
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             medprice_into_slice_raw(&mut temp, high, low, Kernel::Auto)
@@ -1344,7 +1344,7 @@ pub fn medprice_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct MedpriceBatchConfig {
-    pub dummy_range: (usize, usize, usize), // For API consistency
+    pub dummy_range: (usize, usize, usize), 
 }
 
 #[cfg(feature = "wasm")]
@@ -1359,7 +1359,7 @@ pub struct MedpriceBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = medprice_batch)]
 pub fn medprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    // Since medprice has no parameters, we ignore config and just compute once
+    
     let _config: Option<MedpriceBatchConfig> = if config.is_object() {
         serde_wasm_bindgen::from_value(config).ok()
     } else {
@@ -1372,7 +1372,7 @@ pub fn medprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
 
     let js_output = MedpriceBatchJsOutput {
         values: output,
-        combos: vec![MedpriceParams::default()], // Single empty params
+        combos: vec![MedpriceParams::default()], 
         rows: 1,
         cols: high.len(),
     };

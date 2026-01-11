@@ -87,15 +87,15 @@ mod tests_into_parity {
 
     #[test]
     fn test_vidya_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the repo's existing CSV data to construct the input
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VidyaInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = vidya(&input)?.values;
 
-        // No-allocation API writes into caller-provided buffer
+        
         let mut out = vec![0.0; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -103,7 +103,7 @@ mod tests_into_parity {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native symbol is not available; use the same path as the JS wrapper
+            
             vidya_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -441,7 +441,7 @@ pub fn vidya_into_slice(
         {
             if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
                 vidya_simd128(data, short_period, long_period, alpha, first, dst);
-                // Fill warmup with NaN after computation, but don't overwrite the first valid value
+                
                 for v in &mut dst[..warmup_period] {
                     *v = f64::NAN;
                 }
@@ -465,7 +465,7 @@ pub fn vidya_into_slice(
         }
     }
 
-    // Fill warmup with NaN, but don't overwrite the first valid value at warmup_period
+    
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
@@ -1956,9 +1956,9 @@ mod tests {
 				// Property 7: VIDYA follows general price trends
 				// Check that VIDYA generally follows the direction of price movements
 				// Note: VIDYA correctly freezes when volatility is zero, so we only count periods where it's actually moving
-				// Skip for very low alpha where the filter lags heavily and can move opposite direction.
+				
 				if alpha >= 0.05 && data.len() > warmup_end + 20 {
-					// Count how often VIDYA moves in the same direction as price
+					
 					let mut same_direction_count = 0;
 					let mut total_movements = 0;
 					let mut frozen_periods = 0;
@@ -1967,11 +1967,11 @@ mod tests {
 						let price_change = data[i] - data[i - 1];
 						let vidya_change = out[i] - out[i - 1];
 
-						// Count frozen periods (VIDYA not moving despite price movement)
+						
 						if price_change.abs() > 1e-6 && vidya_change.abs() <= 1e-10 {
 							frozen_periods += 1;
 						}
-						// Only count significant movements where both price and VIDYA move
+						
 						else if price_change.abs() > 1e-6 && vidya_change.abs() > 1e-10 {
 							total_movements += 1;
 							if price_change.signum() == vidya_change.signum() {
@@ -1980,9 +1980,9 @@ mod tests {
 						}
 					}
 
-					// VIDYA should follow price direction when it's actually moving
-					// Lower threshold to 40% to account for lagging behavior and edge cases
-					// Skip check if VIDYA is frozen more than 50% of the time (indicates very low volatility data)
+					
+					
+					
 					if total_movements > 10 && frozen_periods < (data.len() - warmup_end) / 2 {
 						let direction_ratio = same_direction_count as f64 / total_movements as f64;
 						prop_assert!(
@@ -1993,7 +1993,7 @@ mod tests {
 					}
 				}
 
-				// Property 8: No poison values in output
+				
 				for (i, &val) in out.iter().enumerate() {
 					if val.is_finite() {
 						let bits = val.to_bits();
@@ -2104,16 +2104,16 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step, alpha_start, alpha_end, alpha_step)
-            (2, 5, 1, 5, 10, 1, 0.2, 0.2, 0.0), // Small ranges, static alpha
-            (2, 10, 2, 10, 30, 5, 0.1, 0.5, 0.1), // Medium ranges, varying alpha
-            (5, 20, 5, 30, 60, 10, 0.2, 0.2, 0.0), // Medium to large, static alpha
-            (10, 30, 10, 50, 100, 25, 0.3, 0.3, 0.0), // Large ranges, static alpha
-            (2, 2, 0, 5, 50, 5, 0.1, 0.9, 0.2), // Static short, varying long and alpha
-            (5, 15, 5, 20, 20, 0, 0.2, 0.8, 0.3), // Varying short, static long, varying alpha
-            (1, 3, 1, 4, 8, 2, 0.5, 0.5, 0.0),  // Small dense ranges
-            (20, 50, 15, 100, 200, 50, 0.1, 0.3, 0.1), // Very large ranges
-            (2, 2, 0, 3, 3, 0, 0.1, 1.0, 0.1),  // Static both, full alpha range
+            
+            (2, 5, 1, 5, 10, 1, 0.2, 0.2, 0.0), 
+            (2, 10, 2, 10, 30, 5, 0.1, 0.5, 0.1), 
+            (5, 20, 5, 30, 60, 10, 0.2, 0.2, 0.0), 
+            (10, 30, 10, 50, 100, 25, 0.3, 0.3, 0.0), 
+            (2, 2, 0, 5, 50, 5, 0.1, 0.9, 0.2), 
+            (5, 15, 5, 20, 20, 0, 0.2, 0.8, 0.3), 
+            (1, 3, 1, 4, 8, 2, 0.5, 0.5, 0.0),  
+            (20, 50, 15, 100, 200, 50, 0.1, 0.3, 0.1), 
+            (2, 2, 0, 3, 3, 0, 0.1, 1.0, 0.1),  
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step, a_start, a_end, a_step)) in
@@ -2197,7 +2197,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings section
+
 
 /// Batch calculation that writes directly to output buffer (for Python bindings)
 #[inline(always)]
@@ -2242,13 +2242,13 @@ pub fn vidya_batch_inner_into(
         });
     }
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.long_period.unwrap() - 2)
         .collect();
 
-    // Initialize the NaN prefixes directly in the output buffer
+    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         out[row_start..row_start + warmup].fill(f64::NAN);
@@ -2429,7 +2429,7 @@ pub fn vidya_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "VidyaDeviceArrayF32", unsendable)]
 pub struct VidyaDeviceArrayF32Py {

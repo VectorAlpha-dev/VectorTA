@@ -1,14 +1,14 @@
-// CUDA kernels for Volume-Weighted MACD (VWMACD)
-//
-// Design
-// - Batch (one series × many params): one thread per row scans the whole
-//   series sequentially using host-precomputed prefix sums (f64) of price*volume
-//   and volume. This mirrors the classic scalar path optimized with sliding sums.
-// - Many-series × one-param (time-major): one thread per series scans rows.
-//
-// Numeric
-// - Inputs/outputs are f32; accumulators use f64 for better agreement with CPU f64.
-// - Warmup and NaN semantics match src/indicators/vwmacd.rs classic SMA/SMA + EMA.
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -17,8 +17,8 @@ static __device__ __forceinline__ float f32_nan() {
     return __int_as_float(0x7fffffff);
 }
 
-// ---- Batch: one series × many params ----
-// Each thread handles one (fast, slow, signal) row across all time steps.
+
+
 extern "C" __global__ void vwmacd_batch_f32(
     const double* __restrict__ pv_prefix,
     const double* __restrict__ vol_prefix,
@@ -44,14 +44,14 @@ extern "C" __global__ void vwmacd_batch_f32(
 
     const int base = row * len;
 
-    // Initialize outputs with NaN up front
+    
     for (int i = 0; i < len; ++i) {
         out_macd[base + i] = f32_nan();
         out_signal[base + i] = f32_nan();
         out_hist[base + i] = f32_nan();
     }
 
-    // Compute MACD (VWMA_fast - VWMA_slow) using prefix sums
+    
     for (int t = warm_macd; t < len; ++t) {
         const int prev_f = t - f;
         const int prev_s = t - s;
@@ -79,7 +79,7 @@ extern "C" __global__ void vwmacd_batch_f32(
         out_macd[base + t] = macd_val;
     }
 
-    // Signal = EMA(macd, g) seeded by running mean of the first g macd values
+    
     if (warm_macd < len) {
         const float alpha = 2.0f / (float)(g + 1);
         const float beta  = 1.0f - alpha;
@@ -92,7 +92,7 @@ extern "C" __global__ void vwmacd_batch_f32(
             int count = 1;
             for (int i = start + 1; i < warm_end; ++i) {
                 const float x = out_macd[base + i];
-                // Running mean in f64 to reduce drift
+                
                 const double m = ((double)(count) * (double)mean + (double)x) / (double)(count + 1);
                 mean = (float)m;
                 out_signal[base + i] = mean;
@@ -108,7 +108,7 @@ extern "C" __global__ void vwmacd_batch_f32(
         }
     }
 
-    // Enforce warmup semantics (NaN until warm_hist)
+    
     for (int i = 0; i < min(warm_hist, len); ++i) {
         out_signal[base + i] = f32_nan();
         out_hist[base + i] = f32_nan();
@@ -120,8 +120,8 @@ extern "C" __global__ void vwmacd_batch_f32(
     }
 }
 
-// ---- Many-series × one-param (time-major) ----
-// One thread per series; scans rows sequentially.
+
+
 extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     const double* __restrict__ pv_prefix_tm,
     const double* __restrict__ vol_prefix_tm,
@@ -129,8 +129,8 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     int fast,
     int slow,
     int signal,
-    int cols,  // num_series
-    int rows,  // series_len
+    int cols,  
+    int rows,  
     float* __restrict__ out_macd_tm,
     float* __restrict__ out_signal_tm,
     float* __restrict__ out_hist_tm)
@@ -142,7 +142,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     const int warm_macd = fv + (fast > slow ? fast : slow) - 1;
     const int warm_hist = warm_macd + signal - 1;
 
-    // Initialize outputs with NaN
+    
     for (int r = 0; r < rows; ++r) {
         const int idx = r * cols + series;
         out_macd_tm[idx] = f32_nan();
@@ -150,7 +150,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         out_hist_tm[idx] = f32_nan();
     }
 
-    // MACD using prefix sums
+    
     for (int r = warm_macd; r < rows; ++r) {
         const int prev_f = r - fast;
         const int prev_s = r - slow;
@@ -180,7 +180,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         out_macd_tm[idx] = macd_val;
     }
 
-    // Signal EMA seeded by running mean of first `signal` macd values
+    
     if (warm_macd < rows) {
         const float alpha = 2.0f / (float)(signal + 1);
         const float beta  = 1.0f - alpha;
@@ -206,7 +206,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         }
     }
 
-    // Enforce warmup/NaN and compute hist
+    
     for (int r = 0; r < min(warm_hist, rows); ++r) {
         out_signal_tm[r * cols + series] = f32_nan();
         out_hist_tm[r * cols + series] = f32_nan();

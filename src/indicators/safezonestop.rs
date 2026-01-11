@@ -52,7 +52,7 @@ use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 
-// Core helper functions
+
 #[inline(always)]
 fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
     let n = high.len().min(low.len());
@@ -66,8 +66,8 @@ fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
 
 #[inline(always)]
 fn warm_len(first: usize, period: usize, max_lookback: usize) -> usize {
-    // first usable out index i must include j = first+period in its window,
-    // and also have a full lookback window.
+    
+    
     first + period.max(max_lookback.saturating_sub(1))
 }
 
@@ -312,12 +312,12 @@ pub fn safezonestop_with_kernel(
     }
 
     let chosen = match kernel {
-        // AVX2/AVX512 kernels are stubs for this indicator; keep Auto on the scalar path.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // allocate only warm prefix as NaN
+    
     let warm = warm_len(first, period, max_lookback);
     let mut out = alloc_with_nan_prefix(len, warm);
 
@@ -416,7 +416,7 @@ pub fn safezonestop_into_slice(
     }
 
     let chosen = match kern {
-        // AVX2/AVX512 kernels are stubs for this indicator; keep Auto on the scalar path.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -438,7 +438,7 @@ pub fn safezonestop_into_slice(
         }
     }
 
-    // enforce warm NaNs after compute (ALMA pattern)
+    
     let warm_end = warm_len(first, period, max_lookback).min(dst.len());
     for v in &mut dst[..warm_end] {
         *v = f64::NAN;
@@ -457,9 +457,9 @@ pub fn safezonestop_into_slice(
 pub fn safezonestop_into(
     input: &SafeZoneStopInput,
     out: &mut [f64],
-// keep error type and behavior identical to existing APIs
+
 ) -> Result<(), SafeZoneStopError> {
-    // Validate lengths early and prefill warmup NaNs to mirror alloc_with_nan_prefix
+    
     let (high, low, direction) = match &input.data {
         SafeZoneStopData::Candles { candles, direction } => (
             source_type(candles, "high"),
@@ -498,14 +498,14 @@ pub fn safezonestop_into(
         return Err(SafeZoneStopError::NotEnoughValidData { needed, valid: len - first });
     }
 
-    // Prefill warmup region with quiet-NaN like alloc_with_nan_prefix
+    
     let warm = warm_len(first, period, max_lookback).min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
     }
 
-    // Dispatch with Kernel::Auto and write into caller buffer
+    
     safezonestop_into_slice(out, input, Kernel::Auto)
 }
 
@@ -524,7 +524,7 @@ pub unsafe fn safezonestop_scalar(
         return;
     }
 
-    // Warmup handling: keep consistent with existing semantics
+    
     let warm = first + period.max(max_lookback) - 1;
     let warm_end = warm.min(len);
     for k in 0..warm_end {
@@ -534,20 +534,20 @@ pub unsafe fn safezonestop_scalar(
         return;
     }
 
-    // Direction once (branch-hoisted)
+    
     let dir_long = direction
         .as_bytes()
         .get(0)
         .map(|&b| b == b'l')
         .unwrap_or(true);
 
-    // Heuristic: tiny lookbacks favor a tight two-pass with a small inner loop;
-    // large lookbacks favor a jammed one-pass with a monotonic deque (O(n)).
+    
+    
     const LB_DEQUE_THRESHOLD: usize = 32;
     let end0 = first + period;
 
     if max_lookback > LB_DEQUE_THRESHOLD {
-        // ---- One-pass: bootstrap + recurrence + monotonic deque ----
+        
         #[inline(always)]
         fn ring_dec(x: usize, cap: usize) -> usize {
             if x == 0 {
@@ -663,10 +663,10 @@ pub unsafe fn safezonestop_scalar(
             prev_low = l;
         }
     } else if end0 < len {
-        // ---- Two-pass: tight scalar recurrence + tiny rolling loop ----
+        
         let mut dm_smooth = vec![0.0f64; len];
 
-        // Bootstrap
+        
         let mut prev_h = *high.get_unchecked(first);
         let mut prev_l = *low.get_unchecked(first);
         let mut sum = 0.0;
@@ -696,7 +696,7 @@ pub unsafe fn safezonestop_scalar(
         }
         *dm_smooth.get_unchecked_mut(end0) = sum;
 
-        // Recursive smoothing
+        
         let alpha = 1.0 - 1.0 / (period as f64);
         for i in (end0 + 1)..len {
             let h = *high.get_unchecked(i);
@@ -724,7 +724,7 @@ pub unsafe fn safezonestop_scalar(
             prev_l = l;
         }
 
-        // Tiny window rolling extremum
+        
         if dir_long {
             for i in warm..len {
                 let start_idx = i + 1 - max_lookback;
@@ -830,38 +830,38 @@ pub unsafe fn safezonestop_avx2(
 
 #[derive(Debug, Clone)]
 pub struct SafeZoneStopStream {
-    // params
+    
     period: usize,
     mult: f64,
     max_lookback: usize,
     dir_long: bool,
 
-    // constants
-    inv_p: f64,    // 1.0 / period
-    alpha: f64,    // 1.0 - inv_p
-    warm_i: usize, // max(period, max_lookback) - 1
+    
+    inv_p: f64,    
+    alpha: f64,    
+    warm_i: usize, 
 
-    // index of last processed bar (0-based for the very first "prev" bar stored)
+    
     i: usize,
 
-    // previous bar to form DM
+    
     have_prev: bool,
     prev_high: f64,
     prev_low: f64,
 
-    // Wilder state
-    boot_n: usize,  // number of raw DM terms accumulated
-    boot_sum: f64,  // sum of raw DM terms during bootstrap
-    dm_prev: f64,   // last Wilder-smoothed DM (as a SUM)
-    dm_ready: bool, // true once bootstrap completes (at j = period)
+    
+    boot_n: usize,  
+    boot_sum: f64,  
+    dm_prev: f64,   
+    dm_ready: bool, 
 
-    // monotonic deque for rolling extremum of candidate values (fixed-size ring buffer)
-    cap: usize,        // = max_lookback.max(1) + 1
-    q_idx: Vec<usize>, // ring buffer of indices
-    q_val: Vec<f64>,   // ring buffer of candidate values
-    q_head: usize,     // points to current front element
-    q_tail: usize,     // points to next insertion slot
-    q_len: usize,      // number of elements in deque
+    
+    cap: usize,        
+    q_idx: Vec<usize>, 
+    q_val: Vec<f64>,   
+    q_head: usize,     
+    q_tail: usize,     
+    q_len: usize,      
 }
 
 impl SafeZoneStopStream {
@@ -900,10 +900,10 @@ impl SafeZoneStopStream {
         let inv_p = 1.0 / (period as f64);
         let alpha = 1.0 - inv_p;
 
-        // match scalar emission boundary
+        
         let warm_i = period.max(max_lookback).saturating_sub(1);
 
-        // fixed-size ring buffers; +1 avoids head==tail ambiguity
+        
         let cap = max_lookback.max(1) + 1;
         let q_idx = vec![0usize; cap];
         let q_val = vec![0.0f64; cap];
@@ -947,7 +947,7 @@ impl SafeZoneStopStream {
 
     #[inline]
     fn push_candidate(&mut self, j: usize, cand: f64) {
-        // evict indices outside [j+1-max_lookback, j]
+        
         let start = j.saturating_add(1).saturating_sub(self.max_lookback);
         while self.q_len > 0 {
             let idx_front = self.q_idx[self.q_head];
@@ -958,7 +958,7 @@ impl SafeZoneStopStream {
                 break;
             }
         }
-        // maintain monotonicity: max-queue for long, min-queue for short
+        
         if self.dir_long {
             while self.q_len > 0 {
                 let last = self.ring_dec(self.q_tail);
@@ -980,7 +980,7 @@ impl SafeZoneStopStream {
                 }
             }
         }
-        // push
+        
         self.q_idx[self.q_tail] = j;
         self.q_val[self.q_tail] = cand;
         self.q_tail = self.ring_inc(self.q_tail);
@@ -999,10 +999,10 @@ impl SafeZoneStopStream {
             self.prev_low = low;
             self.have_prev = true;
             self.i = 0;
-            return None; // need two bars to form first DM
+            return None; 
         }
 
-        // form raw DM from prev and current
+        
         let up = high - self.prev_high;
         let dn = self.prev_low - low;
         let up_pos = if up > 0.0 { up } else { 0.0 };
@@ -1021,10 +1021,10 @@ impl SafeZoneStopStream {
             }
         };
 
-        // index j corresponds to the DM we just formed
+        
         let j = self.i + 1;
 
-        // Wilder smoothing (DM as a smoothed SUM, bootstrap with first 'period' sum)
+        
         if !self.dm_ready {
             self.boot_n += 1;
             self.boot_sum += dm_raw;
@@ -1033,26 +1033,26 @@ impl SafeZoneStopStream {
                 self.dm_ready = true;
             }
         } else {
-            // dm_prev = (1 - 1/p)*dm_prev + dm_raw  (use FMA)
+            
             self.dm_prev = self.alpha.mul_add(self.dm_prev, dm_raw);
         }
 
-        // candidate uses previous bar's extreme and current smoothed DM
+        
         if self.dm_ready {
             let cand = if self.dir_long {
-                (-self.mult).mul_add(self.dm_prev, self.prev_low) // prev_low - mult*dm
+                (-self.mult).mul_add(self.dm_prev, self.prev_low) 
             } else {
-                self.mult.mul_add(self.dm_prev, self.prev_high) // prev_high + mult*dm
+                self.mult.mul_add(self.dm_prev, self.prev_high) 
             };
             self.push_candidate(j, cand);
         }
 
-        // advance prev, index
+        
         self.prev_high = high;
         self.prev_low = low;
         self.i = j;
 
-        // emit only after warm and when deque has a value
+        
         if self.dm_ready && self.i >= self.warm_i && self.q_len > 0 {
             Some(self.q_val[self.q_head])
         } else {
@@ -2527,7 +2527,7 @@ mod tests {
                                         recent_high
                                     );
                                 } else {
-                                    // Short stops shouldn't be way below recent lows
+                                    
                                     prop_assert!(
                                         val >= recent_low - recent_range * mult * 3.0,
                                         "Short stop {} at idx {} too far below recent low {}",
@@ -2540,12 +2540,12 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Volatility response - higher volatility should produce wider stops
+                    
                     if len > warmup_period + period * 2 {
-                        // Compare stops during high vs low volatility periods
+                        
                         let mid_point = len / 2;
                         if mid_point > warmup_period + period {
-                            // Calculate average spreads in first and second half
+                            
                             let first_half_spread: f64 = (warmup_period..mid_point)
                                 .map(|i| high[i] - low[i])
                                 .sum::<f64>()
@@ -2555,12 +2555,12 @@ mod tests {
                                 (mid_point..len).map(|i| high[i] - low[i]).sum::<f64>()
                                     / (len - mid_point) as f64;
 
-                            // If there's a significant volatility difference
+                            
                             if first_half_spread > 0.0 && second_half_spread > 0.0 {
                                 let volatility_ratio = first_half_spread / second_half_spread;
                                 if volatility_ratio > 2.0 || volatility_ratio < 0.5 {
-                                    // Stops should generally be wider in the more volatile period
-                                    // This is a soft check as other factors can influence stops
+                                    
+                                    
                                     let first_half_stops: Vec<f64> = output.values
                                         [warmup_period + period..mid_point]
                                         .iter()
@@ -2576,8 +2576,8 @@ mod tests {
 
                                     if !first_half_stops.is_empty() && !second_half_stops.is_empty()
                                     {
-                                        // Check if stop widths correlate with volatility
-                                        // This is a loose check as many factors affect stops
+                                        
+                                        
                                         prop_assert!(
 										first_half_stops.len() > 0 && second_half_stops.len() > 0,
 										"Should have valid stops in both halves for volatility test"
@@ -2588,12 +2588,12 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Kernel consistency - all kernels should produce same results
+                    
                     for i in 0..len {
                         let y = output.values[i];
                         let r = ref_output.values[i];
 
-                        // Handle NaN/infinite values
+                        
                         if !y.is_finite() || !r.is_finite() {
                             prop_assert!(
                                 y.to_bits() == r.to_bits(),
@@ -2605,7 +2605,7 @@ mod tests {
                             continue;
                         }
 
-                        // Check ULP difference for finite values
+                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2620,24 +2620,24 @@ mod tests {
                         );
                     }
 
-                    // Property 6: Special case - period = 1
+                    
                     if period == 1 && max_lookback == 1 {
-                        // With minimal parameters, most values should be NaN due to warmup
-                        // When max_lookback = 1, warmup is 0, so values start immediately
-                        // But the DM calculation needs at least 2 points
+                        
+                        
+                        
                         prop_assert!(
                             output.values[0].is_nan(),
                             "First value should be NaN with period=1, max_lookback=1"
                         );
                     }
 
-                    // Property 7: Constant price data
+                    
                     if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12)
                         && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12)
                     {
-                        // With constant prices, directional movement should be ~0
-                        // So SafeZone values should eventually stabilize
-                        // Check that later values don't vary too much
+                        
+                        
+                        
                         let stable_start = (warmup_period + period * 2).min(len - 1);
                         if stable_start < len - 1 {
                             let stable_values: Vec<f64> = output.values[stable_start..]
@@ -2704,15 +2704,15 @@ mod tests {
 
     #[test]
     fn test_safezonestop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV input data for parity
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = SafeZoneStopInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = safezonestop(&input)?.values;
 
-        // Into-API preallocated buffer
+        
         let mut out = vec![0.0f64; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2720,7 +2720,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // wasm builds expose only the JS-ABI function; skip here
+            
             return Ok(());
         }
 
@@ -2789,9 +2789,9 @@ mod tests {
         let high = source_type(&c, "high");
         let low = source_type(&c, "low");
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, mult_start, mult_end, mult_step, max_lookback_start, max_lookback_end, max_lookback_step, direction)
+            
             (2, 10, 2, 1.0, 3.0, 0.5, 1, 5, 1, "long"),
             (5, 25, 5, 2.5, 2.5, 0.0, 3, 3, 0, "short"),
             (10, 10, 0, 1.5, 5.0, 0.5, 2, 8, 2, "long"),
@@ -3014,7 +3014,7 @@ pub fn safezonestop_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            // Use the _into function that writes directly to the output buffer
+            
             safezonestop_batch_inner_into(
                 high_slice, low_slice, &sweep, direction, simd, true, slice_out,
             )
@@ -3051,7 +3051,7 @@ pub fn safezonestop_batch_py<'py>(
     Ok(dict)
 }
 
-// -------- Python CUDA bindings (DeviceArrayF32Py) --------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

@@ -303,10 +303,10 @@ pub fn natr_scalar(
     let inv_p: f64 = 1.0 / (period as f64);
     let k100: f64 = 100.0;
 
-    // Warmup: arithmetic mean of TR over the first `period` values starting at `first`.
+    
     let warm_end = first + period - 1;
     let mut sum_tr = 0.0;
-    // i == first
+    
     sum_tr += high[first] - low[first];
     for i in (first + 1)..=warm_end {
         let hi = high[i];
@@ -324,7 +324,7 @@ pub fn natr_scalar(
         f64::NAN
     };
 
-    // Main loop: unrolled by 4 for better ILP; Wilder smoothing remains sequential.
+    
     let mut idx = warm_end + 1;
     while idx + 3 < len {
         let pc0 = close[idx - 1];
@@ -409,7 +409,7 @@ pub fn natr_avx512(
     out: &mut [f64],
 ) {
     unsafe {
-        // Unified body works for all periods
+        
         natr_avx512_body(high, low, close, period, first, out);
     }
 }
@@ -440,7 +440,7 @@ pub unsafe fn natr_avx2(
     let c = close.as_ptr();
     let o = out.as_mut_ptr();
 
-    // Warm-up sum
+    
     let mut i = first;
     let mut sum_tr = *h.add(i) - *l.add(i);
     i += 1;
@@ -483,7 +483,7 @@ pub unsafe fn natr_avx2(
         f64::NAN
     };
 
-    // Main loop: batch TR in AVX2, sequential recurrence
+    
     let mut idx = warm_end + 1;
     while idx + 3 < len {
         let vh = _mm256_loadu_pd(h.add(idx));
@@ -578,7 +578,7 @@ unsafe fn natr_avx512_body(
     let c = close.as_ptr();
     let o = out.as_mut_ptr();
 
-    // Warm-up
+    
     let mut i = first;
     let mut sum_tr = *h.add(i) - *l.add(i);
     i += 1;
@@ -621,7 +621,7 @@ unsafe fn natr_avx512_body(
         f64::NAN
     };
 
-    // Main loop
+    
     let mut idx = warm_end + 1;
     while idx + 7 < len {
         let vh = _mm512_loadu_pd(h.add(idx));
@@ -745,15 +745,15 @@ pub unsafe fn natr_avx512_long(
 #[derive(Debug, Clone)]
 pub struct NatrStream {
     period: usize,
-    alpha: f64, // 1 / period
-    k100: f64,  // 100.0
-    // Running state
-    count: usize,    // how many updates we've seen
-    sum_tr: f64,     // used only until warmup completes
-    atr: f64,        // valid once ready == true
-    prev_close: f64, // last close (for TR)
-    have_prev: bool, // do we have a previous close yet?
-    ready: bool,     // becomes true at count == period
+    alpha: f64, 
+    k100: f64,  
+    
+    count: usize,    
+    sum_tr: f64,     
+    atr: f64,        
+    prev_close: f64, 
+    have_prev: bool, 
+    ready: bool,     
 }
 
 impl NatrStream {
@@ -785,26 +785,26 @@ impl NatrStream {
     /// - Some(natr) otherwise.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // True Range computation (Wilder):
-        // TR = max(high, prev_close) - min(low, prev_close)
-        // For the very first bar, TR := high - low (no prev_close).
+        
+        
+        
         let tr = if self.have_prev {
             let pc = self.prev_close;
             high.max(pc) - low.min(pc)
         } else {
-            // first bar only
+            
             high - low
         };
 
-        // Prepare next step's prev_close
+        
         self.prev_close = close;
         self.have_prev = true;
 
         self.count += 1;
 
         if !self.ready {
-            // Warmup: accumulate TRs; when we reach `period`,
-            // initialize ATR as the arithmetic mean of the first `period` TRs.
+            
+            
             self.sum_tr += tr;
             if self.count == self.period {
                 self.atr = self.sum_tr / (self.period as f64);
@@ -813,12 +813,12 @@ impl NatrStream {
                 return None;
             }
         } else {
-            // Wilder smoothing (EMA with alpha = 1/period):
-            // atr = atr + alpha * (tr - atr)
+            
+            
             self.atr = (tr - self.atr).mul_add(self.alpha, self.atr);
         }
 
-        // NATR = (ATR / close) * 100
+        
         if close.is_finite() && close != 0.0 {
             Some((self.atr / close) * self.k100)
         } else {
@@ -1055,10 +1055,10 @@ fn natr_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let use_tr_shared = combos.len() >= 24; // enable shared TR only for larger sweeps
+    let use_tr_shared = combos.len() >= 24; 
 
     if use_tr_shared {
-        // Precompute TR once and reuse across rows (row-optimized batch)
+        
         let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
         tr.resize(len, 0.0);
         if first < len {
@@ -1073,7 +1073,7 @@ fn natr_batch_inner(
                 i += 1;
             }
         }
-        // Prefix sums for O(1) warmup ATR per row
+        
         let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
         pref.resize(len + 1, 0.0);
         for i in first..len {
@@ -1086,7 +1086,7 @@ fn natr_batch_inner(
             let k100 = 100.0;
             let warm_end = first + period - 1;
 
-            // Warmup ATR via prefix sum
+            
             let sum_tr = pref[warm_end + 1] - pref[first];
             let mut atr = sum_tr * inv_p;
             let cw = close[warm_end];
@@ -1096,7 +1096,7 @@ fn natr_batch_inner(
                 f64::NAN
             };
 
-            // Main recurrence using TR
+            
             let mut i = warm_end + 1;
             while i < len {
                 atr = (tr[i] - atr).mul_add(inv_p, atr);
@@ -1218,7 +1218,7 @@ fn natr_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    // Initialize warmup positions with NaN for each row
+    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warmup_end = first + period - 1;
@@ -1230,7 +1230,7 @@ fn natr_batch_inner_into(
 
     let use_tr_shared = combos.len() >= 24;
     if use_tr_shared {
-        // Precompute TR once and reuse for all rows
+        
         let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
         tr.resize(len, 0.0);
         if first < len {
@@ -1245,7 +1245,7 @@ fn natr_batch_inner_into(
                 i += 1;
             }
         }
-        // Prefix sums for O(1) warmup ATR per row
+        
         let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
         pref.resize(len + 1, 0.0);
         for i in first..len {
@@ -1364,7 +1364,7 @@ unsafe fn natr_row_scalar_from_tr(
     let k100 = 100.0;
     let warm_end = first + period - 1;
 
-    // Warmup ATR from TR
+    
     let mut sum_tr = 0.0;
     for i in first..=warm_end {
         sum_tr += tr[i];
@@ -1377,7 +1377,7 @@ unsafe fn natr_row_scalar_from_tr(
         f64::NAN
     };
 
-    // Main recurrence using TR stream
+    
     let mut i = warm_end + 1;
     while i < len {
         atr = (tr[i] - atr).mul_add(inv_p, atr);
@@ -1452,7 +1452,7 @@ unsafe fn natr_row_avx2_from_tr(
     period: usize,
     out: &mut [f64],
 ) {
-    // Recurrence is scalar; use the TR-optimized scalar row path
+    
     natr_row_scalar_from_tr(tr, close, first, period, out)
 }
 
@@ -1478,21 +1478,21 @@ mod tests {
 
     #[test]
     fn test_natr_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prepare a non-trivial OHLC input from the repo dataset
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Build input with default params (period = 14)
+        
         let input = NatrInput::with_default_candles(&candles);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = natr(&input)?.values;
 
-        // Preallocate output and call the new into API
+        
         let mut out = vec![0.0; candles.close.len()];
         #[allow(unused_variables)]
         {
-            // Native path only; wasm provides a different symbol for natr_into
+            
             #[cfg(not(feature = "wasm"))]
             {
                 natr_into(&input, &mut out)?;
@@ -1501,7 +1501,7 @@ mod tests {
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: treat NaN == NaN; otherwise compare with tight epsilon
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -1782,16 +1782,16 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            NatrParams::default(),            // period: 14
-            NatrParams { period: Some(2) },   // minimum viable period
-            NatrParams { period: Some(5) },   // small period
-            NatrParams { period: Some(7) },   // small period
-            NatrParams { period: Some(10) },  // small-medium period
-            NatrParams { period: Some(20) },  // medium period
-            NatrParams { period: Some(30) },  // medium-large period
-            NatrParams { period: Some(50) },  // large period
-            NatrParams { period: Some(100) }, // very large period
-            NatrParams { period: Some(200) }, // extra large period
+            NatrParams::default(),            
+            NatrParams { period: Some(2) },   
+            NatrParams { period: Some(5) },   
+            NatrParams { period: Some(7) },   
+            NatrParams { period: Some(10) },  
+            NatrParams { period: Some(20) },  
+            NatrParams { period: Some(30) },  
+            NatrParams { period: Some(50) },  
+            NatrParams { period: Some(100) }, 
+            NatrParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1800,12 +1800,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1855,7 +1855,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     fn check_batch_default_row(
@@ -1879,15 +1879,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods
-            (5, 25, 5),    // Medium periods
-            (30, 60, 15),  // Large periods
-            (2, 5, 1),     // Dense small range
-            (10, 20, 2),   // Mid-range with small step
-            (50, 100, 10), // Large range
-            (14, 14, 0),   // Single period (default)
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (30, 60, 15),  
+            (2, 5, 1),     
+            (10, 20, 2),   
+            (50, 100, 10), 
+            (14, 14, 0),   
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1906,7 +1906,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1972,13 +1972,13 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: generate period and length, then create realistic OHLC data
+        
         let strat = (2usize..=50, 50usize..=400, 0usize..=2)
             .prop_flat_map(|(period, len, scenario)| {
-                // Generate base close prices with different scenarios
+                
                 let close_strategy = match scenario {
                     0 => {
-                        // Normal range prices
+                        
                         prop::collection::vec(
                             (1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
@@ -1986,7 +1986,7 @@ mod tests {
                         .boxed()
                     }
                     1 => {
-                        // Very small prices (edge case)
+                        
                         prop::collection::vec(
                             (0.01f64..1.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
@@ -1994,7 +1994,7 @@ mod tests {
                         .boxed()
                     }
                     _ => {
-                        // Constant prices
+                        
                         (1.0f64..100.0f64)
                             .prop_map(move |val| vec![val; len])
                             .boxed()
@@ -2004,27 +2004,27 @@ mod tests {
                 (close_strategy, Just(period), Just(len), Just(scenario))
             })
             .prop_flat_map(|(close_prices, period, len, scenario)| {
-                // Generate high/low based on close with realistic spreads
+                
                 let mut high_vec = Vec::with_capacity(len);
                 let mut low_vec = Vec::with_capacity(len);
 
-                // Use a deterministic approach for generating high/low
+                
                 for (i, &close) in close_prices.iter().enumerate() {
                     if scenario == 2 {
-                        // Constant prices scenario
+                        
                         high_vec.push(close);
                         low_vec.push(close);
                     } else {
-                        // Create volatility that varies over time (expanded range: 0.1% to 20%)
+                        
                         let volatility_factor = 0.001 + 0.20 * ((i * 7919) % 100) as f64 / 100.0;
                         let spread = close * volatility_factor;
 
-                        // Ensure high >= close >= low
+                        
                         let high = close + spread * 0.5;
                         let low = close - spread * 0.5;
 
                         high_vec.push(high);
-                        low_vec.push(low.max(0.001)); // Ensure positive but allow very small values
+                        low_vec.push(low.max(0.001)); 
                     }
                 }
 
@@ -2045,18 +2045,18 @@ mod tests {
                 };
                 let input = NatrInput::from_slices(&high, &low, &close, params);
 
-                // Test with specified kernel
+                
                 let result = natr_with_kernel(&input, kernel)?;
 
-                // Test with scalar kernel as reference
+                
                 let ref_result = natr_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input length
+                
                 prop_assert_eq!(result.values.len(), high.len());
                 prop_assert_eq!(result.values.len(), low.len());
                 prop_assert_eq!(result.values.len(), close.len());
 
-                // Property 2: Warmup period handling - first (period - 1) values should be NaN
+                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -2066,7 +2066,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: NATR values should be non-negative after warmup (TR is always positive)
+                
                 for i in period..result.values.len() {
                     if result.values[i].is_finite() {
                         prop_assert!(
@@ -2076,7 +2076,7 @@ mod tests {
                             result.values[i]
                         );
 
-                        // NATR values should be reasonable (with expanded volatility, could be higher)
+                        
                         prop_assert!(
                             result.values[i] < 10000.0,
                             "NATR seems unreasonably high at index {}: got {}",
@@ -2086,7 +2086,7 @@ mod tests {
                     }
                 }
 
-                // Property 4: Kernel consistency - different SIMD implementations should produce same results
+                
                 for i in 0..result.values.len() {
                     let val = result.values[i];
                     let ref_val = ref_result.values[i];
@@ -2096,7 +2096,7 @@ mod tests {
                     }
 
                     if val.is_finite() && ref_val.is_finite() {
-                        // Allow small tolerance for floating point differences
+                        
                         let diff = (val - ref_val).abs();
                         let tolerance = (ref_val.abs() * 1e-10).max(1e-10);
                         prop_assert!(
@@ -2108,7 +2108,7 @@ mod tests {
                             diff
                         );
                     } else {
-                        // Both should have same finite/infinite status
+                        
                         prop_assert_eq!(
                             val.is_finite(),
                             ref_val.is_finite(),
@@ -2120,10 +2120,10 @@ mod tests {
                     }
                 }
 
-                // Property 5: Test special case - when all prices are constant (scenario 2)
-                // NATR should be exactly 0 after initial warmup
+                
+                
                 if scenario == 2 {
-                    // Check that high == low == close for all values (constant prices)
+                    
                     let is_constant = high
                         .iter()
                         .zip(&low)
@@ -2131,8 +2131,8 @@ mod tests {
                         .all(|((h, l), c)| (*h - *l).abs() < 1e-10 && (*h - *c).abs() < 1e-10);
 
                     if is_constant && result.values.len() > period + 5 {
-                        // After the initial period, NATR should be 0 for constant prices
-                        // Start checking a few indices after warmup to allow stabilization
+                        
+                        
                         for i in (period + 5)..result.values.len() {
                             if result.values[i].is_finite() {
                                 prop_assert!(
@@ -2146,12 +2146,12 @@ mod tests {
                     }
                 }
 
-                // Property 6: Test edge case with very small prices (scenario 1)
+                
                 if scenario == 1 {
-                    // Verify that NATR still works correctly with small prices
+                    
                     for i in period..result.values.len() {
                         if result.values[i].is_finite() && close[i] > 0.0 {
-                            // NATR should still be reasonable even with small prices
+                            
                             prop_assert!(
                                 result.values[i] >= 0.0 && result.values[i] < 100000.0,
                                 "NATR out of bounds with small prices at index {}: got {}",
@@ -2162,10 +2162,10 @@ mod tests {
                     }
                 }
 
-                // Property 7: Division by zero handling
-                // Check if any close prices are near zero
+                
+                
                 if close.iter().any(|&c| c.abs() < 1e-10) {
-                    // NATR should return 0 when close is 0, not NaN or infinity
+                    
                     for (i, &c) in close.iter().enumerate() {
                         if c.abs() < 1e-10 && i >= period - 1 {
                             prop_assert!(
@@ -2178,7 +2178,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Check poison values aren't present
+                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in result.values.iter().enumerate() {
@@ -2422,7 +2422,7 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    // Validate parameters
+    
     if len == 0 {
         return Err(NatrError::EmptyInputData);
     }
@@ -2439,7 +2439,7 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    // Find first valid index
+    
     let first_valid_idx = {
         let first_valid_idx_h = high.iter().position(|&x| !x.is_nan());
         let first_valid_idx_l = low.iter().position(|&x| !x.is_nan());
@@ -2463,13 +2463,13 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    // Choose kernel
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // Compute NATR directly into dst
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -2487,7 +2487,7 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         }
     }
 
-    // Fill warmup with NaN
+    
     for v in &mut dst[..(first_valid_idx + period - 1)] {
         *v = f64::NAN;
     }
@@ -2550,7 +2550,7 @@ pub fn natr_into(
         };
         let input = NatrInput::from_slices(high, low, close, params);
 
-        // Check if any input pointer equals output pointer (aliasing)
+        
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             natr_into_slice(&mut temp, &input, detect_best_kernel())
@@ -2734,7 +2734,7 @@ impl NatrDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producer stream is synchronized before returning; omit `stream`.
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2752,8 +2752,8 @@ impl NatrDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2775,7 +2775,7 @@ impl NatrDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // copy=True is not yet supported (no cross-device copy path here).
+        
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2785,7 +2785,7 @@ impl NatrDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let rows = self.rows;
         let cols = self.cols;
         let buf = self

@@ -52,7 +52,7 @@ pub struct CudaCci {
     context: Arc<Context>,
     device_id: u32,
     debug_batch_logged: bool,
-    smem_optin_limit: usize, // max per-block dyn shared memory (bytes), opt-in, minus reservation
+    smem_optin_limit: usize, 
 }
 
 impl CudaCci {
@@ -119,7 +119,7 @@ impl CudaCci {
         unsafe {
             let mut dev: cu::CUdevice = std::mem::zeroed();
             if cu::cuCtxGetDevice(&mut dev) != cu::CUresult::CUDA_SUCCESS {
-                return 48 * 1024; // safe baseline
+                return 48 * 1024; 
             }
 
             let mut optin: i32 = 0;
@@ -137,7 +137,7 @@ impl CudaCci {
             );
 
             let cap = if optin > 0 { optin as usize } else { def as usize };
-            cap.saturating_sub(1024) // leave 1 KiB per-block reservation
+            cap.saturating_sub(1024) 
         }
     }
 
@@ -167,7 +167,7 @@ impl CudaCci {
                 Err(CudaCciError::OutOfMemory { required: required_bytes, free, headroom })
             }
         } else {
-            // If we cannot query, allow and let allocation fail with a CUDA error.
+            
             Ok(())
         }
     }
@@ -280,14 +280,14 @@ impl CudaCci {
             .get_function("cci_batch_f32")
             .map_err(|_| CudaCciError::MissingKernelSymbol { name: "cci_batch_f32" })?;
 
-        // Favor shared memory over L1 when beneficial on unified L1/SMEM arch; 4-byte banks for f32
+        
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
 
-        // Clamp dynamic SMEM by device's opt-in limit
+        
         let dyn_smem = dyn_smem_bytes.min(self.smem_optin_limit);
 
-        // Opt-in to dynamic SMEM > 48 KiB and prefer SMEM carveout
+        
         unsafe {
             let raw = func.to_raw();
             let _ = cu::cuFuncSetAttribute(
@@ -302,7 +302,7 @@ impl CudaCci {
             );
         }
 
-        // Use CUDA-suggested block size considering dynamic shared memory
+        
         let block_x: u32 = match env::var("CCI_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_mg, suggest) = func
@@ -311,7 +311,7 @@ impl CudaCci {
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
-        // One block per combo (kernel uses 1 active lane per block for simplicity)
+        
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x.max(64), 1, 1).into();
 
@@ -344,7 +344,7 @@ impl CudaCci {
     ) -> Result<DeviceArrayF32, CudaCciError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let rows = combos.len();
-        // VRAM estimate: inputs + params + outputs with checked arithmetic
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let prices_b = len.checked_mul(sz_f32).ok_or_else(|| CudaCciError::InvalidInput("series_len bytes overflow".into()))?;
@@ -371,14 +371,14 @@ impl CudaCci {
                 d_prices.async_copy_from(&h_prices, &self.stream).map_err(CudaCciError::Cuda)?;
                 d_periods.async_copy_from(&h_periods, &self.stream).map_err(CudaCciError::Cuda)?;
             }
-            // Chunk launches if rows is extremely large; keep <= 65_535 blocks as a conservative limit
+            
             let max_blocks: usize = 65_535;
             let mut launched = 0usize;
             while launched < rows {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
                 let periods_off = launched;
                 let out_off = launched * len;
-                // dynamic shared memory for this chunk = max(period) * sizeof(f32)
+                
                 let max_p_this = periods_u[launched..launched + n_this]
                     .iter()
                     .copied()
@@ -419,7 +419,7 @@ impl CudaCci {
             let mut launched = 0usize;
             while launched < rows {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
-                // dynamic shared memory for this chunk = max(period) * sizeof(f32)
+                
                 let max_p_this = periods_u[launched..launched + n_this]
                     .iter()
                     .copied()
@@ -524,7 +524,7 @@ impl CudaCci {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Validate against device limits
+        
         let dev = Device::get_device(self.device_id).map_err(CudaCciError::Cuda)?;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaCciError::Cuda)? as u32;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock).map_err(CudaCciError::Cuda)? as u32;
@@ -560,7 +560,7 @@ impl CudaCci {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaCciError> {
         let (first_valids, period) = Self::prepare_many_series(data_tm_f32, cols, rows, period)?;
-        // Memory check
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let elems = cols
@@ -598,14 +598,14 @@ impl CudaCci {
     }
 }
 
-// ---------- Benches (wrapper-owned) ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 200; // keep runtime reasonable (O(period) MAD per step)
+    const PARAM_SWEEP: usize = 200; 
 
     fn bytes_required() -> usize {
         let in_bytes = SERIES_LEN * std::mem::size_of::<f32>();

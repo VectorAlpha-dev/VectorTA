@@ -1,6 +1,6 @@
-// CUDA kernels for the Normalized Moving Average (NMA).
-// Optimized for Ada (SM 8.9) and newer: broadcasted constant weights,
-// shared-memory tiling over time with halo, and modest unrolling.
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,25 +12,25 @@
 #include <math.h>
 namespace cg = cooperative_groups;
 
-// NaN payload used for warmup prefix
+
 #ifndef NMA_NAN
 #define NMA_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// Upper bound for supported period when using constant/shared tables.
+
 #ifndef NMA_MAX_PERIOD
 #define NMA_MAX_PERIOD 4096
 #endif
 
-// Maximum tile size supported by these kernels; must be >= max blockDim.x used.
+
 #ifndef NMA_MAX_TILE
 #define NMA_MAX_TILE 512
 #endif
 
-// Weights: w[k] = sqrt(k+1) - sqrt(k), k in [0, NMA_MAX_PERIOD-1]
+
 extern "C" __constant__ float c_sqrt_diffs[NMA_MAX_PERIOD];
 
-// Lightweight filler (optional; wrappers may continue per-thread init as before).
+
 extern "C" __global__ void nma_fill_nan_f32(float* __restrict__ out, int total_elems) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < total_elems) out[idx] = NMA_NAN;
@@ -49,7 +49,7 @@ void nma_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    // Fast grid-stride fill of NaNs to preserve warmup semantics
+    
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -67,12 +67,12 @@ void nma_batch_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period;
 
-    // Shared memory: tile of abs_diffs plus left halo (period-1)
+    
     __shared__ float tile[NMA_MAX_TILE + NMA_MAX_PERIOD];
-    // Optional per-block fallback weights when constant memory isn't populated
+    
     __shared__ float wbuf[NMA_MAX_PERIOD];
 
-    // Detect whether constant memory table has been initialized
+    
     const bool use_const = (c_sqrt_diffs[1] > 0.0f);
     if (!use_const) {
         for (int i = threadIdx.x; i < period; i += blockDim.x) {
@@ -91,7 +91,7 @@ void nma_batch_f32(const float* __restrict__ prices,
         const int g_start = tileStart - (period - 1);
         const int load_elems = L + (period - 1);
 
-        // Copy contiguous abs_diffs span into shared (tile + halo)
+        
         cg::memcpy_async(block, tile, abs_diffs + g_start, sizeof(float) * load_elems);
         cg::wait(block);
         block.sync();
@@ -99,7 +99,7 @@ void nma_batch_f32(const float* __restrict__ prices,
         const int lane = threadIdx.x;
         if (lane < L) {
             const int t = tileStart + lane;
-            const int cur_idx = (period - 1) + lane; // index in shared for abs_diffs[t]
+            const int cur_idx = (period - 1) + lane; 
 
             float num = 0.0f;
             float denom = 0.0f;
@@ -134,7 +134,7 @@ void nma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    // Initialize this column to NaN (preserve semantics)
+    
     const int stride = num_series;
     for (int row = 0; row < series_len; ++row) {
         out_tm[row * stride + series] = NMA_NAN;
@@ -150,7 +150,7 @@ void nma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int warm = first_valid + period;
 
-    // Fallback per-block weights if constant memory table isn't populated
+    
     __shared__ float wbuf[NMA_MAX_PERIOD];
     const bool use_const = (c_sqrt_diffs[1] > 0.0f);
     if (!use_const) {

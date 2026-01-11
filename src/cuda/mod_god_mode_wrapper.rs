@@ -1,7 +1,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
-use crate::cuda::DeviceArrayF32Triplet; // shared 3-output handle
+use crate::cuda::DeviceArrayF32Triplet; 
 use crate::indicators::mod_god_mode::{ModGodModeBatchRange, ModGodModeMode, ModGodModeParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-// Must match the kernel's MGM_RING_KCAP (power-of-two, default 64)
+
 const MGM_RING_KCAP: i32 = 64;
 
 #[derive(Debug, Error)]
@@ -220,11 +220,11 @@ impl CudaModGodMode {
 
     #[inline]
     fn fast_shared_bytes(block_x: u32) -> usize {
-        // Per-thread bytes: (2*f32 + 2*i32 + 1*i8) * KCAP = 17 * KCAP
+        
         let cap = Self::fast_cap() as usize;
         let per_thread = (2 * std::mem::size_of::<f32>()
             + 2 * std::mem::size_of::<i32>()
-            + std::mem::size_of::<i8>()) * cap; // = 17*cap
+            + std::mem::size_of::<i8>()) * cap; 
         per_thread * (block_x as usize)
     }
 
@@ -299,7 +299,7 @@ impl CudaModGodMode {
         let combos = Self::expand_range(sweep)?;
         let rows = combos.len();
 
-        // First valid index
+        
         let mut first_valid_opt = None;
         for (i, &v) in close.iter().enumerate() {
             if v.is_finite() {
@@ -310,7 +310,7 @@ impl CudaModGodMode {
         let first_valid = first_valid_opt
             .ok_or_else(|| CudaModGodModeError::InvalidInput("all values are NaN".into()))?;
 
-        // Build param arrays
+        
         let mut n1s: Vec<i32> = Vec::with_capacity(rows);
         let mut n2s: Vec<i32> = Vec::with_capacity(rows);
         let mut n3s: Vec<i32> = Vec::with_capacity(rows);
@@ -328,7 +328,7 @@ impl CudaModGodMode {
             modes.push(m);
         }
 
-        // Rows that exceed the shared-memory ring cap must be run by the fallback kernel.
+        
         let cap = Self::fast_cap();
         let mut large_idxs: Vec<usize> = Vec::new();
         for i in 0..rows {
@@ -339,7 +339,7 @@ impl CudaModGodMode {
             }
         }
 
-        // VRAM estimation (skip H/L when volume is unused)
+        
         let use_vol = volume.is_some();
         let elem_f32 = std::mem::size_of::<f32>();
         let base_scalars = if use_vol {
@@ -382,7 +382,7 @@ impl CudaModGodMode {
             return Err(e);
         }
 
-        // Upload inputs (skip high/low if volume is unused)
+        
         let d_close = DeviceBuffer::from_slice(close)?;
         let d_high = if use_vol {
             Some(DeviceBuffer::from_slice(high)?)
@@ -407,7 +407,7 @@ impl CudaModGodMode {
         let mut d_wt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
         let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
         let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
-        // A) Fast shared-memory kernel over rows that fit the cap
+        
         if large_idxs.len() < rows {
             let func_fast = self
                 .module
@@ -417,7 +417,7 @@ impl CudaModGodMode {
                 })?;
             let mut block_x = Self::fast_block_x();
             let mut shmem_bytes = Self::fast_shared_bytes(block_x);
-            let max_dyn_default: usize = 48 * 1024; // conservative default if opt-in not set
+            let max_dyn_default: usize = 48 * 1024; 
             while shmem_bytes > max_dyn_default && block_x > 1 {
                 block_x /= 2;
                 shmem_bytes = Self::fast_shared_bytes(block_x);
@@ -476,7 +476,7 @@ impl CudaModGodMode {
             }
         }
 
-        // B) Fallback kernel for large rows only (range launches)
+        
         if !large_idxs.is_empty() {
             let func_fallback = self
                 .module
@@ -557,8 +557,8 @@ impl CudaModGodMode {
                     Ok(())
                 };
 
-            // Merge contiguous indices into ranges so we can launch the fallback kernel
-            // with a proper `rows_i` instead of doing a per-row launch.
+            
+            
             let mut range_start = large_idxs[0];
             let mut prev = range_start;
             for &idx in large_idxs.iter().skip(1) {
@@ -652,7 +652,7 @@ impl CudaModGodMode {
         };
         let use_vol = params.use_volume.unwrap_or(false) && volume_tm.is_some();
 
-        // Skip high/low if volume is unused
+        
         let d_close = DeviceBuffer::from_slice(close_tm)?;
         let d_high = if use_vol {
             Some(DeviceBuffer::from_slice(high_tm)?)
@@ -679,7 +679,7 @@ impl CudaModGodMode {
             .map_err(|_| CudaModGodModeError::MissingKernelSymbol {
                 name: "mod_god_mode_many_series_one_param_time_major_f32",
             })?;
-        // Kernel uses threadIdx.x == 0 only
+        
         let bx: u32 = 1;
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (bx, 1, 1).into();
@@ -758,14 +758,14 @@ impl CudaModGodMode {
     }
 }
 
-// ---------- Benches (batch only; conservative sizes to avoid OOM) ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 500_000;
-    const PARAM_SWEEP: usize = 100; // keep outputs moderate (3 * 100 * 500k * 4B ~ 57 MB)
+    const PARAM_SWEEP: usize = 100; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();

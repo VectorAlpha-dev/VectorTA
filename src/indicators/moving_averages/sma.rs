@@ -233,13 +233,13 @@ pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
         });
     }
 
-    // Prefill warmup prefix with the exact NaN pattern used by alloc_with_nan_prefix
+    
     let warm = (first + period - 1).min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Write results directly into caller buffer
+    
     sma_compute_into(data, period, first, chosen, out);
     Ok(())
 }
@@ -250,7 +250,7 @@ pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
 pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result<(), SmaError> {
     let (data, period, first, chosen) = sma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(SmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -258,13 +258,13 @@ pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result
         });
     }
 
-    // Fill warmup with NaN
+    
     let warmup = first + period - 1;
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
     }
 
-    // Compute directly into output buffer
+    
     sma_compute_into(data, period, first, chosen, dst);
 
     Ok(())
@@ -1373,7 +1373,7 @@ impl SmaDeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        // shape: (rows, cols)
+        
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
@@ -1384,7 +1384,7 @@ impl SmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing kernels synchronize before return
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1400,7 +1400,7 @@ impl SmaDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1421,7 +1421,7 @@ impl SmaDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -1498,9 +1498,9 @@ impl SmaStreamPy {
     }
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "sma")]
@@ -1511,10 +1511,10 @@ pub fn sma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = SmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     sma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1532,7 +1532,7 @@ pub struct SmaBatchConfig {
 pub struct SmaBatchJsOutput {
     pub values: Vec<f64>,
     pub combos: Vec<SmaParams>,
-    pub periods: Vec<usize>, // Added for API parity with ALMA
+    pub periods: Vec<usize>, 
     pub rows: usize,
     pub cols: usize,
 }
@@ -1565,7 +1565,7 @@ pub fn sma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// Keep old functions for backward compatibility but mark as deprecated
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = "smaBatch")]
 #[deprecated(since = "1.0.0", note = "Use sma_batch instead")]
@@ -1615,22 +1615,22 @@ pub fn sma_batch_rows_cols_js(
     vec![combos.len(), data_len]
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn sma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1646,13 +1646,13 @@ pub fn sma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
         let params = SmaParams {
@@ -1660,18 +1660,18 @@ pub fn sma_into(
         };
         let input = SmaInput::from_slice(data, params);
 
-        // Check if pointers are the same (aliasing)
+        
         if in_ptr == out_ptr as *const f64 {
-            // Use temporary buffer to avoid corruption
+            
             let mut temp = vec![0.0; len];
             sma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             sma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1681,7 +1681,7 @@ pub fn sma_into(
     }
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1710,7 +1710,7 @@ pub fn sma_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Map to non-batch kernel (ALMA parity) and no parallel on WASM
+        
         let kernel = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[test]
     fn test_sma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Small but non-trivial input with leading NaNs and varying values
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253u32 {
@@ -1744,20 +1744,20 @@ mod tests {
         let params = SmaParams::default();
         let input = SmaInput::from_slice(&data, params);
 
-        // Baseline via existing Vec-returning API
+        
         let base = sma_with_kernel(&input, Kernel::Auto)?.values;
 
-        // Preallocate output and use the new into API
+        
         let mut out = vec![0.0; data.len()];
         #[cfg(not(feature = "wasm"))]
         {
             sma_into(&input, &mut out)?;
         }
 
-        // Length parity
+        
         assert_eq!(base.len(), out.len());
 
-        // Equality check: exact for finite; treat NaN==NaN as equal
+        
         for (i, (a, b)) in base.iter().zip(out.iter()).enumerate() {
             let ok = if a.is_nan() && b.is_nan() {
                 true
@@ -1954,7 +1954,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_sma_no_poison(
         test_name: &str,
@@ -1965,7 +1965,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to increase coverage
+        
         let test_periods = vec![5, 9, 14, 20, 30, 50];
 
         for period in test_periods {
@@ -1975,16 +1975,16 @@ mod tests {
             let input = SmaInput::from_candles(&candles, "close", params);
             let output = sma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={})",
@@ -1992,7 +1992,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={})",
@@ -2000,7 +2000,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={})",
@@ -2013,7 +2013,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_sma_no_poison(
         _test_name: &str,
@@ -2031,7 +2031,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: generate period first, then data of appropriate length
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2049,12 +2049,12 @@ mod tests {
                 };
                 let input = SmaInput::from_slice(&data, params);
 
-                // Compute SMA with specified kernel and scalar reference
+                
                 let SmaOutput { values: out } = sma_with_kernel(&input, kernel).unwrap();
                 let SmaOutput { values: ref_out } =
                     sma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Initial values should be NaN (warmup period)
+                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2064,22 +2064,22 @@ mod tests {
                     );
                 }
 
-                // Properties 2-7: Test each valid SMA value
+                
                 for i in (period - 1)..data.len() {
                     let window_start = i + 1 - period;
                     let window = &data[window_start..=i];
 
-                    // Property 2: SMA should equal exact arithmetic mean of window
+                    
                     let expected_sum: f64 = window.iter().sum();
                     let expected_mean = expected_sum / period as f64;
 
-                    // Use slightly relaxed tolerance for numerical stability across different kernels
-                    // For running sum method, errors accumulate proportionally to magnitude
+                    
+                    
 	                    let abs_tolerance = 1e-8_f64;
 	                    let rel_tolerance = 1e-12_f64;
 	                    let tolerance = abs_tolerance.max(expected_mean.abs() * rel_tolerance);
-	                    // Cross-kernel comparisons can differ slightly due to FMA and/or summation order.
-	                    // Keep a small floor to avoid flaky proptests on large-magnitude windows.
+	                    
+	                    
 	                    let kernel_tol = 5e-8_f64.max(tolerance);
 	                    prop_assert!(
 	                        (out[i] - expected_mean).abs() <= tolerance,
@@ -2090,7 +2090,7 @@ mod tests {
                         (out[i] - expected_mean).abs()
                     );
 
-                    // Property 3: SMA bounded by min/max of input window
+                    
 	                    let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
 	                    let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
@@ -2103,7 +2103,7 @@ mod tests {
                         window_max
                     );
 
-	                    // Property 4: For constant input, SMA equals that constant
+	                    
 	                    if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
 	                        let tolerance = kernel_tol.max(if period == 1 { 1e-8 } else { 1e-9 });
 	                        prop_assert!(
@@ -2115,17 +2115,17 @@ mod tests {
                         );
                     }
 
-                    // Property 5: Linear trend - SMA of linear function should be at midpoint
-                    // Check if window forms a linear sequence
+                    
+                    
 	                    if period >= 3 {
 	                        let diffs: Vec<f64> = window.windows(2).map(|w| w[1] - w[0]).collect();
 	                        let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
 	                        if is_linear && !diffs.is_empty() {
-	                            // For linear sequence, SMA should equal value at midpoint
+	                            
 	                            let midpoint_value = window[period / 2];
 	                            let tolerance = if period % 2 == 0 {
-	                                // Even period: average of two middle values
+	                                
 	                                (window[period / 2 - 1] - window[period / 2]).abs() / 2.0
 	                                    + kernel_tol
 	                            } else {
@@ -2142,7 +2142,7 @@ mod tests {
                         }
                     }
 
-	                    // Property 6: Cross-kernel consistency
+	                    
 	                    prop_assert!(
 	                        (out[i] - ref_out[i]).abs() <= kernel_tol
 	                            || (out[i].is_nan() && ref_out[i].is_nan()),
@@ -2153,9 +2153,9 @@ mod tests {
                         ref_out[i]
                     );
 
-                    // Property 7: Lag property - SMA should smooth out sharp changes
-                    // When sliding the window, the change in SMA depends on the new value added
-                    // and the old value removed from the window
+                    
+                    
+                    
 	                    if i >= period {
 	                        let new_value = data[i];
 	                        let old_value = data[i - period];
@@ -2176,7 +2176,7 @@ mod tests {
 						);
                     }
 
-                    // Property 8: Check for poison values (debug mode only)
+                    
                     #[cfg(debug_assertions)]
                     {
                         let bits = out[i].to_bits();
@@ -2192,7 +2192,7 @@ mod tests {
                     }
                 }
 
-                // Additional property: Period = 1 should return original data
+                
                 if period == 1 {
                     for i in 0..data.len() {
                         prop_assert!(
@@ -2274,7 +2274,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2282,12 +2282,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase coverage
+        
         let test_configs = vec![
-            (5, 15, 5),   // Small periods
-            (10, 30, 10), // Medium periods
-            (20, 50, 15), // Large periods
-            (2, 10, 2),   // Edge case: very small periods
+            (5, 15, 5),   
+            (10, 30, 10), 
+            (20, 50, 15), 
+            (2, 10, 2),   
         ];
 
         for (start, end, step) in test_configs {
@@ -2296,9 +2296,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2308,7 +2308,7 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2316,7 +2316,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2324,7 +2324,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2337,7 +2337,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,

@@ -67,7 +67,7 @@ impl BenchmarkJsonExport {
     ) -> Self {
         let timestamp = chrono::Utc::now().to_rfc3339();
 
-        // Extract unique data sizes and libraries
+        
         let mut data_sizes = std::collections::HashSet::new();
         let mut libraries = std::collections::HashSet::new();
 
@@ -88,21 +88,21 @@ impl BenchmarkJsonExport {
             .collect();
         libraries_vec.sort();
 
-        // Convert FFI profile if available
+        
         let ffi_profile_data = ffi_profile.map(|profile| FfiProfileData {
             call_overhead_ns: profile.call_overhead_ns,
             marshalling_ns_per_kb: profile.marshalling_overhead_ns_per_kb,
             validation_overhead_ns: profile.validation_overhead_ns,
         });
 
-        // Group measurements by indicator and data size
+        
         let mut indicator_map: HashMap<(String, usize), Vec<&UnifiedMeasurement>> = HashMap::new();
         for measurement in measurements {
             let key = (measurement.indicator.clone(), measurement.data_size);
             indicator_map.entry(key).or_insert_with(Vec::new).push(measurement);
         }
 
-        // Convert to indicator results
+        
         let mut indicators = Vec::new();
         for ((indicator_name, data_size), measurements) in indicator_map {
             let mut library_measurements = Vec::new();
@@ -111,7 +111,7 @@ impl BenchmarkJsonExport {
                 let avg_duration = measurement.average_duration();
                 let raw_time_us = avg_duration.as_secs_f64() * 1_000_000.0;
 
-                // Calculate FFI compensated time if applicable
+                
                 let ffi_compensated_time_us = if measurement.library.uses_ffi() {
                     ffi_profile.map(|profile| {
                         let overhead = profile.estimate_overhead(measurement.data_size * 8);
@@ -137,12 +137,12 @@ impl BenchmarkJsonExport {
             });
         }
 
-        // Sort indicators by name and data size
+        
         indicators.sort_by(|a, b| {
             a.name.cmp(&b.name).then(a.data_size.cmp(&b.data_size))
         });
 
-        // Calculate summary statistics
+        
         let summary = calculate_summary(&indicators);
 
         BenchmarkJsonExport {
@@ -187,7 +187,7 @@ fn calculate_summary(indicators: &[IndicatorResults]) -> BenchmarkSummary {
     let mut throughput_by_library: HashMap<String, Vec<f64>> = HashMap::new();
 
     for indicator in indicators {
-        // Find fastest library for this indicator
+        
         if let Some(fastest) = indicator.measurements
             .iter()
             .min_by(|a, b| a.raw_time_us.partial_cmp(&b.raw_time_us).unwrap())
@@ -198,7 +198,7 @@ fn calculate_summary(indicators: &[IndicatorResults]) -> BenchmarkSummary {
             );
         }
 
-        // Collect throughput data
+        
         for measurement in &indicator.measurements {
             throughput_by_library
                 .entry(measurement.library.clone())
@@ -207,7 +207,7 @@ fn calculate_summary(indicators: &[IndicatorResults]) -> BenchmarkSummary {
         }
     }
 
-    // Calculate average throughput
+    
     let average_throughput_by_library = throughput_by_library
         .into_iter()
         .map(|(library, throughputs)| {
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(export.indicators.len(), 1);
         assert_eq!(export.indicators[0].measurements.len(), 2);
 
-        // Test JSON serialization
+        
         let json = export.to_json_string().unwrap();
         assert!(json.contains("\"SMA\""));
         assert!(json.contains("\"Rust Native\""));

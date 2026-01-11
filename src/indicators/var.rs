@@ -327,13 +327,13 @@ pub fn var_into(input: &VarInput, out: &mut [f64]) -> Result<(), VarError> {
         return Err(VarError::InvalidNbdev { nbdev });
     }
 
-    // Prefill warmup with the same quiet-NaN bit pattern used by alloc_with_nan_prefix
+    
     let warmup_end = (first + period - 1).min(len);
     for v in &mut out[..warmup_end] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Match var_with_kernel's Auto selection behavior.
+    
     let chosen = match detect_best_kernel() {
         Kernel::Avx512 => Kernel::Avx2,
         other => other,
@@ -367,7 +367,7 @@ pub fn var_scalar(
     let nbdev2 = nbdev * nbdev;
     let inv_p = 1.0 / (period as f64);
 
-    // Initialize first window with light unrolling via chunks for better ILP
+    
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
     let init = &data[first..first + period];
@@ -389,7 +389,7 @@ pub fn var_scalar(
     let mean0 = sum * inv_p;
     out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    // Rolling updates (pointer-based, Tulip-style) to minimize bounds checks and iterator overhead.
+    
     unsafe {
         let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
         let mut in_new = data.as_ptr().add(first + period);
@@ -428,19 +428,19 @@ pub fn var_avx2(
     let nbdev2 = nbdev * nbdev;
     let inv_p = 1.0 / (period as f64);
 
-    // AVX2-accelerated initialization of the first window (sum and sum of squares)
+    
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
     unsafe {
         let mut idx = first;
         let end = first + period;
 
-        // Process in 4-wide chunks; accumulate lanes in original order to minimize rounding deltas
+        
         while idx + 4 <= end {
             let v = _mm256_loadu_pd(data.as_ptr().add(idx));
             let v2 = _mm256_mul_pd(v, v);
 
-            // Spill to stack and compute block sums with left-associative order
+            
             let mut lanes: [f64; 4] = core::mem::zeroed();
             _mm256_storeu_pd(lanes.as_mut_ptr(), v);
             let mut t = lanes[0] + lanes[1];
@@ -457,7 +457,7 @@ pub fn var_avx2(
             idx += 4;
         }
 
-        // Scalar tail for any remaining indices
+        
         while idx < end {
             let x = *data.get_unchecked(idx);
             sum += x;
@@ -470,7 +470,7 @@ pub fn var_avx2(
     let mean0 = sum * inv_p;
     out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    // Rolling updates (pointer-based, Tulip-style).
+    
     unsafe {
         let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
         let mut in_new = data.as_ptr().add(first + period);
@@ -515,22 +515,22 @@ pub fn var_avx512(
     let mut sum_sq = 0.0f64;
 
     unsafe {
-        // Vectorized initialization of the first window using 8-lane vectors
+        
         let mut idx = first;
         let end = first + period;
         while idx + 8 <= end {
             let v = _mm512_loadu_pd(data.as_ptr().add(idx));
             let v2 = _mm512_mul_pd(v, v);
 
-            // Spill lanes; accumulate as two 4-lane blocks to match scalar chunking
+            
             let mut lanes: [f64; 8] = core::mem::zeroed();
             _mm512_storeu_pd(lanes.as_mut_ptr(), v);
-            // low 0..3
+            
             let mut t0 = lanes[0] + lanes[1];
             t0 = t0 + lanes[2];
             t0 = t0 + lanes[3];
             sum += t0;
-            // high 4..7
+            
             let mut t1 = lanes[4] + lanes[5];
             t1 = t1 + lanes[6];
             t1 = t1 + lanes[7];
@@ -549,7 +549,7 @@ pub fn var_avx512(
             idx += 8;
         }
 
-        // Handle any remaining 4-wide block to match scalar chunking
+        
         while idx + 4 <= end {
             let v4 = _mm256_loadu_pd(data.as_ptr().add(idx));
             let v4sq = _mm256_mul_pd(v4, v4);
@@ -567,7 +567,7 @@ pub fn var_avx512(
             idx += 4;
         }
 
-        // Scalar tail for any remaining elements (<4)
+        
         while idx < end {
             let x = *data.get_unchecked(idx);
             sum += x;
@@ -575,12 +575,12 @@ pub fn var_avx512(
             idx += 1;
         }
 
-        // First output
+        
         let idx0 = first + period - 1;
         let mean0 = sum * inv_p;
         out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-        // Rolling updates (pointer-based, Tulip-style).
+        
         let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
         let mut in_new = data.as_ptr().add(first + period);
         let mut in_old = data.as_ptr().add(first);
@@ -605,7 +605,7 @@ pub fn var_avx512(
     Ok(())
 }
 
-// --- WASM Helper Function ---
+
 
 #[inline]
 pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result<(), VarError> {
@@ -647,7 +647,7 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
         other => other,
     };
 
-    // Compute directly into dst
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -665,7 +665,7 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
         }
     }
 
-    // key addition
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -674,7 +674,7 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
     Ok(())
 }
 
-// --- Row variants for batch ---
+
 
 #[inline(always)]
 pub unsafe fn var_row_scalar(
@@ -689,11 +689,11 @@ pub unsafe fn var_row_scalar(
     let inv_p = 1.0 / (period as f64);
     let nbdev2 = nbdev * nbdev;
 
-    // Rolling sums
+    
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
 
-    // Initialize the first window [first .. first+period) with partial unrolling
+    
     let mut p = data.as_ptr().add(first);
     let end = p.add(period);
     while p.add(4) <= end {
@@ -712,15 +712,15 @@ pub unsafe fn var_row_scalar(
         p = p.add(1);
     }
 
-    // First output at index = first + period - 1
+    
     let idx0 = first + period - 1;
     let mean0 = sum * inv_p;
     *out.get_unchecked_mut(idx0) = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    // Rolling updates, unrolled by 2 for some ILP
+    
     let mut i = idx0 + 1;
     while i + 1 < len {
-        // step i
+        
         {
             let new0 = *data.get_unchecked(i);
             let old0 = *data.get_unchecked(i - period);
@@ -730,7 +730,7 @@ pub unsafe fn var_row_scalar(
             *out.get_unchecked_mut(i) = (sum_sq * inv_p - mean * mean) * nbdev2;
         }
 
-        // step i+1
+        
         {
             let new1 = *data.get_unchecked(i + 1);
             let old1 = *data.get_unchecked(i + 1 - period);
@@ -743,7 +743,7 @@ pub unsafe fn var_row_scalar(
         i += 2;
     }
 
-    // Tail element if one remains
+    
     if i < len {
         let newx = *data.get_unchecked(i);
         let oldx = *data.get_unchecked(i - period);
@@ -810,7 +810,7 @@ pub unsafe fn var_row_avx512_long(
     var_row_scalar(data, first, period, stride, nbdev, out)
 }
 
-// --- Batch support ---
+
 
 #[derive(Clone, Debug)]
 pub struct VarBatchRange {
@@ -900,7 +900,7 @@ impl VarBatchOutput {
     }
 }
 
-// -- Grid
+
 
 #[inline(always)]
 fn expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
@@ -976,7 +976,7 @@ pub fn var_expand_grid(r: &VarBatchRange) -> Vec<VarParams> {
     expand_grid(r)
 }
 
-// -- Batch Inner
+
 
 #[inline(always)]
 pub fn var_batch_slice(
@@ -999,9 +999,9 @@ fn round_up8(x: usize) -> usize {
     (x + 7) & !7
 }
 
-// Row-optimized batch via shared prefix sums (PS/PSQ).
-// Disabled by default: in local tests (47 rows, 100k) per-row rolling was faster than PS/PSQ.
-// Keep present for future experiments or different layouts.
+
+
+
 const ENABLE_VAR_BATCH_PREFIX_SUMS: bool = false;
 
 #[inline(always)]
@@ -1054,7 +1054,7 @@ fn var_batch_inner(
     let rows = combos.len();
     let cols = data.len();
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    // key change: include `first`
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1066,7 +1066,7 @@ fn var_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Row-optimized variant using shared prefix sums for Scalar path
+    
     if ENABLE_VAR_BATCH_PREFIX_SUMS && matches!(kern, Kernel::Scalar) {
         let (ps, psq) = make_prefix_sums(data, first);
         let compute_row = |row: usize, out_row: &mut [f64]| {
@@ -1102,7 +1102,7 @@ fn var_batch_inner(
             }
         }
     } else {
-        // Fallback: per-row rolling kernels (Avx2/Avx512 paths or explicit selection)
+        
         let do_row = |row: usize, out_row: &mut [f64]| unsafe {
             let period = combos[row].period.unwrap();
             let nbdev = combos[row].nbdev.unwrap();
@@ -1176,7 +1176,7 @@ pub fn var_batch_with_kernel(
     var_batch_par_slice(data, sweep, simd)
 }
 
-// --- Streaming ---
+
 
 #[derive(Debug, Clone)]
 pub struct VarStream {
@@ -1235,7 +1235,7 @@ impl VarStream {
     }
 }
 
-// --- WASM Bindings ---
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1298,7 +1298,7 @@ pub fn var_into(
         let input = VarInput::from_slice(data, params);
 
         if in_ptr == out_ptr as *const f64 {
-            // Handle aliasing - data and output are the same
+            
             let mut temp = vec![0.0; len];
             var_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1379,7 +1379,7 @@ pub fn var_batch_into(
             nbdev: (nbdev_start, nbdev_end, nbdev_step),
         };
 
-        // Calculate output size
+        
         let combos = expand_grid(&sweep);
         if combos.is_empty() {
             return Err(JsValue::from_str("No valid parameter combinations"));
@@ -1392,7 +1392,7 @@ pub fn var_batch_into(
             .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // key addition: initialize warmup prefixes per row
+        
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
         for (r, prm) in combos.iter().enumerate() {
             let warm = (first + prm.period.unwrap() - 1).min(cols);
@@ -1402,7 +1402,7 @@ pub fn var_batch_into(
             }
         }
 
-        // compute into the buffer
+        
         let _ = var_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1419,31 +1419,31 @@ mod tests {
 
     #[test]
     fn test_var_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the standard CSV candle dataset used by other VAR tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VarInput::from_candles(&candles, "close", VarParams::default());
 
-        // Baseline via Vec-returning API
+        
         let VarOutput { values: expected } = var(&input)?;
 
-        // Preallocated output buffer
+        
         let mut out = vec![0.0f64; expected.len()];
 
-        // New no-allocation API
+        
         #[cfg(not(feature = "wasm"))]
         {
             var_into(&input, &mut out)?;
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, fall back to helper to compute into an output slice
+            
             var_into_slice(&mut out, &input, detect_best_kernel())?;
         }
 
         assert_eq!(out.len(), expected.len());
 
-        // Equality check treating NaN==NaN
+        
         for (i, (a, b)) in out.iter().zip(expected.iter()).enumerate() {
             let eq_or_both_nan = (*a == *b) || (a.is_nan() && b.is_nan());
             assert!(
@@ -1669,65 +1669,65 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            VarParams::default(), // period: 14, nbdev: 1.0
+            VarParams::default(), 
             VarParams {
                 period: Some(2),
                 nbdev: Some(1.0),
-            }, // minimum period
+            }, 
             VarParams {
                 period: Some(5),
                 nbdev: Some(1.0),
-            }, // small period
+            }, 
             VarParams {
                 period: Some(10),
                 nbdev: Some(1.0),
-            }, // small-medium period
+            }, 
             VarParams {
                 period: Some(20),
                 nbdev: Some(1.0),
-            }, // medium period
+            }, 
             VarParams {
                 period: Some(30),
                 nbdev: Some(1.0),
-            }, // medium-large period
+            }, 
             VarParams {
                 period: Some(50),
                 nbdev: Some(1.0),
-            }, // large period
+            }, 
             VarParams {
                 period: Some(100),
                 nbdev: Some(1.0),
-            }, // very large period
+            }, 
             VarParams {
                 period: Some(200),
                 nbdev: Some(1.0),
-            }, // extreme period
+            }, 
             VarParams {
                 period: Some(14),
                 nbdev: Some(0.5),
-            }, // small nbdev
+            }, 
             VarParams {
                 period: Some(14),
                 nbdev: Some(2.0),
-            }, // double nbdev
+            }, 
             VarParams {
                 period: Some(14),
                 nbdev: Some(3.0),
-            }, // triple nbdev
+            }, 
             VarParams {
                 period: Some(7),
                 nbdev: Some(1.5),
-            }, // mixed 1
+            }, 
             VarParams {
                 period: Some(21),
                 nbdev: Some(2.5),
-            }, // mixed 2
+            }, 
             VarParams {
                 period: Some(50),
                 nbdev: Some(0.75),
-            }, // mixed 3
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1736,12 +1736,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1791,7 +1791,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_var_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1803,8 +1803,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Note: Starting at period=2 because period=1 has numerical precision issues
-        // in the rolling calculation that accumulate small errors
+        
+        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1812,10 +1812,10 @@ mod tests {
                     period.max(10)..400,
                 ),
                 Just(period),
-                0.1f64..3.0f64,      // nbdev
-                -100.0f64..100.0f64, // trend
-                -1e5f64..1e5f64,     // intercept
-                prop::bool::ANY,     // use_special_pattern
+                0.1f64..3.0f64,      
+                -100.0f64..100.0f64, 
+                -1e5f64..1e5f64,     
+                prop::bool::ANY,     
             )
         });
 
@@ -1823,13 +1823,13 @@ mod tests {
             .run(
                 &strat,
                 |(mut data, period, nbdev, trend, intercept, use_special_pattern)| {
-                    // Apply patterns to data for more realistic testing
+                    
                     if use_special_pattern {
-                        // Apply linear trend
+                        
                         for (i, val) in data.iter_mut().enumerate() {
                             *val = intercept + trend * (i as f64);
                         }
-                        // Add some noise
+                        
                         for val in data.iter_mut() {
                             *val += (val.abs() * 0.01).min(10.0)
                                 * (if val.is_sign_positive() { 1.0 } else { -1.0 });
@@ -1846,12 +1846,12 @@ mod tests {
                     let VarOutput { values: ref_out } =
                         var_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Property 1: Variance should always be non-negative
+                    
                     for i in (period - 1)..data.len() {
                         let y = out[i];
                         if !y.is_nan() {
                             prop_assert!(
-                                y >= -1e-6, // Allow small negative due to floating point precision
+                                y >= -1e-6, 
                                 "[{}] Variance should be non-negative at idx {}: got {}",
                                 test_name,
                                 i,
@@ -1860,12 +1860,12 @@ mod tests {
                         }
                     }
 
-                    // Property 2: For period=2, check special behavior (only for non-trended data)
-                    // With only 2 values, variance represents the squared difference from mean
-                    // Skip this check for trended data due to numerical precision differences
+                    
+                    
+                    
                     if period == 2 && !use_special_pattern {
                         for i in (period - 1)..data.len().min(10) {
-                            // Check first few values only
+                            
                             if !out[i].is_nan() {
                                 let window = &data[i + 1 - period..=i];
                                 let mean = (window[0] + window[1]) / 2.0;
@@ -1873,7 +1873,7 @@ mod tests {
                                     ((window[0] - mean).powi(2) + (window[1] - mean).powi(2)) / 2.0
                                         * nbdev
                                         * nbdev;
-                                // Higher tolerance for different computation methods
+                                
                                 let tolerance = (expected.abs() + 1.0) * 1e-8;
                                 prop_assert!(
                                     (out[i] - expected).abs() <= tolerance,
@@ -1887,7 +1887,7 @@ mod tests {
                         }
                     }
 
-                    // Property 3: For constant data, variance should be close to 0
+                    
                     let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                     if is_constant && data.len() >= period {
                         for i in (period - 1)..data.len() {
@@ -1901,7 +1901,7 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Kernel consistency - all kernels should produce identical results
+                    
                     for i in (period - 1)..data.len() {
                         let y = out[i];
                         let r = ref_out[i];
@@ -1933,11 +1933,11 @@ mod tests {
                         );
                     }
 
-                    // Property 5: Mathematical correctness check for simple, non-trended cases
-                    // For a window, verify variance formula: var = E[X^2] - E[X]^2
-                    // Only check when we haven't applied special patterns (which can cause numerical differences)
+                    
+                    
+                    
                     if !use_special_pattern && data.len() >= period && period <= 10 {
-                        let idx = period * 2; // Pick a point well into the data
+                        let idx = period * 2; 
                         if idx < data.len() && !out[idx].is_nan() {
                             let window = &data[idx + 1 - period..=idx];
                             let mean: f64 = window.iter().sum::<f64>() / (period as f64);
@@ -1945,8 +1945,8 @@ mod tests {
                                 window.iter().map(|x| x * x).sum::<f64>() / (period as f64);
                             let expected_var = (mean_sq - mean * mean) * nbdev * nbdev;
 
-                            // Allow reasonable tolerance for floating point differences
-                            // The rolling computation may accumulate different rounding errors
+                            
+                            
                             let tolerance = (expected_var.abs() + 1.0) * 1e-8;
                             prop_assert!(
 							(out[idx] - expected_var).abs() <= tolerance,
@@ -2037,17 +2037,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_range, nbdev_range)
-            ((2, 10, 2), (1.0, 1.0, 0.0)), // Small periods, single nbdev
-            ((10, 30, 5), (1.0, 2.0, 0.5)), // Medium periods, varying nbdev
-            ((30, 100, 10), (0.5, 1.5, 0.5)), // Large periods, varying nbdev
-            ((2, 5, 1), (1.0, 3.0, 1.0)),  // Dense small range, varying nbdev
-            ((14, 14, 0), (1.0, 1.0, 0.0)), // Single value (default)
-            ((5, 25, 5), (2.0, 2.0, 0.0)), // Mixed range, fixed nbdev
-            ((50, 100, 25), (1.0, 2.0, 0.25)), // Large step, fine nbdev
-            ((14, 28, 7), (0.5, 2.5, 0.5)), // Common periods, wide nbdev range
+            
+            ((2, 10, 2), (1.0, 1.0, 0.0)), 
+            ((10, 30, 5), (1.0, 2.0, 0.5)), 
+            ((30, 100, 10), (0.5, 1.5, 0.5)), 
+            ((2, 5, 1), (1.0, 3.0, 1.0)),  
+            ((14, 14, 0), (1.0, 1.0, 0.0)), 
+            ((5, 25, 5), (2.0, 2.0, 0.0)), 
+            ((50, 100, 25), (1.0, 2.0, 0.25)), 
+            ((14, 28, 7), (0.5, 2.5, 0.5)), 
         ];
 
         for (cfg_idx, &(period_range, nbdev_range)) in test_configs.iter().enumerate() {
@@ -2067,7 +2067,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2123,7 +2123,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2149,25 +2149,25 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    // Test that periods not divisible by 8 work correctly
+    
     #[test]
     fn test_batch_non_aligned_periods() {
-        // Create test data with exactly enough points for period=7
+        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
 
-        // Test with period=7 (not divisible by 8)
+        
         let sweep = VarBatchRange {
-            period: (7, 7, 0), // Single period of 7
+            period: (7, 7, 0), 
             nbdev: (1.0, 1.0, 0.0),
         };
 
-        // This should work with 10 data points (need at least 7)
+        
         let result = var_batch_slice(&data, &sweep, Kernel::Scalar);
         assert!(result.is_ok(), "Should handle period=7 with 10 data points");
 
-        // Test with multiple non-aligned periods
+        
         let sweep_multi = VarBatchRange {
-            period: (5, 7, 1), // Periods: 5, 6, 7
+            period: (5, 7, 1), 
             nbdev: (1.0, 1.0, 0.0),
         };
 
@@ -2179,15 +2179,15 @@ mod tests {
         let output = result_multi.unwrap();
         assert_eq!(output.rows, 3, "Should have 3 rows for periods 5,6,7");
 
-        // Test that it correctly rejects when data is insufficient
-        let data_short = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // Only 6 points
+        
+        let data_short = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; 
         let result_short = var_batch_slice(&data_short, &sweep, Kernel::Scalar);
         assert!(
             result_short.is_err(),
             "Should reject when data length (6) < period (7)"
         );
 
-        // Test edge case: period=15 with exactly 15 data points
+        
         let data_15 = vec![1.0; 15];
         let sweep_15 = VarBatchRange {
             period: (15, 15, 0),
@@ -2202,7 +2202,7 @@ mod tests {
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "var")]
 #[pyo3(signature = (data, period=14, nbdev=1.0, kernel=None))]
@@ -2276,7 +2276,7 @@ pub fn var_batch_py<'py>(
         k => k,
     };
 
-    // Use high-level batch that initializes prefixes correctly
+    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -2292,7 +2292,7 @@ pub fn var_batch_py<'py>(
     let cols = out.cols;
 
     let dict = PyDict::new(py);
-    // Convert flat vector to 2D array similar to how ATR does it
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
@@ -2321,7 +2321,7 @@ pub fn var_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2337,7 +2337,7 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-// VAR-specific VRAM handle for Python (CUDA Array Interface v3 + DLPack v1.x)
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "VarDeviceArrayF32", unsendable)]
 pub struct VarDeviceArrayF32Py {
@@ -2382,7 +2382,7 @@ impl VarDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
 
-        // Validate requested device (if any) against this buffer's device.
+        
         let (expected_type, expected_dev) = slf.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_type, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2392,7 +2392,7 @@ impl VarDeviceArrayF32Py {
             }
         }
 
-        // copy=True is not supported for VAR CUDA buffers.
+        
         let wants_copy = copy
             .as_ref()
             .and_then(|c| c.extract::<bool>(py).ok())
@@ -2405,7 +2405,7 @@ impl VarDeviceArrayF32Py {
 
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = slf.inner.rows;
@@ -2419,7 +2419,7 @@ impl VarDeviceArrayF32Py {
             },
         );
 
-        // Repackage max_version into a bound Python object for the shared helper.
+        
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, inner.buf, rows, cols, expected_dev, max_version_bound)
@@ -2498,7 +2498,7 @@ pub fn var_cuda_many_series_one_param_dev_py(
     })
 }
 
-// Helper function for batch processing that writes directly to output
+
 #[inline(always)]
 fn var_batch_inner_into(
     data: &[f64],

@@ -110,10 +110,10 @@ impl CudaMom {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Enable recommended primary-context flags to support mapped/pinned host memory
-        // and let the driver choose appropriate scheduling.
-        // SCHED_AUTO is accepted after context creation; MAP_HOST must be set at
-        // creation time for legacy contexts, so we do not set it here.
+        
+        
+        
+        
         context.set_flags(ContextFlags::SCHED_AUTO)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mom_kernel.ptx"));
@@ -126,7 +126,7 @@ impl CudaMom {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Device properties used for better launch sizing & chunking.
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_grid_x = device
@@ -182,7 +182,7 @@ impl CudaMom {
         Ok(())
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn mom_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -195,7 +195,7 @@ impl CudaMom {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort, checked arithmetic)
+        
         let in_bytes = prices_f32
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -254,9 +254,9 @@ impl CudaMom {
             .get_function("mom_batch_f32")
             .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_batch_f32" })?;
 
-        // Chunk across combos if needed to respect grid limits
+        
         let block_x = self.policy.batch_block_x.unwrap_or(256);
-        // Use actual device limit (Ada: ~2.1B), not legacy 65,535.
+        
         let max_blocks: u32 = self.max_grid_x.max(1);
         let mut launched = 0usize;
         while launched < n_combos {
@@ -267,7 +267,7 @@ impl CudaMom {
             CudaMom::validate_launch(grid, block)?;
 
             unsafe {
-                // Offset param/output pointers for chunk
+                
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut periods_ptr = d_periods
                     .as_device_ptr()
@@ -298,7 +298,7 @@ impl CudaMom {
         self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn mom_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -321,7 +321,7 @@ impl CudaMom {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid (row-major scan, early exit per series)
+        
         let mut first_valids = vec![i32::MAX; cols];
         let mut remaining = cols;
         for t in 0..rows {
@@ -340,7 +340,7 @@ impl CudaMom {
             return Err(CudaMomError::InvalidInput(format!("series {} all NaN", s_bad)));
         }
 
-        // VRAM estimate
+        
         let elems = expected;
         let prices_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
@@ -385,10 +385,10 @@ impl CudaMom {
             .module
             .get_function("mom_many_series_one_param_f32")
             .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_many_series_one_param_f32" })?;
-        // Kernel is grid-stride across series; we don't need to launch one block per column.
+        
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let needed = ((cols as u32) + block_x - 1) / block_x;
-        // Heuristic: ~8 blocks per SM keeps the GPU busy without overlaunch.
+        
         let cap = self.sm_count.saturating_mul(8).max(1);
         let grid_x = needed.min(cap).max(1);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -416,7 +416,7 @@ impl CudaMom {
         self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
-    // ---------- Helpers ----------
+    
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &MomBatchRange,
@@ -438,8 +438,8 @@ impl CudaMom {
         if max_p == 0 {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
-        // If some periods exceed available valid tail, we let the kernel mark those rows as NaN
-        // (scalar parity). Other rows still compute.
+        
+        
         Ok((combos, first_valid, len))
     }
 
@@ -475,7 +475,7 @@ impl CudaMom {
         let n_combos = combos.len();
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
 
-        // VRAM estimate (no input duplication)
+        
         let params_bytes = periods_i32
             .len()
             .checked_mul(std::mem::size_of::<i32>())
@@ -491,7 +491,7 @@ impl CudaMom {
             .ok_or_else(|| CudaMomError::InvalidInput("total VRAM size overflow".into()))?;
         self.will_fit(required, 64 * 1024 * 1024)?;
 
-        // Ensure current device matches wrapper device when reusing a device-resident buffer
+        
         unsafe {
             let mut cur: i32 = 0;
             let _ = cust::sys::cuCtxGetDevice(&mut cur);
@@ -510,7 +510,7 @@ impl CudaMom {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -519,7 +519,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
-    const PARAM_SWEEP: usize = 250; // 2..=251
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -560,7 +560,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaMom::new(0).expect("cuda mom");
         let mut prices = gen_series(ONE_SERIES_LEN);
-        // introduce a small NaN warmup and trend
+        
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
@@ -633,7 +633,7 @@ pub mod benches {
         let mut prices = vec![f32::NAN; n];
         for s in 0..MANY_COLS {
             for t in s..MANY_ROWS {
-                // stagger first_valids
+                
                 let idx = t * MANY_COLS + s;
                 let x = (t as f32) * 0.002 + (s as f32) * 0.01;
                 prices[idx] = base[idx] + 0.05 * x.sin();

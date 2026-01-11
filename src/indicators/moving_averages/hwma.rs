@@ -45,7 +45,7 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Python CUDA handle for HWMA: keeps CUDA context alive and exposes CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -340,17 +340,17 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
     }
 
     let chosen = match kernel {
-        // HWMA is a loop-carried recurrence; the per-element work is scalar and
-        // AVX2/AVX512 `#[target_feature]` variants can underperform due to
-        // downclock. Prefer the scalar reference for `Auto` unless a future
-        // SIMD implementation demonstrates a consistent win.
+        
+        
+        
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
-        // For WASM, use SIMD128 when available instead of scalar
+        
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -520,28 +520,28 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
             // f' = (1-na)*s_prev + na*x0    (one mul + one FMA)
             let f_new = one_m_na.mul_add(s_prev, na * x0);
 
-            // v' = nb*(f'-f) + (1-nb)*(v + a)
+            
             let sum_va = v + a;
             let v_new = nb.mul_add(f_new - f, one_m_nb * sum_va);
 
-            // a' = nc*(v'-v) + (1-nc)*a
+            
             let a_new = nc.mul_add(v_new - v, one_m_nc * a);
 
-            // s_new = f' + v' + 0.5*a'
+            
             let s_new = HALF.mul_add(a_new, f_new + v_new);
             *op = s_new;
 
-            // -------- step #1 (uses updated state) --------
+            
             let x1 = *dp.add(1);
 
-            // Reuse s_new as the next s_prev
+            
             let f2 = one_m_na.mul_add(s_new, na * x1);
             let v2 = nb.mul_add(f2 - f_new, one_m_nb * (v_new + a_new));
             let a2 = nc.mul_add(v2 - v_new, one_m_nc * a_new);
             let s2 = HALF.mul_add(a2, f2 + v2);
             *op.add(1) = s2;
 
-            // roll state and advance
+            
             f = f2;
             v = v2;
             a = a2;
@@ -549,7 +549,7 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
             op = op.add(2);
         }
 
-        // Handle possible tail element
+        
         if op < end {
             let x = *dp;
             let s_prev = HALF.mul_add(a, f + v);
@@ -557,7 +557,7 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
             let v_new = nb.mul_add(f_new - f, one_m_nb * (v + a));
             let a_new = nc.mul_add(v_new - v, one_m_nc * a);
             *op = HALF.mul_add(a_new, f_new + v_new);
-            // (state rolls not needed after last store)
+            
         }
     }
 }
@@ -565,9 +565,9 @@ pub fn hwma_scalar(data: &[f64], na: f64, nb: f64, nc: f64, first_valid: usize, 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn hwma_simd128(data: &[f64], na: f64, nb: f64, nc: f64, first: usize, out: &mut [f64]) {
-    // HWMA is a loop-carried recurrence; lanes cannot advance two independent
-    // timepoints in parallel without changing semantics. Keep the optimized
-    // scalar kernel as the correct fast path on wasm32 as well.
+    
+    
+    
     hwma_scalar(data, na, nb, nc, first, out);
 }
 
@@ -661,20 +661,20 @@ pub unsafe fn hwma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct HwmaStream {
-    // user params (0,1)
+    
     na: f64,
     nb: f64,
     nc: f64,
-    // precomputed complements
+    
     one_m_na: f64,
     one_m_nb: f64,
     one_m_nc: f64,
-    // last state (level, trend, accel) and the cached smoothed output s = f + v + 0.5 a
+    
     last_f: f64,
     last_v: f64,
     last_a: f64,
     last_s: f64,
-    // init flag
+    
     filled: bool,
 }
 
@@ -714,9 +714,9 @@ impl HwmaStream {
     ///   s_new = 0.5·a' + (f' + v')
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Cold init path once; keep it separate for better icache and branch prediction.
+        
         if !self.filled {
-            // identical to batch/scalar initialization: f=x0, v=0, a=0, s=x0
+            
             self.last_f = value;
             self.last_v = 0.0;
             self.last_a = 0.0;
@@ -725,26 +725,26 @@ impl HwmaStream {
             return Some(value);
         }
 
-        // hot path — straight line, FMA friendly
-        // s_prev was cached last tick
+        
+        
         let s_prev = self.last_s;
 
-        // f' = (1-na)*s_prev + na*value   (one mul + one FMA)
+        
         let f_new = self.one_m_na.mul_add(s_prev, self.na * value);
 
-        // v' = nb*(f' - f) + (1-nb)*(v + a)
+        
         let sum_va = self.last_v + self.last_a;
         let v_new = self.nb.mul_add(f_new - self.last_f, self.one_m_nb * sum_va);
 
-        // a' = nc*(v' - v) + (1-nc)*a
+        
         let a_new = self
             .nc
             .mul_add(v_new - self.last_v, self.one_m_nc * self.last_a);
 
-        // s_new = f' + v' + 0.5*a'   (use FMA for the 0.5*a' term)
+        
         let s_new = 0.5f64.mul_add(a_new, f_new + v_new);
 
-        // commit state
+        
         self.last_f = f_new;
         self.last_v = v_new;
         self.last_a = a_new;
@@ -753,8 +753,8 @@ impl HwmaStream {
         Some(s_new)
     }
 
-    // Optional: if you want a branchless inner loop after explicit init,
-    // you can call init_once() then repeatedly call update_unchecked().
+    
+    
     #[inline(always)]
     pub fn init_once(&mut self, first_value: f64) -> f64 {
         self.last_f = first_value;
@@ -886,17 +886,17 @@ pub fn hwma_batch_with_kernel(
     sweep: &HwmaBatchRange,
     k: Kernel,
 ) -> Result<HwmaBatchOutput, HwmaError> {
-    // Disallow explicit non-batch kernels at the batch API surface
+    
     match k {
         Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
             return Err(HwmaError::InvalidKernelForBatch(k));
         }
         _ => {}
     }
-    // Map batch kernels to their regular SIMD equivalents
+    
     let simd = match k {
-        // HWMA batch is effectively a per-row scalar recurrence; prefer the
-        // scalar reference for `Auto` (see single-series rationale).
+        
+        
         Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
         Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
@@ -931,7 +931,7 @@ impl HwmaBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid(r: &HwmaBatchRange) -> Vec<HwmaParams> {
-    // Back-compat shim: use checked version; on error, fall back to a singleton
+    
     match expand_grid_checked(r) {
         Ok(v) => v,
         Err(_) => vec![HwmaParams { na: Some(r.na.0), nb: Some(r.nb.0), nc: Some(r.nc.0) }],
@@ -962,7 +962,7 @@ fn axis_f64_checked(t: (f64, f64, f64)) -> Result<Vec<f64>, HwmaError> {
         let mut x = start;
         while x >= end - eps {
             v.push(x);
-            x += step; // negative step
+            x += step; 
         }
     }
     Ok(v)
@@ -1044,17 +1044,17 @@ fn hwma_batch_inner(
         .ok_or(HwmaError::IntegerOverflow("rows*cols"))?;
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
-    // ----- 2. allocate rows×cols as MaybeUninit and write the NaN prefixes --------
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut buf_mu, cols, &warm) };
 
-    // Use ManuallyDrop pattern to maintain capacity (following alma.rs pattern)
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, total)
     };
 
-    // ----- 3. closure that fills one row ------------------------------------------
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let na = prm.na.unwrap();
@@ -1075,7 +1075,7 @@ fn hwma_batch_inner(
         }
     };
 
-    // ----- 4. run every row, writing directly into `out` ---------------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1095,7 +1095,7 @@ fn hwma_batch_inner(
         }
     }
 
-    // ----- 5. reclaim as Vec<f64> once everything is initialized -----------------
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1149,25 +1149,25 @@ fn hwma_batch_inner_into(
         .checked_mul(cols)
         .ok_or(HwmaError::IntegerOverflow("rows*cols"))?;
 
-    // Ensure output buffer is the correct size
+    
     if out.len() != expected {
         return Err(HwmaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
 
-    // Cast output to MaybeUninit for initialization
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // ----- optional row-vectorized batch path (AVX2/AVX512) -------------------
+    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     {
-        // Row-specific SIMD batch kernels are implemented but disabled by default
-        // due to modest gains (<5%) at 100k–1M. Revisit if layout changes allow
-        // better store locality. Enable by flipping this constant to true.
+        
+        
+        
         const USE_ROW_SIMD: bool = false;
         if USE_ROW_SIMD {
             match kern {
@@ -1184,7 +1184,7 @@ fn hwma_batch_inner_into(
         }
     }
 
-    // ----- closure that fills one row ------------------------------------------
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let na = prm.na.unwrap();
@@ -1205,7 +1205,7 @@ fn hwma_batch_inner_into(
         }
     };
 
-    // ----- run every row -----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1278,9 +1278,9 @@ pub unsafe fn hwma_row_avx512_long(
     hwma_scalar(data, na, nb, nc, first, out);
 }
 
-// ==========================================================================================
-// Row-specific batch kernels (vectorize across rows) for AVX2 / AVX512
-// ==========================================================================================
+
+
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
@@ -1298,10 +1298,10 @@ unsafe fn hwma_batch_rows_avx2(
         return;
     }
 
-    // Process full vectors of rows
+    
     let mut r = 0;
     while r + LANES <= rows {
-        // Load per-row parameters into vector registers
+        
         let na_vec = _mm256_set_pd(
             combos[r + 3].na.unwrap(),
             combos[r + 2].na.unwrap(),
@@ -1327,18 +1327,18 @@ unsafe fn hwma_batch_rows_avx2(
         let one_m_nb = _mm256_sub_pd(one, nb_vec);
         let one_m_nc = _mm256_sub_pd(one, nc_vec);
 
-        // Initialize state per row
+        
         let init = _mm256_set1_pd(*data.get_unchecked(first));
         let mut f = init;
         let mut v = _mm256_set1_pd(0.0);
         let mut a = _mm256_set1_pd(0.0);
 
-        // Iterate over time, 2x-unrolled for ILP
+        
         let mut t = first;
         while t + 1 < cols {
             let x0 = _mm256_set1_pd(*data.get_unchecked(t));
 
-            // s_prev = f + v + 0.5*a
+            
             let s_prev0 = {
                 let hv = _mm256_mul_pd(half, a);
                 _mm256_add_pd(_mm256_add_pd(f, v), hv)
@@ -1362,7 +1362,7 @@ unsafe fn hwma_batch_rows_avx2(
                 }
             }
 
-            // step #1 with updated state
+            
             let x1 = _mm256_set1_pd(*data.get_unchecked(t + 1));
             let s_prev1 = {
                 let hv = _mm256_mul_pd(half, a_new0);
@@ -1387,14 +1387,14 @@ unsafe fn hwma_batch_rows_avx2(
                 }
             }
 
-            // roll state to step #1 results
+            
             f = f_new1;
             v = v_new1;
             a = a_new1;
             t += 2;
         }
 
-        // Handle tail element
+        
         if t < cols {
             let x = _mm256_set1_pd(*data.get_unchecked(t));
             let s_prev = {
@@ -1417,13 +1417,13 @@ unsafe fn hwma_batch_rows_avx2(
                 let row = r + j;
                 *out.get_unchecked_mut(row * cols + t) = tmp[j];
             }
-            // state roll not needed after last store
+            
         }
 
         r += LANES;
     }
 
-    // Tail rows (not a multiple of LANES)
+    
     while r < rows {
         let prm = &combos[r];
         let na = prm.na.unwrap();
@@ -1453,7 +1453,7 @@ unsafe fn hwma_batch_rows_avx512(
 
     let mut r = 0;
     while r + LANES <= rows {
-        // set_pd expects values in reverse order for lane mapping
+        
         let na_vec = _mm512_set_pd(
             combos[r + 7].na.unwrap(),
             combos[r + 6].na.unwrap(),
@@ -1491,13 +1491,13 @@ unsafe fn hwma_batch_rows_avx512(
         let one_m_nb = _mm512_sub_pd(one, nb_vec);
         let one_m_nc = _mm512_sub_pd(one, nc_vec);
 
-        // Initialize state per row
+        
         let init = _mm512_set1_pd(*data.get_unchecked(first));
         let mut f = init;
         let mut v = _mm512_set1_pd(0.0);
         let mut a = _mm512_set1_pd(0.0);
 
-        // Iterate over time, 2x-unrolled
+        
         let mut t = first;
         while t + 1 < cols {
             let x0 = _mm512_set1_pd(*data.get_unchecked(t));
@@ -1581,7 +1581,7 @@ unsafe fn hwma_batch_rows_avx512(
         r += LANES;
     }
 
-    // Tail rows
+    
     while r < rows {
         let prm = &combos[r];
         let row_slice = core::slice::from_raw_parts_mut(out.as_mut_ptr().add(r * cols), cols);
@@ -1602,7 +1602,7 @@ pub fn expand_grid_hwma(r: &HwmaBatchRange) -> Vec<HwmaParams> {
     expand_grid(r)
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -1626,7 +1626,7 @@ pub fn hwma_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
+    let kern = validate_kernel(kernel, false)?; 
 
     let params = HwmaParams {
         na: Some(na),
@@ -1635,12 +1635,12 @@ pub fn hwma_py<'py>(
     };
     let input = HwmaInput::from_slice(slice_in, params);
 
-    // GOOD: Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| hwma_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1659,7 +1659,7 @@ pub fn hwma_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?; 
 
     let sweep = HwmaBatchRange {
         na: na_range,
@@ -1667,20 +1667,20 @@ pub fn hwma_batch_py<'py>(
         nc: nc_range,
     };
 
-    // Calculate dimensions using checked expansion to surface InvalidRange
+    
     let rows = expand_grid_checked(&sweep)
         .map(|v| v.len())
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let cols = slice_in.len();
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let (combos_result, _, _) = py
         .allow_threads(|| {
-            // HWMA batch is a per-row recurrence; prefer scalar for `Auto`.
+            
             let simd = match kern {
                 Kernel::Auto => Kernel::Scalar,
                 kernel => match kernel {
@@ -1695,11 +1695,11 @@ pub fn hwma_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Use zero-copy for parameter arrays
+    
     dict.set_item(
         "na",
         combos_result
@@ -1826,15 +1826,15 @@ impl HwmaStreamPy {
     }
 }
 
-// ================== WASM Bindings ==================
 
-// Helper function alias for consistency with ALMA pattern
+
+
 #[inline(always)]
 pub fn hwma_into_slice(dst: &mut [f64], input: &HwmaInput, kern: Kernel) -> Result<(), HwmaError> {
     hwma_with_kernel_into(input, kern, dst)
 }
 
-// ================== Safe API ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1846,17 +1846,17 @@ pub fn hwma_js(data: &[f64], na: f64, nb: f64, nc: f64) -> Result<Vec<f64>, JsVa
     };
     let input = HwmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     hwma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Batch API ==================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
@@ -1887,7 +1887,7 @@ pub fn hwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         nc: config.nc_range,
     };
 
-    // Resolve to a non-batch kernel like ALMA does
+    
     let simd = match detect_best_batch_kernel() {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1908,22 +1908,22 @@ pub fn hwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hwma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hwma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1941,21 +1941,21 @@ pub fn hwma_ptr_into(
     nb: f64,
     nc: f64,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to hwma_into"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if len == 0 {
             return Err(JsValue::from_str("Empty data"));
         }
 
-        // Calculate HWMA
+        
         let params = HwmaParams {
             na: Some(na),
             nb: Some(nb),
@@ -1963,18 +1963,18 @@ pub fn hwma_ptr_into(
         };
         let input = HwmaInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
+        
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
+            
             let mut temp = vec![0.0; len];
             hwma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             hwma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2032,7 +2032,7 @@ pub fn hwma_batch_into(
     }
 }
 
-// ================== Legacy WASM Functions for Test Compatibility ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2100,17 +2100,17 @@ mod tests {
 
     #[test]
     fn test_hwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Small but non-trivial input with a NaN warmup prefix
+        
         let mut data = vec![f64::NAN; 7];
         data.extend((0..256).map(|i| (i as f64).sin() * 10.0 + 100.0));
 
         let params = HwmaParams::default();
         let input = HwmaInput::from_slice(&data, params);
 
-        // Baseline via allocating API
+        
         let baseline = hwma(&input)?.values;
 
-        // Into path with preallocated buffer (contents will be overwritten)
+        
         let mut out = vec![0.0; data.len()];
         hwma_into(&input, &mut out)?;
 
@@ -2327,7 +2327,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Main strategy: Test general properties with realistic data
+        
         let main_strat = (
             proptest::collection::vec(
                 (-1e6f64..1e6).prop_filter("finite", |x| x.is_finite()),
@@ -2347,14 +2347,14 @@ mod tests {
             let input = HwmaInput::from_slice(&data, params.clone());
             let HwmaOutput { values: out } = hwma_with_kernel(&input, kernel).unwrap();
 
-            // Get scalar reference for SIMD consistency check
+            
             let HwmaOutput { values: ref_out } = hwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Property 1: Output length matches input
+            
             prop_assert_eq!(out.len(), data.len(), "Output length should match input");
 
-            // Property 2: First value should match first input (HWMA initialization)
-            // Based on implementation: f=data[0], v=0, a=0 => output = data[0]
+            
+            
             if !data.is_empty() && data[0].is_finite() {
                 let first_diff = (out[0] - data[0]).abs();
                 prop_assert!(
@@ -2366,7 +2366,7 @@ mod tests {
                 );
             }
 
-            // Property 3: SIMD consistency - all kernels should produce nearly identical results
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
@@ -2376,7 +2376,7 @@ mod tests {
                     continue;
                 }
 
-                // Tighter ULP tolerance (matching ALMA's strictness)
+                
                 let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                 prop_assert!(
                     (y - r).abs() <= 1e-9 || ulp_diff <= 5,
@@ -2389,8 +2389,8 @@ mod tests {
                 );
             }
 
-            // Property 4: Bounds checking with extrapolation allowance
-            // HWMA can overshoot due to momentum terms, especially with high parameters
+            
+            
             let (data_min, data_max) = data
                 .iter()
                 .filter(|&&x| x.is_finite())
@@ -2400,9 +2400,9 @@ mod tests {
 
             if data_min.is_finite() && data_max.is_finite() {
                 let range = (data_max - data_min).abs();
-                // Allow more extrapolation with higher parameters (momentum effect)
+                
                 let max_param = na.max(nb).max(nc);
-                let extrapolation_factor = 0.1 + 0.2 * max_param; // 10-30% extrapolation
+                let extrapolation_factor = 0.1 + 0.2 * max_param; 
                 let tolerance = range * extrapolation_factor + 1e-6;
 
                 for (idx, &y) in out.iter().enumerate() {
@@ -2420,11 +2420,11 @@ mod tests {
                 }
             }
 
-            // Property 5: Constant data convergence
+            
             if data.len() > 20 && data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
                 let constant_val = data[0];
-                // HWMA should converge to constant value
-                // Check last 10% of values for convergence
+                
+                
                 let check_start = out.len() * 9 / 10;
                 for (idx, &val) in out[check_start..].iter().enumerate() {
                     if val.is_finite() {
@@ -2438,14 +2438,14 @@ mod tests {
                 }
             }
 
-            // Property 6: Special parameter cases
-            // When na=1, nb=0, nc=0, HWMA should closely follow the input
+            
+            
             if (na - 1.0).abs() < 0.01 && nb < 0.01 && nc < 0.01 {
                 for (idx, (&y, &x)) in out.iter().zip(data.iter()).enumerate() {
                     if y.is_finite() && x.is_finite() {
                         let diff = (y - x).abs();
                         prop_assert!(
-							diff < 0.1, // Allow small numerical error
+							diff < 0.1, 
 							"With na≈1, nb≈0, nc≈0, output should follow input at idx {}: x={}, y={}, diff={}",
 							idx, x, y, diff
 						);
@@ -2456,16 +2456,16 @@ mod tests {
             Ok(())
         })?;
 
-        // Strategy 2: Parameter sensitivity testing
+        
         let param_strat = (
             proptest::collection::vec(
                 (-100f64..100f64).prop_filter("finite", |x| x.is_finite()),
                 50..100,
             ),
             prop::strategy::Union::new(vec![
-                (0.01f64..0.05).boxed(), // Very small (high smoothing)
-                (0.95f64..0.99).boxed(), // Very large (low smoothing)
-                (0.45f64..0.55).boxed(), // Medium
+                (0.01f64..0.05).boxed(), 
+                (0.95f64..0.99).boxed(), 
+                (0.45f64..0.55).boxed(), 
             ]),
             prop::strategy::Union::new(vec![
                 (0.01f64..0.05).boxed(),
@@ -2494,7 +2494,7 @@ mod tests {
             );
             let HwmaOutput { values } = result.unwrap();
 
-            // Check output is finite
+            
             for (idx, &val) in values.iter().enumerate() {
                 if !val.is_nan() {
                     prop_assert!(
@@ -2506,11 +2506,11 @@ mod tests {
                 }
             }
 
-            // Test smoothness based on parameters
-            // Small parameters = smoother output, large parameters = more responsive
+            
+            
             let avg_param = (na + nb + nc) / 3.0;
 
-            // Calculate roughness metric (average absolute difference)
+            
             let diffs: Vec<f64> = values
                 .windows(2)
                 .filter(|w| w[0].is_finite() && w[1].is_finite())
@@ -2528,7 +2528,7 @@ mod tests {
                 if !data_diffs.is_empty() {
                     let data_avg_diff = data_diffs.iter().sum::<f64>() / data_diffs.len() as f64;
 
-                    // With very small parameters, output should be much smoother than input
+                    
                     if avg_param < 0.1 {
                         prop_assert!(
 							avg_diff < data_avg_diff * 0.5,
@@ -2536,7 +2536,7 @@ mod tests {
 							avg_diff, data_avg_diff
 						);
                     }
-                    // With very large parameters, output should closely follow input
+                    
                     else if avg_param > 0.9 {
                         prop_assert!(
 							avg_diff < data_avg_diff * 1.5,
@@ -2550,7 +2550,7 @@ mod tests {
             Ok(())
         })?;
 
-        // Strategy 3: Step response testing
+        
         let step_strat = (
             10usize..50,
             -100f64..100f64,
@@ -2563,7 +2563,7 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &step_strat,
             |(size, level1, level2, na, nb, nc)| {
-                // Create step function data
+                
                 let mut data = vec![level1; size];
                 data.extend(vec![level2; size]);
 
@@ -2575,13 +2575,13 @@ mod tests {
                 let input = HwmaInput::from_slice(&data, params);
                 let HwmaOutput { values } = hwma_with_kernel(&input, kernel).unwrap();
 
-                // Check that HWMA eventually adapts to the new level
+                
                 let last_quarter = values.len() * 3 / 4;
                 let final_values = &values[last_quarter..];
                 let avg_final = final_values.iter().filter(|&&v| v.is_finite()).sum::<f64>()
                     / final_values.len() as f64;
 
-                // Should converge towards level2
+                
                 let convergence_error = (avg_final - level2).abs();
                 let step_size = (level2 - level1).abs();
 
@@ -2597,7 +2597,7 @@ mod tests {
             },
         )?;
 
-        // Strategy 4: Small data edge cases
+        
         let small_data_strat = (1usize..=5, 0.1f64..0.9, 0.1f64..0.9, 0.1f64..0.9);
 
         proptest::test_runner::TestRunner::default().run(
@@ -2619,7 +2619,7 @@ mod tests {
 
                 prop_assert_eq!(values.len(), data.len(), "Output length should match input");
 
-                // First value should always match input (initialization)
+                
                 if !data.is_empty() {
                     let first_diff = (values[0] - data[0]).abs();
                     prop_assert!(
@@ -2630,7 +2630,7 @@ mod tests {
                     );
                 }
 
-                // All values should be finite
+                
                 for (idx, &val) in values.iter().enumerate() {
                     prop_assert!(
                         val.is_finite(),
@@ -2647,7 +2647,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_hwma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2655,11 +2655,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_params = vec![
-            // Default parameters
+            
             HwmaParams::default(),
-            // Small na, nb, nc values
+            
             HwmaParams {
                 na: Some(0.05),
                 nb: Some(0.05),
@@ -2675,7 +2675,7 @@ mod tests {
                 nb: Some(0.1),
                 nc: Some(0.05),
             },
-            // Medium values
+            
             HwmaParams {
                 na: Some(0.2),
                 nb: Some(0.2),
@@ -2696,7 +2696,7 @@ mod tests {
                 nb: Some(0.5),
                 nc: Some(0.5),
             },
-            // Large values
+            
             HwmaParams {
                 na: Some(0.6),
                 nb: Some(0.6),
@@ -2717,7 +2717,7 @@ mod tests {
                 nb: Some(0.9),
                 nc: Some(0.9),
             },
-            // Mixed values
+            
             HwmaParams {
                 na: Some(0.1),
                 nb: Some(0.5),
@@ -2733,7 +2733,7 @@ mod tests {
                 nb: Some(0.3),
                 nc: Some(0.2),
             },
-            // Edge cases
+            
             HwmaParams {
                 na: Some(0.01),
                 nb: Some(0.01),
@@ -2750,16 +2750,16 @@ mod tests {
             let input = HwmaInput::from_candles(&candles, "close", params.clone());
             let output = hwma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2774,7 +2774,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -2789,7 +2789,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -2809,7 +2809,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_hwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2838,7 +2838,7 @@ mod tests {
                 $( #[test] fn [<$test_fn _avx512_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                 })*
-                // Test WASM SIMD128 implementation
+                
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                 $( #[test] fn [<$test_fn _simd128_f64>]() {
                         let _ = $test_fn(stringify!([<$test_fn _simd128_f64>]), Kernel::Scalar);
@@ -2893,7 +2893,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2901,25 +2901,25 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small ranges with all params
+            
             (0.05, 0.15, 0.05, 0.05, 0.15, 0.05, 0.05, 0.15, 0.05),
-            // Medium ranges
+            
             (0.1, 0.5, 0.1, 0.1, 0.5, 0.1, 0.1, 0.5, 0.1),
-            // Large ranges
+            
             (0.5, 0.9, 0.1, 0.5, 0.9, 0.1, 0.5, 0.9, 0.1),
-            // Different param ranges
+            
             (0.1, 0.9, 0.4, 0.1, 0.5, 0.2, 0.1, 0.3, 0.1),
-            // Edge case: very small values
+            
             (0.01, 0.05, 0.01, 0.01, 0.05, 0.01, 0.01, 0.05, 0.01),
-            // Edge case: near 1.0 values
+            
             (0.8, 0.99, 0.05, 0.8, 0.99, 0.05, 0.8, 0.99, 0.05),
-            // Mixed ranges
+            
             (0.1, 0.9, 0.2, 0.2, 0.8, 0.3, 0.3, 0.7, 0.2),
-            // Original configuration
+            
             (0.1, 0.9, 0.4, 0.1, 0.9, 0.4, 0.1, 0.9, 0.4),
-            // Dense grid
+            
             (0.1, 0.3, 0.05, 0.1, 0.3, 0.05, 0.1, 0.3, 0.05),
         ];
 
@@ -2935,9 +2935,9 @@ mod tests {
                 .nc_range(nc_start, nc_end, nc_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2947,7 +2947,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2965,7 +2965,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -2983,7 +2983,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -3006,7 +3006,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())

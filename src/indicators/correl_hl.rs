@@ -211,7 +211,7 @@ pub enum CorrelHlError {
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("correl_hl: invalid input: {0}")]
     InvalidInput(&'static str),
-    // Batch range or kernel usage errors
+    
     #[error("correl_hl: invalid range: start={start} end={end} step={step}")]
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("correl_hl: invalid kernel for batch path: {0:?}")]
@@ -310,7 +310,7 @@ pub fn correl_hl_into_slice(
     correl_hl_compute_into(high, low, period, first, chosen, dst);
     let warm = first + period - 1;
     for v in &mut dst[..warm] {
-        // Preserve the quiet-NaN warmup semantics used by alloc_with_nan_prefix
+        
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
@@ -324,26 +324,26 @@ pub fn correl_hl_into_slice(
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), CorrelHlError> {
-    // Reuse the existing prepare logic to derive warmup and kernel selection
+    
     let (high, _low, period, first, _chosen) = correl_hl_prepare(input, Kernel::Auto)?;
     if out.len() != high.len() {
         return Err(CorrelHlError::OutputLengthMismatch { expected: high.len(), got: out.len() });
     }
 
-    // Prefill warmup prefix to match alloc_with_nan_prefix semantics
+    
     let warm = first + period - 1;
     let warm_cap = warm.min(out.len());
     for v in &mut out[..warm_cap] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Delegate to the existing no-allocation kernel dispatcher
+    
     correl_hl_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
 pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Running sums over current window
+    
     let mut sum_h = 0.0_f64;
     let mut sum_h2 = 0.0_f64;
     let mut sum_l = 0.0_f64;
@@ -361,7 +361,7 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         sum_hl: f64,
         inv_pf: f64,
     ) -> f64 {
-        // Pearson r = cov / (std_x * std_y) with cov = E[xy] - E[x]E[y]
+        
         let cov = sum_hl - (sum_h * sum_l) * inv_pf;
         let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
         let var_l = sum_l2 - (sum_l * sum_l) * inv_pf;
@@ -372,11 +372,11 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         }
     }
 
-    // Initialize first window [first, first+period)
+    
     let init_start = first;
     let init_end = first + period;
     let mut j = init_start;
-    // Unroll by 4 safely
+    
     while j + 4 <= init_end {
         let h0 = high[j + 0];
         let l0 = low[j + 0];
@@ -408,7 +408,7 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
     let warm = init_end - 1;
     out[warm] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
 
-    // Slide window
+    
     let n = high.len();
     for i in init_end..n {
         let old_idx = i - period;
@@ -419,7 +419,7 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         let new_l = low[new_idx];
 
         if old_h.is_nan() || old_l.is_nan() || new_h.is_nan() || new_l.is_nan() {
-            // Rebuild current window [i+1-period, i+1)
+            
             let start = i + 1 - period;
             let end = i + 1;
             sum_h = 0.0;
@@ -455,7 +455,7 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
                 k += 1;
             }
         } else {
-            // O(1) update, use mul_add for hl to reduce rounding error
+            
             sum_h += new_h - old_h;
             sum_l += new_l - old_l;
             sum_h2 += new_h * new_h - old_h * old_h;
@@ -471,7 +471,7 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // AVX2 accelerates the initial and rebuild reductions; the O(1) slide stays scalar.
+    
     unsafe {
         #[inline(always)]
         unsafe fn hsum256_pd(v: __m256d) -> f64 {
@@ -488,7 +488,7 @@ pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, ou
             high: &[f64],
             low: &[f64],
             start: usize,
-            end: usize, // exclusive
+            end: usize, 
         ) -> (f64, f64, f64, f64, f64) {
             let mut v_h = _mm256_setzero_pd();
             let mut v_l = _mm256_setzero_pd();
@@ -611,7 +611,7 @@ pub unsafe fn correl_hl_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    // AVX512 short reuses the long kernel body.
+    
     correl_hl_avx512_long(high, low, period, first, out)
 }
 
@@ -646,7 +646,7 @@ pub unsafe fn correl_hl_avx512_long(
         high: &[f64],
         low: &[f64],
         start: usize,
-        end: usize, // exclusive
+        end: usize, 
     ) -> (f64, f64, f64, f64, f64) {
         let mut v_h = _mm512_setzero_pd();
         let mut v_l = _mm512_setzero_pd();
@@ -672,8 +672,8 @@ pub unsafe fn correl_hl_avx512_long(
             i += 8;
         }
 
-        // masked tail
-        let rem = (end - i) as i32; // 0..7
+        
+        let rem = (end - i) as i32; 
         if rem != 0 {
             let mask: __mmask8 = ((1u16 << rem) - 1) as __mmask8;
             let mh = _mm512_maskz_loadu_pd(mask, ptr_h.add(i));
@@ -759,18 +759,18 @@ pub struct CorrelHlStream {
     period: usize,
     buffer_high: Vec<f64>,
     buffer_low: Vec<f64>,
-    head: usize,       // ring write index
-    len: usize,        // number of items currently in the window (<= period)
-    nan_in_win: usize, // count of pairs with NaN currently in the window
+    head: usize,       
+    len: usize,        
+    nan_in_win: usize, 
 
-    // Running sums over the current window (valid pairs only)
+    
     sum_h: f64,
     sum_h2: f64,
     sum_l: f64,
     sum_l2: f64,
     sum_hl: f64,
 
-    // Precompute 1/period to avoid a divide per tick
+    
     inv_pf: f64,
 }
 
@@ -807,7 +807,7 @@ impl CorrelHlStream {
     /// - `Some(r)` otherwise, where r ∈ [-1, 1] (up to rounding)
     #[inline(always)]
     pub fn update(&mut self, h: f64, l: f64) -> Option<f64> {
-        // 1) Evict old sample if the window is full
+        
         if self.len == self.period {
             let old_h = self.buffer_high[self.head];
             let old_l = self.buffer_low[self.head];
@@ -825,11 +825,11 @@ impl CorrelHlStream {
             }
         }
 
-        // 2) Write the new pair into the ring
+        
         self.buffer_high[self.head] = h;
         self.buffer_low[self.head] = l;
 
-        // 3) Add new contributions (only if both are numbers)
+        
         if h.is_nan() || l.is_nan() {
             self.nan_in_win += 1;
         } else {
@@ -840,24 +840,24 @@ impl CorrelHlStream {
             self.sum_hl += h * l;
         }
 
-        // 4) Advance ring
+        
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
         if self.len < self.period {
-            self.len += 1; // grow until full
+            self.len += 1; 
         }
 
-        // 5) Emit
+        
         if self.len < self.period {
-            return None; // warmup
+            return None; 
         }
         if self.nan_in_win != 0 {
-            return Some(f64::NAN); // any NaN in window => NaN out
+            return Some(f64::NAN); 
         }
 
-        // Pearson r = cov / (std_h * std_l), with cov = E[hl] - E[h]E[l]
+        
         let cov = self.sum_hl - (self.sum_h * self.sum_l) * self.inv_pf;
         let var_h = self.sum_h2 - (self.sum_h * self.sum_h) * self.inv_pf;
         let var_l = self.sum_l2 - (self.sum_l * self.sum_l) * self.inv_pf;
@@ -962,7 +962,7 @@ pub fn expand_grid(r: &CorrelHlBatchRange) -> Result<Vec<CorrelHlParams>, Correl
             if v.is_empty() { return Err(CorrelHlError::InvalidRange { start, end, step }); }
             Ok(v)
         } else {
-            // reversed bounds
+            
             let mut v = Vec::new();
             let mut x = start;
             while x >= end {
@@ -1084,25 +1084,25 @@ fn correl_hl_batch_inner(
     rows.checked_mul(cols)
         .ok_or(CorrelHlError::InvalidInput("rows*cols overflow"))?;
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Allocate uninitialized matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute prefix sums once across series
+    
     let n = high.len();
     let mut ps_h = vec![0.0f64; n + 1];
     let mut ps_h2 = vec![0.0f64; n + 1];
@@ -1180,7 +1180,7 @@ fn correl_hl_batch_inner(
         }
     }
 
-    // Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1235,7 +1235,7 @@ fn correl_hl_batch_inner_into(
         });
     }
 
-    // Warm prefixes with helper, zero-copy, debug-poison friendly.
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1245,8 +1245,8 @@ fn correl_hl_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Precompute prefix sums across the entire series for h, h^2, l, l^2, h*l
-    // and a prefix count of indices where either high or low is NaN.
+    
+    
     let n = high.len();
     let mut ps_h = vec![0.0f64; n + 1];
     let mut ps_h2 = vec![0.0f64; n + 1];
@@ -1276,14 +1276,14 @@ fn correl_hl_batch_inner_into(
         }
     }
 
-    // Row compute writes valid cells; no need to touch warm prefix again.
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let inv_pf = 1.0 / (p as f64);
         let dst: &mut [f64] = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
-        // Compute from warm index onward using prefix sums; preserve NaNs for windows crossing any NaN.
+        
         let warm = first + p - 1;
         for i in warm..n {
             let end = i + 1;
@@ -1432,16 +1432,16 @@ pub fn correl_hl_into(
         };
         let input = CorrelHlInput::from_slices(high, low, params);
 
-        // Check for aliasing - if any input pointer equals output pointer
+        
         if high_ptr == out_ptr || low_ptr == out_ptr {
-            // Need temporary buffer for aliasing case
+            
             let mut temp = vec![0.0; len];
             correl_hl_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing - can write directly to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             correl_hl_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1479,7 +1479,7 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         period: config.period_range,
     };
 
-    // Expand parameter grid and allocate output once
+    
     let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = high.len();
@@ -1488,9 +1488,9 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
     let mut values = vec![0.0f64; total];
 
-    // Use the shared-prefix batch path to ensure numerical parity with the
-    // zero-copy fast API (`correl_hl_batch_into`). This writes warmup NaNs
-    // and computes each row in-place into `values` (row-major) without copies.
+    
+    
+    
     correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, &mut values)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1538,7 +1538,7 @@ pub fn correl_hl_batch_into(
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Use the optimized batch inner function
+        
         correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out_slice)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1660,7 +1660,7 @@ pub fn correl_hl_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA VRAM HANDLE (CAI v3 + DLPack v1.x) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "CorrelHlDeviceArrayF32", unsendable)]
 pub struct CorrelHlDeviceArrayF32Py {
@@ -2452,7 +2452,7 @@ mod tests {
 
             let bits = val.to_bits();
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -2460,7 +2460,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -2468,7 +2468,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -2480,7 +2480,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_correl_hl_no_poison(
         _test_name: &str,
@@ -2513,12 +2513,12 @@ mod tests {
         }
     }
 
-    // Test period=1 behavior - reproduce the bug
+    
     #[test]
     fn test_period_one_bug() {
-        // Test case that reproduces the bug from property test
+        
         let high = vec![100.0, 200.0, 300.0];
-        let low = vec![90.0, 190.0, 310.0]; // Different from high
+        let low = vec![90.0, 190.0, 310.0]; 
 
         let params = CorrelHlParams { period: Some(1) };
         let input = CorrelHlInput::from_slices(&high, &low, params.clone());
@@ -2531,7 +2531,7 @@ mod tests {
                 i, high[i], low[i], val
             );
 
-            // Correlation MUST be within [-1, 1]
+            
             assert!(
                 val.is_nan() || (val >= -1.0 && val <= 1.0),
                 "Period=1 correlation at index {} out of bounds: {}",
@@ -2540,9 +2540,9 @@ mod tests {
             );
         }
 
-        // Test with identical values
+        
         let high2 = vec![100.0, 200.0, 300.0];
-        let low2 = vec![100.0, 200.0, 300.0]; // Same as high
+        let low2 = vec![100.0, 200.0, 300.0]; 
 
         let input2 = CorrelHlInput::from_slices(&high2, &low2, params.clone());
         let result2 = correl_hl(&input2).unwrap();
@@ -2595,7 +2595,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2603,15 +2603,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CorrelHlBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 20, 5) // Test with periods 5, 10, 15, 20
+            .period_range(5, 20, 5) 
             .apply_candles(&c)?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -2620,7 +2620,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2628,7 +2628,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2636,7 +2636,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2648,7 +2648,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,

@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -41,7 +41,7 @@ test.before(async () => {
 });
 
 test('ALMA partial params', () => {
-    // Test with default parameters - mirrors check_alma_partial_params
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.alma_js(close, 9, 0.85, 6.0);
@@ -49,7 +49,7 @@ test('ALMA partial params', () => {
 });
 
 test('ALMA accuracy', async () => {
-    // Test ALMA matches expected values from Rust tests - mirrors check_alma_accuracy
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.alma;
     
@@ -62,7 +62,7 @@ test('ALMA accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -71,12 +71,12 @@ test('ALMA accuracy', async () => {
         "ALMA last 5 values mismatch"
     );
     
-    // Compare full output with Rust
+    
     await compareWithRust('alma', result, 'close', expected.defaultParams);
 });
 
 test('ALMA default candles', () => {
-    // Test ALMA with default parameters - mirrors check_alma_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.alma_js(close, 9, 0.85, 6.0);
@@ -84,7 +84,7 @@ test('ALMA default candles', () => {
 });
 
 test('ALMA zero period', () => {
-    // Test ALMA fails with zero period - mirrors check_alma_zero_period
+    
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -93,7 +93,7 @@ test('ALMA zero period', () => {
 });
 
 test('ALMA period exceeds length', () => {
-    // Test ALMA fails when period exceeds data length - mirrors check_alma_period_exceeds_length
+    
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -102,7 +102,7 @@ test('ALMA period exceeds length', () => {
 });
 
 test('ALMA very small dataset', () => {
-    // Test ALMA fails with insufficient data - mirrors check_alma_very_small_dataset
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -111,7 +111,7 @@ test('ALMA very small dataset', () => {
 });
 
 test('ALMA empty input', () => {
-    // Test ALMA fails with empty input - mirrors check_alma_empty_input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -120,54 +120,54 @@ test('ALMA empty input', () => {
 });
 
 test('ALMA invalid sigma', () => {
-    // Test ALMA fails with invalid sigma - mirrors check_alma_invalid_sigma
+    
     const data = new Float64Array([1.0, 2.0, 3.0]);
     
-    // Sigma = 0
+    
     assert.throws(() => {
         wasm.alma_js(data, 2, 0.85, 0.0);
     }, /Invalid sigma/);
     
-    // Negative sigma
+    
     assert.throws(() => {
         wasm.alma_js(data, 2, 0.85, -1.0);
     }, /Invalid sigma/);
 });
 
 test('ALMA invalid offset', () => {
-    // Test ALMA fails with invalid offset - mirrors check_alma_invalid_offset
+    
     const data = new Float64Array([1.0, 2.0, 3.0]);
     
-    // NaN offset
+    
     assert.throws(() => {
         wasm.alma_js(data, 2, NaN, 6.0);
     }, /Invalid offset/);
     
-    // Offset > 1
+    
     assert.throws(() => {
         wasm.alma_js(data, 2, 1.5, 6.0);
     }, /Invalid offset/);
     
-    // Offset < 0
+    
     assert.throws(() => {
         wasm.alma_js(data, 2, -0.1, 6.0);
     }, /Invalid offset/);
 });
 
 test('ALMA reinput', () => {
-    // Test ALMA applied twice (re-input) - mirrors check_alma_reinput
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.alma;
     
-    // First pass
+    
     const firstResult = wasm.alma_js(close, 9, 0.85, 6.0);
     assert.strictEqual(firstResult.length, close.length);
     
-    // Second pass - apply ALMA to ALMA output
+    
     const secondResult = wasm.alma_js(firstResult, 9, 0.85, 6.0);
     assert.strictEqual(secondResult.length, firstResult.length);
     
-    // Check last 5 values match expected
+    
     const last5 = secondResult.slice(-5);
     assertArrayClose(
         last5,
@@ -178,25 +178,25 @@ test('ALMA reinput', () => {
 });
 
 test('ALMA NaN handling', () => {
-    // Test ALMA handles NaN values correctly - mirrors check_alma_nan_handling
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.alma_js(close, 9, 0.85, 6.0);
     assert.strictEqual(result.length, close.length);
     
-    // After warmup period (240), no NaN values should exist
+    
     if (result.length > 240) {
         for (let i = 240; i < result.length; i++) {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
     
-    // First period-1 values should be NaN
+    
     assertAllNaN(result.slice(0, 8), "Expected NaN in warmup period");
 });
 
 test('ALMA all NaN input', () => {
-    // Test ALMA with all NaN values
+    
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
@@ -206,17 +206,17 @@ test('ALMA all NaN input', () => {
 });
 
 test('ALMA batch single parameter set', () => {
-    // Test batch with single parameter combination
+    
     const close = new Float64Array(testData.close);
     
-    // Using the new ergonomic batch API for single parameter
+    
     const batchResult = wasm.alma_batch(close, {
         period_range: [9, 9, 0],
         offset_range: [0.85, 0.85, 0],
         sigma_range: [6.0, 6.0, 0]
     });
     
-    // Should match single calculation
+    
     const singleResult = wasm.alma_js(close, 9, 0.85, 6.0);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
@@ -224,22 +224,22 @@ test('ALMA batch single parameter set', () => {
 });
 
 test('ALMA batch multiple periods', () => {
-    // Test batch with multiple period values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Multiple periods: 9, 11, 13 using ergonomic API
+    const close = new Float64Array(testData.close.slice(0, 100)); 
+    
+    
     const batchResult = wasm.alma_batch(close, {
-        period_range: [9, 13, 2],      // period range
-        offset_range: [0.85, 0.85, 0], // offset range  
-        sigma_range: [6.0, 6.0, 0]     // sigma range
+        period_range: [9, 13, 2],      
+        offset_range: [0.85, 0.85, 0], 
+        sigma_range: [6.0, 6.0, 0]     
     });
     
-    // Should have 3 rows * 100 cols = 300 values
+    
     assert.strictEqual(batchResult.values.length, 3 * 100);
     assert.strictEqual(batchResult.rows, 3);
     assert.strictEqual(batchResult.cols, 100);
     
-    // Verify each row matches individual calculation
+    
     const periods = [9, 11, 13];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -257,47 +257,47 @@ test('ALMA batch multiple periods', () => {
 });
 
 test('ALMA batch metadata from result', () => {
-    // Test that batch result includes correct parameter combinations
-    const close = new Float64Array(20); // Need enough data for period 13
+    
+    const close = new Float64Array(20); 
     close.fill(100);
     
     const result = wasm.alma_batch(close, {
-        period_range: [9, 13, 2],      // period: 9, 11, 13
-        offset_range: [0.85, 0.95, 0.05], // offset: 0.85, 0.90, 0.95
-        sigma_range: [6.0, 7.0, 0.5]   // sigma: 6.0, 6.5, 7.0
+        period_range: [9, 13, 2],      
+        offset_range: [0.85, 0.95, 0.05], 
+        sigma_range: [6.0, 7.0, 0.5]   
     });
     
-    // Should have 3 * 3 * 3 = 27 combinations
+    
     assert.strictEqual(result.combos.length, 27);
     
-    // Check first combination
-    assert.strictEqual(result.combos[0].period, 9);    // period
-    assert.strictEqual(result.combos[0].offset, 0.85); // offset
-    assert.strictEqual(result.combos[0].sigma, 6.0);   // sigma
     
-    // Check last combination
-    assert.strictEqual(result.combos[26].period, 13);   // period
-    assertClose(result.combos[26].offset, 0.95, 1e-10, "offset mismatch"); // offset
-    assert.strictEqual(result.combos[26].sigma, 7.0);  // sigma
+    assert.strictEqual(result.combos[0].period, 9);    
+    assert.strictEqual(result.combos[0].offset, 0.85); 
+    assert.strictEqual(result.combos[0].sigma, 6.0);   
+    
+    
+    assert.strictEqual(result.combos[26].period, 13);   
+    assertClose(result.combos[26].offset, 0.95, 1e-10, "offset mismatch"); 
+    assert.strictEqual(result.combos[26].sigma, 7.0);  
 });
 
 test('ALMA batch full parameter sweep', () => {
-    // Test full parameter sweep matching expected structure
+    
     const close = new Float64Array(testData.close.slice(0, 50));
     
     const batchResult = wasm.alma_batch(close, {
-        period_range: [9, 11, 2],      // 2 periods
-        offset_range: [0.85, 0.90, 0.05], // 2 offsets
-        sigma_range: [6.0, 6.0, 0]     // 1 sigma
+        period_range: [9, 11, 2],      
+        offset_range: [0.85, 0.90, 0.05], 
+        sigma_range: [6.0, 6.0, 0]     
     });
     
-    // Should have 2 * 2 * 1 = 4 combinations
+    
     assert.strictEqual(batchResult.combos.length, 4);
     assert.strictEqual(batchResult.rows, 4);
     assert.strictEqual(batchResult.cols, 50);
     assert.strictEqual(batchResult.values.length, 4 * 50);
     
-    // Verify structure
+    
     for (let combo = 0; combo < batchResult.combos.length; combo++) {
         const period = batchResult.combos[combo].period;
         const offset = batchResult.combos[combo].offset;
@@ -306,12 +306,12 @@ test('ALMA batch full parameter sweep', () => {
         const rowStart = combo * 50;
         const rowData = batchResult.values.slice(rowStart, rowStart + 50);
         
-        // First period-1 values should be NaN
+        
         for (let i = 0; i < period - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
         }
         
-        // After warmup should have values
+        
         for (let i = period - 1; i < 50; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
         }
@@ -319,10 +319,10 @@ test('ALMA batch full parameter sweep', () => {
 });
 
 test('ALMA batch edge cases', () => {
-    // Test edge cases for batch processing
+    
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     
-    // Single value sweep
+    
     const singleBatch = wasm.alma_batch(close, {
         period_range: [5, 5, 1],
         offset_range: [0.85, 0.85, 0.1],
@@ -332,18 +332,18 @@ test('ALMA batch edge cases', () => {
     assert.strictEqual(singleBatch.values.length, 10);
     assert.strictEqual(singleBatch.combos.length, 1);
     
-    // Step larger than range
+    
     const largeBatch = wasm.alma_batch(close, {
-        period_range: [5, 7, 10], // Step larger than range
+        period_range: [5, 7, 10], 
         offset_range: [0.85, 0.85, 0],
         sigma_range: [6.0, 6.0, 0]
     });
     
-    // Should only have period=5
+    
     assert.strictEqual(largeBatch.values.length, 10);
     assert.strictEqual(largeBatch.combos.length, 1);
     
-    // Empty data should throw
+    
     assert.throws(() => {
         wasm.alma_batch(new Float64Array([]), {
             period_range: [9, 9, 0],
@@ -353,9 +353,9 @@ test('ALMA batch edge cases', () => {
     }, /All values are NaN/);
 });
 
-// New API tests
+
 test('ALMA batch - new ergonomic API with single parameter', () => {
-    // Test the new API with a single parameter combination
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.alma_batch(close, {
@@ -364,29 +364,29 @@ test('ALMA batch - new ergonomic API with single parameter', () => {
         sigma_range: [6.0, 6.0, 0]
     });
     
-    // Verify structure
+    
     assert(result.values, 'Should have values array');
     assert(result.combos, 'Should have combos array');
     assert(typeof result.rows === 'number', 'Should have rows count');
     assert(typeof result.cols === 'number', 'Should have cols count');
     
-    // Verify dimensions
+    
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, close.length);
     assert.strictEqual(result.combos.length, 1);
     assert.strictEqual(result.values.length, close.length);
     
-    // Verify parameters
+    
     const combo = result.combos[0];
     assert.strictEqual(combo.period, 9);
     assert.strictEqual(combo.offset, 0.85);
     assert.strictEqual(combo.sigma, 6.0);
     
-    // Compare with old API
+    
     const oldResult = wasm.alma_js(close, 9, 0.85, 6.0);
     for (let i = 0; i < oldResult.length; i++) {
         if (isNaN(oldResult[i]) && isNaN(result.values[i])) {
-            continue; // Both NaN is OK
+            continue; 
         }
         assert(Math.abs(oldResult[i] - result.values[i]) < 1e-10,
                `Value mismatch at index ${i}`);
@@ -394,22 +394,22 @@ test('ALMA batch - new ergonomic API with single parameter', () => {
 });
 
 test('ALMA batch - new API with multiple parameters', () => {
-    // Test with multiple parameter combinations
+    
     const close = new Float64Array(testData.close.slice(0, 50));
     
     const result = wasm.alma_batch(close, {
-        period_range: [9, 11, 2],      // 9, 11
-        offset_range: [0.85, 0.90, 0.05], // 0.85, 0.90
-        sigma_range: [6.0, 6.0, 0]     // 6.0
+        period_range: [9, 11, 2],      
+        offset_range: [0.85, 0.90, 0.05], 
+        sigma_range: [6.0, 6.0, 0]     
     });
     
-    // Should have 2 * 2 * 1 = 4 combinations
+    
     assert.strictEqual(result.rows, 4);
     assert.strictEqual(result.cols, 50);
     assert.strictEqual(result.combos.length, 4);
     assert.strictEqual(result.values.length, 200);
     
-    // Verify each combo
+    
     const expectedCombos = [
         { period: 9, offset: 0.85, sigma: 6.0 },
         { period: 9, offset: 0.90, sigma: 6.0 },
@@ -423,46 +423,46 @@ test('ALMA batch - new API with multiple parameters', () => {
         assert.strictEqual(result.combos[i].sigma, expectedCombos[i].sigma);
     }
     
-    // Extract and verify a specific row
+    
     const secondRow = result.values.slice(result.cols, 2 * result.cols);
     assert.strictEqual(secondRow.length, 50);
     
-    // Compare with old API for first combination
+    
     const oldResult = wasm.alma_js(close, 9, 0.85, 6.0);
     const firstRow = result.values.slice(0, result.cols);
     for (let i = 0; i < oldResult.length; i++) {
         if (isNaN(oldResult[i]) && isNaN(firstRow[i])) {
-            continue; // Both NaN is OK
+            continue; 
         }
         assert(Math.abs(oldResult[i] - firstRow[i]) < 1e-10,
                `Value mismatch at index ${i}`);
     }
 });
 
-// Note: alma_batch_js (old API) is deprecated. All batch tests now use the ergonomic alma_batch API.
+
 
 test('ALMA batch - new API error handling', () => {
     const close = new Float64Array(testData.close.slice(0, 10));
     
-    // Invalid config structure
+    
     assert.throws(() => {
         wasm.alma_batch(close, {
-            period_range: [9, 9], // Missing step
+            period_range: [9, 9], 
             offset_range: [0.85, 0.85, 0],
             sigma_range: [6.0, 6.0, 0]
         });
     }, /Invalid config/);
     
-    // Missing required field
+    
     assert.throws(() => {
         wasm.alma_batch(close, {
             period_range: [9, 9, 0],
             offset_range: [0.85, 0.85, 0]
-            // Missing sigma_range
+            
         });
     }, /Invalid config/);
     
-    // Invalid data type
+    
     assert.throws(() => {
         wasm.alma_batch(close, {
             period_range: "invalid",
@@ -472,22 +472,22 @@ test('ALMA batch - new API error handling', () => {
     }, /Invalid config/);
 });
 
-// Note: Streaming functionality is available through the Python bindings.
-// For WASM, repeated calculations with same parameters can be achieved using
-// the fast/unsafe API with persistent buffers.
 
-// Zero-copy API tests
+
+
+
+
 test('ALMA zero-copy API', () => {
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const period = 5;
     const offset = 0.85;
     const sigma = 6.0;
     
-    // Allocate buffer
+    
     const ptr = wasm.alma_alloc(data.length);
     assert(ptr !== 0, 'Failed to allocate memory');
     
-    // Create view into WASM memory
+    
     const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
     if (!memory || !memory.buffer) {
         console.warn('Skipping zero-copy API test: wasm memory accessor unavailable');
@@ -500,24 +500,24 @@ test('ALMA zero-copy API', () => {
         data.length
     );
     
-    // Copy data into WASM memory
+    
     memView.set(data);
     
-    // Compute ALMA in-place
+    
     try {
         wasm.alma_into(ptr, ptr, data.length, period, offset, sigma);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.alma_js(data, period, offset, sigma);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.alma_free(ptr, data.length);
     }
 });
@@ -543,7 +543,7 @@ test('ALMA zero-copy with large dataset', () => {
         
         wasm.alma_into(ptr, ptr, size, 9, 0.85, 6.0);
         
-        // Recreate view in case memory grew
+        
         const memory2 = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
         if (!memory2 || !memory2.buffer) {
             console.warn('Skipping zero-copy large dataset verification: wasm memory accessor unavailable');
@@ -551,12 +551,12 @@ test('ALMA zero-copy with large dataset', () => {
         }
         const memView2 = new Float64Array(memory2.buffer, ptr, size);
         
-        // Check warmup period has NaN
+        
         for (let i = 0; i < 8; i++) {
             assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values
+        
         for (let i = 8; i < Math.min(100, size); i++) {
             assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
         }
@@ -565,13 +565,13 @@ test('ALMA zero-copy with large dataset', () => {
     }
 });
 
-// Note: Context API has been deprecated in favor of using the fast/unsafe API with persistent buffers
-// for weight reuse patterns. The following tests demonstrate equivalent functionality.
 
-// SIMD128 verification test
+
+
+
 test('ALMA SIMD128 consistency', () => {
-    // This test verifies SIMD128 produces same results as scalar
-    // It runs automatically when SIMD128 is enabled
+    
+    
     const testCases = [
         { size: 10, period: 5 },
         { size: 100, period: 9 },
@@ -587,15 +587,15 @@ test('ALMA SIMD128 consistency', () => {
         
         const result = wasm.alma_js(data, testCase.period, 0.85, 6.0);
         
-        // Basic sanity checks
+        
         assert.strictEqual(result.length, data.length);
         
-        // Check warmup period
+        
         for (let i = 0; i < testCase.period - 1; i++) {
             assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
         }
         
-        // Check values exist after warmup
+        
         let sumAfterWarmup = 0;
         let countAfterWarmup = 0;
         for (let i = testCase.period - 1; i < result.length; i++) {
@@ -604,28 +604,28 @@ test('ALMA SIMD128 consistency', () => {
             countAfterWarmup++;
         }
         
-        // Verify reasonable values
+        
         const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
         assert(Math.abs(avgAfterWarmup) < 10, `Average value ${avgAfterWarmup} seems unreasonable`);
     }
 });
 
-// Error handling for zero-copy API
+
 test('ALMA zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.alma_into(0, 0, 10, 9, 0.85, 6.0);
     }, /null pointer|invalid memory/i);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.alma_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.alma_into(ptr, ptr, 10, 0, 0.85, 6.0);
         }, /Invalid period/);
         
-        // Invalid sigma
+        
         assert.throws(() => {
             wasm.alma_into(ptr, ptr, 10, 5, 0.85, 0.0);
         }, /Invalid sigma/);
@@ -634,16 +634,16 @@ test('ALMA zero-copy error handling', () => {
     }
 });
 
-// Memory leak prevention test
+
 test('ALMA zero-copy memory management', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 10000, 100000];
     
     for (const size of sizes) {
         const ptr = wasm.alma_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
-        // Write pattern to verify memory
+        
         const memory = wasm.__wbindgen_memory ? wasm.__wbindgen_memory() : wasm.memory;
         if (!memory || !memory.buffer) {
             console.warn('Skipping zero-copy memory management: wasm memory accessor unavailable');
@@ -655,12 +655,12 @@ test('ALMA zero-copy memory management', () => {
             memView[i] = i * 1.5;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.alma_free(ptr, size);
     }
 });

@@ -42,7 +42,7 @@ pub enum CudaZscoreError {
     NotImplemented,
 }
 
-// Host-side POD matching CUDA float2 layout (hi,lo) for DS prefixes
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Float2 { hi: f32, lo: f32 }
@@ -62,7 +62,7 @@ pub struct CudaZscore {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    // Selection policy + introspection (ALMA parity)
+    
     policy: CudaZscorePolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -110,7 +110,7 @@ impl CudaZscore {
     pub fn synchronize(&self) -> Result<(), CudaZscoreError> {
         self.stream.synchronize().map_err(Into::into)
     }
-    // duplicate accessors removed above
+    
 
     fn expand_combos(
         range: &ZscoreBatchRange,
@@ -340,7 +340,7 @@ impl CudaZscore {
         (prefix_sum, prefix_sum_sq, prefix_nan)
     }
 
-    // Build DS (float2) prefixes directly into pinned memory
+    
     fn build_prefixes_ds_pinned(
         data: &[f32],
     ) -> Result<(LockedBuffer<Float2>, LockedBuffer<Float2>, LockedBuffer<i32>), CudaZscoreError> {
@@ -390,7 +390,7 @@ impl CudaZscore {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
-        // record selection once
+        
         unsafe {
             (*(self as *const _ as *mut CudaZscore)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -398,9 +398,9 @@ impl CudaZscore {
         self.maybe_log_batch_debug();
 
         let grid_x = ((len as u32) + block_x - 1) / block_x;
-        // Must match `ZSCORE_COMBO_TILE` in `kernels/cuda/zscore_kernel.cu`.
+        
         const COMBO_TILE: usize = 4;
-        // Chunk grid.y to ≤ 65_535
+        
         for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
             let grid_y = ((chunk_len + (COMBO_TILE - 1)) / COMBO_TILE) as u32;
             let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
@@ -416,7 +416,7 @@ impl CudaZscore {
                 let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
                 let mut nbdevs_ptr = d_nbdevs.as_device_ptr().add(start).as_raw();
                 let mut combos_i = chunk_len as i32;
-                // Offset output by start * len
+                
                 let out_off = start * len;
                 let mut out_ptr = d_out.as_device_ptr().add(out_off).as_raw();
 
@@ -462,7 +462,7 @@ impl CudaZscore {
         unsafe { (*(self as *const _ as *mut CudaZscore)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
         let grid_x = ((len as u32) + block_x - 1) / block_x;
-        // Must match `ZSCORE_COMBO_TILE` in `kernels/cuda/zscore_kernel.cu`.
+        
         const COMBO_TILE: usize = 4;
 
         for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
@@ -500,7 +500,7 @@ impl CudaZscore {
 
     #[inline]
     fn select_batch_impl(len: usize, combos: usize) -> bool {
-        // Heuristic: prefer DS for larger workloads to avoid FP64 throughput bottleneck
+        
         let work = len.saturating_mul(combos);
         work >= 5_000_000
     }
@@ -573,7 +573,7 @@ impl CudaZscore {
         sweep: &ZscoreBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<(usize, f32)>), CudaZscoreError> {
         let (combos, first_valid, _len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        // VRAM estimate (DS prefixes use Float2 = 8 bytes)
+        
         let len = data_f32.len();
         let len1 = len
             .checked_add(1)
@@ -617,8 +617,8 @@ impl CudaZscore {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<(usize, f32)>), CudaZscoreError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        // Mirror VRAM estimation from `zscore_batch_dev` so we fail early
-        // with a typed OutOfMemory error when the workload cannot fit.
+        
+        
         let len1 = len
             .checked_add(1)
             .ok_or_else(|| CudaZscoreError::InvalidInput("len+1 overflow".into()))?;
@@ -682,7 +682,7 @@ impl CudaZscore {
         Ok((combos.len(), len, meta))
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn zscore_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -705,7 +705,7 @@ impl CudaZscore {
         if period == 0 {
             return Err(CudaZscoreError::InvalidInput("period must be > 0".into()));
         }
-        // Compute per-series first_valid
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -719,7 +719,7 @@ impl CudaZscore {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate (inputs + first_valids + output + ~64MB headroom)
+        
         let bytes_in = expected
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaZscoreError::InvalidInput("input bytes overflow".into()))?;
@@ -829,7 +829,7 @@ impl CudaZscore {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -884,7 +884,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaZscore::new(0).expect("cuda zscore");
         let price = gen_series(ONE_SERIES_LEN);
-        // vary period; nbdev=2.0; ma_type="sma"; devtype=0 (supported)
+        
         let sweep = ZscoreBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
@@ -934,7 +934,7 @@ pub mod benches {
     }
 }
 
-// ---------- Policies, introspection, and helpers ----------
+
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {

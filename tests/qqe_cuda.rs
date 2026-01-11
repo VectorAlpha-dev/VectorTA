@@ -1,16 +1,16 @@
-// Integration tests for CUDA QQE kernels
 
-use my_project::indicators::qqe::{
+
+use vector_ta::indicators::qqe::{
     qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeData, QqeInput, QqeParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::qqe_wrapper::CudaQqe;
+use vector_ta::cuda::oscillators::qqe_wrapper::CudaQqe;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -62,9 +62,9 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
 
-    // Allow slightly larger tolerance for fp32+compensated accumulators
-    // Batch path can occasionally diverge in branch selection due to fp32 vs f64;
-    // keep tolerance modest but accommodating
+    
+    
+    
     let tol = 1.5e-1;
     let cols = cpu.cols;
     for row in 0..cpu.rows {
@@ -120,7 +120,7 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     };
 
 
-    // CPU baseline per series
+    
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -150,7 +150,7 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
-    // Allow slightly larger tolerance for fp32+compensated accumulators
+    
     let tol = 7.5e-3;
     for s in 0..cols {
         let mut printed = 0;

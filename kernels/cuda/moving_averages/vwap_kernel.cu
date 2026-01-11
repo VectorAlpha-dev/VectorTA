@@ -1,4 +1,4 @@
-// Drop-in optimized rewrite for CUDA 13 / sm_89+
+
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
@@ -7,10 +7,10 @@
 #include <cub/cub.cuh>
 #include <limits.h>
 
-// ---------- helpers ----------
+
 #if __CUDACC_VER_MAJOR__ >= 9
-// Read-only cached load. On modern GPUs this maps to the read-only path and is
-// effective for broadcast/warp-uniform loads. Fallback to plain load if arch<3.5.
+
+
 template <typename T>
 __device__ __forceinline__ T ld_ro(const T* p) {
 #if __CUDA_ARCH__ >= 350
@@ -24,7 +24,7 @@ template <typename T>
 __device__ __forceinline__ T ld_ro(const T* p) { return *p; }
 #endif
 
-// Optional L2 prefetch (disabled by default).
+
 #ifndef VWAP_PREFETCH_DISTANCE
 #define VWAP_PREFETCH_DISTANCE 0
 #endif
@@ -37,7 +37,7 @@ __device__ __forceinline__ void prefetch_l2(const void* ptr) {
 }
 #endif
 
-// ---------- Kernel 1: many-params × one time series (column-major output) ----------
+
 struct VwapSeg2 {
     float vol;
     float pv;
@@ -75,12 +75,12 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
     if (combo >= n_combos) return;
 
     const int count = counts[combo];
-    const int unit = unit_codes[combo]; // 0=m,1=h,2=d,3=M
+    const int unit = unit_codes[combo]; 
     long long divisor = divisors[combo];
     int warm = first_valids[combo];
 
     const int base = combo * series_len;
-    const float nan = __int_as_float(0x7fffffff); // canonical qNaN
+    const float nan = __int_as_float(0x7fffffff); 
 
     if (count <= 0 || series_len <= 0) {
         for (int t = threadIdx.x; t < series_len; t += BLOCK_THREADS) {
@@ -179,16 +179,16 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
     }
 }
 
-// ---------- Kernel 2: many series × one param (time-major I/O) ----------
+
 extern "C" __global__
 void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
                                      const float* __restrict__ volumes_tm,
                                      const float* __restrict__ prices_tm,
                                      int count,
-                                     int unit_code,           // 0=m,1=h,2=d,3=M
-                                     long long divisor,       // ms for m/h/d; ignored for 'M'
-                                     const int* __restrict__ first_valids, // per series
-                                     const int* __restrict__ month_ids,    // per time (rows), if unit_code==3
+                                     int unit_code,           
+                                     long long divisor,       
+                                     const int* __restrict__ first_valids, 
+                                     const int* __restrict__ month_ids,    
                                      int num_series,
                                      int series_len,
                                      float* __restrict__ out_tm)
@@ -201,9 +201,9 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
     if (warm < 0) warm = 0;
     if (warm > series_len) warm = series_len;
 
-    const float nan = __int_as_float(0x7fffffff); // canonical qNaN
+    const float nan = __int_as_float(0x7fffffff); 
 
-    // Warmup NaNs
+    
     for (int t = 0; t < warm; ++t)
         out_tm[t * num_series + series_idx] = nan;
 
@@ -214,8 +214,8 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
     const long long div  = (unit_code != 3 && divisor > 0) ? divisor : 1;
 
     long long current_gid = LLONG_MIN;
-    long long next_boundary_ll = LLONG_MIN; // for ts path
-    int       next_boundary_i  = INT_MIN;   // for month path
+    long long next_boundary_ll = LLONG_MIN; 
+    int       next_boundary_i  = INT_MIN;   
 
     long long last_ts = LLONG_MIN;
     bool monotonic_ts = true;
@@ -282,7 +282,7 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
         const float pr  = ld_ro(&prices_tm[idx]);
 
         volume_sum    += vol;
-        vol_price_sum  = fmaf(vol, pr, vol_price_sum); // fused multiply-add
+        vol_price_sum  = fmaf(vol, pr, vol_price_sum); 
 
         out_tm[idx] = (volume_sum > 0.0f) ? (vol_price_sum / volume_sum) : nan;
     }

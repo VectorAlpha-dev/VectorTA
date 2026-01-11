@@ -1,15 +1,15 @@
-// CUDA kernels for Variable Index Dynamic Average (VIDYA)
-//
-// Pattern: recurrence/IIR. Each block handles one parameter combo (batch)
-// or one series (many-series, time-major). Thread 0 performs the sequential
-// scan; other threads parallelize prefix NaN initialization.
-//
-// Semantics are aligned with the scalar Rust implementation in
-// src/indicators/vidya.rs:
-// - warmup index = first_valid + long_period - 2
-// - out[warmup-2] = price[warmup-2]
-// - out[warmup-1] = EMA-style update using k = alpha * (short_std / long_std)
-// - Thereafter, rolling updates for sums/sumsq and EMA-style recurrence.
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -36,7 +36,7 @@ void vidya_batch_f32(const float* __restrict__ prices,
     const float alpha = alphas[combo];
     const int base = combo * series_len;
 
-    // Basic validation mirroring CPU-side guards; on invalid, fill NaNs.
+    
     bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
                    (first_valid < 0) || (first_valid >= series_len) ||
                    (lp > (series_len - first_valid));
@@ -48,19 +48,19 @@ void vidya_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm_end = first_valid + lp; // first index after initial window
+    const int warm_end = first_valid + lp; 
     const int idx_m2 = warm_end - 2;
     const int idx_m1 = warm_end - 1;
-    const int warmup_prefix = idx_m2; // exclusive end for NaN prefix
+    const int warmup_prefix = idx_m2; 
 
-    // Prefix NaN initialization [0, warmup_prefix)
+    
     for (int i = threadIdx.x; i < warmup_prefix; i += blockDim.x) {
         out[base + i] = CUDART_NAN_F;
     }
 
     if (threadIdx.x != 0) return;
 
-    // Rolling accumulators over initial window [first_valid .. warm_end)
+    
     double long_sum = 0.0;
     double long_sum2 = 0.0;
     double short_sum = 0.0;
@@ -80,7 +80,7 @@ void vidya_batch_f32(const float* __restrict__ prices,
         short_sum2 += x * x;
     }
 
-    // First two defined outputs
+    
     float val = prices[idx_m2];
     out[base + idx_m2] = val;
 
@@ -101,18 +101,18 @@ void vidya_batch_f32(const float* __restrict__ prices,
         out[base + idx_m1] = val;
     }
 
-    // Main rolling loop
+    
     for (int t = warm_end; t < series_len; ++t) {
         const double x_new = static_cast<double>(prices[t]);
         const double x_new2 = x_new * x_new;
 
-        // push new
+        
         long_sum += x_new;
         long_sum2 += x_new2;
         short_sum += x_new;
         short_sum2 += x_new2;
 
-        // pop old
+        
         const double x_long_out = static_cast<double>(prices[t - lp]);
         const double x_short_out = static_cast<double>(prices[t - sp]);
         long_sum -= x_long_out;
@@ -137,13 +137,13 @@ void vidya_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Prefix-scan batch kernel: uses host-provided prefix sums of x and x^2 to compute
-// rolling mean/variance in O(1), then applies a warp-scan of affine transforms
-// for the EMA-style recurrence (32 timesteps per iteration).
-//
-// prefix_sum / prefix_sum2 are length-(series_len+1) arrays where:
-//   prefix_sum[0] = 0, prefix_sum[t+1] = sum_{i=0..t} x[i]   (NaN treated as 0 on host)
-//   prefix_sum2[0] = 0, prefix_sum2[t+1] = sum_{i=0..t} x[i]^2 (NaN treated as 0 on host)
+
+
+
+
+
+
+
 extern "C" __global__ __launch_bounds__(32)
 void vidya_batch_prefix_f32(const float* __restrict__ prices,
                             const double* __restrict__ prefix_sum,
@@ -278,7 +278,7 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                      int num_series,
                                      int series_len,
                                      float* __restrict__ out_tm) {
-    const int series_idx = blockIdx.x; // one block per series (compat mode)
+    const int series_idx = blockIdx.x; 
     if (series_idx >= num_series || series_len <= 0) return;
 
     const int sp = short_period;
@@ -289,7 +289,7 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
                          (lp > (series_len - first_valid));
-    const int stride = num_series; // time-major
+    const int stride = num_series; 
 
     if (invalid) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
@@ -302,14 +302,14 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int idx_m2 = warm_end - 2;
     const int idx_m1 = warm_end - 1;
 
-    // Prefix NaN per series
+    
     for (int t = threadIdx.x; t < idx_m2; t += blockDim.x) {
         out_tm[t * stride + series_idx] = CUDART_NAN_F;
     }
 
     if (threadIdx.x != 0) return;
 
-    // Rolling accumulators over initial window
+    
     double long_sum = 0.0;
     double long_sum2 = 0.0;
     double short_sum = 0.0;

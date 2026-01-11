@@ -220,17 +220,17 @@ pub fn wad_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
     let mut acc = 0.0f64;
     let mut pc = close[0];
 
-    // Branchless accumulation to reduce mispredictions; keep scalar path safe.
+    
     for i in 1..n {
         let h = high[i];
         let l = low[i];
         let c = close[i];
         let trh = pc.max(h);
         let trl = pc.min(l);
-        // booleans → {0.0,1.0} masks
+        
         let gt = (c > pc) as i32 as f64;
         let lt = (c < pc) as i32 as f64;
-        // FMA-friendly expression; identical semantics to branched logic
+        
         let ad = gt.mul_add(c - trl, lt * (c - trh));
         acc += ad;
         out[i] = acc;
@@ -241,8 +241,8 @@ pub fn wad_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // Unrolled pointer-based kernel with branchless accumulation and modest prefetching.
-    // WAD isn't truly vectorizable; the goal is reducing front-end stalls and branch misses.
+    
+    
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
@@ -262,7 +262,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
         let mut i = 1usize;
 
         while i + 7 < n {
-            // Prefetch ahead to help L1/L2
+            
             use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
             if i + 40 < n {
                 _mm_prefetch(cp.add(i + 32) as *const i8, _MM_HINT_T0);
@@ -270,7 +270,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
                 _mm_prefetch(lp.add(i + 32) as *const i8, _MM_HINT_T0);
             }
 
-            // ---- step i+0 ----
+            
             let c0 = *cp.add(i);
             let h0 = *hp.add(i);
             let l0 = *lp.add(i);
@@ -282,7 +282,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad0;
             *op.add(i) = acc;
 
-            // ---- step i+1 ----
+            
             let c1 = *cp.add(i + 1);
             let h1 = *hp.add(i + 1);
             let l1 = *lp.add(i + 1);
@@ -294,7 +294,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad1;
             *op.add(i + 1) = acc;
 
-            // ---- step i+2 ----
+            
             let c2 = *cp.add(i + 2);
             let h2 = *hp.add(i + 2);
             let l2 = *lp.add(i + 2);
@@ -306,7 +306,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad2;
             *op.add(i + 2) = acc;
 
-            // ---- step i+3 ----
+            
             let c3 = *cp.add(i + 3);
             let h3 = *hp.add(i + 3);
             let l3 = *lp.add(i + 3);
@@ -318,7 +318,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad3;
             *op.add(i + 3) = acc;
 
-            // ---- step i+4 ----
+            
             let c4 = *cp.add(i + 4);
             let h4 = *hp.add(i + 4);
             let l4 = *lp.add(i + 4);
@@ -330,7 +330,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad4;
             *op.add(i + 4) = acc;
 
-            // ---- step i+5 ----
+            
             let c5 = *cp.add(i + 5);
             let h5 = *hp.add(i + 5);
             let l5 = *lp.add(i + 5);
@@ -342,7 +342,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad5;
             *op.add(i + 5) = acc;
 
-            // ---- step i+6 ----
+            
             let c6 = *cp.add(i + 6);
             let h6 = *hp.add(i + 6);
             let l6 = *lp.add(i + 6);
@@ -354,7 +354,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad6;
             *op.add(i + 6) = acc;
 
-            // ---- step i+7 ----
+            
             let c7 = *cp.add(i + 7);
             let h7 = *hp.add(i + 7);
             let l7 = *lp.add(i + 7);
@@ -392,7 +392,7 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // Route by length to allow slightly deeper unroll for long sequences
+    
     if high.len() <= 64 {
         wad_avx512_short(high, low, close, out);
     } else {
@@ -403,7 +403,7 @@ pub unsafe fn wad_avx512(high: &[f64], low: &[f64], close: &[f64], out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512_short(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // 8x unroll (short)
+    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
         let n = close.len();
@@ -535,7 +535,7 @@ pub unsafe fn wad_avx512_short(high: &[f64], low: &[f64], close: &[f64], out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512_long(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    // 16x unroll (long)
+    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
         let n = close.len();
@@ -615,7 +615,7 @@ pub unsafe fn wad_avx512_long(high: &[f64], low: &[f64], close: &[f64], out: &mu
     inner(high, low, close, out)
 }
 
-// Per-row APIs for batch processing
+
 #[inline(always)]
 pub unsafe fn wad_row_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
     wad_scalar(high, low, close, out)
@@ -655,7 +655,7 @@ impl WadStream {
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> f64 {
-        // Branchless hot path; first tick initializes prev_close and returns 0.0
+        
         let pc = match self.prev_close {
             Some(pc) => pc,
             None => {
@@ -664,11 +664,11 @@ impl WadStream {
             }
         };
 
-        // TRH = max(high, prev_close); TRL = min(low, prev_close)
+        
         let trh = pc.max(high);
         let trl = pc.min(low);
 
-        // Masks as {0.0, 1.0}; FMA-friendly accumulation
+        
         let gt = (close > pc) as i32 as f64;
         let lt = (close < pc) as i32 as f64;
         let ad = gt.mul_add(close - trl, lt * (close - trh));
@@ -761,8 +761,8 @@ impl WadBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid(_r: &WadBatchRange) -> Vec<WadParams> {
-    // WAD has no parameters, so always return single element
-    // Using with_capacity to avoid reallocation
+    
+    
     let mut result = Vec::with_capacity(1);
     result.push(WadParams);
     result
@@ -810,18 +810,18 @@ fn wad_batch_inner(
         return Err(WadError::AllValuesNaN);
     }
 
-    // Use uninit matrix + prefix init, parity with ALMA
+    
     let mut buf_mu = make_uninit_matrix(1, len);
-    init_matrix_prefixes(&mut buf_mu, len, &[0]); // WAD warmup = 0
+    init_matrix_prefixes(&mut buf_mu, len, &[0]); 
 
     let mut guard = ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Write in place
+    
     wad_batch_inner_into(high, low, close, kern, false, out)?;
 
-    // Turn matrix back into Vec without copy
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -990,11 +990,11 @@ mod tests {
         Ok(())
     }
 
-    // New: small fixed‐input test for wad_scalar via wad_with_kernel
+    
     fn check_wad_small_example(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // 5‐bar example from documentation:
+        
         let high = [10.0, 11.0, 12.0, 11.5, 12.5];
         let low = [9.0, 9.5, 11.0, 10.5, 11.0];
         let close = [9.5, 10.5, 11.5, 11.0, 12.0];
@@ -1002,7 +1002,7 @@ mod tests {
 
         let input = WadInput::from_slices(&high, &low, &close);
         let output = wad_with_kernel(&input, kernel)?;
-        // output.values should be length 5
+        
         assert_eq!(output.values.len(), 5);
 
         for i in 0..5 {
@@ -1029,10 +1029,10 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // WAD has no parameters, so we test with default configuration
+        
         let test_configs = vec![
             WadParams::default(),
-            // Since WAD has no parameters, we only have one configuration
+            
         ];
 
         for (param_idx, params) in test_configs.iter().enumerate() {
@@ -1044,12 +1044,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1081,7 +1081,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_wad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(debug_assertions)]
@@ -1091,8 +1091,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Since WAD has no parameters, batch processing is simplified
-        // We test with different input data configurations to ensure proper initialization
+        
+        
         let test_configs = vec!["high", "low", "close"];
 
         for (cfg_idx, &source) in test_configs.iter().enumerate() {
@@ -1112,7 +1112,7 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1144,7 +1144,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_wad_tests {
@@ -1211,18 +1211,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: Generate realistic OHLC data with proper constraints
+        
         let strat = (1usize..=200).prop_flat_map(|len| {
             prop::collection::vec(
                 (1.0f64..1000.0f64).prop_flat_map(|base_price| {
-                    // Generate proper OHLC where low <= close <= high
-                    let range = base_price * 0.1; // 10% daily range
+                    
+                    let range = base_price * 0.1; 
                     let low = base_price - range;
                     let high = base_price + range;
 
-                    // Generate close within [low, high]
+                    
                     (low..=high).prop_map(move |close| {
-                        // Ensure low <= close <= high
+                        
                         let actual_low = low.min(close);
                         let actual_high = high.max(close);
                         (actual_high, actual_low, close)
@@ -1236,18 +1236,18 @@ mod tests {
             let (highs, lows, closes): (Vec<f64>, Vec<f64>, Vec<f64>) =
                 ohlc_data.into_iter().map(|(h, l, c)| (h, l, c)).unzip3();
 
-            // Create input
+            
             let input = WadInput::from_slices(&highs, &lows, &closes);
 
-            // Calculate WAD with specified kernel and scalar reference
+            
             let WadOutput { values: out } = wad_with_kernel(&input, kernel).unwrap();
             let WadOutput { values: ref_out } = wad_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Property 1: First value should always be 0.0
+            
             prop_assert_eq!(out[0], 0.0, "First WAD value must be 0.0");
             prop_assert_eq!(ref_out[0], 0.0, "First reference WAD value must be 0.0");
 
-            // Property 2: WAD is cumulative - verify accumulation logic
+            
             let mut expected_sum = 0.0;
             let mut prev_close = closes[0];
 
@@ -1273,7 +1273,7 @@ mod tests {
 
                 expected_sum += ad;
 
-                // Check that the calculated value matches expected
+                
                 prop_assert!(
                     (out[i] - expected_sum).abs() <= 1e-9,
                     "WAD mismatch at idx {}: got {}, expected {}",
@@ -1285,12 +1285,12 @@ mod tests {
                 prev_close = closes[i];
             }
 
-            // Property 3: Different kernels should produce identical results
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                // Check for exact bit-level equality for special values
+                
                 if !y.is_finite() || !r.is_finite() {
                     prop_assert_eq!(
                         y.to_bits(),
@@ -1303,7 +1303,7 @@ mod tests {
                     continue;
                 }
 
-                // For finite values, allow small numerical tolerance
+                
                 let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                 prop_assert!(
                     (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1316,7 +1316,7 @@ mod tests {
                 );
             }
 
-            // Property 4: When consecutive closes are equal, AD should be 0
+            
             for i in 1..closes.len() {
                 if (closes[i] - closes[i - 1]).abs() < f64::EPSILON {
                     let ad_change = if i == 1 {
@@ -1334,18 +1334,18 @@ mod tests {
                 }
             }
 
-            // Edge case 1: Single element should return [0.0]
+            
             if closes.len() == 1 {
                 prop_assert_eq!(out.len(), 1);
                 prop_assert_eq!(out[0], 0.0);
             }
 
-            // Edge case 2: All constant prices should accumulate to 0
+            
             if closes
                 .windows(2)
                 .all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
             {
-                // All WAD values should remain 0 after the first
+                
                 for i in 0..out.len() {
                     prop_assert!(
                         out[i].abs() < 1e-9,
@@ -1356,10 +1356,10 @@ mod tests {
                 }
             }
 
-            // Edge case 3: Strictly increasing closes should have positive accumulation
+            
             let strictly_increasing = closes.windows(2).all(|w| w[1] > w[0]);
             if strictly_increasing && closes.len() > 1 {
-                // Each WAD value should be >= previous (monotonic increase)
+                
                 for i in 1..out.len() {
                     prop_assert!(
 							out[i] >= out[i-1] - 1e-9,
@@ -1369,10 +1369,10 @@ mod tests {
                 }
             }
 
-            // Edge case 4: Strictly decreasing closes should have negative accumulation
+            
             let strictly_decreasing = closes.windows(2).all(|w| w[1] < w[0]);
             if strictly_decreasing && closes.len() > 1 {
-                // Each WAD value should be <= previous (monotonic decrease)
+                
                 for i in 1..out.len() {
                     prop_assert!(
 							out[i] <= out[i-1] + 1e-9,
@@ -1388,7 +1388,7 @@ mod tests {
         Ok(())
     }
 
-    // Helper for unzipping tuples
+    
     trait Unzip3<A, B, C> {
         fn unzip3(self) -> (Vec<A>, Vec<B>, Vec<C>);
     }
@@ -1413,15 +1413,15 @@ mod tests {
 
     #[test]
     fn test_wad_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use repository CSV fixture to match other tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = WadInput::from_candles(&candles);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = wad(&input)?.values;
 
-        // New API: preallocated output buffer
+        
         let mut out = vec![0.0; baseline.len()];
         #[allow(unused_variables)]
         {
@@ -1437,7 +1437,7 @@ mod tests {
 
         assert_eq!(baseline.len(), out.len());
 
-        // Treat NaN == NaN as equal; otherwise exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1456,7 +1456,7 @@ mod tests {
     }
 }
 
-// Helper functions for WASM zero-copy optimization
+
 #[inline(always)]
 fn wad_prepare<'a>(
     input: &'a WadInput,

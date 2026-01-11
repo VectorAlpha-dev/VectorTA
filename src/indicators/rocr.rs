@@ -823,7 +823,7 @@ fn rocr_batch_inner(
         }
     }
 
-    // Convert ManuallyDrop back to Vec without copying
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -864,7 +864,7 @@ fn rocr_batch_inner_into(
         return Err(RocrError::AllValuesNaN);
     }
 
-    // Ensure caller-provided buffer matches expected size.
+    
     let expected = combos
         .len()
         .checked_mul(cols)
@@ -1080,11 +1080,11 @@ pub unsafe fn rocr_row_avx512_long(data: &[f64], first: usize, period: usize, ou
 
 #[inline(always)]
 pub fn expand_grid_rocr(r: &RocrBatchRange) -> Vec<RocrParams> {
-    // Helper retained for external callers; on invalid ranges this returns an empty Vec.
+    
     expand_grid(r).unwrap_or_else(|_| Vec::new())
 }
 
-// Optimized scalar batch row using shared inv[] (1/x) precompute across rows.
+
 #[inline(always)]
 unsafe fn rocr_row_scalar_mul(
     data: &[f64],
@@ -1101,7 +1101,7 @@ unsafe fn rocr_row_scalar_mul(
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "rocr")]
 #[pyo3(signature = (data, period=DEFAULT_PERIOD, kernel=None))]

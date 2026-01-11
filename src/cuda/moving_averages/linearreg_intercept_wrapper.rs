@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// ---------------- Kernel policy & selection ----------------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -205,7 +205,7 @@ impl CudaLinregIntercept {
         }
     }
 
-    // ---------------- VRAM helpers ----------------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -234,7 +234,7 @@ impl CudaLinregIntercept {
         Ok(())
     }
 
-    // ---------------- Batch: prepare inputs ----------------
+    
     #[allow(clippy::type_complexity)]
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -524,7 +524,7 @@ impl CudaLinregIntercept {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaLinregInterceptError> {
-        // VRAM estimate with checked arithmetic
+        
         let f32_size = std::mem::size_of::<f32>();
         let prices_bytes = len
             .checked_mul(f32_size)
@@ -663,7 +663,7 @@ impl CudaLinregIntercept {
         Ok((combos.len(), len, combos))
     }
 
-    // ---------------- Many-series × one-param ----------------
+    
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,
@@ -868,7 +868,7 @@ impl CudaLinregIntercept {
         Ok(dev)
     }
 
-    // grid helper
+    
     #[inline]
     fn grid_1d_for(&self, work_items: usize, block_x: u32) -> GridSize {
         let blocks_needed = ((work_items as u32).saturating_add(block_x - 1)) / block_x;
@@ -936,7 +936,7 @@ fn expand_grid_params(
     Ok(out)
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

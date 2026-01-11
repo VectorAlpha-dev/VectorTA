@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// Keep in sync with device constant C_WMA_RAMP size in the CUDA TU.
+
 const WMA_MAX_PERIOD: usize = 8192;
 
 #[derive(Debug, Error)]
@@ -52,7 +52,7 @@ pub enum CudaWmaError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (parity with ALMA/CWMA subset) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum WmaBatchThreadsPerOutput {
@@ -66,7 +66,7 @@ pub enum WmaBatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    // Reserved for future: tiled WMA kernels are not implemented today
+    
     Tiled {
         tile: u32,
         per_thread: WmaBatchThreadsPerOutput,
@@ -77,7 +77,7 @@ pub enum WmaBatchKernelPolicy {
 pub enum WmaManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    // Reserved for future
+    
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -96,7 +96,7 @@ impl Default for CudaWmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum WmaBatchKernelSelected {
@@ -129,7 +129,7 @@ pub struct CudaWma {
 impl CudaWma {
     /// Initialize the device constant ramp C_WMA_RAMP with 1..=WMA_MAX_PERIOD.
     fn init_constant_ramp(&mut self) -> Result<(), CudaWmaError> {
-        // Try binding by CStr literal first; fall back to CString path.
+        
         unsafe {
             if let Ok(mut sym) = self.module.get_global::<[f32; WMA_MAX_PERIOD]>(
                 CStr::from_bytes_with_nul_unchecked(b"C_WMA_RAMP\0"),
@@ -314,7 +314,7 @@ impl CudaWma {
         } else if start < end {
             (start..=end).step_by(step.max(1)).collect::<Vec<_>>()
         } else {
-            // Decreasing sequence inclusive using isize to avoid overflow
+            
             let mut out = Vec::new();
             let mut x = start as isize;
             let end_i = end as isize;
@@ -384,7 +384,7 @@ impl CudaWma {
         Ok((combos, first_valid, series_len, max_period))
     }
 
-    // (top-level WMA_MAX_PERIOD constant is used)
+    
 
     fn launch_batch_kernel(
         &self,
@@ -402,7 +402,7 @@ impl CudaWma {
             ));
         }
 
-        // Policy (only Plain path implemented)
+        
         let block_x: u32 = match self.policy.batch {
             WmaBatchKernelPolicy::Plain { block_x } => block_x.max(1),
             _ => 256,
@@ -414,7 +414,7 @@ impl CudaWma {
         self.maybe_log_batch_debug();
 
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        // Zero SMEM when constant ramp is available and period within cap.
+        
         let shared_bytes: u32 = if self.ramp_inited && max_period <= WMA_MAX_PERIOD {
             0
         } else {
@@ -478,7 +478,7 @@ impl CudaWma {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWmaError> {
-        // Policy (block size)
+        
         let block_x: u32 = match self.policy.batch {
             WmaBatchKernelPolicy::Plain { block_x } => block_x.max(1),
             _ => 256,
@@ -536,7 +536,7 @@ impl CudaWma {
         let prefer_prefix_env = matches!(std::env::var("WMA_BATCH_PREFIX"), Ok(ref v) if v == "1" || v.eq_ignore_ascii_case("true"));
         let force_path = std::env::var("WMA_FORCE_PATH").ok();
 
-        // Heuristic defaults: prefer rolling when available and sizes warrant it
+        
         let rolling_min_p: usize = std::env::var("WMA_ROLLING_MIN_PERIOD")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -563,8 +563,8 @@ impl CudaWma {
             Some("plain") => Path::Plain,
             _ => {
                 let out_elems = n_combos.saturating_mul(series_len);
-                // Prefix is a good default for large batch sweeps (one series x many periods),
-                // especially when `min_period` is small so the rolling heuristic won't trigger.
+                
+                
                 let auto_prefix = has_prefix && out_elems >= 8_000_000;
                 if prefer_prefix_env && has_prefix {
                     Path::Prefix
@@ -578,7 +578,7 @@ impl CudaWma {
             }
         };
 
-        // Accurate VRAM estimate: only account for prefixes when we will use them
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let prices_bytes = series_len
@@ -629,7 +629,7 @@ impl CudaWma {
 
         match path {
             Path::Prefix => {
-                // Build prefixes A and B on host (leading NaNs treated as 0.0)
+                
                 let mut pref_a = vec![0f32; series_len + 1];
                 let mut pref_b = vec![0f32; series_len + 1];
                 for i in 0..series_len {
@@ -648,7 +648,7 @@ impl CudaWma {
                     first_valid,
                     &mut d_out,
                 )?;
-                // Introspection
+                
                 let block_x = match self.policy.batch {
                     WmaBatchKernelPolicy::Plain { block_x } => block_x.max(1),
                     _ => 256,
@@ -814,7 +814,7 @@ impl CudaWma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWmaError> {
-        // Policy selection and introspection
+        
         let block_x: u32 = match self.policy.many_series {
             WmaManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
             _ => 128,
@@ -887,7 +887,7 @@ impl CudaWma {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWmaError> {
-        // Policy (only Plain path implemented)
+        
         let block_x: u32 = match self.policy.batch {
             WmaBatchKernelPolicy::Plain { block_x } => block_x.max(1),
             _ => 256,
@@ -1042,7 +1042,7 @@ impl CudaWma {
     }
 }
 
-// -------------------- Python: CUDA Array Interface v3 + DLPack v1.x ----------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]

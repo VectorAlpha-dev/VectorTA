@@ -5,10 +5,10 @@
 //! precomputed-weights kernels if on-device variants are not present.
 //!
 //! Kernel symbols expected (any missing ones are auto-fallbacks to the others):
-//! - "alma_batch_f32_ondev"                          // one-series × many-params, weights computed on device
-//! - "alma_batch_f32"                                // one-series × many-params, precomputed weights
-//! - "alma_batch_tiled_f32_tile128" / "..._tile256"  // tiled variant for long series, precomputed weights
-//! - "alma_multi_series_one_param_f32"               // many-series × one-param, precomputed weights
+//! - "alma_batch_f32_ondev"                          
+//! - "alma_batch_f32"                                
+//! - "alma_batch_tiled_f32_tile128" / "..._tile256"  
+//! - "alma_multi_series_one_param_f32"               
 //!
 //! Notes:
 //! - Async allocations/copies use the stream-ordered allocator and pinned
@@ -25,7 +25,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::AsyncCopyDestination; // for async_copy_to on DeviceBuffer
+use cust::memory::AsyncCopyDestination; 
 use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -35,7 +35,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// -------- Kernel selection policy (explicit for tests; Auto for production) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -62,7 +62,7 @@ pub enum ManySeriesKernelPolicy {
     Tiled2D { tx: u32, ty: u32 },
 }
 
-// Single-variant wrapper (fast FP32 path preserved)
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaAlmaPolicy {
@@ -79,7 +79,7 @@ impl Default for CudaAlmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -135,12 +135,12 @@ impl DeviceArrayF32 {
 pub struct CudaAlma {
     module: Module,
     stream: Stream,
-    context: std::sync::Arc<Context>, // keep context alive and clonable
+    context: std::sync::Arc<Context>, 
     device_id: u32,
     policy: CudaAlmaPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
-    // Debug: ensure we only print selection once per instance when BENCH_DEBUG=1
+    
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
@@ -153,9 +153,9 @@ impl CudaAlma {
         let context = std::sync::Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/alma_kernel.ptx"));
-        // High optimization, target from current context
-        // Use a slightly lower JIT opt level for improved stability across drivers
-        // while keeping high performance in practice.
+        
+        
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -163,7 +163,7 @@ impl CudaAlma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                // Retry with progressively simpler JIT options to avoid brittle drivers.
+                
                 if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
@@ -213,7 +213,7 @@ impl CudaAlma {
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
-            // Max window size supported by device
+            
             let mut max_window_bytes_i32: i32 = 0;
             if let Ok(dev) = CuDevice::get_device(self.device_id) {
                 let _ = cuDeviceGetAttribute(
@@ -224,10 +224,10 @@ impl CudaAlma {
             }
             let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(bytes);
 
-            // Best-effort set-aside for L2 persistence
+            
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
 
-            // Configure the stream access policy window
+            
             let mut val: CUstreamAttrValue = std::mem::zeroed();
             val.accessPolicyWindow = CUaccessPolicyWindow {
                 base_ptr: base_dev_ptr as *mut std::ffi::c_void,
@@ -270,7 +270,7 @@ impl CudaAlma {
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
-        // Throttle: once per process unless BENCH_DEBUG_SCOPE=scenario
+        
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if self.debug_batch_logged {
             return;
@@ -291,7 +291,7 @@ impl CudaAlma {
 
     #[inline]
     fn maybe_log_many_debug(&self) {
-        // Throttle: once per process unless BENCH_DEBUG_SCOPE=scenario
+        
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
         if self.debug_many_logged {
             return;
@@ -310,7 +310,7 @@ impl CudaAlma {
         }
     }
 
-    // ---------- Utilities ----------
+    
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -339,7 +339,7 @@ impl CudaAlma {
 
     #[inline]
     fn pick_tiled_block(&self, max_period: usize, series_len: usize, n_combos: usize) -> u32 {
-        // Env override: ALMA_TILE=128|256|512
+        
         if let Ok(v) = std::env::var("ALMA_TILE") {
             if let Ok(tile) = v.parse::<u32>() {
                 let name = match tile {
@@ -355,11 +355,11 @@ impl CudaAlma {
                 }
             }
         }
-        // Default preference: 256 is best for typical long series and moderate combo counts.
-        // Fall back to 128 only for very short series where blocks would be mostly idle.
+        
+        
         let prefer_256 = self.has_function("alma_batch_tiled_f32_tile256");
         if prefer_256 {
-            // If series is extremely short, 128 can reduce tail waste.
+            
             if series_len < 8192 {
                 if self.has_function("alma_batch_tiled_f32_tile128") {
                     return 128;
@@ -367,15 +367,15 @@ impl CudaAlma {
             }
             return 256;
         }
-        // Next best: 128
+        
         if self.has_function("alma_batch_tiled_f32_tile128") {
             return 128;
         }
-        // Otherwise 512 if available
+        
         if self.has_function("alma_batch_tiled_f32_tile512") {
             return 512;
         }
-        // Fallback
+        
         256
     }
 
@@ -425,7 +425,7 @@ impl CudaAlma {
         Ok(())
     }
 
-    // ---------- Host helpers ----------
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -569,7 +569,7 @@ impl CudaAlma {
         Ok((first_valids, period, offset as f32, sigma as f32))
     }
 
-    // ---------- Public API: one-series × many-params ----------
+    
 
     /// Launch using precomputed device buffers (legacy performance path).
     pub fn alma_batch_device(
@@ -614,7 +614,7 @@ impl CudaAlma {
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaAlmaError::InvalidInput("series_len bytes overflow".into()))?;
-        // Upper bound for legacy path; on-device path avoids weight traffic
+        
         let weights_bytes = combos
             .len()
             .checked_mul(max_period)
@@ -629,7 +629,7 @@ impl CudaAlma {
             .checked_add(weights_bytes)
             .and_then(|n| n.checked_add(out_bytes))
             .ok_or_else(|| CudaAlmaError::InvalidInput("total bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
                 return Err(CudaAlmaError::OutOfMemory { required, free, headroom });
@@ -638,7 +638,7 @@ impl CudaAlma {
             }
         }
 
-        // H2D async copy for prices
+        
         let d_prices = unsafe {
             DeviceBuffer::from_slice_async(data_f32, &self.stream)?
         };
@@ -670,7 +670,7 @@ impl CudaAlma {
     ) -> Result<DeviceArrayF32, CudaAlmaError> {
         let n_combos = combos.len();
 
-        // Best-effort: keep the large, read-mostly prices region warm in L2 for this stream
+        
         self.try_enable_persisting_l2(
             d_prices.as_device_ptr().as_raw(),
             series_len
@@ -682,12 +682,12 @@ impl CudaAlma {
             .checked_mul(series_len)
             .ok_or_else(|| CudaAlmaError::InvalidInput("n_combos*series_len overflow".into()))?;
 
-        // Output buffer
+        
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
-        // Prefer precomputed host weights for large sweeps; allow opt-in to on-device
-        // weights via env ALMA_BATCH_ONDEV=1.
+        
+        
         let has_ondev = self.module.get_function("alma_batch_f32_ondev").is_ok()
             || self.module.get_function("alma_batch_f32_onthefly").is_ok();
         let has_pre = self.has_function("alma_batch_f32")
@@ -699,12 +699,12 @@ impl CudaAlma {
             Ok(ref v) if v == "1" || v.eq_ignore_ascii_case("true")
         );
 
-        // Heuristic: on-device weight generation is only beneficial for very small
-        // combo counts; otherwise precomputing once on host is faster.
+        
+        
         let prefer_ondev = env_force_ondev || (n_combos <= 16);
 
         if has_pre && (!has_ondev || !prefer_ondev) {
-            // Legacy: build CPU weights + inv_norms per-combo
+            
             let mut periods_i32 = vec![0i32; n_combos];
             let mut inv_norms = vec![0f32; n_combos];
             let weights_cap = n_combos
@@ -718,13 +718,13 @@ impl CudaAlma {
                 let sigma = prm.sigma.unwrap();
                 let (mut weights, inv_norm) = compute_weights_cpu_f32(period, offset, sigma);
                 periods_i32[idx] = period as i32;
-                // Pre-scale weights to eliminate per-output multiply in kernels
+                
                 if inv_norm != 0.0 {
                     for w in &mut weights {
                         *w *= inv_norm;
                     }
                 }
-                inv_norms[idx] = 1.0; // now a dummy in kernels
+                inv_norms[idx] = 1.0; 
                 let base = idx * max_period;
                 weights_flat[base..base + period].copy_from_slice(&weights);
             }
@@ -758,7 +758,7 @@ impl CudaAlma {
             return Err(CudaAlmaError::NotImplemented);
         }
 
-        // Ensure completion for VRAM handle consistency.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
@@ -792,7 +792,7 @@ impl CudaAlma {
             max_period,
         )?;
 
-        // Pinned buffer for faster D2H
+        
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(arr.len())?
         };
@@ -805,7 +805,7 @@ impl CudaAlma {
         Ok((arr.rows, arr.cols, combos))
     }
 
-    // ---------- Public API: many-series × one-parameter ----------
+    
 
     /// Many-series × one-parameter (time-major). Returns a VRAM handle.
     pub fn alma_multi_series_one_param_time_major_dev(
@@ -826,7 +826,7 @@ impl CudaAlma {
             .ok_or_else(|| CudaAlmaError::InvalidInput("prices bytes overflow".into()))?;
         let weights_bytes = period
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaAlmaError::InvalidInput("weights bytes overflow".into()))?; // legacy upper bound
+            .ok_or_else(|| CudaAlmaError::InvalidInput("weights bytes overflow".into()))?; 
         let out_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaAlmaError::InvalidInput("output bytes overflow".into()))?;
@@ -849,7 +849,7 @@ impl CudaAlma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
-        // Best-effort: persist the time-major price matrix in L2 for this stream
+        
         self.try_enable_persisting_l2(
             d_prices.as_device_ptr().as_raw(),
             elems
@@ -857,8 +857,8 @@ impl CudaAlma {
                 .ok_or_else(|| CudaAlmaError::InvalidInput("prices bytes overflow".into()))?,
         );
 
-        // Prefer host-precomputed weights/normalization for accuracy.
-        // Pre-scale weights to eliminate per-output multiply in kernels.
+        
+        
         let (mut weights_host, inv_norm) =
             compute_weights_cpu_f32(period, offset as f64, sigma as f64);
         if inv_norm != 0.0 {
@@ -913,7 +913,7 @@ impl CudaAlma {
         Ok(())
     }
 
-    // ---------- Kernel launches (internal) ----------
+    
 
     fn launch_batch_kernel_ondev(
         &self,
@@ -925,7 +925,7 @@ impl CudaAlma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
-        // Compact params
+        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let offsets: Vec<f32> = combos.iter().map(|c| c.offset.unwrap() as f32).collect();
         let sigmas: Vec<f32> = combos.iter().map(|c| c.sigma.unwrap() as f32).collect();
@@ -944,13 +944,13 @@ impl CudaAlma {
                 })?,
         };
 
-        // Shared memory needed for weights (dynamic) ~ max_period * sizeof(f32)
+        
         let shared_bytes = max_period
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaAlmaError::InvalidInput("shared bytes overflow".into()))?
             as u32;
 
-        // Ask occupancy for a good block size
+        
         let (_, suggested_block) = func
             .suggested_launch_configuration(shared_bytes as usize, BlockSize::xyz(0, 0, 0))?;
         let block_x = if suggested_block > 0 {
@@ -959,21 +959,21 @@ impl CudaAlma {
             256
         };
 
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaAlma;
             (*this).last_batch = Some(BatchKernelSelected::OnDevice { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk over grid.y if needed
+        
         for (start, len) in Self::grid_y_chunks(n_combos) {
             let grid_x = ((series_len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x, len as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             self.validate_launch(grid_x, len as u32, 1, block_x, 1, 1)?;
 
-            // Offset output pointer by start * series_len elements
+            
             let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
 
             let stream = &self.stream;
@@ -1008,7 +1008,7 @@ impl CudaAlma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
-        // Decide between plain and tiled kernels (policy first)
+        
         let mut use_tiled = series_len > 8192;
         let mut block_x: u32 = 256;
         let mut force_tile: Option<u32> = None;
@@ -1029,8 +1029,8 @@ impl CudaAlma {
         if use_tiled {
             block_x = force_tile
                 .unwrap_or_else(|| self.pick_tiled_block(max_period, series_len, n_combos));
-            let tile = block_x as usize; // outputs per block
-                                         // Automatic 2x-per-thread selection for larger periods if kernel exists
+            let tile = block_x as usize; 
+                                         
             let two_x_name = match block_x {
                 128 => "alma_batch_tiled_f32_2x_tile128",
                 256 => "alma_batch_tiled_f32_2x_tile256",
@@ -1038,7 +1038,7 @@ impl CudaAlma {
                 _ => "",
             };
             let two_x_available = !two_x_name.is_empty() && self.has_function(two_x_name);
-            // Decide 1x vs 2x per-thread: prefer 2x whenever available unless explicitly forced off.
+            
             let use_two_per_thread = if let Some(v) = force_two_per_thread {
                 v
             } else {
@@ -1057,7 +1057,7 @@ impl CudaAlma {
             } else {
                 block_x
             };
-            // Dynamic shared: weights + tile_overlap buffer sized by outputs per block
+            
             let elems = max_period + (tile + max_period - 1);
             let shared_bytes = (elems * std::mem::size_of::<f32>()) as u32;
 
@@ -1087,7 +1087,7 @@ impl CudaAlma {
                 .get_function(base)
                 .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: base })?;
 
-            // Introspection
+            
             unsafe {
                 let this = self as *const _ as *mut CudaAlma;
                 (*this).last_batch = Some(if use_two_per_thread {
@@ -1099,7 +1099,7 @@ impl CudaAlma {
             self.maybe_log_batch_debug();
 
             for (start, len) in Self::grid_y_chunks(n_combos) {
-                let grid_x = ((series_len as u32) + (block_x - 1)) / block_x; // divide by outputs per block
+                let grid_x = ((series_len as u32) + (block_x - 1)) / block_x; 
                 let grid: GridSize = (grid_x, len as u32, 1).into();
                 let block: BlockSize = (threads_x, 1, 1).into();
                 self.validate_launch(grid_x, len as u32, 1, threads_x, 1, 1)?;
@@ -1123,14 +1123,14 @@ impl CudaAlma {
                 }
             }
         } else {
-            // Plain kernel: dynamic shared = weights only
+            
             let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
             let func = self
                 .module
                 .get_function("alma_batch_f32")
                 .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: "alma_batch_f32" })?;
 
-            // Fixed block size; allow override when Auto only.
+            
             block_x = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => block_x,
                 _ => match std::env::var("ALMA_BLOCK_X")
@@ -1142,7 +1142,7 @@ impl CudaAlma {
                 },
             };
 
-            // Introspection
+            
             unsafe {
                 let this = self as *const _ as *mut CudaAlma;
                 (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -1178,7 +1178,7 @@ impl CudaAlma {
         Ok(())
     }
 
-    // (removed) launch_many_series_kernel_ondev: many-series on-the-fly weights path was unused
+    
 
     fn launch_many_series_kernel_precomputed(
         &self,
@@ -1191,8 +1191,8 @@ impl CudaAlma {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAlmaError> {
-        // Try 2D tiled variants first (TX=128, TY=4 then TY=2), fall back if not suitable.
-        // We prefer 2D whenever the symbol exists and shared memory fits.
+        
+        
         let dev = Device::get_device(self.device_id).ok();
         let max_smem: usize = dev
             .and_then(|d| {
@@ -1201,7 +1201,7 @@ impl CudaAlma {
             })
             .unwrap_or(48 * 1024) as usize;
 
-        // Optional test/bench override: ALMA_MS_FORCE=1d|2d_ty4|2d_ty2 (only used when policy=Auto)
+        
         let force_ms = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => std::env::var("ALMA_MS_FORCE").ok(),
             _ => None,
@@ -1209,13 +1209,13 @@ impl CudaAlma {
 
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let total = tx as usize + period - 1;
-            // Shared = weights + tile
+            
             let shared_elems = period.checked_add(total.checked_mul(ty as usize)? )?;
             let shared_bytes = shared_elems.checked_mul(std::mem::size_of::<f32>())? as u32;
             if (shared_bytes as usize) > max_smem {
                 return None;
             }
-            // Make sure symbol exists
+            
             let fname = match (tx, ty) {
                 (128, 4) => "alma_ms1p_tiled_f32_tx128_ty4",
                 (128, 2) => "alma_ms1p_tiled_f32_tx128_ty2",
@@ -1252,7 +1252,7 @@ impl CudaAlma {
                 .map_err(CudaAlmaError::from)
                 .ok()?;
             }
-            // Introspection
+            
             unsafe {
                 let this = self as *const _ as *mut CudaAlma;
                 (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
@@ -1261,7 +1261,7 @@ impl CudaAlma {
             Some(())
         };
 
-        // Respect explicit policy first
+        
         match self.policy.many_series {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
                 if try_2d(tx as u32, ty as u32).is_some() {
@@ -1270,10 +1270,10 @@ impl CudaAlma {
             }
             ManySeriesKernelPolicy::OneD { .. } => { /* fall through to 1D below */ }
             ManySeriesKernelPolicy::Auto => {
-                // For very small column counts, 1D tends to be numerically
-                // cleaner and plenty fast. Prefer 1D when cols are tiny.
+                
+                
                 if cols < 16 {
-                    // fall through to 1D mapping below
+                    
                 } else if let Some(ref v) = force_ms {
                     if v.eq_ignore_ascii_case("2d_ty4") {
                         if try_2d(128, 4).is_some() {
@@ -1285,7 +1285,7 @@ impl CudaAlma {
                         }
                     }
                 } else {
-                    // Prefer TY=4 when columns are reasonably wide; else TY=2.
+                    
                     if cols >= 128 {
                         if try_2d(128, 4).is_some() {
                             return Ok(());
@@ -1305,7 +1305,7 @@ impl CudaAlma {
             }
         }
 
-        // Fallback: 1D mapping (current kernel)
+        
         let func = self
             .module
             .get_function("alma_multi_series_one_param_f32")
@@ -1338,7 +1338,7 @@ impl CudaAlma {
                 )
             )?;
         }
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaAlma;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -1377,7 +1377,7 @@ impl CudaAlma {
     }
 }
 
-// ---------- Grid expansion + CPU weights (fallback) ----------
+
 
 fn expand_grid(r: &AlmaBatchRange) -> Result<Vec<AlmaParams>, CudaAlmaError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAlmaError> {
@@ -1438,7 +1438,7 @@ fn compute_weights_cpu_f32(period: usize, offset: f64, sigma: f64) -> (Vec<f32>,
     (weights, inv)
 }
 
-// ---------- Bench profiles (wrapper-owned) ----------
+
 
 pub mod benches {
     use super::*;
@@ -1449,7 +1449,7 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_LEN: usize = 1_000_000;
-    // Additional sizes for coverage
+    
     const ONE_SERIES_LEN_SMALL: usize = 250_000;
     const PARAM_SWEEP_SMALL: usize = 128;
     const ONE_SERIES_LEN_LARGE: usize = 2_000_000;
@@ -1463,7 +1463,7 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // small overhead for params + 64MB headroom
+        
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -1474,7 +1474,7 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    // Preallocated, device-resident batch state to avoid per-iteration allocs/copies.
+    
     struct AlmaBatchDeviceState {
         cuda: CudaAlma,
         d_prices: DeviceBuffer<f32>,
@@ -1513,7 +1513,7 @@ pub mod benches {
 
     fn prep_alma_one_series_many_params() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path)
+        
         cuda.set_policy(CudaAlmaPolicy {
             batch: BatchKernelPolicy::Tiled {
                 tile: 256,
@@ -1530,10 +1530,10 @@ pub mod benches {
             sigma: (6.0, 6.0, 0.0),
         };
 
-        // Compute first_valid on host once
+        
         let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-        // Expand combos and host-precompute weights once
+        
         let combos = super::expand_grid(&sweep).expect("expand_grid");
         let n_combos = combos.len();
         let max_period = combos
@@ -1561,7 +1561,7 @@ pub mod benches {
             weights_flat[base..base + period].copy_from_slice(&weights);
         }
 
-        // Upload once
+        
         let d_prices =
             unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
         let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
@@ -1587,10 +1587,10 @@ pub mod benches {
         })
     }
 
-    // Generic prep for batch with (LEN, SWEEP)
+    
     fn prep_batch_len_sweep<const LEN: usize, const SWEEP: usize>() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path)
+        
         cuda.set_policy(CudaAlmaPolicy {
             batch: BatchKernelPolicy::Tiled {
                 tile: 256,
@@ -1655,7 +1655,7 @@ pub mod benches {
         })
     }
 
-    // Fast-mode variants of the prep functions
+    
     fn prep_alma_one_series_many_params_fast() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlma::new(0).expect("cuda alma");
         cuda.set_policy(CudaAlmaPolicy {
@@ -1723,7 +1723,7 @@ pub mod benches {
         })
     }
 
-    // removed fast-only prep
+    
 
     struct AlmaManySeriesDeviceState {
         cuda: CudaAlma,
@@ -1759,10 +1759,10 @@ pub mod benches {
         }
     }
 
-    // Generic prep for many-series (COLS, ROWS)
+    
     fn prep_many_series_generic<const COLS: usize, const ROWS: usize>() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path)
+        
         cuda.set_policy(CudaAlmaPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
@@ -1808,11 +1808,11 @@ pub mod benches {
         })
     }
 
-    // removed fast-only prep
+    
 
     fn prep_alma_many_series_one_param() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlma::new(0).expect("cuda alma");
-        // Bench pin (fast path)
+        
         cuda.set_policy(CudaAlmaPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Tiled2D { tx: 128, ty: 4 },
@@ -1821,7 +1821,7 @@ pub mod benches {
         let rows = MANY_SERIES_LEN;
         let prices_tm = gen_time_major_prices(cols, rows);
 
-        // Params fixed
+        
         let period = 64usize;
         let offset = 0.85f64;
         let sigma = 6.0f64;
@@ -1832,7 +1832,7 @@ pub mod benches {
             }
         }
 
-        // Compute first_valids
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0usize;
@@ -1845,7 +1845,7 @@ pub mod benches {
             first_valids[s] = fv as i32;
         }
 
-        // Upload once
+        
         let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices_tm, &cuda.stream) }
             .expect("d_prices_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
@@ -1869,11 +1869,11 @@ pub mod benches {
         })
     }
 
-    // removed fast-only prep
+    
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            // Accurate scenarios
+            
             CudaBenchScenario::new(
                 "alma",
                 "one_series_many_params",

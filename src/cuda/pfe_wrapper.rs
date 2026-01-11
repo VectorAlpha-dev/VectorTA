@@ -157,9 +157,9 @@ impl CudaPfe {
 
     #[inline]
     fn chunk_rows(n_rows: usize, len: usize) -> usize {
-        // Conservative VRAM guard: reserve ~64MB headroom
+        
         let headroom = 64usize << 20;
-        let bytes_per_row = len * std::mem::size_of::<f32>(); // outputs only (inputs shared)
+        let bytes_per_row = len * std::mem::size_of::<f32>(); 
         if let Ok((free, _)) = mem_get_info() {
             if free > headroom {
                 let cap = (free - headroom) / bytes_per_row;
@@ -190,7 +190,7 @@ impl CudaPfe {
         let first_valid = Self::first_valid(data_f32)
             .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
         let combos = Self::expand_grid(sweep)?;
-        // Validate parameters
+        
         for c in &combos {
             let p = c.period as usize;
             let s = c.smoothing as usize;
@@ -205,10 +205,10 @@ impl CudaPfe {
             }
         }
 
-        // VRAM sizing (rough estimate for main fast path):
-        // - data_f32: len * f32
-        // - periods + smooths: 2 * combos * i32
-        // - steps / prefixes / output in fast path: ~ (3 * len * f32) + combos * len * f32
+        
+        
+        
+        
         let len_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
@@ -233,23 +233,23 @@ impl CudaPfe {
         let headroom = 64usize << 20;
         Self::will_fit(required, headroom)?;
 
-        // Fast path: device-built steps + dual-FP32 prefix + many-params kernel
+        
         if let (Ok(func_steps), Ok(func_pref), Ok(func_main)) = (
             self.module.get_function("pfe_build_steps_f32"),
             self.module.get_function("pfe_build_prefix_float2_serial"),
             self.module.get_function("pfe_many_params_prefix_f32"),
         ) {
-            // Fill the head to avoid NaN in prefix; zeros out head steps in differences.
+            
             let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
 
-            // Device inputs
+            
             let d_data = DeviceBuffer::from_slice(&data_filled)?;
             let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
             let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
             let d_periods = DeviceBuffer::from_slice(&periods)?;
             let d_smooths = DeviceBuffer::from_slice(&smooths)?;
 
-            // 1) steps[t] in parallel
+            
             let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             let block_x: u32 = 256;
             let grid_x: u32 = (((len as u32) + block_x - 1) / block_x).max(1);
@@ -267,7 +267,7 @@ impl CudaPfe {
                 self.stream.launch(&func_steps, grid_1d, block_1d, 0, args)?;
             }
 
-            // 2) dual-FP32 prefix (serial)
+            
             let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             unsafe {
@@ -287,14 +287,14 @@ impl CudaPfe {
             }
             drop(d_steps);
 
-            // 3) outputs
+            
             let total_out = combos
                 .len()
                 .checked_mul(len)
                 .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
             let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
-            // 4) main many-params kernel
+            
             let block_x: u32 = 256;
             let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);
             let grid_np: GridSize = (grid_x, 1, 1).into();
@@ -332,15 +332,15 @@ impl CudaPfe {
             });
         }
 
-        // Fallback: existing prefix/rolling pathways
-        // Precompute shared prefix on host for the legacy prefix kernel
+        
+        
         let mut prefix = vec![0.0f64; len];
         for i in 1..len {
             let d = (data_f32[i] as f64) - (data_f32[i - 1] as f64);
             prefix[i] = prefix[i - 1] + (d.mul_add(d, 1.0)).sqrt();
         }
 
-        // Device buffers
+        
         let d_data = DeviceBuffer::from_slice(data_f32)?;
         let d_prefix = DeviceBuffer::from_slice(&prefix)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
@@ -462,7 +462,7 @@ impl CudaPfe {
             return Err(CudaPfeError::InvalidInput("invalid smoothing".into()));
         }
 
-        // Build per-series first_valid indices
+        
         let mut fvs = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0usize;
@@ -632,7 +632,7 @@ pub mod benches {
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
 
-        // Precompute per-step lengths + dual-FP32 prefix once (device-resident).
+        
         let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
         let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
         let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();

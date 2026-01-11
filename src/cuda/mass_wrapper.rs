@@ -92,7 +92,7 @@ pub struct CudaMass {
     debug_logged: bool,
 }
 
-// Two-float encoding for high-precision sums (double-single)
+
 #[repr(C)]
 #[derive(Clone, Copy, Default, DeviceCopy)]
 pub struct F2 { pub x: f32, pub y: f32 }
@@ -193,7 +193,7 @@ impl CudaMass {
         }
     }
 
-    // ----------------------- Host precompute helpers -----------------------
+    
     
     fn first_valid_hilo(high: &[f32], low: &[f32]) -> Option<usize> {
         high.iter()
@@ -214,21 +214,21 @@ impl CudaMass {
         let first = Self::first_valid_hilo(high, low)
             .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
 
-        // DS prefix buffers: [hi, lo] per entry, length n+1
+        
         let mut prefix_ratio_ds = vec!(F2::default(); n + 1);
         let mut prefix_nan = vec![0i32; n + 1];
 
-        // EMA(9) constants (f32)
+        
         let alpha: f32 = 2.0f32 / 10.0f32;
         let inv_alpha: f32 = 1.0f32 - alpha;
 
-        // Initialize EMAs at first valid
+        
         let mut ema1: f32 = high[first] - low[first];
         let mut ema2: f32 = ema1;
         let start_ema2 = first + 8;
         let start_ratio = first + 16;
 
-        // DS accumulator
+        
         let mut acc_hi: f32 = 0.0;
         let mut acc_lo: f32 = 0.0;
 
@@ -287,7 +287,7 @@ impl CudaMass {
         let inv_alpha: f32 = 1.0f32 - alpha;
 
         for s in 0..cols {
-            // find first valid row for this series
+            
             let fv = (0..rows)
                 .find(|&t| high_tm[t * cols + s].is_finite() && low_tm[t * cols + s].is_finite())
                 .unwrap_or(rows);
@@ -353,13 +353,13 @@ impl CudaMass {
         let mut prefix_nan_tm = vec![0i32; total + 1];
         let mut first_valids = vec![0i32; cols];
 
-        // Build double prefixes exactly like the original path (time-major flattened)
+        
         let mut prefix_ratio_tm_f64 = vec![0.0f64; total + 1];
         let alpha = 2.0f64 / 10.0f64;
         let inv_alpha = 1.0f64 - alpha;
 
         for s in 0..cols {
-            // find first valid
+            
             let mut fv: Option<usize> = None;
             for t in 0..rows {
                 let h = high_tm[t * cols + s];
@@ -418,7 +418,7 @@ impl CudaMass {
         Ok((prefix_ratio_tm_f64, prefix_nan_tm, first_valids))
     }
 
-    // ----------------------- Public device entry points -----------------------
+    
 
     pub fn mass_batch_dev(
         &mut self,
@@ -432,7 +432,7 @@ impl CudaMass {
             ));
         }
 
-        // Expand parameter grid
+        
         let combos = expand_mass_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaMassError::InvalidInput(
@@ -456,7 +456,7 @@ impl CudaMass {
             )));
         }
 
-        // VRAM check with headroom and checked arithmetic
+        
         let size_f2 = std::mem::size_of::<F2>();
         let size_i32 = std::mem::size_of::<i32>();
         let size_f32 = std::mem::size_of::<f32>();
@@ -486,10 +486,10 @@ impl CudaMass {
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaMassError::InvalidInput("total VRAM size overflow".into()))?;
 
-        let headroom = 64usize << 20; // ~64MB
+        let headroom = 64usize << 20; 
         Self::will_fit(bytes_needed, headroom)?;
 
-        // Upload inputs
+        
         let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds)?;
         let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)?;
         let periods_i32: Vec<i32> = combos
@@ -499,7 +499,7 @@ impl CudaMass {
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> = DeviceBuffer::zeroed(out_elems)?;
 
-        // Launch config
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -509,7 +509,7 @@ impl CudaMass {
         let block: BlockSize = (block_x, 1, 1).into();
         let stream = &self.stream;
 
-        // Chunk Y if needed
+        
         let mut launched = 0usize;
         const MAX_GRID_Y: usize = 65_535;
         while launched < combos.len() {
@@ -567,13 +567,13 @@ impl CudaMass {
             ));
         }
 
-        // Host buffer used only for upload; still guard VRAM for the final DeviceBuffer.
+        
         let bytes_out = total
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMassError::InvalidInput("output bytes overflow".into()))?;
         Self::will_fit(bytes_out, 64usize << 20)?;
 
-        // Fallback to CPU compute for correctness, then upload to device.
+        
         let mut host_tm = vec![0f32; total];
         for s in 0..cols {
             let mut h = vec![f64::NAN; rows];
@@ -602,7 +602,7 @@ impl CudaMass {
     }
 }
 
-// ----------------------- helpers -----------------------
+
 
 fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassError> {
     #[inline]
@@ -621,7 +621,7 @@ fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassErr
             }
             Ok(v)
         } else {
-            // Reversed bounds supported: walk downward including both ends.
+            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
@@ -659,7 +659,7 @@ fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassErr
     Ok(v)
 }
 
-// ----------------------- benches registration -----------------------
+
 
 pub mod benches {
     use super::*;

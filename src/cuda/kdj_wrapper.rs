@@ -10,7 +10,7 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::DeviceArrayF32Triplet;
 use crate::indicators::kdj::{KdjBatchRange, KdjParams};
-use crate::indicators::willr::build_willr_gpu_tables; // re-use sparse tables for HH/LL
+use crate::indicators::willr::build_willr_gpu_tables; 
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
@@ -108,7 +108,7 @@ impl CudaKdj {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Prefer L1 when available
+        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         Ok(Self { module, stream, _context: context, device_id: device_id as u32, policy })
@@ -159,7 +159,7 @@ impl CudaKdj {
     }
 
     fn expand_grid(range: &KdjBatchRange) -> Result<Vec<KdjParams>, CudaKdjError> {
-        // Mirror indicators::kdj::expand_grid semantics, but return CUDA-typed errors.
+        
         fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaKdjError> {
             let (start, end, step) = a;
             if step == 0 || start == end {
@@ -228,7 +228,7 @@ impl CudaKdj {
         Ok(out)
     }
 
-    // ---- Batch path ----
+    
     pub fn kdj_batch_dev(
         &self,
         high_f32: &[f32],
@@ -242,7 +242,7 @@ impl CudaKdj {
                 "input slices are empty or mismatched".into(),
             ));
         }
-        // first valid overall index
+        
         let first_valid = (0..len)
             .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite())
             .ok_or_else(|| CudaKdjError::InvalidInput("all values are NaN".into()))?
@@ -250,7 +250,7 @@ impl CudaKdj {
 
         let combos = Self::expand_grid(sweep)?;
 
-        // Validate and encode params; only SMA/EMA pairs are supported in the fused kernel
+        
         let mut fk: Vec<i32> = Vec::with_capacity(combos.len());
         let mut sk: Vec<i32> = Vec::with_capacity(combos.len());
         let mut sd: Vec<i32> = Vec::with_capacity(combos.len());
@@ -283,18 +283,18 @@ impl CudaKdj {
             )));
         }
 
-        // Build sparse tables for HH/LL (shared across all rows)
+        
         let tables = build_willr_gpu_tables(high_f32, low_f32);
-        let level_count = tables.level_offsets.len() as i32; // full count; kernel checks k_log2 < level_count
+        let level_count = tables.level_offsets.len() as i32; 
 
-        // Estimate VRAM and allow chunking by rows
+        
         let nrows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let bytes_inputs = close_f32
             .len()
             .checked_mul(sz_f32)
-            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (inputs)".into()))?; // batch kernel only reads close + tables
+            .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (inputs)".into()))?; 
         let tables_i32 = tables
             .log2
             .len()
@@ -337,16 +337,16 @@ impl CudaKdj {
             .and_then(|e| e.checked_add(bytes_params))
             .and_then(|e| e.checked_add(bytes_outputs))
             .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (required bytes)".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(required, headroom)?;
-        // Modern GPUs allow gridDim.x up to 2^31-1; we do not chunk by 65,535.
-        // Keep a single launch domain; rows cap is applied inside the loop.
+        
+        
         let combos_per_launch = nrows;
 
-        // D2H pinned staging (async) when large
+        
         let use_async = required > (64 * 1024 * 1024);
 
-        // Upload common inputs (batch kernel does NOT dereference high/low)
+        
         let (d_close, d_log2, d_offsets, d_st_max, d_st_min, d_nan_psum) = if use_async {
             let h_close = LockedBuffer::from_slice(close_f32).map_err(CudaKdjError::Cuda)?;
             let h_log2 = LockedBuffer::from_slice(&tables.log2).map_err(CudaKdjError::Cuda)?;
@@ -378,14 +378,14 @@ impl CudaKdj {
             )
         };
 
-        // Persist parameter arrays on device (avoid per-chunk allocations)
+        
         let d_fk_all = DeviceBuffer::from_slice(&fk).map_err(CudaKdjError::Cuda)?;
         let d_sk_all = DeviceBuffer::from_slice(&sk).map_err(CudaKdjError::Cuda)?;
         let d_sd_all = DeviceBuffer::from_slice(&sd).map_err(CudaKdjError::Cuda)?;
         let d_km_all = DeviceBuffer::from_slice(&kma).map_err(CudaKdjError::Cuda)?;
         let d_dm_all = DeviceBuffer::from_slice(&dma).map_err(CudaKdjError::Cuda)?;
 
-        // Allocate outputs
+        
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(rows_cols) }
             .map_err(CudaKdjError::Cuda)?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(rows_cols) }
@@ -393,14 +393,14 @@ impl CudaKdj {
         let mut d_j = unsafe { DeviceBuffer::<f32>::uninitialized(rows_cols) }
             .map_err(CudaKdjError::Cuda)?;
 
-        // Locate kernel
+        
         let mut func: Function = self
             .module
             .get_function("kdj_batch_f32")
             .map_err(|_| CudaKdjError::MissingKernelSymbol { name: "kdj_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Chunk rows if needed
+        
         let mut row0 = 0usize;
         while row0 < nrows {
             let rows = (nrows - row0).min(combos_per_launch).min(2_147_483_647usize);
@@ -427,10 +427,10 @@ impl CudaKdj {
                 let mut stmax_ptr   = d_st_max.as_device_ptr().as_raw();
                 let mut stmin_ptr   = d_st_min.as_device_ptr().as_raw();
                 let mut nanp_ptr    = d_nan_psum.as_device_ptr().as_raw();
-                // Reuse close pointer for the (unused) high/low kernel args
+                
                 let mut high_ptr    = close_ptr;
                 let mut low_ptr     = close_ptr;
-                // Param pointers with row offsets
+                
                 let mut fk_ptr      = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut sk_ptr      = d_sk_all.as_device_ptr().offset(row0 as isize).as_raw();
                 let mut sd_ptr      = d_sd_all.as_device_ptr().offset(row0 as isize).as_raw();
@@ -477,7 +477,7 @@ impl CudaKdj {
             row0 += rows;
         }
 
-        // Ensure kernels finished before dropping short-lived device buffers
+        
         self.stream.synchronize().map_err(CudaKdjError::Cuda)?;
 
         Ok((
@@ -487,7 +487,7 @@ impl CudaKdj {
         ))
     }
 
-    // ---- Many-series (time-major) ----
+    
     pub fn kdj_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -519,7 +519,7 @@ impl CudaKdj {
         let kma = Self::ma_to_code(params.slow_k_ma_type.as_deref().unwrap_or("sma"))?;
         let dma = Self::ma_to_code(params.slow_d_ma_type.as_deref().unwrap_or("sma"))?;
 
-        // first_valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -563,7 +563,7 @@ impl CudaKdj {
             .ok_or_else(|| CudaKdjError::InvalidInput("size overflow (required bytes)".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Upload inputs
+        
         let d_h = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaKdjError::Cuda)?;
         let d_l = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaKdjError::Cuda)?;
         let d_c = DeviceBuffer::from_slice(close_tm_f32).map_err(CudaKdjError::Cuda)?;
@@ -633,7 +633,7 @@ impl CudaKdj {
                 .map_err(CudaKdjError::Cuda)?;
         }
 
-        // Ensure kernels finished before dropping short-lived device buffers
+        
         self.stream.synchronize().map_err(CudaKdjError::Cuda)?;
 
         Ok((
@@ -644,7 +644,7 @@ impl CudaKdj {
     }
 }
 
-// ------------------- Benches -------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -652,7 +652,7 @@ pub mod benches {
     use crate::indicators::kdj::KdjBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // (fast_k, slow_k, slow_d) sweep along fast_k
+    const PARAM_SWEEP: usize = 250; 
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();

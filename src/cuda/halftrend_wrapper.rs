@@ -57,7 +57,7 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-// Results returned by device batch/many-series APIs (module-scope structs).
+
 pub struct CudaHalftrendBatch {
     pub halftrend: DeviceArrayF32,
     pub trend: DeviceArrayF32,
@@ -110,7 +110,7 @@ pub struct CudaHalftrend {
     debug_many_logged: bool,
 }
 
-// Must match `HT_FUSED_MAX_AMP` in `kernels/cuda/halftrend_kernel.cu`.
+
 const HALF_TREND_FUSED_MAX_AMP: usize = 64;
 
 impl CudaHalftrend {
@@ -186,7 +186,7 @@ impl CudaHalftrend {
         None
     }
 
-    // ---------------------- Batch (one-series × many-params) ----------------------
+    
 
     fn expand_grid(range: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>, CudaHalftrendError> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaHalftrendError> {
@@ -397,15 +397,15 @@ impl CudaHalftrend {
         let use_fused = matches!(self.batch_policy, BatchKernelPolicy::Auto)
             && max_amp <= HALF_TREND_FUSED_MAX_AMP;
 
-        // Heuristic: prefer time-major layout for larger combo counts and lengths.
+        
         let use_time_major = match self.batch_policy {
             BatchKernelPolicy::Auto => (rows >= 16) && (n >= 8192),
             BatchKernelPolicy::Plain { .. } => false,
         };
 
-        // Rough VRAM requirement.
-        // - Fused: inputs 3N + params + outputs 6*rows*N
-        // - Legacy: inputs 3N + helpers 5*rows*N + warms/params + outputs 6*rows*N
+        
+        
+        
         let helpers = if use_fused { 0usize } else { 5usize };
         let f32_elems = (3usize
             .checked_mul(n)
@@ -415,10 +415,10 @@ impl CudaHalftrend {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
         let param_bytes = if use_fused {
-            // amps (i32) + atr_periods (i32) + chdevs (f32)
+            
             rows.checked_mul(2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
         } else {
-            // warms (i32) + chdevs (f32)
+            
             rows.checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
         }
         .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
@@ -433,7 +433,7 @@ impl CudaHalftrend {
         }
 
         if use_fused {
-            // ---------------------- FUSED batch path (no host helper matrices) ----------------------
+            
             let mut amps = Vec::<i32>::with_capacity(rows);
             let mut atr_periods = Vec::<i32>::with_capacity(rows);
             let mut chdevs = Vec::<f32>::with_capacity(rows);
@@ -554,7 +554,7 @@ impl CudaHalftrend {
             });
         }
 
-        // Shared precompute on host by unique periods/amplitudes
+        
         use std::collections::{BTreeSet, HashMap};
         let amps: BTreeSet<usize> = combos.iter().map(|p| p.amplitude.unwrap()).collect();
         let atrs: BTreeSet<usize> = combos.iter().map(|p| p.atr_period.unwrap()).collect();
@@ -605,12 +605,12 @@ impl CudaHalftrend {
             );
         }
 
-        // Build helper matrices in either row-major (legacy) or time-major (optimized) layout
+        
         use cust::memory::LockedBuffer;
         let mut warms = vec![0i32; rows];
         let mut chdevs = vec![0f32; rows];
 
-        // Common per-row fields
+        
         for (row, prm) in combos.iter().enumerate() {
             let a = prm.amplitude.unwrap();
             let p = prm.atr_period.unwrap();
@@ -620,7 +620,7 @@ impl CudaHalftrend {
             warms[row] = warm.min(n) as i32;
         }
 
-        // Prepare device inputs and helper buffers
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..n], &self.stream) }
             .map_err(CudaHalftrendError::from)?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..n], &self.stream) }
@@ -632,7 +632,7 @@ impl CudaHalftrend {
         let d_chdevs = DeviceBuffer::from_slice(&chdevs)
             .map_err(CudaHalftrendError::from)?;
 
-        // Outputs (we keep external row-major metadata: rows x n)
+        
         let elems = rows
             .checked_mul(n)
             .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
@@ -656,7 +656,7 @@ impl CudaHalftrend {
                 .map_err(CudaHalftrendError::from)?;
 
         if !use_time_major {
-            // Legacy ROW-MAJOR [rows, n] helper matrices
+            
             let mut atr_rows = vec![0f32; rows * n];
             let mut hma_rows = vec![0f32; rows * n];
             let mut lma_rows = vec![0f32; rows * n];
@@ -680,7 +680,7 @@ impl CudaHalftrend {
                 }
             }
 
-            // Upload legacy helpers
+            
             let d_atr = unsafe { DeviceBuffer::from_slice_async(&atr_rows, &self.stream) }
                 .map_err(CudaHalftrendError::from)?;
             let d_hma = unsafe { DeviceBuffer::from_slice_async(&hma_rows, &self.stream) }
@@ -692,7 +692,7 @@ impl CudaHalftrend {
             let d_rlo = unsafe { DeviceBuffer::from_slice_async(&rlo_rows, &self.stream) }
                 .map_err(CudaHalftrendError::from)?;
 
-            // Launch row-major kernel (keeps existing ABI)
+            
             let func = self
                 .module
                 .get_function("halftrend_batch_f32")
@@ -756,7 +756,7 @@ impl CudaHalftrend {
                 .synchronize()
                 .map_err(CudaHalftrendError::from)?;
         } else {
-            // TIME-MAJOR [n, rows] helper matrices in pinned memory
+            
             let len_tm = rows
                 .checked_mul(n)
                 .ok_or_else(|| {
@@ -796,7 +796,7 @@ impl CudaHalftrend {
                 }
             }
 
-            // Device helpers (uninitialized + async copy from pinned host)
+            
             let mut d_atr: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized_async(len_tm, &self.stream) }
                     .map_err(CudaHalftrendError::from)?;
@@ -831,7 +831,7 @@ impl CudaHalftrend {
                     .map_err(CudaHalftrendError::from)?;
             }
 
-            // Launch TIME-MAJOR kernel
+            
             let func = self
                 .module
                 .get_function("halftrend_batch_time_major_f32")
@@ -844,7 +844,7 @@ impl CudaHalftrend {
             }
             unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(BatchKernelSelected::TimeMajor { block_x }); }
 
-            // Note: kernel outputs time-major [n, rows] into the same d_* buffers.
+            
             unsafe {
                 let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1);
                 self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
@@ -898,7 +898,7 @@ impl CudaHalftrend {
         }
 
         Ok(CudaHalftrendBatch {
-            // Keep external shape as [rows, n] to preserve API/tests
+            
             halftrend: DeviceArrayF32 { buf: d_ht, rows, cols: n },
             trend: DeviceArrayF32 { buf: d_tr, rows, cols: n },
             atr_high: DeviceArrayF32 { buf: d_ah, rows, cols: n },
@@ -909,7 +909,7 @@ impl CudaHalftrend {
         })
     }
 
-    // ---------------------- Many-series × one-param (time-major) ----------------------
+    
 
     pub fn halftrend_many_series_one_param_time_major_dev(
         &self,
@@ -934,7 +934,7 @@ impl CudaHalftrend {
             ));
         }
 
-        // Per-series first_valid and warm
+        
         let mut firsts = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -958,8 +958,8 @@ impl CudaHalftrend {
             warms[s] = (firsts[s] as usize + amplitude.max(atr_period) - 1).min(rows) as i32;
         }
 
-        // Host precompute per series (ATR + SMA + rolling extrema) and flatten back to TM
-        // Use page-locked buffers to enable true async H->D copies.
+        
+        
         let len_tm = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
@@ -1034,7 +1034,7 @@ impl CudaHalftrend {
             }
         }
 
-        // VRAM estimate: inputs + 5 tm helpers + warms + 6 outputs
+        
         let req = (3 * cols * rows + 5 * cols * rows + cols + 6 * cols * rows)
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|x| x.checked_add(64 * 1024 * 1024))
@@ -1112,7 +1112,7 @@ impl CudaHalftrend {
             unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
                 .map_err(CudaHalftrendError::from)?;
 
-        // Launch
+        
         let func = self
             .module
             .get_function("halftrend_many_series_one_param_time_major_f32")
@@ -1230,7 +1230,7 @@ impl CudaHalftrend {
         })
     }
 
-    // Host-copy helpers for tests/benches
+    
     pub fn halftrend_batch_into_host_f32(
         &self,
         high: &[f32],
@@ -1266,7 +1266,7 @@ impl CudaHalftrend {
             ));
         }
 
-        // Copy from device
+        
         dev.halftrend.buf.copy_to(out_ht).map_err(CudaHalftrendError::from)?;
         dev.trend.buf.copy_to(out_tr).map_err(CudaHalftrendError::from)?;
         dev.atr_high.buf.copy_to(out_ah).map_err(CudaHalftrendError::from)?;
@@ -1274,32 +1274,32 @@ impl CudaHalftrend {
         dev.buy.buf.copy_to(out_bs).map_err(CudaHalftrendError::from)?;
         dev.sell.buf.copy_to(out_ss).map_err(CudaHalftrendError::from)?;
 
-        // If the last batch used the time-major kernel, transpose back to row-major for host slices
+        
         let used_time_major = matches!(
             self.last_batch,
             Some(BatchKernelSelected::TimeMajor { .. } | BatchKernelSelected::FusedTimeMajor { .. })
         );
         if used_time_major {
-            // Input buffers are laid out time-major [n, rows] on device; we copied raw order.
-            // Transpose to row-major [rows, n] for the host outputs.
+            
+            
             let (n, r) = (cols, rows);
             let mut tmp = vec![0f32; need];
-            // halftrend
+            
             tmp.copy_from_slice(out_ht);
             for row in 0..r { for t in 0..n { out_ht[row*n + t] = tmp[t*r + row]; } }
-            // trend
+            
             tmp.copy_from_slice(out_tr);
             for row in 0..r { for t in 0..n { out_tr[row*n + t] = tmp[t*r + row]; } }
-            // atr_high
+            
             tmp.copy_from_slice(out_ah);
             for row in 0..r { for t in 0..n { out_ah[row*n + t] = tmp[t*r + row]; } }
-            // atr_low
+            
             tmp.copy_from_slice(out_al);
             for row in 0..r { for t in 0..n { out_al[row*n + t] = tmp[t*r + row]; } }
-            // buy
+            
             tmp.copy_from_slice(out_bs);
             for row in 0..r { for t in 0..n { out_bs[row*n + t] = tmp[t*r + row]; } }
-            // sell
+            
             tmp.copy_from_slice(out_ss);
             for row in 0..r { for t in 0..n { out_ss[row*n + t] = tmp[t*r + row]; } }
         }
@@ -1307,7 +1307,7 @@ impl CudaHalftrend {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

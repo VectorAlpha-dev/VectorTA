@@ -53,8 +53,8 @@ use crate::utilities::kernel_validation::validate_kernel;
 use std::error::Error;
 use thiserror::Error;
 
-// Note: Unlike ALMA, WCLPRICE doesn't implement AsRef<[f64]> because it needs multiple slices
-// This is intentional as WCLPRICE requires high, low, and close data
+
+
 
 #[derive(Debug, Clone)]
 pub enum WclpriceData<'a> {
@@ -1625,7 +1625,7 @@ mod tests {
         assert_eq!(output.rows, 1);
         assert_eq!(output.cols, c.close.len());
 
-        // Check for poison values in the batch output
+        
         for (idx, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
                 continue;
@@ -1658,9 +1658,9 @@ mod tests {
             }
         }
 
-        // Test batch processing with various slice patterns
+        
         let test_configs = vec![
-            // (description, high, low, close)
+            
             (
                 "small data",
                 vec![100.0, 101.0, 102.0],
@@ -1740,7 +1740,7 @@ mod tests {
                 .kernel(kernel)
                 .apply_slices(high, low, close)?;
 
-            // Verify batch structure
+            
             assert_eq!(
                 output.rows, 1,
                 "[{}] Config {}: Expected 1 row for WCLPRICE",
@@ -1754,7 +1754,7 @@ mod tests {
                 cfg_idx
             );
 
-            // Check for poison values
+            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1793,7 +1793,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {

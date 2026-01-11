@@ -1,14 +1,14 @@
-// CUDA integration tests for VPT
 
-use my_project::indicators::vpt::{vpt_with_kernel, VptInput};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::vpt::{vpt_with_kernel, VptInput};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaVpt;
+use vector_ta::cuda::CudaVpt;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -36,7 +36,7 @@ fn vpt_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 4096usize;
     let mut price = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
-    // Ensure valid pair starts around index 4
+    
     for i in 0..len {
         if i == 0 {
             price[i] = 100.0;
@@ -104,11 +104,11 @@ fn vpt_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             price_tm[t * cols + s] = (x * 0.0013).sin() + 100.0 + 0.0002 * x;
             volume_tm[t * cols + s] = (x * 0.0011).cos().abs() * 450.0 + 110.0;
         }
-        // ensure p[t-1] non-zero for first valid pair
+        
         price_tm[s.min(6) * cols + s] = 100.0;
     }
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

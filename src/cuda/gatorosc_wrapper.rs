@@ -90,7 +90,7 @@ impl CudaGatorOsc {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let ctx = Arc::new(Context::new(device)?);
-        // Query limits we’ll use for chunking & shared-mem capping
+        
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .unwrap_or(65_535) as usize;
@@ -160,7 +160,7 @@ impl CudaGatorOsc {
         }
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn gatorosc_batch_dev(
         &self,
         data_f32: &[f32],
@@ -176,12 +176,12 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep)?;
-        // IMPORTANT: The warp-scan batch path is experimental (has exhibited hangs on some
-        // systems under WDDM). Keep it opt-in only.
+        
+        
         let warp_scan_enabled =
             std::env::var("GATOROSC_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
 
-        // Flatten params and validate
+        
         let mut jl: Vec<i32> = Vec::with_capacity(combos.len());
         let mut js: Vec<i32> = Vec::with_capacity(combos.len());
         let mut tl: Vec<i32> = Vec::with_capacity(combos.len());
@@ -216,7 +216,7 @@ impl CudaGatorOsc {
             )));
         }
 
-        // VRAM estimation for outputs + prices (params sliced per chunk)
+        
         let rows = combos.len();
         let elt = std::mem::size_of::<f32>();
         let total_elems = rows
@@ -236,16 +236,16 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("bytes overflow".into()))?;
         CudaGatorOsc::will_fit(required, headroom)?;
 
-        // Upload prices once
+        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
 
-        // Final device outputs allocated once
+        
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
-        // Launcher: write directly into final outputs at row offset = start
+        
         let launch_chunk = |this: &CudaGatorOsc,
                             start: usize,
                             chunk: usize,
@@ -263,14 +263,14 @@ impl CudaGatorOsc {
                 .get_function("gatorosc_batch_f32")
                 .map_err(|_| CudaGatorOscError::MissingKernelSymbol { name: "gatorosc_batch_f32" })?;
             let block_x = if warp_scan_enabled {
-                // One warp per combo is the intended fast path for `gatorosc_batch_f32`.
-                // Keep block_x a multiple of 32 (ideally exactly 32).
+                
+                
                 let mut bx = this.policy.batch_block_x.unwrap_or(32).max(32);
                 bx -= bx % 32;
                 if bx == 0 { bx = 32; }
                 bx
             } else {
-                // Force the kernel's sequential fallback (blockDim.x < 32).
+                
                 1
             };
             let grid: GridSize = (chunk as u32, 1, 1).into();
@@ -330,18 +330,18 @@ impl CudaGatorOsc {
             Ok(())
         };
 
-        // Chunk by device grid.x and shrink shared memory per chunk
+        
         let mut launched = 0usize;
         while launched < rows {
             let chunk = (rows - launched).min(self.max_grid_x);
             let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
             let ring_len_i = if warp_scan_enabled {
-                // Pad the ring to a multiple of 32 so the kernel can process 32-wide time tiles
-                // without any ring wrap inside a warp iteration (better shared-memory access).
+                
+                
                 let min_ring = (chunk_max_shift + 1).max(64);
                 ((min_ring + 31) / 32 * 32) as i32
             } else {
-                // Minimal ring for the sequential fallback.
+                
                 (chunk_max_shift + 1) as i32
             };
             launch_chunk(self, launched, chunk, ring_len_i)?;
@@ -373,7 +373,7 @@ impl CudaGatorOsc {
         })
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn gatorosc_many_series_one_param_time_major_dev(
         &self,
         prices_tm: &[f32],
@@ -402,7 +402,7 @@ impl CudaGatorOsc {
                 "time-major length mismatch".into(),
             ));
         }
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -432,7 +432,7 @@ impl CudaGatorOsc {
             }
         }
 
-        // VRAM estimation: prices + first_valids + 4 outputs
+        
         let elt_f32 = std::mem::size_of::<f32>();
         let elt_i32 = std::mem::size_of::<i32>();
         let bytes_prices = prices_tm
@@ -469,7 +469,7 @@ impl CudaGatorOsc {
             .module
             .get_function("gatorosc_many_series_one_param_f32")
             .map_err(|_| CudaGatorOscError::MissingKernelSymbol { name: "gatorosc_many_series_one_param_f32" })?;
-        // Ring len drives per-thread shared memory
+        
         let ring_len = (jaws_shift.max(teeth_shift).max(lips_shift) + 1) as i32;
         let per_thread_smem = (ring_len as usize) * 3 * std::mem::size_of::<f32>();
         let smem_budget = self.max_smem_per_block.saturating_sub(1024);
@@ -585,16 +585,16 @@ impl CudaGatorOsc {
     }
 }
 
-// ---- Local helpers ----
+
 fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
     if start < end {
-        // ascending, inclusive upper bound
+        
         return (start..=end).step_by(step.max(1)).collect();
     }
-    // descending bounds supported
+    
     let mut v = Vec::new();
     let mut cur = start;
     let s = step.max(1);
@@ -659,14 +659,14 @@ fn max_shift_in_range(js: &[i32], ts: &[i32], ls: &[i32], start: usize, count: u
     m
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 96; // modest grid to bound VRAM (e.g., 4x4x6)
+    const PARAM_SWEEP: usize = 96; 
 
     fn mem_required() -> usize {
         let out_bytes = 4 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
@@ -690,7 +690,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaGatorOsc::new(0).expect("cuda gator");
         let data = gen_series(ONE_SERIES_LEN);
-        // 3×(length) × 2×(shift) grid ~ 96 rows
+        
         let sweep = GatorOscBatchRange {
             jaws_length: (8, 14, 2),
             jaws_shift: (2, 6, 2),
@@ -703,8 +703,8 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        // Known issue: this benchmark can take extremely long on some systems (driver/clock/power
-        // state interactions). Keep it opt-in so the full CUDA bench suite remains usable.
+        
+        
         if std::env::var("CUDA_BENCH_ENABLE_GATOROSC").ok().as_deref() != Some("1") {
             return Vec::new();
         }

@@ -1,17 +1,17 @@
-// CUDA integration tests for FVG Trailing Stop
 
-use my_project::indicators::fvg_trailing_stop::{
+
+use vector_ta::indicators::fvg_trailing_stop::{
     fvg_trailing_stop_batch_with_kernel, fvg_trailing_stop_with_kernel, FvgTrailingStopInput,
     FvgTrailingStopParams, FvgTsBatchRange,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::fvg_trailing_stop_wrapper::CudaFvgTs;
+use vector_ta::cuda::fvg_trailing_stop_wrapper::CudaFvgTs;
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -36,7 +36,7 @@ fn fvg_ts_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[fvg_ts_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    // Synthetic OHLC
+    
     let len = 4096usize;
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
@@ -82,8 +82,8 @@ fn fvg_ts_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     batch.upper_ts.buf.copy_to(&mut gut)?;
     batch.lower_ts.buf.copy_to(&mut glt)?;
 
-    let tol = 1e-2; // FP32 tolerance
-                    // cpu.values layout: rows * 4 * cols, in blocks of (upper, lower, upper_ts, lower_ts)
+    let tol = 1e-2; 
+                    
     let rows = cpu.rows;
     let cols = cpu.cols;
     for r in 0..rows {
@@ -149,7 +149,7 @@ fn fvg_ts_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Error
         smoothing_length: Some(9),
         reset_on_cross: Some(false),
     };
-    // CPU ref per series
+    
     let mut cpu_u = vec![f64::NAN; cols * rows];
     let mut cpu_l = vec![f64::NAN; cols * rows];
     let mut cpu_ut = vec![f64::NAN; cols * rows];

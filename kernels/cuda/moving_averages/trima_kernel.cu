@@ -1,10 +1,10 @@
-// CUDA kernel for Triangular Moving Average (TRIMA)
-//
-// This file provides:
-//  - A drop-in tiled batch kernel (shared-memory reuse + optional async copy)
-//  - A time-major many-series tiled kernel (coalesced across series)
-//  - Plain 1-D kernels remain available for fallback/compat
-//  - Optional primitives for the two-SMA path (prefix-sum based)
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,7 +18,7 @@
 #endif
 #include <math.h>
 
-// Tunables (must match wrapper assumptions if changed)
+
 #ifndef TRIMA_TILE
 #define TRIMA_TILE 256
 #endif
@@ -29,9 +29,9 @@
 #define TRIMA_TT 64
 #endif
 
-// ----------------------
-// Plain 1-D batch kernel
-// ----------------------
+
+
+
 extern "C" __global__
 void trima_batch_f32(const float* __restrict__ prices,
                      const int* __restrict__ periods,
@@ -48,7 +48,7 @@ void trima_batch_f32(const float* __restrict__ prices,
 
     const int warm = warm_indices[combo];
 
-    extern __shared__ float weights[]; // sized to at least 'period'
+    extern __shared__ float weights[]; 
     const int m1 = (period + 1) / 2;
     const int m2 = period - m1 + 1;
     const float inv_norm = 1.0f / float(m1 * m2);
@@ -78,9 +78,9 @@ void trima_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ---------------------------------------
-// Tiled batch kernel (same signature)
-// ---------------------------------------
+
+
+
 extern "C" __global__
 void trima_batch_f32_tiled(const float* __restrict__ prices,
                            const int* __restrict__ periods,
@@ -98,14 +98,14 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
 
     const int warm = warm_indices[combo];
 
-    // Shared memory layout:
-    // [0 .. max_period-1] -> weights (we only fill [0..period-1])
-    // [max_period .. max_period + tile_load_len-1] -> tile window
+    
+    
+    
     extern __shared__ float smem[];
     float* __restrict__ weights = smem;
     float* __restrict__ tile    = smem + max_period;
 
-    // Precompute normalized triangular weights (once per CTA)
+    
     const int m1 = (period + 1) / 2;
     const int m2 = period - m1 + 1;
     const float inv_norm = 1.0f / float(m1 * m2);
@@ -118,25 +118,25 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    // Tile coordinates along time
-    const int TILE = blockDim.x; // blockDim.x configured to TRIMA_TILE at launch
+    
+    const int TILE = blockDim.x; 
     const int t0   = blockIdx.x * TILE;
     if (t0 >= series_len) return;
     const int t1   = min(t0 + TILE, series_len);
 
     const int tile_base = max(t0 - period + 1, 0);
     const int tile_end  = t1 - 1;
-    const int tile_len  = tile_end - tile_base + 1; // in [1, TILE + period - 1]
+    const int tile_len  = tile_end - tile_base + 1; 
 
-    // NOTE: This project embeds PTX and JIT-loads it via `cust::Module::from_ptx`.
-    // We intentionally avoid `cuda::memcpy_async`/pipeline here because it has
-    // produced incorrect loads under driver JIT in some environments.
+    
+    
+    
     for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
         tile[i] = prices[tile_base + i];
     }
     __syncthreads();
 
-    // Each thread computes one output in this tile (or none if out-of-range).
+    
     const int t = t0 + threadIdx.x;
     if (t < t1) {
         const int out_idx = combo * series_len + t;
@@ -144,7 +144,7 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
             out[out_idx] = NAN;
         } else {
             const int start_global = t - period + 1;
-            const int start_local  = start_global - tile_base; // into tile[]
+            const int start_local  = start_global - tile_base; 
             float acc = 0.0f;
 #pragma unroll 4
             for (int k = 0; k < period; ++k) {
@@ -155,9 +155,9 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     }
 }
 
-// -----------------------------------------------------------------
-// Many-series × one-parameter (time-major input) — 1D baseline
-// -----------------------------------------------------------------
+
+
+
 extern "C" __global__
 void trima_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                       const float* __restrict__ weights,
@@ -166,7 +166,7 @@ void trima_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                       int series_len,
                                       const int* __restrict__ first_valids,
                                       float* __restrict__ out_tm) {
-    extern __shared__ float shared_weights[]; // sized to at least period
+    extern __shared__ float shared_weights[]; 
     for (int i = threadIdx.x; i < period; i += blockDim.x) shared_weights[i] = weights[i];
     __syncthreads();
 
@@ -194,9 +194,9 @@ void trima_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     }
 }
 
-// -----------------------------------------------------------------
-// Many-series × one-parameter (time-major) — tiled & coalesced
-// -----------------------------------------------------------------
+
+
+
 extern "C" __global__
 void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_tm,
                                                const float* __restrict__ weights_in,
@@ -205,29 +205,29 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
                                                int series_len,
                                                const int* __restrict__ first_valids,
                                                float* __restrict__ out_tm) {
-    // Shared memory: [0..period-1] weights, then time-major tile: rows*(TRIMA_TS)
+    
     extern __shared__ float smem[];
     float* __restrict__ w    = smem;
     float* __restrict__ tile = smem + period;
 
-    // Copy weights once per CTA
+    
     for (int i = threadIdx.x; i < period; i += blockDim.x) w[i] = weights_in[i];
     __syncthreads();
 
-    // This block covers series in [s0, s1) and time in [t0, t1)
+    
     const int s0 = blockIdx.x * TRIMA_TS;
-    const int s  = s0 + threadIdx.x; // each thread owns one series
+    const int s  = s0 + threadIdx.x; 
     if (s >= num_series) return;
 
     const int t0 = blockIdx.y * TRIMA_TT;
     if (t0 >= series_len) return;
     const int t1 = min(t0 + TRIMA_TT, series_len);
 
-    // Load rows in [base .. t1-1], backing off by (period-1)
+    
     const int base  = max(t0 - period + 1, 0);
-    const int rows  = t1 - base; // <= TRIMA_TT + period - 1
+    const int rows  = t1 - base; 
 
-    // Cooperative row loads (coalesced across series for fixed time)
+    
     for (int r = 0; r < rows; ++r) {
         const int t = base + r;
         if (s < num_series) {
@@ -236,7 +236,7 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
     }
     __syncthreads();
 
-    // Compute outputs for this (series, time) tile
+    
     const int warm = first_valids[s] + period - 1;
     for (int t = t0; t < t1; ++t) {
         const int out_idx = t * num_series + s;
@@ -254,9 +254,9 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
     }
 }
 
-// -----------------------------------------------------------------
-// Optional primitives: two-pass SMA path using prefix sums
-// -----------------------------------------------------------------
+
+
+
 extern "C" __global__
 void sma_from_prefix_exclusive_f32(const float* __restrict__ P,
                                    int series_len,

@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -41,7 +41,7 @@ test.before(async () => {
 });
 
 test('VolumeAdjustedMa partial params', () => {
-    // Test with default parameters - mirrors check_volume_adjusted_ma_partial_params
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
@@ -50,7 +50,7 @@ test('VolumeAdjustedMa partial params', () => {
 });
 
 test('VolumeAdjustedMa accuracy', async () => {
-    // Test VolumeAdjustedMa matches expected values from Rust tests - mirrors check_volume_adjusted_ma_accuracy
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const expected = EXPECTED_OUTPUTS.volume_adjusted_ma;
@@ -66,7 +66,7 @@ test('VolumeAdjustedMa accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -75,12 +75,12 @@ test('VolumeAdjustedMa accuracy', async () => {
         "VolumeAdjustedMa last 5 values mismatch"
     );
     
-    // Skip Rust comparison for now (generate_references binary has issues)
-    // await compareWithRust('volume_adjusted_ma', result, 'close_volume', expected.defaultParams);
+    
+    
 });
 
 test('VolumeAdjustedMa slow', () => {
-    // Test VolumeAdjustedMa with slow parameters (length=55) - mirrors check_volume_adjusted_ma_slow
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const expected = EXPECTED_OUTPUTS.volume_adjusted_ma;
@@ -96,7 +96,7 @@ test('VolumeAdjustedMa slow', () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -107,7 +107,7 @@ test('VolumeAdjustedMa slow', () => {
 });
 
 test('VolumeAdjustedMa default candles', () => {
-    // Test with default parameters - mirrors check_volume_adjusted_ma_default_candles
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
@@ -116,7 +116,7 @@ test('VolumeAdjustedMa default candles', () => {
 });
 
 test('VolumeAdjustedMa zero period', () => {
-    // Test VolumeAdjustedMa fails with zero period - mirrors check_volume_adjusted_ma_zero_period
+    
     const price = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0, 400.0, 500.0]);
     
@@ -126,7 +126,7 @@ test('VolumeAdjustedMa zero period', () => {
 });
 
 test('VolumeAdjustedMa empty input', () => {
-    // Test VolumeAdjustedMa fails with empty input - mirrors check_volume_adjusted_ma_empty_input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -135,7 +135,7 @@ test('VolumeAdjustedMa empty input', () => {
 });
 
 test('VolumeAdjustedMa all NaN input', () => {
-    // Test VolumeAdjustedMa with all NaN values
+    
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     const volume = new Float64Array(100);
@@ -147,9 +147,9 @@ test('VolumeAdjustedMa all NaN input', () => {
 });
 
 test('VolumeAdjustedMa mismatched lengths', () => {
-    // Test VolumeAdjustedMa fails when price and volume have different lengths
+    
     const price = new Float64Array([10.0, 20.0, 30.0]);
-    const volume = new Float64Array([100.0, 200.0]);  // Different length
+    const volume = new Float64Array([100.0, 200.0]);  
     
     assert.throws(() => {
         wasm.volume_adjusted_ma_js(price, volume, 13, 0.67, true, 0);
@@ -157,7 +157,7 @@ test('VolumeAdjustedMa mismatched lengths', () => {
 });
 
 test('VolumeAdjustedMa invalid period', () => {
-    // Test VolumeAdjustedMa fails with zero period
+    
     const price = new Float64Array([10.0, 20.0, 30.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
@@ -167,23 +167,23 @@ test('VolumeAdjustedMa invalid period', () => {
 });
 
 test('VolumeAdjustedMa invalid vi_factor', () => {
-    // Test VolumeAdjustedMa fails with invalid vi_factor
+    
     const price = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0, 400.0, 500.0]);
     
-    // Zero vi_factor
+    
     assert.throws(() => {
         wasm.volume_adjusted_ma_js(price, volume, 2, 0.0, true, 0);
     }, /Invalid vi_factor/);
     
-    // Negative vi_factor
+    
     assert.throws(() => {
         wasm.volume_adjusted_ma_js(price, volume, 2, -1.0, true, 0);
     }, /Invalid vi_factor/);
 });
 
 test('VolumeAdjustedMa period exceeds length', () => {
-    // Test VolumeAdjustedMa fails when period exceeds data length
+    
     const smallPrice = new Float64Array([10.0, 20.0, 30.0]);
     const smallVolume = new Float64Array([100.0, 200.0, 300.0]);
     
@@ -193,7 +193,7 @@ test('VolumeAdjustedMa period exceeds length', () => {
 });
 
 test('VolumeAdjustedMa NaN handling', () => {
-    // Test VolumeAdjustedMa handles NaN values correctly
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const expected = EXPECTED_OUTPUTS.volume_adjusted_ma;
@@ -201,8 +201,8 @@ test('VolumeAdjustedMa NaN handling', () => {
     const result = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 0);
     assert.strictEqual(result.length, close.length);
     
-    // After warmup period, no NaN values should exist
-    const warmup = expected.warmupPeriod; // Should be 12 (length - 1)
+    
+    const warmup = expected.warmupPeriod; 
     
     if (result.length > warmup) {
         for (let i = warmup + 1; i < result.length; i++) {
@@ -210,25 +210,25 @@ test('VolumeAdjustedMa NaN handling', () => {
         }
     }
     
-    // First warmup values should be NaN
+    
     assertAllNaN(result.slice(0, warmup), "Expected NaN in warmup period");
 });
 
 test('VolumeAdjustedMa strict vs non-strict', () => {
-    // Test VolumeAdjustedMa with strict=True vs strict=False
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset
+    
+    const close = new Float64Array(testData.close.slice(0, 100)); 
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
-    // Test with strict=true
+    
     const resultStrict = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 0);
     
-    // Test with strict=false
+    
     const resultNonStrict = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, false, 0);
     
     assert.strictEqual(resultStrict.length, close.length);
     assert.strictEqual(resultNonStrict.length, close.length);
     
-    // Results may differ but both should be valid
+    
     let hasValidStrict = false;
     let hasValidNonStrict = false;
     for (let i = 13; i < resultStrict.length; i++) {
@@ -240,20 +240,20 @@ test('VolumeAdjustedMa strict vs non-strict', () => {
 });
 
 test('VolumeAdjustedMa sample period', () => {
-    // Test VolumeAdjustedMa with different sample periods
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset
+    
+    const close = new Float64Array(testData.close.slice(0, 100)); 
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
-    // Test with sample_period=0 (all bars)
+    
     const resultAll = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 0);
     
-    // Test with fixed sample_period
+    
     const resultFixed = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 20);
     
     assert.strictEqual(resultAll.length, close.length);
     assert.strictEqual(resultFixed.length, close.length);
     
-    // Results may differ but both should be valid
+    
     let hasValidAll = false;
     let hasValidFixed = false;
     for (let i = 13; i < resultAll.length; i++) {
@@ -265,11 +265,11 @@ test('VolumeAdjustedMa sample period', () => {
 });
 
 test('VolumeAdjustedMa different vi_factors', () => {
-    // Test VolumeAdjustedMa with different vi_factor values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset
+    
+    const close = new Float64Array(testData.close.slice(0, 100)); 
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
-    // Test with different vi_factors
+    
     const result1 = wasm.volume_adjusted_ma_js(close, volume, 13, 0.5, true, 0);
     const result2 = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 0);
     const result3 = wasm.volume_adjusted_ma_js(close, volume, 13, 1.0, true, 0);
@@ -278,7 +278,7 @@ test('VolumeAdjustedMa different vi_factors', () => {
     assert.strictEqual(result2.length, close.length);
     assert.strictEqual(result3.length, close.length);
     
-    // Results should differ with different vi_factors
+    
     let hasDifference12 = false;
     let hasDifference23 = false;
     
@@ -292,7 +292,7 @@ test('VolumeAdjustedMa different vi_factors', () => {
 });
 
 test('VolumeAdjustedMa very small dataset', () => {
-    // Test VolumeAdjustedMa fails with insufficient data - mirrors check_volume_adjusted_ma_very_small_dataset
+    
     const singlePrice = new Float64Array([42.0]);
     const singleVolume = new Float64Array([100.0]);
     
@@ -302,7 +302,7 @@ test('VolumeAdjustedMa very small dataset', () => {
 });
 
 test('VolumeAdjustedMa zero length', () => {
-    // Test VolumeAdjustedMa fails with zero length - mirrors check_volume_adjusted_ma_zero_length
+    
     const price = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0, 400.0, 500.0]);
     
@@ -312,7 +312,7 @@ test('VolumeAdjustedMa zero length', () => {
 });
 
 test('VolumeAdjustedMa length exceeds data', () => {
-    // Test VolumeAdjustedMa fails when length exceeds data - mirrors check_volume_adjusted_ma_length_exceeds_data
+    
     const price = new Float64Array([10.0, 20.0, 30.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
@@ -322,11 +322,11 @@ test('VolumeAdjustedMa length exceeds data', () => {
 });
 
 test('VolumeAdjustedMa batch single parameter set', () => {
-    // Test batch with single parameter combination - mirrors check_batch_default_row
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
-    // Using the new ergonomic batch API for single parameter
+    
     const batchResult = wasm.volume_adjusted_ma_batch(close, volume, {
         length_range: [13, 13, 0],
         vi_factor_range: [0.67, 0.67, 0],
@@ -334,7 +334,7 @@ test('VolumeAdjustedMa batch single parameter set', () => {
         sample_period_range: [0, 0, 0]
     });
     
-    // Should match single calculation
+    
     const singleResult = wasm.volume_adjusted_ma_js(close, volume, 13, 0.67, true, 0);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
@@ -342,24 +342,24 @@ test('VolumeAdjustedMa batch single parameter set', () => {
 });
 
 test('VolumeAdjustedMa batch multiple periods', () => {
-    // Test batch with multiple period values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
+    
+    const close = new Float64Array(testData.close.slice(0, 100)); 
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
-    // Multiple periods: 13, 15, 17 using ergonomic API
+    
     const batchResult = wasm.volume_adjusted_ma_batch(close, volume, {
-        length_range: [13, 17, 2],         // length range
-        vi_factor_range: [0.67, 0.67, 0],  // vi_factor range  
-        strict: true,                       // strict mode
-        sample_period_range: [0, 0, 0]     // sample_period range
+        length_range: [13, 17, 2],         
+        vi_factor_range: [0.67, 0.67, 0],  
+        strict: true,                       
+        sample_period_range: [0, 0, 0]     
     });
     
-    // Should have 3 rows * 100 cols = 300 values
+    
     assert.strictEqual(batchResult.values.length, 3 * 100);
     assert.strictEqual(batchResult.rows, 3);
     assert.strictEqual(batchResult.cols, 100);
     
-    // Verify each row matches individual calculation
+    
     const periods = [13, 15, 17];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -377,29 +377,29 @@ test('VolumeAdjustedMa batch multiple periods', () => {
 });
 
 test('VolumeAdjustedMa batch metadata from result', () => {
-    // Test that batch result includes correct parameter combinations
+    
     const close = new Float64Array(20);
     close.fill(100);
     const volume = new Float64Array(20);
     volume.fill(1000);
     
     const result = wasm.volume_adjusted_ma_batch(close, volume, {
-        length_range: [10, 14, 2],        // length: 10, 12, 14
-        vi_factor_range: [0.5, 0.7, 0.1], // vi_factor: 0.5, 0.6, 0.7
+        length_range: [10, 14, 2],        
+        vi_factor_range: [0.5, 0.7, 0.1], 
         strict: true,
-        sample_period_range: [0, 10, 5]   // sample_period: 0, 5, 10
+        sample_period_range: [0, 10, 5]   
     });
     
-    // Should have 3 * 3 * 3 = 27 combinations
+    
     assert.strictEqual(result.combos.length, 27);
     
-    // Check first combination
+    
     assert.strictEqual(result.combos[0].length, 10);
     assert.strictEqual(result.combos[0].vi_factor, 0.5);
     assert.strictEqual(result.combos[0].strict, true);
     assert.strictEqual(result.combos[0].sample_period, 0);
     
-    // Check last combination
+    
     assert.strictEqual(result.combos[26].length, 14);
     assertClose(result.combos[26].vi_factor, 0.7, 1e-10, "vi_factor mismatch");
     assert.strictEqual(result.combos[26].strict, true);
@@ -407,24 +407,24 @@ test('VolumeAdjustedMa batch metadata from result', () => {
 });
 
 test('VolumeAdjustedMa batch full parameter sweep', () => {
-    // Test full parameter sweep matching expected structure
+    
     const close = new Float64Array(testData.close.slice(0, 50));
     const volume = new Float64Array(testData.volume.slice(0, 50));
     
     const batchResult = wasm.volume_adjusted_ma_batch(close, volume, {
-        length_range: [10, 12, 2],         // 2 periods
-        vi_factor_range: [0.6, 0.7, 0.1],  // 2 vi_factors
-        strict: false,                      // non-strict mode
-        sample_period_range: [0, 0, 0]     // 1 sample_period
+        length_range: [10, 12, 2],         
+        vi_factor_range: [0.6, 0.7, 0.1],  
+        strict: false,                      
+        sample_period_range: [0, 0, 0]     
     });
     
-    // Should have 2 * 2 * 1 = 4 combinations
+    
     assert.strictEqual(batchResult.combos.length, 4);
     assert.strictEqual(batchResult.rows, 4);
     assert.strictEqual(batchResult.cols, 50);
     assert.strictEqual(batchResult.values.length, 4 * 50);
     
-    // Verify structure
+    
     for (let combo = 0; combo < batchResult.combos.length; combo++) {
         const length = batchResult.combos[combo].length;
         const vi_factor = batchResult.combos[combo].vi_factor;
@@ -433,15 +433,15 @@ test('VolumeAdjustedMa batch full parameter sweep', () => {
         const rowStart = combo * 50;
         const rowData = batchResult.values.slice(rowStart, rowStart + 50);
         
-        // First length-1 values should be NaN
+        
         for (let i = 0; i < length - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for length ${length}`);
         }
         
-        // After warmup should have values (but may be NaN if not enough data for Pine formula)
-        // With strict Pine logic, we need at least length bars of history
+        
+        
         for (let i = length; i < 50; i++) {
-            // Only check values where we have enough data
+            
             if (i >= length) {
                 assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for length ${length}`);
             }
@@ -450,11 +450,11 @@ test('VolumeAdjustedMa batch full parameter sweep', () => {
 });
 
 test('VolumeAdjustedMa batch edge cases', () => {
-    // Test edge cases for batch processing
+    
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const volume = new Float64Array([100, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
     
-    // Single value sweep
+    
     const singleBatch = wasm.volume_adjusted_ma_batch(close, volume, {
         length_range: [5, 5, 1],
         vi_factor_range: [0.67, 0.67, 0.1],
@@ -465,19 +465,19 @@ test('VolumeAdjustedMa batch edge cases', () => {
     assert.strictEqual(singleBatch.values.length, 10);
     assert.strictEqual(singleBatch.combos.length, 1);
     
-    // Step larger than range
+    
     const largeBatch = wasm.volume_adjusted_ma_batch(close, volume, {
-        length_range: [5, 7, 10], // Step larger than range
+        length_range: [5, 7, 10], 
         vi_factor_range: [0.67, 0.67, 0],
         strict: true,
         sample_period_range: [0, 0, 0]
     });
     
-    // Should only have length=5
+    
     assert.strictEqual(largeBatch.values.length, 10);
     assert.strictEqual(largeBatch.combos.length, 1);
     
-    // Empty data should throw
+    
     assert.throws(() => {
         wasm.volume_adjusted_ma_batch(new Float64Array([]), new Float64Array([]), {
             length_range: [13, 13, 0],
@@ -488,7 +488,7 @@ test('VolumeAdjustedMa batch edge cases', () => {
     }, /Input data slice is empty|All values are NaN/);
 });
 
-// Zero-copy API tests
+
 test('VolumeAdjustedMa zero-copy API', () => {
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const volume = new Float64Array([100, 100, 100, 100, 100, 100, 100, 100, 100, 100]);
@@ -497,13 +497,13 @@ test('VolumeAdjustedMa zero-copy API', () => {
     const strict = true;
     const sample_period = 0;
     
-    // Allocate buffers
+    
     const dataPtr = wasm.volume_adjusted_ma_alloc(data.length);
     const volPtr = wasm.volume_adjusted_ma_alloc(volume.length);
     assert(dataPtr !== 0, 'Failed to allocate data memory');
     assert(volPtr !== 0, 'Failed to allocate volume memory');
     
-    // Create views into WASM memory
+    
     const memory = wasm.__wasm.memory.buffer;
     const dataView = new Float64Array(
         memory,
@@ -516,25 +516,25 @@ test('VolumeAdjustedMa zero-copy API', () => {
         volume.length
     );
     
-    // Copy data into WASM memory
+    
     dataView.set(data);
     volView.set(volume);
     
-    // Compute VolumeAdjustedMa in-place
+    
     try {
         wasm.volume_adjusted_ma_into(dataPtr, volPtr, dataPtr, data.length, length, vi_factor, strict, sample_period);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.volume_adjusted_ma_js(data, volume, length, vi_factor, strict, sample_period);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(dataView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - dataView[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${dataView[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.volume_adjusted_ma_free(dataPtr, data.length);
         wasm.volume_adjusted_ma_free(volPtr, volume.length);
     }
@@ -563,16 +563,16 @@ test('VolumeAdjustedMa zero-copy with large dataset', () => {
         
         wasm.volume_adjusted_ma_into(dataPtr, volPtr, dataPtr, size, 13, 0.67, true, 0);
         
-        // Recreate view in case memory grew
+        
         const memory2 = wasm.__wasm.memory.buffer;
         const dataView2 = new Float64Array(memory2, dataPtr, size);
         
-        // Check warmup period has NaN
+        
         for (let i = 0; i < 12; i++) {
             assert(isNaN(dataView2[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values
+        
         for (let i = 12; i < Math.min(100, size); i++) {
             assert(!isNaN(dataView2[i]), `Unexpected NaN at index ${i}`);
         }
@@ -582,23 +582,23 @@ test('VolumeAdjustedMa zero-copy with large dataset', () => {
     }
 });
 
-// Error handling for zero-copy API
+
 test('VolumeAdjustedMa zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.volume_adjusted_ma_into(0, 0, 0, 10, 13, 0.67, true, 0);
     }, /null pointer|invalid memory/i);
     
-    // Test invalid parameters with allocated memory
+    
     const dataPtr = wasm.volume_adjusted_ma_alloc(10);
     const volPtr = wasm.volume_adjusted_ma_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.volume_adjusted_ma_into(dataPtr, volPtr, dataPtr, 10, 0, 0.67, true, 0);
         }, /Invalid period/);
         
-        // Invalid vi_factor
+        
         assert.throws(() => {
             wasm.volume_adjusted_ma_into(dataPtr, volPtr, dataPtr, 10, 5, 0.0, true, 0);
         }, /Invalid vi_factor/);
@@ -608,9 +608,9 @@ test('VolumeAdjustedMa zero-copy error handling', () => {
     }
 });
 
-// Memory leak prevention test
+
 test('VolumeAdjustedMa zero-copy memory management', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 10000];
     
     for (const size of sizes) {
@@ -619,7 +619,7 @@ test('VolumeAdjustedMa zero-copy memory management', () => {
         assert(dataPtr !== 0, `Failed to allocate ${size} data elements`);
         assert(volPtr !== 0, `Failed to allocate ${size} volume elements`);
         
-        // Write pattern to verify memory
+        
         const memory = wasm.__wasm.memory.buffer;
         const dataView = new Float64Array(memory, dataPtr, size);
         const volView = new Float64Array(memory, volPtr, size);
@@ -628,28 +628,28 @@ test('VolumeAdjustedMa zero-copy memory management', () => {
             volView[i] = i * 100.0;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(dataView[i], i * 1.5, `Data memory corruption at index ${i}`);
             assert.strictEqual(volView[i], i * 100.0, `Volume memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.volume_adjusted_ma_free(dataPtr, size);
         wasm.volume_adjusted_ma_free(volPtr, size);
     }
 });
 
 test('VolumeAdjustedMa constant volume', () => {
-    // Test VolumeAdjustedMa with constant volume
-    // Create price series with some variation
+    
+    
     const priceData = [];
     for (let i = 0; i < 5; i++) {
         priceData.push(50.0, 51.0, 49.0, 52.0, 48.0, 53.0, 47.0, 54.0, 46.0, 55.0);
     }
     const price = new Float64Array(priceData);
     
-    // Constant volume
+    
     const volume = new Float64Array(50);
     volume.fill(1000.0);
     
@@ -657,7 +657,7 @@ test('VolumeAdjustedMa constant volume', () => {
     
     assert.strictEqual(result.length, price.length);
     
-    // With constant volume, VolumeAdjustedMa should still produce valid results
+    
     let hasValidValues = false;
     for (let i = 5; i < result.length; i++) {
         if (!isNaN(result[i])) {

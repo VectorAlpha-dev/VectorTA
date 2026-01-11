@@ -1,14 +1,14 @@
-// Integration tests for CUDA MACD (EMA path)
 
-use my_project::indicators::macd::{macd, MacdBatchBuilder, MacdBatchRange, MacdInput, MacdParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::macd::{macd, MacdBatchBuilder, MacdBatchRange, MacdInput, MacdParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaMacd;
+use vector_ta::cuda::oscillators::CudaMacd;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,7 +46,7 @@ fn macd_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let cpu =
-        my_project::indicators::macd::macd_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
+        vector_ta::indicators::macd::macd_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaMacd::new(0).expect("CudaMacd::new");
@@ -105,7 +105,7 @@ fn macd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let slow = 26usize;
     let signal = 9usize;
 
-    // CPU reference per series
+    
     let mut cpu_macd = vec![f64::NAN; cols * rows];
     let mut cpu_signal = vec![f64::NAN; cols * rows];
     let mut cpu_hist = vec![f64::NAN; cols * rows];

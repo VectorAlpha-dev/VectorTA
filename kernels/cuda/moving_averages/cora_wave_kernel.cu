@@ -1,19 +1,19 @@
-// CUDA kernels for the Compound Ratio Moving Average (CoRa Wave).
-//
-// Batch (one-series × many-params) and many-series (time-major, one param)
-// variants, plus a simple per-combo WMA smoothing pass used by the batch path.
-//
-// Semantics:
-// - FP32 throughout.
-// - Warm-up: outputs prior to warm = first_valid + (period-1) are NaN for the
-//   CoRa stage. When smoothing is enabled (period_smooth > 1), final warm-up is
-//   warm + (period_smooth-1).
-// - Weights are provided per-combo as oldest→newest of length = period and an
-//   inv_norm (1/sum(weights)).
-//
-// Notes:
-// - WMA smoothing in the batch path uses a dedicated kernel so each combo can
-//   have a different first-valid frontier and smoothing period.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -23,12 +23,12 @@
 #include <math.h>
 #include <stdint.h>
 
-// Quiet NaN helper
+
 static __device__ __forceinline__ float f32_qnan() {
     return __int_as_float(0x7fffffff);
 }
 
-// ---------------------- 1) Plain batched kernel ----------------------------
+
 
 extern "C" __global__
 void cora_wave_batch_f32(const float* __restrict__ prices,
@@ -46,7 +46,7 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     if (period <= 0) return;
 
-    extern __shared__ float shared_weights[]; // [period]
+    extern __shared__ float shared_weights[]; 
     for (int i = threadIdx.x; i < period; i += blockDim.x) {
         shared_weights[i] = weights_flat[combo * max_period + i];
     }
@@ -64,7 +64,7 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
         } else {
             const int start = t - period + 1;
             float s = 0.f;
-            // Kahan-Neumaier compensated accumulation for numerical stability
+            
             float c = 0.f;
 #pragma unroll 4
             for (int k = 0; k < period; ++k) {
@@ -80,9 +80,9 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// -------- 2) Batch WMA smoothing pass over CoRa outputs --------------------
-// Each combo can have its own smoothing period m[combo] and its own CoRa
-// frontier warm0[combo].
+
+
+
 
 extern "C" __global__
 void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
@@ -96,7 +96,7 @@ void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
 
     const int m = smooth_periods[combo];
     if (m <= 1) {
-        // No smoothing: copy y → out with NaN preserved
+        
         const int base = combo * series_len;
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -130,12 +130,12 @@ void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
     }
 }
 
-// -------- 3) Many-series, one param, time-major ----------------------------
+
 
 extern "C" __global__
 void cora_wave_multi_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
-    const float* __restrict__ weights, // length = period, oldest→newest
+    const float* __restrict__ weights, 
     int period,
     float inv_norm,
     int num_series,
@@ -144,7 +144,7 @@ void cora_wave_multi_series_one_param_time_major_f32(
     float* __restrict__ out_tm) {
     if (period <= 0) return;
 
-    const int s = blockIdx.y; // series index
+    const int s = blockIdx.y; 
     if (s >= num_series) return;
 
     const int warm = first_valids[s] + period - 1;
@@ -173,7 +173,7 @@ void cora_wave_multi_series_one_param_time_major_f32(
     }
 }
 
-// -------- 4) Many-series WMA smoothing over CoRa outputs -------------------
+
 
 extern "C" __global__
 void cora_wave_ms1p_wma_time_major_f32(const float* __restrict__ y_tm,
@@ -183,7 +183,7 @@ void cora_wave_ms1p_wma_time_major_f32(const float* __restrict__ y_tm,
                                        const int* __restrict__ warm0s,
                                        float* __restrict__ out_tm) {
     if (wma_period <= 1) {
-        // No smoothing: copy
+        
         int s = blockIdx.y;
         if (s >= num_series) return;
         int t = blockIdx.x * blockDim.x + threadIdx.x;

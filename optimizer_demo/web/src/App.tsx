@@ -32,7 +32,7 @@ export const App: React.FC = () => {
   const [selected, setSelected] = useState<{ fast: number; slow: number } | null>(null)
 
   const series = useMemo(() => {
-    // Generate the same synthetic series used by the backend
+    
     const T = len
     const s = new Array(T).fill(NaN)
     for (let i = 3; i < T; i++) { const x = i; s[i] = Math.sin(x * 0.001) + 0.0001 * x }
@@ -64,14 +64,14 @@ export const App: React.FC = () => {
     setSlicers(new Array(ax.length).fill(0))
     const rows = meta.rows, cols = meta.cols, M = 5
     const out: BacktestResult[] = []
-    // Determine extras (beyond fast/slow period)
+    
     const extraAxes = (meta.axes || []).filter(a => a.name !== 'fast_period' && a.name !== 'slow_period')
     const extraLens = extraAxes.map(a => a.values.length)
-    // Compute current layer index from slicers for extras
+    
     const layerIndex = extraLens.length === 0 ? 0 : (() => {
       const idxs = (meta.axes || []).map((a, i) => ({ name: a.name, idx: slicers[i] || 0 }))
       const extras = idxs.filter(x => x.name !== 'fast_period' && x.name !== 'slow_period').map(x => x.idx)
-      // row-major over extras in listed order
+      
       let mul = 1, idx = 0
       for (let k = extraLens.length - 1; k >= 0; k--) { idx += (extras[k] || 0) * mul; mul *= extraLens[k] }
       return idx

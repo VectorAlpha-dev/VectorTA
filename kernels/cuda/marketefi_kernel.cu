@@ -1,18 +1,18 @@
-// CUDA kernels for Market Facilitation Index (marketefi)
-//
-// Formula per time step:
-//   marketefi[t] = (high[t] - low[t]) / volume[t]
-// Semantics:
-//   - Write NaN for indices before `first_valid`.
-//   - For t >= first_valid: if any input is NaN or volume == 0, write NaN.
-//   - Otherwise write the ratio in FP32.
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 #include <math_constants.h>
 #include <stdint.h>
 
-// ---- Small helpers ---------------------------------------------------------
+
 
 __device__ __forceinline__ float mfi_elem(float h, float l, float v, bool ok) {
     if (!ok) return CUDART_NAN_F;
@@ -20,7 +20,7 @@ __device__ __forceinline__ float mfi_elem(float h, float l, float v, bool ok) {
     return (h - l) / v;
 }
 
-// ---- 1) Single-series, grid-stride with ILP --------------------------------
+
 extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
                                                  const float* __restrict__ low,
                                                  const float* __restrict__ volume,
@@ -33,13 +33,13 @@ extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
     const int stride = blockDim.x * gridDim.x;
     const int first  = first_valid < 0 ? 0 : first_valid;
 
-    // Process up to 4 items per iteration to hide latency
+    
     constexpr int ILP = 4;
 
     for (int base = tid; base < len; base += stride * ILP) {
 #pragma unroll
         for (int k = 0; k < ILP; ++k) {
-            int i = base + k * blockDim.x; // keeps coalescing for each k arm
+            int i = base + k * blockDim.x; 
             if (i < len) {
                 const bool ok = (i >= first);
                 const float h = high[i];
@@ -51,11 +51,11 @@ extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
     }
 }
 
-// ---- 2) Many-series × one-param (time-major) --------------------------------
-// Layout: *_tm is [time][series], so consecutive series are contiguous.
-// Primary mapping (preferred): threads in X span series; grid.x tiles time.
-// Back-compat: if launched with grid=(num_series,1,1) and one block per series
-// (older wrappers), fall back to a 1D-per-series kernel to preserve behavior.
+
+
+
+
+
 
 #ifndef MKT_T_TILE
 #define MKT_T_TILE 128
@@ -65,27 +65,27 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ volume_tm,
-    const int*   __restrict__ first_valids,  // may be null
+    const int*   __restrict__ first_valids,  
     int num_series,
     int series_len,
     float* __restrict__ out_tm) {
 
     if (num_series <= 0 || series_len <= 0) return;
 
-    // Back-compat detection: legacy launch config uses one block per series
+    
     const bool legacy_1d = (gridDim.y == 1) && (gridDim.x == num_series);
     if (legacy_1d) {
-        // Original mapping: blockIdx.x == series, threads sweep time.
+        
         const int s = blockIdx.x;
         if (s >= num_series) return;
         const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
-        const int stride_series = num_series; // [time][series]
+        const int stride_series = num_series; 
 
-        // Prefix NaNs up to first
+        
         for (int t = threadIdx.x; t < min(first, series_len); t += blockDim.x) {
             out_tm[t * stride_series + s] = CUDART_NAN_F;
         }
-        // Process the rest
+        
         for (int t = threadIdx.x + first; t < series_len; t += blockDim.x) {
             const int idx = t * stride_series + s;
             const float h = high_tm[idx];
@@ -96,7 +96,7 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
         return;
     }
 
-    // Preferred mapping with optional vectorization
+    
     const uintptr_t mask16 = 0xF;
     const bool aligned16 =
         (((uintptr_t)high_tm   | (uintptr_t)low_tm |
@@ -105,12 +105,12 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
     const bool vec_ok = aligned16 && ((num_series & 3) == 0);
 
     if (vec_ok) {
-        // Vectorized path: operate on 4 series at a time (float4)
-        const int series4 = num_series >> 2; // number of float4 groups
-        const int s4 = blockIdx.y * blockDim.x + threadIdx.x; // group index across series
+        
+        const int series4 = num_series >> 2; 
+        const int s4 = blockIdx.y * blockDim.x + threadIdx.x; 
         if (s4 >= series4) return;
 
-        // Preload first_valids for these 4 series
+        
         int4 fv4 = make_int4(0, 0, 0, 0);
         if (first_valids) {
             const int4* __restrict__ fv_ptr = reinterpret_cast<const int4*>(first_valids);
@@ -145,16 +145,16 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
                 out4.z = mfi_elem(h4.z, l4.z, v4.z, t >= fv4.z);
                 out4.w = mfi_elem(h4.w, l4.w, v4.w, t >= fv4.w);
 
-                O[idx4] = out4; // 128-bit store
+                O[idx4] = out4; 
             }
         }
     } else {
-        // Scalar fallback with preferred mapping: threadIdx.x spans series
-        const int s = blockIdx.y * blockDim.x + threadIdx.x; // series index
+        
+        const int s = blockIdx.y * blockDim.x + threadIdx.x; 
         if (s >= num_series) return;
 
         const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
-        const int stride_series = num_series; // [time][series]
+        const int stride_series = num_series; 
 
         for (int t0 = blockIdx.x * MKT_T_TILE; t0 < series_len; t0 += gridDim.x * MKT_T_TILE) {
             const int t_end = min(series_len, t0 + MKT_T_TILE);

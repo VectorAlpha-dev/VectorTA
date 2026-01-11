@@ -23,12 +23,12 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const wasmUrl = new URL(`file:///${wasmPath.replace(/\\/g, '/')}`).href;
         wasm = await import(wasmUrl);
-        // The CommonJS module doesn't export a default function, it auto-initializes
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -38,7 +38,7 @@ test.before(async () => {
 });
 
 test('MOD_GOD_MODE basic test', () => {
-    // Create test data
+    
     const length = 50;
     const high = new Float64Array(length).fill(10.0);
     const low = new Float64Array(length).fill(9.0);
@@ -47,31 +47,31 @@ test('MOD_GOD_MODE basic test', () => {
         close[i] = 10.0 + (i % 5) * 0.2;
     }
     
-    // Call the indicator - no volume, default parameters
+    
     const result = wasm.mod_god_mode(
         high, 
         low, 
         close,
-        undefined,  // volume
-        17,         // n1
-        6,          // n2
-        4,          // n3
-        "tradition_mg",  // mode
-        false       // use_volume
+        undefined,  
+        17,         
+        6,          
+        4,          
+        "tradition_mg",  
+        false       
     );
     
-    // Check that we got a result
+    
     assert(result, 'Should return a result');
     assert(result.wavetrend, 'Should have wavetrend');
     assert(result.signal, 'Should have signal');
     assert(result.histogram, 'Should have histogram');
     
-    // Check lengths
+    
     assert.equal(result.wavetrend.length, length, 'Wavetrend length should match input');
     assert.equal(result.signal.length, length, 'Signal length should match input');
     assert.equal(result.histogram.length, length, 'Histogram length should match input');
     
-    // Check that we have some non-NaN values after warmup
+    
     let nonNanCount = 0;
     for (let i = 0; i < result.wavetrend.length; i++) {
         if (!isNaN(result.wavetrend[i])) {
@@ -82,7 +82,7 @@ test('MOD_GOD_MODE basic test', () => {
 });
 
 test('MOD_GOD_MODE accuracy (matches Rust refs, tol<=4.0)', () => {
-    // Use the same CSV-backed dataset as Rust tests
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
@@ -90,18 +90,18 @@ test('MOD_GOD_MODE accuracy (matches Rust refs, tol<=4.0)', () => {
 
     const result = wasm.mod_god_mode(
         high, low, close, volume,
-        17, // n1
-        6,  // n2
-        4,  // n3
+        17, 
+        6,  
+        4,  
         'tradition_mg',
-        true // use_volume
+        true 
     );
 
     const wt = Array.from(result.wavetrend);
     const nonNan = wt.filter(v => !isNaN(v));
     assert(nonNan.length >= 5, 'Not enough non-NaN values for accuracy check');
 
-    // Reference last 5 wavetrend values from Rust test (PineScript)
+    
     const expectedLastFive = [
         61.66219598,
         55.92955776,

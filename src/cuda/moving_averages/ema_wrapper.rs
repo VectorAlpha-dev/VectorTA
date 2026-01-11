@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-// remove duplicate import
+
 
 #[derive(Debug, Error)]
 pub enum CudaEmaError {
@@ -45,9 +45,9 @@ pub enum CudaEmaError {
     NotImplemented,
 }
 
-// `thiserror::Error` derive already provides `std::error::Error` impl.
 
-// -------- Kernel selection policy (explicit for tests; Auto for production) --------
+
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -105,7 +105,7 @@ pub struct CudaEma {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Device-derived limits & features
+    
     max_grid_x: usize,
     warp_size: u32,
     max_threads_per_block: u32,
@@ -136,7 +136,7 @@ impl CudaEma {
         let ctx = Arc::new(context);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
-        // Match ALMA: prefer DetermineTargetFromContext + O2; fall back to simpler modes.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -152,13 +152,13 @@ impl CudaEma {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Device attributes for sane defaults & launch sizing
+        
         let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
         let warp_size = device.get_attribute(cust::device::DeviceAttribute::WarpSize)? as u32;
         let max_threads_per_block =
             device.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
 
-        // Detect presence of coalesced kernel symbol in PTX
+        
         let has_coalesced_ms = module
             .get_function("ema_many_series_one_param_f32_coalesced")
             .is_ok();
@@ -206,7 +206,7 @@ impl CudaEma {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM estimate and async H2D copy (fixed alphas sizing)
+        
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -229,11 +229,11 @@ impl CudaEma {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaEmaError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
-        // Make small param copies async as well to avoid host stalls
+        
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)? };
         let d_alphas = unsafe { DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
@@ -249,7 +249,7 @@ impl CudaEma {
             &mut d_out,
         )?;
 
-        // Ensure completion for VRAM handle consistency
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -337,7 +337,7 @@ impl CudaEma {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate and async H2D copy
+        
         let prices_bytes = num_series
             .checked_mul(series_len)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -355,7 +355,7 @@ impl CudaEma {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaEmaError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
@@ -373,7 +373,7 @@ impl CudaEma {
             &mut d_out,
         )?;
 
-        // Ensure completion for VRAM handle consistency.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -469,7 +469,7 @@ impl CudaEma {
             .get_function("ema_batch_f32")
             .map_err(|_| CudaEmaError::MissingKernelSymbol { name: "ema_batch_f32" })?;
 
-        // Policy/env block size selection
+        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => env::var("EMA_BLOCK_X")
@@ -491,14 +491,14 @@ impl CudaEma {
             });
         }
 
-        // Introspection (once per scenario when BENCH_DEBUG=1)
+        
         unsafe {
             (*(self as *const _ as *mut CudaEma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Grid limit guard: chunk by device max grid.x
+        
         let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
         for (start, len) in Self::grid_chunks(n_combos, cap) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -546,13 +546,13 @@ impl CudaEma {
             return Ok(());
         }
 
-        // Resolve kernel function (standard one-block-per-series variant)
+        
         let func = self
             .module
             .get_function("ema_many_series_one_param_f32")
             .map_err(|_| CudaEmaError::MissingKernelSymbol { name: "ema_many_series_one_param_f32" })?;
 
-        // Decide block size from policy/env, then normalize to warp multiple and cap
+        
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => env::var("EMA_MS_BLOCK_X")
@@ -574,7 +574,7 @@ impl CudaEma {
             });
         }
 
-        // Introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaEma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -703,7 +703,7 @@ impl CudaEma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -880,7 +880,7 @@ fn expand_grid(range: &EmaBatchRange) -> Result<Vec<EmaParams>, CudaEmaError> {
     Ok(vals.into_iter().map(|p| EmaParams { period: Some(p) }).collect())
 }
 
-// ---------- Utilities (VRAM + debug) ----------
+
 
 impl CudaEma {
     #[inline]

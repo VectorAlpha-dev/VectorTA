@@ -275,7 +275,7 @@ pub fn stochf_into(
     out_d: &mut [f64],
     
 ) -> Result<(), StochfError> {
-    // Resolve input slices
+    
     let (high, low, close) = match &input.data {
         StochfData::Candles { candles } => {
             let high = candles
@@ -318,7 +318,7 @@ pub fn stochf_into(
         });
     }
 
-    // First valid non-NaN tuple
+    
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(StochfError::AllValuesNaN)?;
@@ -329,7 +329,7 @@ pub fn stochf_into(
         });
     }
 
-    // Prefill NaN warmups to match Vec API semantics
+    
     let k_warm = first + fastk - 1;
     let d_warm = first + fastk + fastd - 2;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -340,7 +340,7 @@ pub fn stochf_into(
         *v = qnan;
     }
 
-    // Dispatch into the existing compute-into path using Kernel::Auto
+    
     stochf_into_slice(out_k, out_d, input, Kernel::Auto)
 }
 
@@ -403,8 +403,8 @@ pub fn stochf_into_slice(
         });
     }
 
-    // SIMD underperforms for this indicator due to deque-based algorithm.
-    // Short-circuit Auto to Scalar to avoid slower SIMD selection.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -451,7 +451,7 @@ pub fn stochf_into_slice(
         }
     }
 
-    // Apply NaN masking after computation
+    
     let k_warmup = (first_valid_idx + fastk_period - 1).min(len);
     let d_warmup = (first_valid_idx + fastk_period + fastd_period - 2).min(len);
     for v in &mut dst_k[..k_warmup] {
@@ -518,7 +518,7 @@ pub fn stochf_with_kernel(
     let mut k_vals = alloc_with_nan_prefix(len, k_warmup.min(len));
     let mut d_vals = alloc_with_nan_prefix(len, d_warmup.min(len));
 
-    // SIMD underperforms due to deque-dominant algorithm; prefer Scalar by default
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -599,7 +599,7 @@ pub unsafe fn stochf_scalar(
 
     let k_start = first_valid_idx + fastk_period - 1;
 
-    // Small windows: direct scan with unrolling; compute %D (SMA) in the same pass
+    
     if fastk_period <= 16 {
         let use_sma_d = matype == 0;
         let mut d_sum: f64 = 0.0;
@@ -706,7 +706,7 @@ pub unsafe fn stochf_scalar(
         return;
     }
 
-    // General path: ring-indexed monotonic deques without modulo in hot path; loop-jammed %D (SMA)
+    
     let cap = fastk_period;
     let mut qh = vec![0usize; cap];
     let mut ql = vec![0usize; cap];
@@ -845,7 +845,7 @@ pub unsafe fn stochf_avx2(
     k_vals: &mut [f64],
     d_vals: &mut [f64],
 ) {
-    // For small windows, use AVX2-accelerated min/max reduction; otherwise fall back to scalar (deque).
+    
     if fastk_period <= 32 {
         let len = high.len();
         let start_i = first_valid_idx + fastk_period - 1;
@@ -877,7 +877,7 @@ pub unsafe fn stochf_avx2(
                 j += 4;
             }
 
-            // Horizontal reduce
+            
             let vmax_lo = _mm256_castpd256_pd128(vmax);
             let vmax_hi = _mm256_extractf128_pd(vmax, 1);
             let vmax_128 = _mm_max_pd(vmax_lo, vmax_hi);
@@ -902,7 +902,7 @@ pub unsafe fn stochf_avx2(
                 j += 1;
             }
 
-            // %K
+            
             let c = *close.get_unchecked(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
@@ -917,7 +917,7 @@ pub unsafe fn stochf_avx2(
             };
             *k_vals.get_unchecked_mut(i) = kv;
 
-            // %D (SMA) loop-jammed
+            
             if use_sma_d {
                 if kv.is_nan() {
                     *d_vals.get_unchecked_mut(i) = f64::NAN;
@@ -1050,38 +1050,38 @@ pub unsafe fn stochf_avx512_long(
 /// matches offline scalar numerics post-warmup.
 #[derive(Debug, Clone)]
 pub struct StochfStream {
-    // params
+    
     fastk_period: usize,
     fastd_period: usize,
     fastd_matype: usize,
 
-    // --- Monotonic deques for %K ---
-    // Max-deque (for highest high)
+    
+    
     qh_idx: Vec<usize>,
     qh_val: Vec<f64>,
     qh_head: usize,
     qh_tail: usize,
 
-    // Min-deque (for lowest low)
+    
     ql_idx: Vec<usize>,
     ql_val: Vec<f64>,
     ql_head: usize,
     ql_tail: usize,
 
-    // Ring capacity for the deques. Use fastk_period + 1 to distinguish
-    // empty vs full states in a head/tail ring without tracking length.
-    // This avoids the head==tail ambiguity that previously caused the
-    // first valid %K to be treated as empty (yielding NaN).
+    
+    
+    
+    
     cap_k: usize,
 
-    // Full-state flags to disambiguate head==tail (empty vs full)
+    
     qh_full: bool,
     ql_full: bool,
 
-    // tick counter
+    
     t: usize,
 
-    // --- Ring + running sum for %D (SMA of K) ---
+    
     k_ring: Vec<f64>,
     k_head: usize,
     k_count: usize,
@@ -1102,8 +1102,8 @@ impl StochfStream {
             });
         }
 
-        // Preallocate fixed-size deques and %D ring
-        // Use fastk_period + 1 ring capacity to disambiguate empty/full.
+        
+        
         let cap_k = fastk_period + 1;
 
         Ok(Self {
@@ -1157,7 +1157,7 @@ impl StochfStream {
             && self.qh_idx[self.qh_head] < win_start
         {
             Self::inc(&mut self.qh_head, self.cap_k);
-            // Once we move head forward, the deque cannot be full
+            
             self.qh_full = false;
         }
     }
@@ -1173,13 +1173,13 @@ impl StochfStream {
 
     #[inline(always)]
     fn qh_push(&mut self, idx: usize, val: f64) {
-        // Pop <= from back (maintain decreasing values)
+        
         while self.qh_head != self.qh_tail || self.qh_full {
             let mut back = self.qh_tail;
             Self::dec(&mut back, self.cap_k);
             if self.qh_val[back] <= val {
                 self.qh_tail = back;
-                // Removing from back means it's no longer full
+                
                 self.qh_full = false;
             } else {
                 break;
@@ -1188,7 +1188,7 @@ impl StochfStream {
         self.qh_idx[self.qh_tail] = idx;
         self.qh_val[self.qh_tail] = val;
         Self::inc(&mut self.qh_tail, self.cap_k);
-        // If tail wrapped to head, mark full
+        
         if self.qh_tail == self.qh_head {
             self.qh_full = true;
         }
@@ -1196,7 +1196,7 @@ impl StochfStream {
 
     #[inline(always)]
     fn ql_push(&mut self, idx: usize, val: f64) {
-        // Pop >= from back (maintain increasing values)
+        
         while self.ql_head != self.ql_tail || self.ql_full {
             let mut back = self.ql_tail;
             Self::dec(&mut back, self.cap_k);
@@ -1218,10 +1218,10 @@ impl StochfStream {
     /// O(1) amortized per tick for both %K and %D (SMA).
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
         let i = self.t;
-        // advance tick (wrapping avoids debug overflow panics on very long streams)
+        
         self.t = self.t.wrapping_add(1);
 
-        // Push current high/low into deques (ignore NaNs like offline deque path)
+        
         if high == high {
             self.qh_push(i, high);
         }
@@ -1229,18 +1229,18 @@ impl StochfStream {
             self.ql_push(i, low);
         }
 
-        // Expire elements that fell out of the window
+        
         let have_k_window = (i + 1) >= self.fastk_period;
         if have_k_window {
             let win_start = i + 1 - self.fastk_period;
             self.qh_expire(win_start);
             self.ql_expire(win_start);
         } else {
-            // Not enough samples for %K yet
+            
             return None;
         }
 
-        // Fetch HH/LL from deque fronts; if empty, behave like offline code (-INF/INF)
+        
         let hh = if self.qh_head != self.qh_tail || self.qh_full {
             self.qh_val[self.qh_head]
         } else {
@@ -1252,9 +1252,9 @@ impl StochfStream {
             f64::INFINITY
         };
 
-        // (No debug printing; keep stream hot path clean.)
+        
 
-        // %K
+        
         let denom = hh - ll;
         let k = if denom == 0.0 {
             if close == hh {
@@ -1263,16 +1263,16 @@ impl StochfStream {
                 0.0
             }
         } else {
-            // Use FMA like the offline kernels for accuracy/perf where FMA exists.
+            
             let scale = 100.0 / denom;
             close.mul_add(scale, (-ll) * scale)
         };
 
-        // %D (SMA of K) — O(1) running-sum update.
+        
         let d = if self.fastd_matype != 0 {
-            f64::NAN // only SMA supported (matype=0), match offline semantics
+            f64::NAN 
         } else if self.k_count < self.fastd_period {
-            // still filling the ring
+            
             self.k_ring[self.k_head] = k;
             self.d_sma_sum += k;
             self.k_count += 1;
@@ -1284,7 +1284,7 @@ impl StochfStream {
                 f64::NAN
             }
         } else {
-            // normal running window: subtract oldest, add newest
+            
             let old = self.k_ring[self.k_head];
             self.k_ring[self.k_head] = k;
             StochfStream::inc(&mut self.k_head, self.fastd_period);
@@ -1448,7 +1448,7 @@ fn expand_grid(r: &StochfBatchRange) -> Vec<StochfParams> {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -1535,7 +1535,7 @@ pub fn stochf_batch_inner_into(
     let rows = combos.len();
     let cols = high.len();
 
-    // Ensure output slices are correct size
+    
     let expected_size = rows
         .checked_mul(cols)
         .ok_or(StochfError::InvalidRange {
@@ -1551,19 +1551,19 @@ pub fn stochf_batch_inner_into(
         });
     }
 
-    // Initialize NaN prefixes for each row based on warmup period including first
+    
     for (row, combo) in combos.iter().enumerate() {
         let k_warmup = (first + combo.fastk_period.unwrap() - 1).min(cols);
         let d_warmup =
             (first + combo.fastk_period.unwrap() + combo.fastd_period.unwrap() - 2).min(cols);
         let row_start = row * cols;
 
-        // Initialize K warmup period with NaN
+        
         for i in 0..k_warmup {
             k_out[row_start + i] = f64::NAN;
         }
 
-        // Initialize D warmup period with NaN
+        
         for i in 0..d_warmup {
             d_out[row_start + i] = f64::NAN;
         }
@@ -1680,7 +1680,7 @@ fn stochf_batch_inner(
     let rows = combos.len();
     let cols = high.len();
 
-    // Guard rows * cols overflow before allocation
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(StochfError::InvalidRange {
@@ -1689,11 +1689,11 @@ fn stochf_batch_inner(
             step: sweep.fastk_period.2,
         })?;
 
-    // Use uninitialized memory operations like ALMA
+    
     let mut k_buf = make_uninit_matrix(rows, cols);
     let mut d_buf = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination including first valid index
+    
     let k_warmups: Vec<usize> = combos
         .iter()
         .map(|c| (first + c.fastk_period.unwrap() - 1).min(cols))
@@ -1703,11 +1703,11 @@ fn stochf_batch_inner(
         .map(|c| (first + c.fastk_period.unwrap() + c.fastd_period.unwrap() - 2).min(cols))
         .collect();
 
-    // Initialize matrix prefixes with NaN
+    
     init_matrix_prefixes(&mut k_buf, cols, &k_warmups);
     init_matrix_prefixes(&mut d_buf, cols, &d_warmups);
 
-    // Convert to mutable slices
+    
     let k_buf_len = k_buf.len();
     let d_buf_len = d_buf.len();
     let k_buf_cap = k_buf.capacity();
@@ -1792,7 +1792,7 @@ fn stochf_batch_inner(
         }
     }
 
-    // Reconstruct vectors from raw pointers
+    
     let k_vec = unsafe { Vec::from_raw_parts(k_ptr as *mut f64, k_buf_len, k_buf_cap) };
     let d_vec = unsafe { Vec::from_raw_parts(d_ptr as *mut f64, d_buf_len, d_buf_cap) };
 
@@ -1931,7 +1931,7 @@ unsafe fn stochf_row_scalar(
         return;
     }
 
-    // General path: ring-indexed monotonic deques without modulo in hot path; loop-jammed %D (SMA)
+    
     let cap = fastk_period;
     let mut qh = vec![0usize; cap];
     let mut ql = vec![0usize; cap];

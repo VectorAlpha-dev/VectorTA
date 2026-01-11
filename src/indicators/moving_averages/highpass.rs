@@ -42,7 +42,7 @@ use crate::cuda::cuda_available;
 use crate::cuda::moving_averages::CudaHighpass;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::highpass_wrapper::DeviceArrayF32Highpass;
-// For highpass CUDA Python returns, provide a local PyClass with CAI v3 + DLPack
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1465,7 +1465,7 @@ mod tests {
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1474,7 +1474,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1483,7 +1483,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1497,7 +1497,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_highpass_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1565,7 +1565,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1573,22 +1573,22 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
+        
         let batch_configs = vec![
-            // Original test case
+            
             (10, 30, 10),
-            // Edge cases
-            (48, 48, 0),    // Single parameter (default)
-            (3, 15, 3),     // Small periods
-            (50, 100, 25),  // Large periods
-            (5, 25, 5),     // Different step
-            (20, 80, 20),   // Medium to large
-            (7, 21, 7),     // Different small range
-            (100, 120, 10), // Very large periods
+            
+            (48, 48, 0),    
+            (3, 15, 3),     
+            (50, 100, 25),  
+            (5, 25, 5),     
+            (20, 80, 20),   
+            (7, 21, 7),     
+            (100, 120, 10), 
         ];
 
         for (p_start, p_end, p_step) in batch_configs {
-            // Skip any period that would be exactly 4 (causes InvalidAlpha)
+            
             let periods: Vec<usize> = if p_step == 0 || p_start == p_end {
                 vec![p_start]
             } else {
@@ -1598,7 +1598,7 @@ mod tests {
                     .collect()
             };
 
-            // If all periods would be 4, skip this config
+            
             if periods.is_empty() || (periods.len() == 1 && periods[0] == 4) {
                 continue;
             }
@@ -1608,9 +1608,9 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1620,7 +1620,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -1629,7 +1629,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -1638,7 +1638,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -1652,7 +1652,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1685,7 +1685,7 @@ fn highpass_batch_inner_into(
     }
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-    // Validate alpha for all parameter combinations
+    
     for c in &combos {
         let period = c.period.unwrap();
         let k = 1.0;
@@ -1698,30 +1698,30 @@ fn highpass_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Reinterpret output slice as MaybeUninit for row processing
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-    // No NaN initialization needed - highpass writes all values
+    
 
-    // Precompute Δx once per series: dx[0]=0, dx[i]=x[i]-x[i-1]
+    
     let mut dx: Vec<f64> = Vec::with_capacity(cols);
     if cols > 0 {
-        dx.push(data[0]); // store x0 in slot 0 for convenience; we'll treat dx[0] as x0
+        dx.push(data[0]); 
         for i in 1..cols {
             dx.push(data[i] - data[i - 1]);
         }
     }
 
-    // ---------- worker that fills one row ----------
+    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Re-interpret this row as &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        // Compute coefficients as in streaming path
+        
         let theta = 2.0 * std::f64::consts::PI / period as f64;
         let sin_t = theta.sin();
         let cos_t = theta.cos();
@@ -1729,14 +1729,14 @@ fn highpass_batch_inner_into(
         let c = 1.0 - 0.5 * alpha;
         let oma = 1.0 - alpha;
 
-        // y[0] = x0
+        
         let mut y_prev = dx[0];
         out_row[0] = y_prev;
 
-        // Process i=1..n-1 using shared Δx
+        
         let mut i = 1usize;
         let n = cols;
-        // 8× unrolled loop
+        
         while i + 7 < n {
             let d1 = dx[i];
             let y1 = oma.mul_add(y_prev, c * d1);
@@ -1814,7 +1814,7 @@ fn highpass_batch_inner_into(
     Ok(combos)
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass")]
 #[pyo3(signature = (data, period=48, kernel=None))]
@@ -1834,12 +1834,12 @@ pub fn highpass_py<'py>(
     };
     let hp_input = HighPassInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| highpass_with_kernel(&hp_input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1858,7 +1858,7 @@ pub fn highpass_batch_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
 
-    // Validate input like the Rust path does
+    
     if slice_in.is_empty() {
         return Err(PyValueError::new_err(
             "highpass: Input data slice is empty.",
@@ -1885,7 +1885,7 @@ pub fn highpass_batch_py<'py>(
 	    let combos = py
 	        .allow_threads(|| {
 	            let kernel = match kern {
-	                // Keep batch Auto consistent with the Rust API: SIMD underperforms for this IIR.
+	                
 	                Kernel::Auto => Kernel::ScalarBatch,
 	                k => k,
 	            };
@@ -1995,7 +1995,7 @@ impl HighPassStreamPy {
     }
 }
 
-// ================== WASM Helper Functions ==================
+
 
 /// Helper function to write directly to output slice - no allocations
 #[inline]
@@ -2004,7 +2004,7 @@ pub fn highpass_into_slice(
     input: &HighPassInput,
     kern: Kernel,
 ) -> Result<(), HighPassError> {
-    // Validate input
+    
     let data = input.as_ref();
 
     if data.is_empty() {
@@ -2018,12 +2018,12 @@ pub fn highpass_into_slice(
         });
     }
 
-    // Use the existing _into function
-    // Note: highpass doesn't have a traditional warmup period - it starts computing from index 0
+    
+    
     highpass_with_kernel_into(input, kern, dst)
 }
 
-// ================== WASM Bindings ==================
+
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
@@ -2036,32 +2036,32 @@ pub fn highpass_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = HighPassInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     highpass_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2077,38 +2077,38 @@ pub fn highpass_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Create input
+        
         let params = HighPassParams {
             period: Some(period),
         };
         let input = HighPassInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
+        
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during computation
+            
             let mut temp = vec![0.0; len];
             highpass_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             highpass_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2118,7 +2118,7 @@ pub fn highpass_into(
     }
 }
 
-// ================== Batch Processing ==================
+
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
@@ -2159,7 +2159,7 @@ pub fn highpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Keep old batch API for compatibility
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_batch_js(
@@ -2177,7 +2177,7 @@ pub fn highpass_batch_js(
     }
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
@@ -2208,7 +2208,7 @@ pub fn highpass_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Resolve Auto kernel before calling inner_into
+        
         let kernel = detect_best_kernel();
         highpass_batch_inner_into(data, &sweep, kernel, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -154,7 +154,7 @@ impl CudaVwmacd {
         Ok(())
     }
 
-    // ------------- Batch (one series × many params) -------------
+    
     pub fn vwmacd_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -167,7 +167,7 @@ impl CudaVwmacd {
                 "mismatched or empty inputs".into(),
             ));
         }
-        // Support only default MA types for device kernels
+        
         if !sweep.fast_ma_type.eq_ignore_ascii_case("sma")
             || !sweep.slow_ma_type.eq_ignore_ascii_case("sma")
             || !sweep.signal_ma_type.eq_ignore_ascii_case("ema")
@@ -197,11 +197,11 @@ impl CudaVwmacd {
             ));
         }
 
-        // Prefix sums (f64) matching VWMA wrapper semantics
+        
         let (pv_prefix, vol_prefix) =
             compute_prefix_sums(prices_f32, volumes_f32, first_valid, len);
 
-        // Compact params (i32)
+        
         let rows = combos.len();
         let fasts: Vec<i32> = combos
             .iter()
@@ -216,7 +216,7 @@ impl CudaVwmacd {
             .map(|c| c.signal_period.unwrap() as i32)
             .collect();
 
-        // VRAM check (prefixes + params + outputs)
+        
         let f64_sz = std::mem::size_of::<f64>();
         let f32_sz = std::mem::size_of::<f32>();
         let i32_sz = std::mem::size_of::<i32>();
@@ -246,7 +246,7 @@ impl CudaVwmacd {
             .ok_or_else(|| CudaVwmacdError::InvalidInput("size overflow".into()))?;
         CudaVwmacd::will_fit(bytes, 64 * 1024 * 1024)?;
 
-        // Stage to device (pinned + async for large spans)
+        
         let h_pv = LockedBuffer::from_slice(&pv_prefix)?;
         let h_vol = LockedBuffer::from_slice(&vol_prefix)?;
         let d_pv: DeviceBuffer<f64> =
@@ -299,7 +299,7 @@ impl CudaVwmacd {
         Ok((triplet, combos))
     }
 
-    // ------------- Many-series × one-param (time-major) -------------
+    
     pub fn vwmacd_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -344,7 +344,7 @@ impl CudaVwmacd {
         }
 
         let first_valids = first_valids_time_major_f32(prices_tm_f32, volumes_tm_f32, cols, rows);
-        // Quick check: at least one column has enough valid data
+        
         let mut ok = false;
         for &fv in &first_valids {
             if (rows as i32 - fv) as usize > f.max(s) {
@@ -366,7 +366,7 @@ impl CudaVwmacd {
             &first_valids,
         );
 
-        // VRAM check
+        
         let f64_sz = std::mem::size_of::<f64>();
         let f32_sz = std::mem::size_of::<f32>();
         let i32_sz = std::mem::size_of::<i32>();
@@ -441,7 +441,7 @@ impl CudaVwmacd {
         })
     }
 
-    // ---------- kernel launches ----------
+    
     #[allow(clippy::too_many_arguments)]
     fn launch_batch(
         &self,
@@ -561,7 +561,7 @@ impl CudaVwmacd {
     }
 }
 
-// ---------- Helpers (host) ----------
+
 
 fn first_valid_pair_f32(close: &[f32], volume: &[f32]) -> Option<usize> {
     close
@@ -727,19 +727,19 @@ fn expand_grid(r: &VwmacdBatchRange) -> Result<Vec<VwmacdParams>, CudaVwmacdErro
     Ok(out)
 }
 
-// ---------- Minimal benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_00; // 100k
+    const ONE_SERIES_LEN: usize = 1_000_00; 
     const SWEEP: (usize, usize, usize) = (8, 8 + 128 - 1, 1);
     const MANY_SERIES_COLS: usize = 128;
     const MANY_SERIES_LEN: usize = 100_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let rows = (SWEEP.1 - SWEEP.0 + 1) as usize * (SWEEP.1 - SWEEP.0 + 1) as usize; // worst approx
+        let rows = (SWEEP.1 - SWEEP.0 + 1) as usize * (SWEEP.1 - SWEEP.0 + 1) as usize; 
         let in_b = 2 * ONE_SERIES_LEN * 4;
         let out_b = 3 * rows * ONE_SERIES_LEN * 4;
         in_b + out_b + 64 * 1024 * 1024

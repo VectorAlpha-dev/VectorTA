@@ -20,8 +20,8 @@
 //! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
 //! - **Decision note**: Scalar kernel optimized to O(1) per bar using a closed-form minimizer on the discrete gain grid; SIMD remains stubbed due to strict loop-carried dependency across time.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -38,9 +38,9 @@ use crate::cuda::moving_averages::CudaEhlersEcema;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 
-// ==================== PYTHON CUDA HANDLE (CAI v3 + DLPack) ====================
-// For CUDA-enabled Python builds, provide an indicator-specific VRAM handle that
-// keeps the CUDA context alive and exposes both CAI v3 and DLPack interop.
+
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 mod ecema_python_cuda_handle {
     use super::*;
@@ -54,7 +54,7 @@ mod ecema_python_cuda_handle {
 
     #[pyclass(module = "ta_indicators.cuda", unsendable, name = "DeviceArrayF32Py")]
     pub struct DeviceArrayF32Py {
-        pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+        pub(crate) buf: Option<DeviceBuffer<f32>>, 
         pub(crate) rows: usize,
         pub(crate) cols: usize,
         pub(crate) _ctx: Arc<Context>,
@@ -415,7 +415,7 @@ pub enum EhlersEcemaError {
     SizeOverflow { what: &'static str },
 }
 
-// ==================== PINE-STYLE EMA CALCULATION ====================
+
 /// Calculate Pine EMA in-place (no extra Vec)
 #[inline]
 fn calculate_pine_ema_into(
@@ -433,7 +433,7 @@ fn calculate_pine_ema_into(
     if first >= len {
         return;
     }
-    let mut ema = 0.0; // zero-seeded
+    let mut ema = 0.0; 
     for i in first..len {
         let src = data[i];
         if src.is_finite() {
@@ -445,7 +445,7 @@ fn calculate_pine_ema_into(
     }
 }
 
-// ==================== MAIN ALGORITHM ====================
+
 #[inline]
 pub fn ehlers_ecema(input: &EhlersEcemaInput) -> Result<EhlersEcemaOutput, EhlersEcemaError> {
     ehlers_ecema_with_kernel(input, Kernel::Auto)
@@ -1975,7 +1975,7 @@ mod tests {
             58978.72640292,
         ];
 
-        // Check last 5 values
+        
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -1989,7 +1989,7 @@ mod tests {
             );
         }
 
-        // In Pine mode, values should start from the beginning (no warmup)
+        
         assert!(
             result.values[0].is_finite(),
             "[{}] Pine mode should have valid value at index 0",
@@ -2104,7 +2104,7 @@ mod tests {
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let params = EhlersEcemaParams {
             length: Some(2),
-            gain_limit: Some(0), // Invalid gain limit
+            gain_limit: Some(0), 
             pine_compatible: Some(false),
             confirmed_only: Some(false),
         };
@@ -2123,7 +2123,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Use smaller period for reinput test to match Python/WASM tests
+        
         let first_params = EhlersEcemaParams {
             length: Some(10),
             gain_limit: Some(30),
@@ -2144,7 +2144,7 @@ mod tests {
 
         assert_eq!(second_result.values.len(), first_result.values.len());
 
-        // Expected values from real CSV data
+        
         let expected_last_five = [
             59324.20351585,
             59282.79818999,
@@ -2153,7 +2153,7 @@ mod tests {
             59025.67038012,
         ];
 
-        // Check last 5 values
+        
         let start = second_result.values.len().saturating_sub(5);
         for (i, &val) in second_result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -2167,11 +2167,11 @@ mod tests {
             );
         }
 
-        // Verify that we get valid values after double processing
+        
         let valid_count = second_result
             .values
             .iter()
-            .skip(20) // Skip warmup periods from both passes (10-1 + 10-1 = 18, use 20 for safety)
+            .skip(20) 
             .filter(|x| x.is_finite())
             .count();
         assert!(
@@ -2204,7 +2204,7 @@ mod tests {
         let res = ehlers_ecema_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
 
-        // After warmup, values should not be NaN
+        
         if res.values.len() > 40 {
             for (i, &val) in res.values[40..].iter().enumerate() {
                 assert!(
@@ -2253,10 +2253,10 @@ mod tests {
 
         assert_eq!(batch_output.len(), stream_values.len());
 
-        // Compare after warmup period
+        
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if i < length - 1 {
-                // During warmup, both should be NaN
+                
                 assert!(
                     b.is_nan() || s.is_nan(),
                     "[{}] Expected NaN during warmup at {}: batch={}, stream={}",
@@ -2266,11 +2266,11 @@ mod tests {
                     s
                 );
             } else if i >= length && b.is_finite() && s.is_finite() {
-                // After warmup, values should be close (allow more tolerance for adaptive algorithm)
+                
                 let diff = (b - s).abs();
                 let relative_diff = diff / b.abs().max(1.0);
                 assert!(
-                    relative_diff < 0.001, // 0.1% relative tolerance
+                    relative_diff < 0.001, 
                     "[{}] Streaming mismatch at idx {}: batch={}, stream={}, diff={}, rel_diff={}",
                     test_name,
                     i,
@@ -2385,7 +2385,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (5usize..=100) // length range
+        let strat = (5usize..=100) 
             .prop_flat_map(|length| {
                 (
                     prop::collection::vec(
@@ -2393,7 +2393,7 @@ mod tests {
                         length..400,
                     ),
                     Just(length),
-                    10usize..=100, // gain_limit range
+                    10usize..=100, 
                 )
             });
 
@@ -2413,7 +2413,7 @@ mod tests {
                 let EhlersEcemaOutput { values: ref_out } =
                     ehlers_ecema_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Check output length matches input
+                
                 assert_eq!(
                     out.len(),
                     data.len(),
@@ -2427,10 +2427,10 @@ mod tests {
                     test_name
                 );
 
-                // Check values after warmup period match between kernels
+                
                 for i in (length - 1)..data.len() {
                     if out[i].is_finite() && ref_out[i].is_finite() {
-                        // Allow small numerical differences between kernels
+                        
                         let diff = (out[i] - ref_out[i]).abs();
                         let relative_diff = diff / ref_out[i].abs().max(1.0);
                         assert!(
@@ -2445,7 +2445,7 @@ mod tests {
                     }
                 }
 
-                // Check warmup period has NaN values
+                
                 for i in 0..(length - 1) {
                     assert!(
                         out[i].is_nan(),
@@ -2462,7 +2462,7 @@ mod tests {
         Ok(())
     }
 
-    // ==================== TEST GENERATION MACROS ====================
+    
     macro_rules! generate_all_ehlers_ecema_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2494,7 +2494,7 @@ mod tests {
         }
     }
 
-    // Generate all test variants
+    
     generate_all_ehlers_ecema_tests!(
         check_ehlers_ecema_partial_params,
         check_ehlers_ecema_accuracy,
@@ -2514,7 +2514,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_ehlers_ecema_tests!(check_ehlers_ecema_property);
 
-    // ==================== BATCH PROCESSING TESTS ====================
+    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2530,7 +2530,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Verify we get valid values after warmup
+        
         let valid_count = row.iter().skip(40).filter(|x| x.is_finite()).count();
         assert!(valid_count > 0, "[{}] No valid values in default row", test);
 
@@ -2549,7 +2549,7 @@ mod tests {
             .gain_limit_range(30, 70, 10)
             .apply_candles(&c, "close")?;
 
-        let expected_combos = 5 * 5; // 5 lengths * 5 gain limits
+        let expected_combos = 5 * 5; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -2674,10 +2674,10 @@ mod tests {
 
     #[test]
     fn test_ehlers_ecema_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input (with NaN warmup and varying values)
+        
         let len = 256usize;
         let mut data = vec![0.0f64; len];
-        // introduce a few NaNs at the start to exercise warmup handling
+        
         for i in 0..3 { data[i] = f64::NAN; }
         for i in 3..len {
             let x = i as f64;
@@ -2687,25 +2687,25 @@ mod tests {
         let params = EhlersEcemaParams::default();
         let input = EhlersEcemaInput::from_slice(&data, params);
 
-        // Baseline via allocating API
+        
         let baseline = ehlers_ecema(&input)?.values;
 
-        // Preallocate output and compute via into API
+        
         let mut out = vec![0.0f64; len];
-        // Note: native into is cfg(not(wasm)); for wasm builds this test is skipped
+        
         #[cfg(not(feature = "wasm"))]
         {
             ehlers_ecema_into(&input, &mut out)?;
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, fall back to into_slice with Auto to keep parity
+            
             ehlers_ecema_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: NaN == NaN, else exact or tight epsilon
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }

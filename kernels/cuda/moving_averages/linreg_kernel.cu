@@ -1,54 +1,54 @@
-// CUDA kernels for the Linear Regression (LINREG) indicator.
-// Optimized for Ada+ (e.g., RTX 4090, sm_89) while preserving accuracy.
-// - Grid-stride loops for scalability
-// - Prefix-NaN only (avoid full-buffer clears in the common, valid-parameter path)
-// - Double-precision accumulators with fused multiply-add (fma)
-// - Fast path for period == 1
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
-#include <math_functions.h>  // for fma on device
+#include <math_functions.h>  
 
 #ifndef LINREG_NAN
 #define LINREG_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// Optional: help the compiler target a reasonable register/occupancy tradeoff on wide GPUs.
-// You can tune the second value (min blocks/SM) for your kernels/workload mix.
-// See "Launch Bounds" in the Programming Guide.
+
+
+
 #ifndef LINREG_LAUNCH_BOUNDS
 #define LINREG_LAUNCH_BOUNDS 256, 2
 #endif
 
-// ----------------------------------------------------------------------------
-// Prefix helpers for batch LINREG
-//
-// The legacy batch kernel runs 1 thread per combo, scanning the whole series.
-// That severely underutilizes the GPU when n_combos is small (e.g., 250) and
-// makes the kernel dominated by sequential DP math.
-//
-// Here we compute two FP64 exclusive prefixes once per input series:
-//   prefix_y[t+1]  = Σ_{i<=t} y_i
-//   prefix_yi[t+1] = Σ_{i<=t} (y_i * i)  (i is 0-based absolute index)
-//
-// For a window ending at time t with length n (x = 1..n), we can compute:
-//   sum_y  = Σ y_i
-//   sum_yi = Σ (y_i * i)
-//   xy_sum = Σ (y_i * x_i) = sum_yi + (n - t) * sum_y
-//
-// This lets us compute each output independently with a 2D launch:
-//   grid.y = combos, grid.x tiles time.
-// ----------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
     const float* __restrict__ prices,
     int series_len,
     int first_valid,
-    double* __restrict__ prefix_y,   // length = series_len + 1
-    double* __restrict__ prefix_yi   // length = series_len + 1
+    double* __restrict__ prefix_y,   
+    double* __restrict__ prefix_yi   
 ) {
     if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0) return;
     if (series_len <= 0) return;
@@ -73,16 +73,16 @@ extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
 extern "C" __global__
 __launch_bounds__(LINREG_LAUNCH_BOUNDS)
 void linreg_batch_from_prefix_f64(
-    const double* __restrict__ prefix_y,  // length = series_len + 1
-    const double* __restrict__ prefix_yi, // length = series_len + 1
-    const int*   __restrict__ periods,    // [n_combos]
-    const float* __restrict__ x_sums,     // [n_combos]
-    const float* __restrict__ denom_invs, // [n_combos]
-    const float* __restrict__ inv_periods,// [n_combos]
+    const double* __restrict__ prefix_y,  
+    const double* __restrict__ prefix_yi, 
+    const int*   __restrict__ periods,    
+    const float* __restrict__ x_sums,     
+    const float* __restrict__ denom_invs, 
+    const float* __restrict__ inv_periods,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out               // [n_combos * series_len]
+    float* __restrict__ out               
 ) {
     const int combo = static_cast<int>(blockIdx.y);
     if (combo >= n_combos) return;
@@ -113,7 +113,7 @@ void linreg_batch_from_prefix_f64(
 
     const int warm = first_valid + period - 1;
 
-    // period == 1: output is the input itself from first_valid forward.
+    
     if (period == 1) {
         while (t < series_len) {
             if (t < warm) {
@@ -150,7 +150,7 @@ void linreg_batch_from_prefix_f64(
     }
 }
 
-// -------------------------- Batch kernel (many parameter combos over one series) --------------------------
+
 
 extern "C" __global__
 __launch_bounds__(LINREG_LAUNCH_BOUNDS)
@@ -173,7 +173,7 @@ void linreg_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        // Parameter guards. For invalid cases we keep existing behavior: fill all rows with NaN.
+        
         if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = LINREG_NAN;
             continue;
@@ -191,37 +191,37 @@ void linreg_batch_f32(const float* __restrict__ prices,
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
 
-        // Prefix rows are not computable yet.
+        
         for (int i = 0; i < warm; ++i) out[base + i] = LINREG_NAN;
 
-        // Fast path: a window of size 1 is just the current value.
+        
         if (period == 1) {
-            // warm == first_valid
+            
             for (int idx = warm; idx < series_len; ++idx) {
                 out[base + idx] = prices[idx];
             }
             continue;
         }
 
-        // Warm-up rolling sums over the first (period - 1) elements
+        
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {
             const double val = static_cast<double>(prices[first_valid + k]);
             const double x   = static_cast<double>(k + 1);
             y_sum  += val;
-            xy_sum  = fma(val, x, xy_sum);  // xy_sum += val * x (DFMA)
+            xy_sum  = fma(val, x, xy_sum);  
         }
 
-        // Software prefetch of the next 'latest' value
+        
         double latest = static_cast<double>(prices[warm]);
 
-        // Main rolling loop
+        
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum  += latest;
-            xy_sum  = fma(latest, period_f, xy_sum);  // xy_sum += latest * period
+            xy_sum  = fma(latest, period_f, xy_sum);  
 
-            const double b_num = fma(period_f, xy_sum, -x_sum * y_sum); // period*xy_sum - x_sum*y_sum
+            const double b_num = fma(period_f, xy_sum, -x_sum * y_sum); 
             const double b     = b_num * denom_inv;
             const double a     = (y_sum - b * x_sum) * inv_period;
 
@@ -237,7 +237,7 @@ void linreg_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// -------------------------- Time-major kernel (many series × one parameter) --------------------------
+
 
 static __device__ __forceinline__
 int tm_idx(int row, int num_series, int series) {
@@ -258,7 +258,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
 {
     const int stride = blockDim.x * gridDim.x;
 
-    // Hoist shared scalars out of the per-series loop
+    
     const double period_f   = static_cast<double>(period);
     const double x_sum      = static_cast<double>(x_sum_f);
     const double denom_inv  = static_cast<double>(denom_inv_f);
@@ -268,7 +268,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
          series < num_series;
          series += stride)
     {
-        // Parameter guards per series (due to first_valid varying by series).
+        
         if (period <= 0 || period > series_len) {
             for (int row = 0; row < series_len; ++row)
                 out_tm[tm_idx(row, num_series, series)] = LINREG_NAN;
@@ -291,11 +291,11 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const int warm = first_valid + period - 1;
 
-        // Prefix rows to NaN
+        
         for (int row = 0; row < warm; ++row)
             out_tm[tm_idx(row, num_series, series)] = LINREG_NAN;
 
-        // period == 1: output is the price itself from first_valid forward
+        
         if (period == 1) {
             for (int row = warm; row < series_len; ++row) {
                 out_tm[tm_idx(row, num_series, series)] = prices_tm[tm_idx(row, num_series, series)];
@@ -303,7 +303,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
             continue;
         }
 
-        // Warm-up sums
+        
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {

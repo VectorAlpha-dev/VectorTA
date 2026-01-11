@@ -1,16 +1,16 @@
-// Integration tests for CUDA MWDX kernels
 
-use my_project::indicators::moving_averages::mwdx::{
+
+use vector_ta::indicators::moving_averages::mwdx::{
     mwdx_batch_with_kernel, mwdx_with_kernel, MwdxBatchRange, MwdxInput, MwdxParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaMwdx;
+use vector_ta::cuda::moving_averages::CudaMwdx;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

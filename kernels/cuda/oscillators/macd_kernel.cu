@@ -1,19 +1,19 @@
-// CUDA kernels for MACD (EMA-only fast path)
-//
-// Implements two entry points:
-//  - macd_batch_f32: one series x many params (rows = combos, cols = len)
-//  - macd_many_series_one_param_f32: many series x one param (time-major)
-//
-// Behavior mirrors the scalar EMA path:
-//  - Seed fast/slow EMAs by SMA windows starting at first_valid
-//  - Advance fast EMA to align with slow window at macd_warmup = first + slow - 1
-//  - First MACD at macd_warmup, then signal is SMA-seeded over `signal` MACD values
-//  - Write NaN before warmups
-//
-// Batch kernel is optimized for the primary use-case (one series x many params):
-// - One warp per parameter row (combo)
-// - Warp-level affine scans compute EMA recurrences 32 timesteps at a time
-// - Row-major outputs remain coalesced within each warp
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -22,9 +22,9 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// --- small helpers (header-only, no extra compilation switches) ---
+
 __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
-    // Kahan compensated add in FP32
+    
     float y = x - c;
     float t = sum + y;
     c = (t - sum) - y;
@@ -34,10 +34,10 @@ __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
 __device__ __forceinline__ int imin(int a, int b) { return a < b ? a : b; }
 __device__ __forceinline__ int imax(int a, int b) { return a > b ? a : b; }
 
-// Warp-wide inclusive scan over affine transforms (A,B) where:
-//   y = A * y_prev + B
-// Composition is associative:
-//   (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1)
+
+
+
+
 __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, unsigned lane, unsigned mask) {
 #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
@@ -52,10 +52,10 @@ __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, u
     }
 }
 
-// ===================================================================
-// 1) One price series x many params (rows = combos, cols = len)
-//    Warp-per-combo with warp-scan for EMA recurrences.
-// ===================================================================
+
+
+
+
 extern "C" __global__
 void macd_batch_f32(const float* __restrict__ prices,
                     const int*   __restrict__ fasts,
@@ -89,7 +89,7 @@ void macd_batch_f32(const float* __restrict__ prices,
     const int macd_warmup   = fv + slow - 1;
     const int signal_warmup = fv + slow + signal - 2;
 
-    // Prefix NaNs (coalesced within warp).
+    
     const float nanv = NAN;
     const int macd_nan_end   = imin(macd_warmup, series_len);
     const int signal_nan_end = imin(signal_warmup, series_len);
@@ -104,7 +104,7 @@ void macd_batch_f32(const float* __restrict__ prices,
 
     if (macd_warmup >= series_len) return;
 
-    // Lane 0 handles the short scalar warmup work; warp-scan handles the long tail.
+    
     float fast_prev = 0.0f;
     float slow_prev = 0.0f;
     float se_prev   = 0.0f;
@@ -118,7 +118,7 @@ void macd_batch_f32(const float* __restrict__ prices,
     const float bsig  = 1.0f - asig;
 
     if (lane == 0) {
-        // Seed EMAs via SMA windows (match scalar seeding)
+        
         float fsum = 0.0f, fc = 0.0f;
         const int fcap = imin(fast, series_len - fv);
         for (int i = 0; i < fcap; ++i) {
@@ -133,21 +133,21 @@ void macd_batch_f32(const float* __restrict__ prices,
         }
         float slow_ema = ssum / static_cast<float>(slow);
 
-        // Advance fast EMA to macd_warmup (align with slow window at slow-1)
+        
         const int mwu = imin(macd_warmup, series_len - 1);
         for (int t = fv + fast; t <= mwu; ++t) {
             const float x = prices[t];
             if (isfinite(x)) {
-                // fast_ema += af * (x - fast_ema)  (single fma)
+                
                 fast_ema = fmaf(x - fast_ema, af, fast_ema);
             }
         }
 
-        // First MACD value at macd_warmup
+        
         float m0 = fast_ema - slow_ema;
         macd_out[row_base + static_cast<size_t>(macd_warmup)] = m0;
 
-        // Seed signal (SMA over first `signal` MACD values) if it exists in-bounds
+        
         if (signal_warmup < series_len) {
             if (signal == 1) {
                 se_prev = m0;
@@ -158,7 +158,7 @@ void macd_batch_f32(const float* __restrict__ prices,
                 float sig_acc = m0;
                 float sig_c = 0.0f;
 
-                // Emit MACD values up to signal_warmup so the SMA seed matches scalar.
+                
                 for (int k = macd_warmup + 1; k <= signal_warmup; ++k) {
                     const float x = prices[k];
                     if (isfinite(x)) {
@@ -184,7 +184,7 @@ void macd_batch_f32(const float* __restrict__ prices,
         slow_prev = slow_ema;
     }
 
-    // Broadcast warmup state.
+    
     fast_prev = __shfl_sync(mask, fast_prev, 0);
     slow_prev = __shfl_sync(mask, slow_prev, 0);
     se_prev   = __shfl_sync(mask, se_prev,   0);
@@ -192,14 +192,14 @@ void macd_batch_f32(const float* __restrict__ prices,
 
     int t0 = have_seed ? (signal_warmup + 1) : (macd_warmup + 1);
 
-    // Main steady-state tiles: 32 timesteps per loop using warp scans.
+    
     for (; t0 < series_len; t0 += 32) {
         const int t = t0 + lane;
 
-        // FAST EMA transform at t
+        
         float Af = 1.0f;
         float Bf = 0.0f;
-        // SLOW EMA transform at t
+        
         float As = 1.0f;
         float Bs = 0.0f;
 
@@ -254,10 +254,10 @@ void macd_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ===================================================================
-// 2) Many series x one param (time-major). One thread per series.
-//    Grid-stride over columns (series).
-// ===================================================================
+
+
+
+
 extern "C" __global__
 void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     int cols,
@@ -271,7 +271,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     float* __restrict__ hist_tm) {
     if (rows <= 0 || cols <= 0 || fast <= 0 || slow <= 0 || signal <= 0) return;
 
-    const int stride = cols; // time-major layout
+    const int stride = cols; 
 
     for (int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
          series_idx < cols;
@@ -284,7 +284,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const int macd_warmup   = fv + slow - 1;
         const int signal_warmup = fv + slow + signal - 2;
 
-        // Prefix NaNs for this series
+        
         const int macd_nan_end   = imin(macd_warmup, rows);
         const int signal_nan_end = imin(signal_warmup, rows);
         for (int t = 0; t < macd_nan_end; ++t) {
@@ -297,7 +297,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
         if (macd_warmup >= rows) continue;
 
-        // Seed EMAs via SMA over [fv .. fv+fast/slow)
+        
         float fsum = 0.f, fc = 0.f;
         const int fcap = imin(fast, rows - fv);
         for (int i = 0; i < fcap; ++i) {
@@ -316,7 +316,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const float aslow = 2.0f / (slow   + 1.0f);
         const float asig  = 2.0f / (signal + 1.0f);
 
-        // Advance fast EMA to macd_warmup
+        
         const int mwu = imin(macd_warmup, rows - 1);
         for (int t = fv + fast; t <= mwu; ++t) {
             const float x = prices_tm[t * stride + series_idx];
@@ -325,10 +325,10 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
             }
         }
 
-        // First MACD
+        
         macd_tm[macd_warmup * stride + series_idx] = fast_ema - slow_ema;
 
-        // Signal seeding
+        
         bool  have_seed = false;
         float se        = 0.0f;
 
@@ -342,7 +342,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
             hist_tm  [signal_warmup * stride + series_idx] = macd_tm[signal_warmup * stride + series_idx] - se;
         }
 
-        // Main pass
+        
         for (int t = macd_warmup + 1; t < rows; ++t) {
             const float x = prices_tm[t * stride + series_idx];
             if (isfinite(x)) {

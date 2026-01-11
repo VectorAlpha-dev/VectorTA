@@ -56,7 +56,7 @@ pub mod wilders;
 pub mod wma;
 pub mod zlema;
 
-// Exports for migrated moving averages
+
 pub use cwma::{cwma, CwmaInput, CwmaOutput, CwmaParams};
 pub use dma::{
     dma,
@@ -65,7 +65,7 @@ pub use dma::{
     dma_with_kernel,
     DmaBatchBuilder,
     DmaBatchOutput,
-    // Batch API exports
+    
     DmaBatchRange,
     DmaBuilder,
     DmaData,
@@ -103,7 +103,7 @@ pub use ehma::{
     ehma_with_kernel,
     EhmaBatchBuilder,
     EhmaBatchOutput,
-    // Batch API exports
+    
     EhmaBatchRange,
     EhmaBuilder,
     EhmaData,
@@ -111,7 +111,7 @@ pub use ehma::{
     EhmaInput,
     EhmaOutput,
     EhmaParams,
-    // Streaming API exports
+    
     EhmaStream,
 };
 
@@ -122,7 +122,7 @@ pub use nama::{
     nama_with_kernel,
     NamaBatchBuilder,
     NamaBatchOutput,
-    // Batch API exports
+    
     NamaBatchRange,
     NamaBuilder,
     NamaData,
@@ -142,7 +142,7 @@ pub use sama::{
     sama_with_kernel,
     SamaBatchBuilder,
     SamaBatchOutput,
-    // Batch API exports
+    
     SamaBatchRange,
     SamaBuilder,
     SamaData,
@@ -150,11 +150,11 @@ pub use sama::{
     SamaInput,
     SamaOutput,
     SamaParams,
-    // Streaming API exports
+    
     SamaStream,
 };
 
-// Python exports for migrated moving averages
+
 #[cfg(feature = "python")]
 pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
 
@@ -167,6 +167,6 @@ pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
 #[cfg(feature = "python")]
 pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
-// WASM exports
+
 #[cfg(feature = "wasm")]
 pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};

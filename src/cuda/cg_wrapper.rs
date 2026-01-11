@@ -25,8 +25,8 @@ use thiserror::Error;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Prefer pinned transfers for moderately large buffers to enable true async H2D/D2H.
-const H2D_PIN_THRESHOLD_BYTES: usize = 256 * 1024; // ~256 KiB
+
+const H2D_PIN_THRESHOLD_BYTES: usize = 256 * 1024; 
 
 #[derive(Error, Debug)]
 pub enum CudaCgError {
@@ -103,11 +103,11 @@ impl CudaCg {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Hint: prefer L1 for read-mostly kernels like CG.
+        
         let _ = CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cg_kernel.ptx"));
-        // Prefer highest optimizer level and target from context; fall back progressively.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -181,7 +181,7 @@ impl CudaCg {
         }
     }
 
-    // ---------- Utilities ----------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -249,7 +249,7 @@ impl CudaCg {
         Ok(())
     }
 
-    // -------- Batch (one series × many params) --------
+    
     pub fn cg_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -286,7 +286,7 @@ impl CudaCg {
             )));
         }
 
-        // Pre-flight VRAM fit check (prices + output; allow headroom)
+        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaCgError::InvalidInput("byte size overflow".into()))?;
@@ -298,7 +298,7 @@ impl CudaCg {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaCgError::InvalidInput("byte size overflow".into()))?;
         let required = prices_bytes.saturating_add(out_bytes);
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
                 return Err(CudaCgError::OutOfMemory { required, free, headroom });
@@ -307,8 +307,8 @@ impl CudaCg {
             }
         }
 
-        // Upload inputs
-        // ---------- Upload inputs (with pinned H2D for large buffers) ----------
+        
+        
         let d_prices: DeviceBuffer<f32> = if prices_f32.len() * std::mem::size_of::<f32>()
             >= H2D_PIN_THRESHOLD_BYTES
         {
@@ -328,23 +328,23 @@ impl CudaCg {
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
-        // ---------- Kernel selection heuristic (rolling vs prefix) ----------
+        
         let avg_period: f64 = periods.iter().map(|&p| p as f64).sum::<f64>() / (periods.len() as f64);
         let use_prefix = (avg_period >= 512.0) && (periods.len() >= 16)
             && ((periods.len() as f64) * avg_period >= (len as f64) * 2.0);
 
         if use_prefix {
-            // Prepare prefix arrays
+            
             let mut d_P: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
             let mut d_Q: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
             let mut d_C: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len)? };
 
-            // cg_prefix_prepare_f32<<<1,1>>>(prices, len, P, Q, C)
+            
             let mut prep = self
                 .module
                 .get_function("cg_prefix_prepare_f32")
                 .map_err(|_| CudaCgError::MissingKernelSymbol { name: "cg_prefix_prepare_f32" })?;
-            // Function-level L1 preference
+            
             let _ = prep.set_cache_config(CacheConfig::PreferL1);
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -363,7 +363,7 @@ impl CudaCg {
                 self.stream.launch(&prep, (1, 1, 1), (1, 1, 1), 0, args)?;
             }
 
-            // Launch from-prefix kernel with occupancy-guided block size
+            
             let mut func = self
                 .module
                 .get_function("cg_batch_f32_from_prefix")
@@ -382,7 +382,7 @@ impl CudaCg {
             let grid_x = ((combos.len() as u32) + block_x - 1) / block_x;
             unsafe { (*(self as *const _ as *mut CudaCg)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
             unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw(); // unused in kernel but kept for symmetry
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw(); 
                 let mut periods_ptr = d_periods.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut combos_i = combos.len() as i32;
@@ -407,7 +407,7 @@ impl CudaCg {
             }
             self.maybe_log_batch_debug();
         } else {
-            // Rolling kernel path (default)
+            
             let mut func = self
                 .module
                 .get_function("cg_batch_f32")
@@ -449,7 +449,7 @@ impl CudaCg {
         Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
     }
 
-    // -------- Many-series × one param (time-major) --------
+    
     pub fn cg_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -475,10 +475,10 @@ impl CudaCg {
             .checked_mul(rows)
             .ok_or_else(|| CudaCgError::InvalidInput("rows*cols overflow".into()))?;
 
-        // Compute per-series first_valids over time-major input
+        
         let first_valids = compute_first_valids_time_major(prices_tm_f32, cols, rows);
 
-        // ---------- Upload inputs ----------
+        
         let d_prices: DeviceBuffer<f32> = if prices_tm_f32.len() * std::mem::size_of::<f32>()
             >= H2D_PIN_THRESHOLD_BYTES
         {
@@ -540,7 +540,7 @@ impl CudaCg {
 }
 
 impl CudaCg {
-    // --- one series × many params, device-resident input ---
+    
     pub fn cg_batch_dev_on_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -655,7 +655,7 @@ impl CudaCg {
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
 
-    // --- many series × one param, device-resident input ---
+    
     pub fn cg_many_series_one_param_time_major_on_device(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,
@@ -762,7 +762,7 @@ fn compute_first_valids_time_major(data_tm: &[f32], cols: usize, rows: usize) ->
     v
 }
 
-// ---- Bench profiles (wrapper-owned) ----
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -770,7 +770,7 @@ pub mod benches {
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
 
-        // Device-resident benches (prep uploads/allocs once; launch is kernel + sync).
+        
         v.push(
             CudaBenchScenario::new(
                 "cg",
@@ -960,7 +960,7 @@ pub mod benches {
         );
         #[cfg(any())]
         {
-        // Batch: one series × many params
+        
         v.push(
             CudaBenchScenario::new(
                 "cg",
@@ -1032,7 +1032,7 @@ pub mod benches {
             .with_inner_iters(1),
         );
 
-        // Many-series: 512 series × 8192 rows, single param
+        
         v.push(
             CudaBenchScenario::new(
                 "cg",

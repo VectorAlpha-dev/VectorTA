@@ -54,10 +54,10 @@ pub enum CudaBandpassError {
 }
 
 pub struct DeviceArrayF32Quad {
-    pub first: DeviceArrayF32,  // bp
-    pub second: DeviceArrayF32, // bp_normalized
-    pub third: DeviceArrayF32,  // signal
-    pub fourth: DeviceArrayF32, // trigger
+    pub first: DeviceArrayF32,  
+    pub second: DeviceArrayF32, 
+    pub third: DeviceArrayF32,  
+    pub fourth: DeviceArrayF32, 
 }
 
 impl DeviceArrayF32Quad {
@@ -417,7 +417,7 @@ impl CudaBandpass {
                     bw
                 )));
             }
-            // Ensure enough valid after first for HP stage
+            
             let hp_period = (4.0 * period as f64 / bw).round() as usize;
             if len - first_valid < hp_period {
                 return Err(CudaBandpassError::InvalidInput(format!(
@@ -434,7 +434,7 @@ impl CudaBandpass {
         use std::f64::consts::PI;
         let beta = (2.0 * PI / period as f64).cos();
         let gamma = (2.0 * PI * bw / period as f64).cos();
-        // alpha = 1/g - sqrt(1/g^2 - 1)
+        
         let alpha = 1.0 / gamma - ((1.0 / (gamma * gamma)) - 1.0).sqrt();
         let trig = ((period as f64 / bw) / 1.5).round() as i32;
         let hp_period = (4.0 * period as f64 / bw).round() as usize;
@@ -450,7 +450,7 @@ impl CudaBandpass {
         let n = len;
         let rows = combos.len();
 
-        // Build per-combo coeffs + hp-periods, dedupe hp rows
+        
         let mut alphas = vec![0f32; rows];
         let mut betas = vec![0f32; rows];
         let mut trig = vec![0i32; rows];
@@ -471,7 +471,7 @@ impl CudaBandpass {
             hp_row_idx[i] = idx as i32;
         }
 
-        // VRAM estimate: prices + hp unique rows + params + 4 outputs
+        
         let sz_f32 = std::mem::size_of::<f32>() as u128;
         let sz_i32 = std::mem::size_of::<i32>() as u128;
         let prices_bytes = (n as u128)
@@ -504,19 +504,19 @@ impl CudaBandpass {
         let headroom = 64 * 1024 * 1024;
         Self::ensure_fit(required, headroom)?;
 
-        // Stage 1: push prices + compute HP unique rows on device using CudaHighpass
-        // Use synchronous HtoD for prices to avoid cross-stream hazards with CudaHighpass
-        // (its kernels run on a different stream).
+        
+        
+        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
-        // NOTE: This buffer is consumed by CudaHighpass on its own stream.
-        // Keep this copy synchronous to avoid cross-stream hazards without events.
+        
+        
         let d_hp_periods = DeviceBuffer::from_slice(&hp_unique)?;
         let hp_len = hp_unique
             .len()
             .checked_mul(n)
             .ok_or_else(|| CudaBandpassError::InvalidInput("hp buffer length overflow".into()))?;
-        // `d_hp` is written by `CudaHighpass` on its own stream; allocate synchronously
-        // to avoid stream-ordered allocation hazards across streams.
+        
+        
         let mut d_hp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(hp_len)? };
         let cuda_hp = CudaHighpass::new(0).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
         cuda_hp
@@ -528,18 +528,18 @@ impl CudaBandpass {
                 hp_unique.len() as i32,
                 &mut d_hp,
             ).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
-        // Ensure HP stage completes before consuming `d_hp` on this stream.
+        
         cuda_hp
             .synchronize()
             .map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
 
-        // Params to device
+        
         let d_hp_idx = DeviceBuffer::from_slice(&hp_row_idx)?;
         let d_alpha = DeviceBuffer::from_slice(&alphas)?;
         let d_beta = DeviceBuffer::from_slice(&betas)?;
         let d_trig = DeviceBuffer::from_slice(&trig)?;
 
-        // Outputs
+        
         let total_out = rows
             .checked_mul(n)
             .ok_or_else(|| CudaBandpassError::InvalidInput("output buffer length overflow".into()))?;
@@ -552,17 +552,17 @@ impl CudaBandpass {
         let mut d_trg: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total_out, &self.stream)? };
 
-        // Launch bandpass kernel
+        
         let mut func = self
             .module
             .get_function("bandpass_batch_from_hp_f32")
             .map_err(|_| CudaBandpassError::MissingKernelSymbol { name: "bandpass_batch_from_hp_f32" })?;
-        // Prefer L1 for read-heavy streaming kernel; ignore errors if unsupported.
+        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        // occupancy suggestion
+        
         let (suggested, _min_grid) =
             func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
-        // Kernel is compiled with `__launch_bounds__(256, 2)`, so cap threads-per-block.
+        
         let bx = match self.policy.batch {
             BatchKernelPolicy::Auto => suggested.clamp(128, 256),
             BatchKernelPolicy::Plain { block_x } => block_x.clamp(32, 256),
@@ -664,7 +664,7 @@ impl CudaBandpass {
         }
         let (_a, _b, _trig, hp_period) = Self::host_coeffs(period, bw);
 
-        // Compute HP time-major for this param
+        
         let cuda_hp = CudaHighpass::new(0).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
         let hp_dev = cuda_hp
             .highpass_many_series_one_param_time_major_dev(
@@ -676,11 +676,11 @@ impl CudaBandpass {
                 },
             ).map_err(|e| CudaBandpassError::InvalidInput(e.to_string()))?;
 
-        // Prepare params
+        
         let (alpha, beta, trig, _hp) = Self::host_coeffs(period, bw);
-        // No device copies of scalars; they are passed by value to the kernel.
+        
 
-        // Outputs (time-major)
+        
         let total = expected;
         let mut d_bp: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
@@ -691,7 +691,7 @@ impl CudaBandpass {
         let mut d_trg_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
 
-        // Launch many-series kernel
+        
         let mut func = self
             .module
             .get_function("bandpass_many_series_one_param_time_major_from_hp_f32")
@@ -699,7 +699,7 @@ impl CudaBandpass {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (suggested, _mg) =
             func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
-        // Kernel is compiled with `__launch_bounds__(256, 2)`, so cap threads-per-block.
+        
         let bx = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => suggested.clamp(128, 256),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.clamp(32, 256),
@@ -768,7 +768,7 @@ impl CudaBandpass {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -779,7 +779,7 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series(rows: usize, len: usize) -> usize {
-        // prices + hp(unique ~= rows) + 4 outputs
+        
         let in_b = len * std::mem::size_of::<f32>();
         let hp_b = rows * len * std::mem::size_of::<f32>();
         let out_b = 4 * rows * len * std::mem::size_of::<f32>();
@@ -854,7 +854,7 @@ pub mod benches {
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBandpass::new(0).expect("cuda bandpass");
         let prices = gen_series(ONE_SERIES_LEN);
-        // Small sweep to avoid huge VRAM usage
+        
         let sweep = BandPassBatchRange {
             period: (16, 22, 2),
             bandwidth: (0.2, 0.4, 0.1),
@@ -884,7 +884,7 @@ pub mod benches {
             hp_row_idx[i] = idx as i32;
         }
 
-        // Compute HP table once using the existing highpass CUDA (device-resident).
+        
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
         let d_hp_periods = DeviceBuffer::from_slice(&hp_unique).expect("d_hp_periods");
         let hp_rows = hp_unique.len();
@@ -1000,7 +1000,7 @@ pub mod benches {
         let bw = params.bandwidth.unwrap_or(0.0);
         let (_a, _b, _trig, hp_period) = CudaBandpass::host_coeffs(period, bw);
 
-        // Prepare HP time-major once (device-resident) using CUDA highpass.
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<i32> = None;
@@ -1093,7 +1093,7 @@ pub mod benches {
             )
             .with_mem_required({
                 let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-                // peak during prep: prices + hp + 4 outputs
+                
                 (6 * elems * std::mem::size_of::<f32>()) + (MANY_SERIES_COLS * std::mem::size_of::<i32>()) + 64 * 1024 * 1024
             }),
         ]

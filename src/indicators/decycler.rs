@@ -90,7 +90,7 @@ impl DeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted; wrapper synchronizes before returning
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -106,7 +106,7 @@ impl DeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -129,7 +129,7 @@ impl DeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = self.inner.ctx.clone();
@@ -370,7 +370,7 @@ pub fn decycler_into_slice(
         other => other,
     };
 
-    // Compute directly into the output slice
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -379,16 +379,16 @@ pub fn decycler_into_slice(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 decycler_scalar_into(data, hp_period, k, first, out)
-            } // AVX2 not implemented, fallback
+            } 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 decycler_scalar_into(data, hp_period, k, first, out)
-            } // AVX512 not implemented, fallback
+            } 
             _ => unreachable!(),
         }
     }?;
 
-    // Fill warmup period with canonical quiet-NaN to match alloc_with_nan_prefix
+    
     let warmup_period = first + 2;
     for v in &mut out[..warmup_period] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -418,7 +418,7 @@ unsafe fn decycler_scalar_into(
 ) -> Result<(), DecyclerError> {
     use std::f64::consts::PI;
 
-    // Compute coefficients once
+    
     let angle = (2.0 * PI * k) * (hp_period as f64).recip();
     let (sin_val, cos_val) = angle.sin_cos();
     const EPSILON: f64 = 1e-10;
@@ -433,11 +433,11 @@ unsafe fn decycler_scalar_into(
     let one_minus_alpha = 1.0 - alpha;
     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-    // Initialize internal state only; DO NOT write to output
+    
     let mut hp_prev2 = data[first];
     let mut hp_prev1 = data[first + 1];
 
-    // Start writing results only from first+2 onwards
+    
     for i in (first + 2)..data.len() {
         let current = data[i];
         let prev1 = data[i - 1];
@@ -449,7 +449,7 @@ unsafe fn decycler_scalar_into(
         let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
         let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
-        // Shift the hp values
+        
         hp_prev2 = hp_prev1;
         hp_prev1 = hp_val;
 
@@ -518,17 +518,17 @@ pub fn decycler_scalar(
 ) -> Result<DecyclerOutput, DecyclerError> {
     use std::f64::consts::PI;
 
-    // Use alloc_with_nan_prefix to avoid unnecessary initialization
-    let warmup_period = first + 2; // Need at least 2 values for the calculation
+    
+    let warmup_period = first + 2; 
     let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
-    // We only need to keep track of the last 2 hp values
+    
     let mut hp_prev2 = 0.0;
     let mut hp_prev1 = 0.0;
 
     let angle = (2.0 * PI * k) * (hp_period as f64).recip();
     let (sin_val, cos_val) = angle.sin_cos();
-    // Add epsilon guard to avoid division by near-zero
+    
     const EPSILON: f64 = 1e-10;
     let cos_safe = if cos_val.abs() < EPSILON {
         EPSILON.copysign(cos_val)
@@ -541,7 +541,7 @@ pub fn decycler_scalar(
     let one_minus_alpha = 1.0 - alpha;
     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-    // Initialize internal state only; DO NOT write to out[first..first+2]
+    
     if data.len() > first {
         hp_prev2 = data[first];
     }
@@ -549,7 +549,7 @@ pub fn decycler_scalar(
         hp_prev1 = data[first + 1];
     }
 
-    // Start writing results only from first+2 onwards
+    
     for i in (first + 2)..data.len() {
         let current = data[i];
         let prev1 = data[i - 1];
@@ -561,7 +561,7 @@ pub fn decycler_scalar(
         let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
         let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
-        // Shift the hp values
+        
         hp_prev2 = hp_prev1;
         hp_prev1 = hp_val;
 
@@ -578,7 +578,7 @@ pub fn decycler_avx512(
     k: f64,
     first: usize,
 ) -> Result<DecyclerOutput, DecyclerError> {
-    // STUB: AVX512 not implemented, fallback to scalar
+    
     decycler_scalar(data, hp_period, k, first)
 }
 
@@ -590,7 +590,7 @@ pub fn decycler_avx2(
     k: f64,
     first: usize,
 ) -> Result<DecyclerOutput, DecyclerError> {
-    // STUB: AVX2 not implemented, fallback to scalar
+    
     decycler_scalar(data, hp_period, k, first)
 }
 
@@ -638,23 +638,23 @@ pub fn decycler_batch_with_kernel(
 
 #[derive(Debug, Clone)]
 pub struct DecyclerStream {
-    // Parameters (immutable after construction)
+    
     hp_period: usize,
     k: f64,
 
-    // Coefficients (derived from period & k)
-    c: f64,          // (1 - alpha/2)^2
-    oma2: f64,       // 2 * (1 - alpha)
-    oma_sq_neg: f64, // -(1 - alpha)^2
-    c_neg2: f64,     // -2 * c (precompute)
+    
+    c: f64,          
+    oma2: f64,       
+    oma_sq_neg: f64, 
+    c_neg2: f64,     
 
-    // State (previous two inputs & hp states)
-    x1: f64,  // x[t-1]
-    x2: f64,  // x[t-2]
-    hp1: f64, // hp[t-1]
-    hp2: f64, // hp[t-2]
+    
+    x1: f64,  
+    x2: f64,  
+    hp1: f64, 
+    hp2: f64, 
 
-    // Warmup tracker: number of valid (non-NaN) samples seen so far (0..=2)
+    
     seen: u8,
 }
 
@@ -672,8 +672,8 @@ impl DecyclerStream {
             return Err(DecyclerError::InvalidK { k });
         }
 
-        // Coefficient derivation per Ehlers 2‑pole high‑pass
-        // alpha = 1 + (sin(w) - 1) / cos(w), with w = 2πk / hp_period
+        
+        
         use std::f64::consts::PI;
         let angle = (2.0 * PI * k) * (hp_period as f64).recip();
         let (sin_val, cos_val) = angle.sin_cos();
@@ -714,21 +714,21 @@ impl DecyclerStream {
     /// - Some(value) otherwise.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // Skip leading NaNs (do not advance warmup until we get valid data)
+        
         if self.seen < 2 {
             if x.is_nan() {
                 return None;
             }
             match self.seen {
                 0 => {
-                    // Seed per offline kernel: hp_prev2 = first valid sample
+                    
                     self.x1 = x;
                     self.hp1 = x;
                     self.seen = 1;
                     return None;
                 }
                 1 => {
-                    // Seed per offline kernel: hp_prev1 = second valid sample
+                    
                     self.x2 = self.x1;
                     self.x1 = x;
                     self.hp2 = self.hp1;
@@ -740,7 +740,7 @@ impl DecyclerStream {
             }
         }
 
-        // After warmup, compute 2‑pole HP via FMA chain
+        
         let s0 = self.c * x;
         let s1 = self.c_neg2.mul_add(self.x1, s0);
         let s2 = self.c.mul_add(self.x2, s1);
@@ -749,7 +749,7 @@ impl DecyclerStream {
 
         let out = x - hp;
 
-        // Shift state
+        
         self.x2 = self.x1;
         self.x1 = x;
         self.hp2 = self.hp1;
@@ -863,7 +863,7 @@ fn expand_grid(r: &DecyclerBatchRange) -> Result<Vec<DecyclerParams>, DecyclerEr
         if start < end {
             return Ok((start..=end).step_by(step).collect());
         }
-        // Reversed bounds with positive step: descend
+        
         let mut vals = Vec::new();
         let mut cur: isize = start as isize;
         let end_i: isize = end as isize;
@@ -898,7 +898,7 @@ fn expand_grid(r: &DecyclerBatchRange) -> Result<Vec<DecyclerParams>, DecyclerEr
             let mut x = start;
             while x >= end - 1e-12 {
                 v.push(x);
-                x += step; // negative step
+                x += step; 
             }
         }
         if v.is_empty() {
@@ -953,15 +953,15 @@ fn decycler_batch_inner(
     }
     let rows = combos.len();
 
-    // rows * cols overflow check
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or_else(|| DecyclerError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Allocate once, set per-row warmups, then compute into place
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Decycler warmup is first + 2 for all rows
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1001,7 +1001,7 @@ unsafe fn decycler_row_scalar(
 ) {
     use std::f64::consts::PI;
 
-    // Coefficients
+    
     let angle = (2.0 * PI * k) * (hp_period as f64).recip();
     let (sin_val, cos_val) = angle.sin_cos();
     const EPSILON: f64 = 1e-10;
@@ -1016,11 +1016,11 @@ unsafe fn decycler_row_scalar(
     let one_minus_alpha = 1.0 - alpha;
     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-    // Initialize internal state only; DO NOT write to output
+    
     let mut hp_prev2 = data[first];
     let mut hp_prev1 = data[first + 1];
 
-    // Start writing results only from first+2 onwards
+    
     for i in (first + 2)..data.len() {
         let current = data[i];
         let prev1 = data[i - 1];
@@ -1032,7 +1032,7 @@ unsafe fn decycler_row_scalar(
         let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, s2);
         let hp_val = hp_prev2.mul_add(-one_minus_alpha_sq, s3);
 
-        // Shift the hp values
+        
         hp_prev2 = hp_prev1;
         hp_prev1 = hp_val;
 
@@ -1101,7 +1101,7 @@ mod tests {
 
     #[test]
     fn test_decycler_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Small but non-trivial synthetic input (covers warmup and steady state)
+        
         let n = 512usize;
         let data: Vec<f64> = (0..n)
             .map(|i| ((i as f64) * 0.037).sin() * 5.0 + 100.0)
@@ -1109,10 +1109,10 @@ mod tests {
         let params = DecyclerParams::default();
         let input = DecyclerInput::from_slice(&data, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = decycler(&input)?.values;
 
-        // Into API with preallocated buffer
+        
         let mut out = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1120,7 +1120,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // Wasm build keeps name for JS export; use slice variant for parity here
+            
             decycler_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1634,9 +1634,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic test data with valid parameters
-        // hp_period range: 2-100 (must be >= 2)
-        // k range: 0.1-5.0 (must be positive)
+        
+        
+        
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1644,7 +1644,7 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                0.1f64..5.0f64, // k must be positive
+                0.1f64..5.0f64, 
             )
         });
 
@@ -1655,18 +1655,18 @@ mod tests {
             };
             let input = DecyclerInput::from_slice(&data, params);
 
-            // Test with specified kernel
+            
             let DecyclerOutput { values: out } = decycler_with_kernel(&input, kernel).unwrap();
 
-            // Also test against scalar reference for kernel consistency
+            
             let DecyclerOutput { values: ref_out } =
                 decycler_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Find first non-NaN value
+            
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_period = first + 2;
 
-            // Property 1: Warmup period should have NaN values
+            
             for i in 0..warmup_period.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1676,7 +1676,7 @@ mod tests {
                 );
             }
 
-            // Property 2: After warmup, values should be finite
+            
             for i in warmup_period..out.len() {
                 prop_assert!(
                     out[i].is_finite(),
@@ -1686,16 +1686,16 @@ mod tests {
                 );
             }
 
-            // Property 3: Kernel consistency - results should match across kernels
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
                 if y.is_nan() && r.is_nan() {
-                    continue; // Both NaN is ok
+                    continue; 
                 }
 
-                // Use ULP comparison for floating point equality
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = if y_bits > r_bits {
@@ -1716,10 +1716,10 @@ mod tests {
                 );
             }
 
-            // Property 4: For constant input, high-pass filter output should be close to 0
-            // Decycler = input - high_pass, so for DC signal, high_pass → input, decycler → 0
+            
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && !data.is_empty() {
-                // After sufficient warmup for filter to stabilize
+                
                 if out.len() > warmup_period + hp_period * 2 {
                     let check_idx = out.len() - 1;
                     prop_assert!(
@@ -1731,15 +1731,15 @@ mod tests {
                 }
             }
 
-            // Property 5: Bounded output - decycler removes components, shouldn't amplify much
-            // After warmup, output magnitude should be bounded relative to input
+            
+            
             if out.len() > warmup_period + hp_period {
                 let start_check = warmup_period + hp_period;
                 for i in start_check..out.len() {
                     let input_mag = data[i].abs();
                     let output_mag = out[i].abs();
-                    // Allow some tolerance for numerical precision and filter characteristics
-                    // Decycler can have transient responses but shouldn't amplify significantly
+                    
+                    
                     prop_assert!(
                         output_mag <= input_mag * 2.0 + 1.0,
                         "Output magnitude {} exceeds reasonable bound for input {} at index {}",
@@ -1750,8 +1750,8 @@ mod tests {
                 }
             }
 
-            // Property 6: For monotonic trends, decycler should reduce the trend
-            // Check if data has a strong linear trend
+            
+            
             if data.len() > warmup_period + 10 {
                 let trend_start = warmup_period;
                 let trend_end = data.len().min(warmup_period + 50);
@@ -1765,8 +1765,8 @@ mod tests {
                 if (is_monotonic_increasing || is_monotonic_decreasing)
                     && trend_end > trend_start + 5
                 {
-                    // For strong trends, the decycler output should have less variance than input
-                    // as it removes the low-frequency trend component
+                    
+                    
                     let input_range = data[trend_start..trend_end]
                         .iter()
                         .fold(f64::INFINITY, |a, &b| a.min(b))
@@ -1783,8 +1783,8 @@ mod tests {
                     let input_span = input_range.end() - input_range.start();
                     let output_span = output_range.end() - output_range.start();
 
-                    // Output should have reduced range for monotonic trends
-                    // Allow some tolerance for edge effects
+                    
+                    
                     if input_span > 1e-9 {
                         prop_assert!(
                             output_span <= input_span * 1.5,
@@ -1796,7 +1796,7 @@ mod tests {
                 }
             }
 
-            // Property 7: Check for poison values (debug builds only)
+            
             #[cfg(debug_assertions)]
             for (i, &val) in out.iter().enumerate() {
                 if val.is_nan() {
@@ -1815,16 +1815,16 @@ mod tests {
                 );
             }
 
-            // Property 8: Edge cases - minimum period and extreme k values
+            
             if hp_period == 2 {
-                // Should still produce valid output with correct length
+                
                 prop_assert!(
                     out.len() == data.len(),
                     "Output length mismatch for period=2"
                 );
             }
 
-            // For extreme k values, output should still be bounded
+            
             if k < 0.2 || k > 4.5 {
                 for i in warmup_period..out.len() {
                     prop_assert!(
@@ -1916,14 +1916,14 @@ pub fn decycler_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Preallocate 1D buffer, zero-copy reshape later
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize NaN prefixes for each row
+    
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let warmup = first + 2;
     for row in 0..rows {
@@ -1974,7 +1974,7 @@ pub fn decycler_batch_py<'py>(
     Ok(dict)
 }
 
-// ================= CUDA Python bindings =================
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "decycler_cuda_batch_dev")]
@@ -2073,14 +2073,14 @@ fn decycler_batch_inner_into(
         return Err(DecyclerError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Precompute second difference once for reuse across rows:
-    // d[i] = x[i] - 2*x[i-1] + x[i-2]
+    
+    
     let mut diff: Vec<f64> = vec![0.0; cols];
     for i in (first + 2)..cols {
         diff[i] = data[i] - 2.0 * data[i - 1] + data[i - 2];
     }
 
-    // Treat out as MaybeUninit to allow caller to set NaN prefixes via init_matrix_prefixes
+    
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -2090,7 +2090,7 @@ fn decycler_batch_inner_into(
         let k = combos[row].k.unwrap();
         let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        // Compute coefficients per row
+        
         let angle = (2.0 * std::f64::consts::PI * k) * (hp_period as f64).recip();
         let (sin_val, cos_val) = angle.sin_cos();
         const EPSILON: f64 = 1e-10;
@@ -2105,11 +2105,11 @@ fn decycler_batch_inner_into(
         let one_minus_alpha = 1.0 - alpha;
         let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-        // State
+        
         let mut hp_prev2 = data[first];
         let mut hp_prev1 = data[first + 1];
 
-        // Write only from first+2 onward; warmups already NaN
+        
         for i in (first + 2)..cols {
             let current = data[i];
             let s3 = hp_prev1.mul_add(2.0 * one_minus_alpha, c * diff[i]);
@@ -2142,9 +2142,9 @@ fn decycler_batch_inner_into(
     Ok(combos)
 }
 
-// =============================================================================
-// WASM Bindings
-// =============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]

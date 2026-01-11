@@ -73,7 +73,7 @@ impl CudaNwe {
             env!("OUT_DIR"),
             "/nadaraya_watson_envelope_kernel.ptx"
         ));
-        // Prefer highest JIT opt level; fall back conservatively if unavailable
+        
         let module = Module::from_ptx(
             ptx,
             &[
@@ -354,7 +354,7 @@ impl CudaNwe {
             Self::prepare_batch_inputs(prices, sweep)?;
         let n = combos.len();
 
-        // VRAM estimate (2 outputs) with checked arithmetic
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let mut required = 0usize;
@@ -407,11 +407,11 @@ impl CudaNwe {
             }
         }
 
-        // Pinned host buffers for larger one-time copies; enable fully async DMA
+        
         let h_prices = LockedBuffer::from_slice(prices).map_err(CudaNweError::from)?;
         let h_weights = LockedBuffer::from_slice(&weights_flat).map_err(CudaNweError::from)?;
 
-        // Device allocations
+        
         let mut d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaNweError::from)?;
         let weights_len = n
@@ -429,7 +429,7 @@ impl CudaNwe {
         let mut d_lower: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_len) }.map_err(CudaNweError::from)?;
 
-        // Async H2D copies on non-blocking stream
+        
         unsafe {
             d_prices
                 .async_copy_from(&h_prices, &self.stream)
@@ -516,14 +516,14 @@ impl CudaNwe {
                 name: "nadaraya_watson_envelope_batch_f32",
             })?;
 
-        // Optimized kernel: one block per combo; parallel dot products within block.
-        // Use 128 threads per block by default and dynamic shared memory for weights + time tile.
-        const NWE_THREADS: u32 = 128; // must match tuned kernel policy
-        const NWE_TILE_T: usize = 64; // must match CUDA kernel constant
+        
+        
+        const NWE_THREADS: u32 = 128; 
+        const NWE_TILE_T: usize = 64; 
         let grid = GridSize::xy(1, n_combos as u32);
         let block = BlockSize::xyz(NWE_THREADS, 1, 1);
         self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
-        // s_w[L] + s_x[L+T-1] + s_mask[L+T-1]
+        
         let smem_elems = max_lb + 2 * (max_lb + NWE_TILE_T - 1);
         let smem_bytes = (smem_elems * std::mem::size_of::<f32>()) as u32;
 
@@ -588,7 +588,7 @@ impl CudaNwe {
             return Err(CudaNweError::InvalidInput("lookback must be > 0".into()));
         }
 
-        // first_valid per series
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -608,7 +608,7 @@ impl CudaNwe {
                 }
             }
         }
-        // weights pre-scaled
+        
         let (w_row, _l) = Self::compute_weights_row(bandwidth, lookback);
 
         let sz_f32 = std::mem::size_of::<f32>();
@@ -663,7 +663,7 @@ impl CudaNwe {
             }
         }
 
-        // Optional but beneficial: pinned host for the large matrix + async copy
+        
         let h_tm = LockedBuffer::from_slice(data_tm).map_err(CudaNweError::from)?;
         let len_tm = cols
             .checked_mul(rows)
@@ -737,7 +737,7 @@ impl CudaNwe {
     }
 }
 
-// -------- Benches registration (lightweight) --------
+
 #[cfg(feature = "cuda")]
 pub mod benches {
     use super::*;
@@ -750,7 +750,7 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        // Batch (device-resident): pre-upload inputs/weights and reuse output buffers.
+        
         struct BatchDevState {
             cuda: CudaNwe,
             d_prices: DeviceBuffer<f32>,
@@ -817,7 +817,7 @@ pub mod benches {
                 d_lower,
             }) as Box<dyn CudaBenchState>
         };
-        // Many-series
+        
         struct ManyState {
             cuda: CudaNwe,
             d_prices_tm: DeviceBuffer<f32>,
@@ -878,7 +878,7 @@ pub mod benches {
             let rows = MANY_SERIES_LEN;
             let data_tm = gen_time_major_prices(cols, rows);
 
-            // Mirror the wrapper defaults used in the dev path.
+            
             let bandwidth = 8.0;
             let lookback = 256usize;
             let multiplier = 3.0f32;

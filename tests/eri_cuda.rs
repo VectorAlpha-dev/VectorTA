@@ -1,16 +1,16 @@
-// Integration tests for CUDA ERI kernels
 
-use my_project::indicators::eri::{
+
+use vector_ta::indicators::eri::{
     eri_batch_with_kernel, eri_with_kernel, EriBatchRange, EriData, EriInput, EriParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::eri_wrapper::CudaEri;
+use vector_ta::cuda::eri_wrapper::CudaEri;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -112,7 +112,7 @@ fn eri_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let period = 14usize;
     let ma_type = "ema";
 
-    // CPU baseline per series
+    
     let mut bull_cpu = vec![f64::NAN; cols * rows];
     let mut bear_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -144,7 +144,7 @@ fn eri_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let src_tm_f32: Vec<f32> = src_tm.iter().map(|&v| v as f32).collect();

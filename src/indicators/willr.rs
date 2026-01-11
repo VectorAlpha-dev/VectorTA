@@ -47,7 +47,7 @@ use std::error::Error;
 use std::sync::Arc;
 use thiserror::Error;
 
-// --- Data types ---
+
 
 #[derive(Debug, Clone)]
 pub enum WillrData<'a> {
@@ -188,7 +188,7 @@ pub enum WillrError {
     InvalidKernelForBatch(Kernel),
 }
 
-// --- Main entrypoints ---
+
 
 #[inline(always)]
 fn willr_compute_into(
@@ -203,7 +203,7 @@ fn willr_compute_into(
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            // No dedicated SIMD128 kernel yet. Keep hook for parity.
+            
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
                 willr_scalar(high, low, close, period, first_valid, out);
                 return;
@@ -344,7 +344,7 @@ pub fn willr_into_slice(
 
     willr_compute_into(high, low, close, period, first_valid, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first_valid + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -353,7 +353,7 @@ pub fn willr_into_slice(
     Ok(())
 }
 
-// --- Scalar/AVX kernels ---
+
 
 #[inline]
 pub fn willr_scalar(
@@ -364,7 +364,7 @@ pub fn willr_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Fast exit / preconditions are validated by caller; write only from warmup end.
+    
     let n = high.len();
     if n == 0 {
         return;
@@ -374,13 +374,13 @@ pub fn willr_scalar(
         return;
     }
 
-    // Heuristic: naive scan is generally faster for WILLR periods (~14);
-    // switch to O(1) deque maintenance for larger windows.
+    
+    
     const DEQUE_SWITCH: usize = 32;
 
     unsafe {
         if period <= DEQUE_SWITCH {
-            // Naive O(period) scan with 4-way unroll and unchecked indexing.
+            
             for i in start_i..n {
                 let c = *close.get_unchecked(i);
                 if c != c {
@@ -481,10 +481,10 @@ pub fn willr_scalar(
             return;
         }
 
-        // Large-window path: monotonic deques with explicit head/tail and no modulo ops.
+        
         let cap = period;
 
-        // Deques store indices; we manage head/tail/len explicitly.
+        
         let mut dq_max: Vec<usize> = Vec::with_capacity(cap);
         dq_max.set_len(cap);
         let mut dq_min: Vec<usize> = Vec::with_capacity(cap);
@@ -497,13 +497,13 @@ pub fn willr_scalar(
         let mut tail_min = 0usize;
         let mut len_min = 0usize;
 
-        // Rolling NaN tracker over (high|low) window
+        
         let mut nan_ring: Vec<u8> = Vec::with_capacity(cap);
         nan_ring.set_len(cap);
         let mut ring_pos = 0usize;
         let mut nan_count: usize = 0;
 
-        // Prime structures for the first computable index
+        
         let l0 = start_i + 1 - period;
         let mut j = l0;
         while j <= start_i {
@@ -519,7 +519,7 @@ pub fn willr_scalar(
             }
 
             if is_nan == 0 {
-                // push into max deque (monotone decreasing)
+                
                 while len_max != 0 {
                     let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
                     let back_idx = *dq_max.get_unchecked(back_pos);
@@ -537,7 +537,7 @@ pub fn willr_scalar(
                 }
                 len_max += 1;
 
-                // push into min deque (monotone increasing)
+                
                 while len_min != 0 {
                     let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
                     let back_idx = *dq_min.get_unchecked(back_pos);
@@ -558,7 +558,7 @@ pub fn willr_scalar(
             j += 1;
         }
 
-        // Main sweep
+        
         for i in start_i..n {
             let c = *close.get_unchecked(i);
 
@@ -583,12 +583,12 @@ pub fn willr_scalar(
                 }
             }
 
-            // Slide window: drop i+1-period, add i+1
+            
             let next = i + 1;
             if next < n {
                 let cutoff = next - period;
 
-                // pop outdated from fronts
+                
                 while len_max != 0 {
                     let f_idx = *dq_max.get_unchecked(head_max);
                     if f_idx <= cutoff {
@@ -614,7 +614,7 @@ pub fn willr_scalar(
                     }
                 }
 
-                // Update rolling NaN ring (overwrite oldest)
+                
                 let hj = *high.get_unchecked(next);
                 let lj = *low.get_unchecked(next);
                 let new_nan = ((hj != hj) | (lj != lj)) as u8;
@@ -627,7 +627,7 @@ pub fn willr_scalar(
                 }
 
                 if new_nan == 0 {
-                    // push_back into max deque
+                    
                     while len_max != 0 {
                         let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
                         let back_idx = *dq_max.get_unchecked(back_pos);
@@ -645,7 +645,7 @@ pub fn willr_scalar(
                     }
                     len_max += 1;
 
-                    // push_back into min deque
+                    
                     while len_min != 0 {
                         let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
                         let back_idx = *dq_min.get_unchecked(back_pos);
@@ -726,15 +726,15 @@ fn willr_scalar_deque(
         return;
     }
 
-    // First index where the value is computable
+    
     let start_i = first_valid + period - 1;
     if start_i >= n {
         return;
     }
 
-    let cap = period; // capacity for ring buffers
+    let cap = period; 
 
-    // Monotonic deques implemented as ring buffers (store indices)
+    
     let mut dq_max = vec![0usize; cap];
     let mut head_max = 0usize;
     let mut len_max = 0usize;
@@ -743,12 +743,12 @@ fn willr_scalar_deque(
     let mut head_min = 0usize;
     let mut len_min = 0usize;
 
-    // Rolling NaN tracker for the (high|low) window
+    
     let mut nan_ring = vec![0u8; cap];
     let mut ring_pos = 0usize;
     let mut nan_count: usize = 0;
 
-    // Prime the structures with the first window: [l0 .. start_i]
+    
     let l0 = start_i + 1 - period;
     for j in l0..=start_i {
         let hj = high[j];
@@ -763,7 +763,7 @@ fn willr_scalar_deque(
         }
 
         if is_nan == 0 {
-            // Maintain decreasing deque for highs (pop while back <= hj)
+            
             while len_max != 0 {
                 let back_pos = (head_max + len_max - 1) % cap;
                 let back_idx = dq_max[back_pos];
@@ -777,7 +777,7 @@ fn willr_scalar_deque(
             dq_max[ins_pos] = j;
             len_max += 1;
 
-            // Maintain increasing deque for lows (pop while back >= lj)
+            
             while len_min != 0 {
                 let back_pos = (head_min + len_min - 1) % cap;
                 let back_idx = dq_min[back_pos];
@@ -793,14 +793,14 @@ fn willr_scalar_deque(
         }
     }
 
-    // Main pass
+    
     for i in start_i..n {
         let c = close[i];
 
         if c.is_nan() || nan_count != 0 || len_max == 0 || len_min == 0 {
             out[i] = f64::NAN;
         } else {
-            // Current window extrema are at deque fronts
+            
             let h_idx = dq_max[head_max];
             let l_idx = dq_min[head_min];
             let h = high[h_idx];
@@ -818,10 +818,10 @@ fn willr_scalar_deque(
             }
         }
 
-        // Slide the window by one: incorporate i+1 and drop (i+1 - period)
+        
         let next = i + 1;
         if next < n {
-            // Remove outdated indices (<= next - period) from fronts
+            
             let cutoff = next - period;
 
             while len_max != 0 {
@@ -849,12 +849,12 @@ fn willr_scalar_deque(
                 }
             }
 
-            // Add new sample at `next`
+            
             let hj = high[next];
             let lj = low[next];
             let new_nan = (hj.is_nan() || lj.is_nan()) as u8;
 
-            // Update rolling NaN count via ring overwrite (subtract old, add new)
+            
             let old_nan = nan_ring[ring_pos] as usize;
             nan_count = nan_count + (new_nan as usize) - old_nan;
             nan_ring[ring_pos] = new_nan;
@@ -864,7 +864,7 @@ fn willr_scalar_deque(
             }
 
             if new_nan == 0 {
-                // Push into max deque (highs)
+                
                 while len_max != 0 {
                     let back_pos = (head_max + len_max - 1) % cap;
                     let back_idx = dq_max[back_pos];
@@ -878,7 +878,7 @@ fn willr_scalar_deque(
                 dq_max[ins_pos] = next;
                 len_max += 1;
 
-                // Push into min deque (lows)
+                
                 while len_min != 0 {
                     let back_pos = (head_min + len_min - 1) % cap;
                     let back_idx = dq_min[back_pos];
@@ -916,7 +916,7 @@ pub unsafe fn willr_avx2(
         return;
     }
 
-    // Large windows: monotone deque is superior.
+    
     const VEC_SWITCH: usize = 64;
     if period > VEC_SWITCH {
         willr_scalar(high, low, close, period, first_valid, out);
@@ -956,7 +956,7 @@ pub unsafe fn willr_avx2(
             continue;
         }
 
-        // Reduce vmax/vmin to scalars
+        
         let vhi_max: __m128d = _mm256_extractf128_pd(vmax, 1);
         let vlo_max: __m128d = _mm256_castpd256_pd128(vmax);
         let v128_max = _mm_max_pd(vlo_max, vhi_max);
@@ -1010,8 +1010,8 @@ pub unsafe fn willr_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Delegate to AVX2: On many CPUs AVX512 downclocks and underperforms AVX2 for this kernel.
-    // Keep AVX512 implementations in-tree for future re-evaluation.
+    
+    
     willr_avx2(high, low, close, period, first_valid, out)
 }
 
@@ -1067,7 +1067,7 @@ pub unsafe fn willr_avx512_short(
             continue;
         }
 
-        // Reduce 512 -> 256 -> 128 -> 64
+        
         let vmax_lo256 = _mm512_castpd512_pd256(vmax512);
         let vmax_hi256 = _mm512_extractf64x4_pd(vmax512, 1);
         let vmax256 = _mm256_max_pd(vmax_lo256, vmax_hi256);
@@ -1130,7 +1130,7 @@ pub unsafe fn willr_avx512_long(
     willr_scalar(high, low, close, period, first_valid, out)
 }
 
-// --- Batch grid/params/output for batch evaluation ---
+
 
 #[derive(Clone, Debug)]
 pub struct WillrBatchRange {
@@ -1193,7 +1193,7 @@ pub fn willr_batch_with_kernel(
     k: Kernel,
 ) -> Result<WillrBatchOutput, WillrError> {
     let kernel = match k {
-        // AVX512 downclocks here; prefer AVX2 batch when available.
+        
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx2Batch,
             other => other,
@@ -1237,7 +1237,7 @@ fn expand_grid(r: &WillrBatchRange) -> Result<Vec<WillrParams>, WillrError> {
     fn axis_usize(
         (start, end, step): (usize, usize, usize),
     ) -> Result<Vec<usize>, WillrError> {
-        // Treat zero step as static; allow reversed bounds; error on empty.
+        
         if step == 0 {
             return Ok(vec![start]);
         }
@@ -1260,7 +1260,7 @@ fn expand_grid(r: &WillrBatchRange) -> Result<Vec<WillrParams>, WillrError> {
                 }
             }
         } else {
-            // reversed bounds: count down by step
+            
             let mut v = start;
             while v >= end {
                 vals.push(v);
@@ -1601,7 +1601,7 @@ fn willr_batch_inner(
             step: sweep.period.2,
         })?;
 
-    // Create uninitialized matrix and set up warmup periods
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmup_periods: Vec<usize> = combos
         .iter()
@@ -1609,7 +1609,7 @@ fn willr_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to Vec<f64> using ManuallyDrop for safety
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let mut values = unsafe {
         Vec::from_raw_parts(
@@ -1732,9 +1732,9 @@ pub unsafe fn willr_row_avx512_long(
     willr_scalar(high, low, close, period, first_valid, out)
 }
 
-// --- Streaming implementation ---
-// Decision: O(1) streaming via monotone deques; matches batch semantics (NaN/zero-range/warmup).
-// SIMD unchanged; scalar streaming remains the reference path.
+
+
+
 
 /// Williams %R streaming evaluator with O(1) amortized updates.
 /// Strategy:
@@ -1747,17 +1747,17 @@ pub unsafe fn willr_row_avx512_long(
 pub struct WillrStream {
     period: usize,
 
-    // Ring buffers storing last `period` highs/lows; indices are the global tick index % period.
+    
     high_ring: Vec<f64>,
     low_ring: Vec<f64>,
 
-    // Rolling NaN tracker for (high|low) window: ring of 0/1 flags + running count.
+    
     nan_ring: Vec<u8>,
     nan_count: usize,
 
-    // Monotone deques (store global indices, not ring positions)
-    dq_max: Vec<usize>, // decreasing by high
-    dq_min: Vec<usize>, // increasing by low
+    
+    dq_max: Vec<usize>, 
+    dq_min: Vec<usize>, 
     head_max: usize,
     tail_max: usize,
     len_max: usize,
@@ -1765,7 +1765,7 @@ pub struct WillrStream {
     tail_min: usize,
     len_min: usize,
 
-    // Number of updates seen so far (also the next global index to insert).
+    
     count: usize,
 }
 
@@ -1806,24 +1806,24 @@ impl WillrStream {
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         let cap = self.period;
-        let t = self.count; // global index of this sample
-        let pos = t % cap; // ring position being overwritten
+        let t = self.count; 
+        let pos = t % cap; 
 
-        // 1) Update rolling NaN state first (corresponds to evicting t - cap and adding t).
+        
         let new_nan = (high.is_nan() || low.is_nan()) as u8;
         let old_nan = self.nan_ring[pos] as usize;
         self.nan_ring[pos] = new_nan;
         self.nan_count = self.nan_count + (new_nan as usize) - old_nan;
 
-        // Write incoming sample into rings.
+        
         self.high_ring[pos] = high;
         self.low_ring[pos] = low;
 
-        // 2) Evict outdated indices from deque fronts (anything < oldest allowed index).
+        
         if t + 1 > cap {
             let cutoff = t + 1 - cap;
 
-            // max: pop front while idx < cutoff
+            
             while self.len_max != 0 {
                 let front_idx = self.dq_max[self.head_max];
                 if front_idx < cutoff {
@@ -1836,7 +1836,7 @@ impl WillrStream {
                     break;
                 }
             }
-            // min: pop front while idx < cutoff
+            
             while self.len_min != 0 {
                 let front_idx = self.dq_min[self.head_min];
                 if front_idx < cutoff {
@@ -1851,9 +1851,9 @@ impl WillrStream {
             }
         }
 
-        // 3) Push current index into monotone deques if (high|low) are not NaN.
+        
         if new_nan == 0 {
-            // Maintain decreasing deque for highs (pop while back <= high).
+            
             while self.len_max != 0 {
                 let back_pos = if self.tail_max == 0 {
                     cap - 1
@@ -1876,7 +1876,7 @@ impl WillrStream {
             }
             self.len_max += 1;
 
-            // Maintain increasing deque for lows (pop while back >= low).
+            
             while self.len_min != 0 {
                 let back_pos = if self.tail_min == 0 {
                     cap - 1
@@ -1900,13 +1900,13 @@ impl WillrStream {
             self.len_min += 1;
         }
 
-        // 4) We have fully slid the window; bump count and decide what to return.
+        
         self.count = t + 1;
         if self.count < cap {
-            return None; // warmup
+            return None; 
         }
 
-        // 5) Compute Williams %R for the window ending at t.
+        
         if close.is_nan() || self.nan_count != 0 || self.len_max == 0 || self.len_min == 0 {
             return Some(f64::NAN);
         }
@@ -1924,7 +1924,7 @@ impl WillrStream {
         if denom == 0.0 {
             Some(0.0)
         } else {
-            // ((high - close) / (high - low)) * -100, with FMA to reduce rounding.
+            
             let ratio = (h - close) / denom;
             Some((-100.0f64).mul_add(ratio, 0.0))
         }
@@ -1957,7 +1957,7 @@ fn willr_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    // Ensure output buffer has correct size
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(WillrError::InvalidRange {
@@ -1985,8 +1985,8 @@ fn willr_batch_inner_into(
         });
     }
 
-    // Initialize warmup NaN prefixes once for the entire output matrix (ALMA-style).
-    // In debug builds this also poisons all cells to catch any missing writes.
+    
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first_valid + c.period.unwrap() - 1)
@@ -2051,17 +2051,17 @@ mod tests {
 
     #[test]
     fn test_willr_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV candles dataset for parity with other WILLR tests.
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let params = WillrParams::default(); // period = 14
+        let params = WillrParams::default(); 
         let input = WillrInput::from_candles(&candles, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = willr(&input)?.values;
 
-        // In-place API into a preallocated buffer
+        
         let mut out = vec![0.0f64; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2069,7 +2069,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native willr_into is not exposed; use the slice variant.
+            
             willr_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2234,17 +2234,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            WillrParams::default(),            // period: 14
-            WillrParams { period: Some(2) },   // minimum viable period
-            WillrParams { period: Some(5) },   // small period
-            WillrParams { period: Some(10) },  // medium-small period
-            WillrParams { period: Some(20) },  // medium period
-            WillrParams { period: Some(30) },  // medium-large period
-            WillrParams { period: Some(50) },  // large period
-            WillrParams { period: Some(100) }, // very large period
-            WillrParams { period: Some(200) }, // edge case large period
+            WillrParams::default(),            
+            WillrParams { period: Some(2) },   
+            WillrParams { period: Some(5) },   
+            WillrParams { period: Some(10) },  
+            WillrParams { period: Some(20) },  
+            WillrParams { period: Some(30) },  
+            WillrParams { period: Some(50) },  
+            WillrParams { period: Some(100) }, 
+            WillrParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2253,12 +2253,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2305,7 +2305,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_willr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2317,18 +2317,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data
-        // Period range: 2-50 for realistic testing
+        
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                // Generate high, low, close prices with proper constraints
+                
                 prop::collection::vec(
-                    // Generate (low, high_offset, close_ratio) to ensure high >= low and close within range
+                    
                     (1.0f64..1000.0f64).prop_flat_map(|low| {
                         (
                             Just(low),
-                            0.0f64..100.0f64, // high_offset to ensure high >= low
-                            0.0f64..=1.0f64,  // close_ratio for close within [low, high]
+                            0.0f64..100.0f64, 
+                            0.0f64..=1.0f64,  
                         )
                     }),
                     period..400,
@@ -2338,7 +2338,7 @@ mod tests {
         });
 
         proptest::test_runner::TestRunner::default().run(&strat, |(price_data, period)| {
-            // Construct high, low, close arrays from generated data
+            
             let mut high = Vec::with_capacity(price_data.len());
             let mut low = Vec::with_capacity(price_data.len());
             let mut close = Vec::with_capacity(price_data.len());
@@ -2356,14 +2356,14 @@ mod tests {
             };
             let input = WillrInput::from_slices(&high, &low, &close, params.clone());
 
-            // Get output from kernel under test
+            
             let WillrOutput { values: out } = willr_with_kernel(&input, kernel).unwrap();
 
-            // Get reference output from scalar kernel
+            
             let WillrOutput { values: ref_out } =
                 willr_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Property 1: Warmup period - first (period-1) values should be NaN
+            
             for i in 0..(period - 1) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2373,18 +2373,18 @@ mod tests {
                 );
             }
 
-            // Test properties for valid output values
+            
             for i in (period - 1)..high.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
                 if y.is_nan() {
-                    // If NaN, reference should also be NaN
+                    
                     prop_assert!(r.is_nan(), "NaN mismatch at index {}", i);
                     continue;
                 }
 
-                // Property 2: Output bounds - Williams %R should be between -100 and 0
+                
                 prop_assert!(
                     y >= -100.0 - 1e-9 && y <= 0.0 + 1e-9,
                     "Output bounds violation at index {}: {} not in [-100, 0]",
@@ -2392,7 +2392,7 @@ mod tests {
                     y
                 );
 
-                // Property 3: Extreme values validation
+                
                 let window_start = i + 1 - period;
                 let window_high = high[window_start..=i]
                     .iter()
@@ -2403,7 +2403,7 @@ mod tests {
                     .cloned()
                     .fold(f64::INFINITY, f64::min);
 
-                // If close equals highest high, %R should be close to 0
+                
                 if (close[i] - window_high).abs() < 1e-10 {
                     prop_assert!(
                         y.abs() < 1e-6,
@@ -2413,7 +2413,7 @@ mod tests {
                     );
                 }
 
-                // If close equals lowest low, %R should be close to -100
+                
                 if (close[i] - window_low).abs() < 1e-10 {
                     prop_assert!(
                         (y + 100.0).abs() < 1e-6,
@@ -2423,10 +2423,10 @@ mod tests {
                     );
                 }
 
-                // Property 4: Single period case
+                
                 if period == 1 {
                     let expected = if high[i] == low[i] {
-                        0.0 // When high = low, denominator is 0, so %R = 0
+                        0.0 
                     } else {
                         (high[i] - close[i]) / (high[i] - low[i]) * -100.0
                     };
@@ -2439,7 +2439,7 @@ mod tests {
                     );
                 }
 
-                // Property 5: Constant prices
+                
                 let window_highs = &high[window_start..=i];
                 let window_lows = &low[window_start..=i];
                 let window_closes = &close[window_start..=i];
@@ -2460,7 +2460,7 @@ mod tests {
                     );
                 }
 
-                // Property 6: Kernel consistency
+                
                 if !r.is_finite() {
                     prop_assert!(
                         y.to_bits() == r.to_bits(),
@@ -2482,14 +2482,14 @@ mod tests {
                     );
                 }
 
-                // Property 7: Mathematical bounds based on window
-                // %R formula: ((high - close) / (high - low)) * -100
-                // Since close is within [low, high], the fraction is in [0, 1]
-                // So %R is in [-100, 0]
+                
+                
+                
+                
                 let range = window_high - window_low;
                 if range > 1e-10 {
                     let theoretical_value = (window_high - close[i]) / range * -100.0;
-                    // Allow for some numerical error
+                    
                     prop_assert!(
                         (y - theoretical_value).abs() < 1e-6,
                         "Mathematical formula mismatch at index {}: expected {}, got {}",
@@ -2572,16 +2572,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),     // Small periods with step 2
-            (5, 25, 5),     // Medium periods with step 5
-            (10, 50, 10),   // Large periods with step 10
-            (2, 5, 1),      // Dense small range
-            (14, 14, 0),    // Single period (default)
-            (30, 60, 15),   // Large periods with large step
-            (50, 100, 25),  // Very large periods
-            (100, 200, 50), // Edge case large periods
+            (2, 10, 2),     
+            (5, 25, 5),     
+            (10, 50, 10),   
+            (2, 5, 1),      
+            (14, 14, 0),    
+            (30, 60, 15),   
+            (50, 100, 25),  
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -2600,7 +2600,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2660,7 +2660,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// --- Python bindings ---
+
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -2725,11 +2725,11 @@ impl WillrStreamPy {
     }
 }
 
-// Python CUDA handle for WILLR: CAI v3 + DLPack v1.x with version negotiation.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "WillrDeviceArrayF32", unsendable)]
 pub struct WillrDeviceArrayF32Py {
-    // One-shot export via __dlpack__: move out of this Option
+    
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) _ctx: Arc<Context>,
     pub(crate) device_id: u32,

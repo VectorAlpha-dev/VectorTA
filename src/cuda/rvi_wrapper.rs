@@ -233,7 +233,7 @@ impl CudaRvi {
             ));
         }
 
-        // Reject unsupported devtype=2 for now (median abs dev)
+        
         if combos.iter().any(|c| c.devtype.unwrap_or(0) == 2) {
             return Err(CudaRviError::InvalidInput(
                 "devtype=2 (median abs dev) not supported by CUDA kernel yet".into(),
@@ -275,7 +275,7 @@ impl CudaRvi {
             .checked_mul(len)
             .ok_or_else(|| CudaRviError::InvalidInput("rows * len overflow".into()))?;
 
-        // Partition rows by devtype
+        
         let mut idx_std = Vec::with_capacity(rows);
         let mut idx_mad = Vec::with_capacity(rows);
         for (i, c) in combos.iter().enumerate() {
@@ -284,12 +284,12 @@ impl CudaRvi {
         let rows_std = idx_std.len();
         let rows_mad = idx_mad.len();
 
-        // Sorted combos (stddev first, then mad) for caller mapping
+        
         let mut combos_sorted = Vec::with_capacity(rows);
         for &i in &idx_std { combos_sorted.push(combos[i].clone()); }
         for &i in &idx_mad { combos_sorted.push(combos[i].clone()); }
 
-        // VRAM estimate
+        
         let param_i32_bytes = rows
             .checked_mul(4)
             .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
@@ -331,24 +331,24 @@ impl CudaRvi {
             }
         }
 
-        // Upload prices
+        
         let h_data = LockedBuffer::from_slice(data)?;
         let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)? };
         unsafe { d_data.async_copy_from(&h_data, &self.stream)?; }
 
-        // Output
+        
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows_len, &self.stream)? };
 
-        // Heuristic: engage prefix path when total work is heavy enough
-        // Engage prefix path for any StdDev rows to maximize reuse
+        
+        
         let use_prefix = false;
 
-        // Small-problem CPU fallback for parity on unit tests
+        
         if rows * len <= 2_000_000 {
             let data_f64: Vec<f64> = data.iter().map(|&v| v as f64).collect();
             let cpu = rvi_scalar_mod::rvi_batch_with_kernel(&data_f64, sweep, Kernel::ScalarBatch)
                 .map_err(|e| CudaRviError::InvalidInput(format!("CPU fallback failed: {:?}", e)))?;
-            // Copy CPU values to device as f32
+            
             let vals_f32: Vec<f32> = cpu.values.iter().map(|&v| v as f32).collect();
             unsafe {
                 d_out.async_copy_from(vals_f32.as_slice(), &self.stream)?;
@@ -357,14 +357,14 @@ impl CudaRvi {
             return Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, cpu.combos));
         }
 
-        // ---- StdDev path ----
+        
         if use_prefix {
-            // Build param arrays for the StdDev group
+            
             let periods_std: Vec<i32> = idx_std.iter().map(|&i| combos[i].period.unwrap() as i32).collect();
             let ma_std: Vec<i32>      = idx_std.iter().map(|&i| combos[i].ma_len.unwrap() as i32).collect();
             let mt_std: Vec<i32>      = idx_std.iter().map(|&i| combos[i].matype.unwrap() as i32).collect();
 
-            // Prefix buffers
+            
             let mut d_pref = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)? };
             let mut d_pref2 = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream)? };
             let mut d_runlen =
@@ -401,7 +401,7 @@ impl CudaRvi {
             }
         }
 
-        // ---- MAD path ----
+        
         if use_prefix && rows_mad > 0 {
             let periods_mad: Vec<i32> = idx_mad.iter().map(|&i| combos[i].period.unwrap() as i32).collect();
             let ma_mad: Vec<i32>      = idx_mad.iter().map(|&i| combos[i].ma_len.unwrap() as i32).collect();
@@ -442,7 +442,7 @@ impl CudaRvi {
         }
 
         if !use_prefix {
-            // Legacy: launch all rows via original batch kernel for parity on small problems
+            
             let periods_all: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
             let ma_all: Vec<i32>      = combos.iter().map(|c| c.ma_len.unwrap() as i32).collect();
             let mt_all: Vec<i32>      = combos.iter().map(|c| c.matype.unwrap() as i32).collect();
@@ -555,7 +555,7 @@ impl CudaRvi {
             let mut f_i = first_valid as i32;
             let mut r_i = n_rows as i32;
             let mut maxm_i = max_ma_len as i32;
-            let mut ids_ptr: u64 = 0; // null row_ids → contiguous mapping
+            let mut ids_ptr: u64 = 0; 
             let mut o_ptr = d_out.as_device_ptr().as_raw()
                 .wrapping_add((row_offset * len * std::mem::size_of::<f32>()) as u64);
             let mut args: [*mut c_void; 13] = [
@@ -639,7 +639,7 @@ impl CudaRvi {
     }
 
     #[allow(clippy::too_many_arguments)]
-    // removed legacy launch_batch; split into stddev/mad launchers above
+    
 
     pub fn rvi_many_series_one_param_time_major_dev(&self, data_tm: &[f32], cols: usize, rows: usize, params: &RviParams) -> Result<DeviceArrayF32, CudaRviError> {
         if cols == 0 || rows == 0 {
@@ -657,7 +657,7 @@ impl CudaRvi {
         let devtype = params.devtype.unwrap_or(0);
         if devtype == 2 { return Err(CudaRviError::InvalidInput("devtype=2 (median abs dev) not supported by CUDA kernel yet".into())); }
 
-        // Semantic guard: current CUDA kernel degrades SMA->EMA for very large ma_len; refuse to launch
+        
         if matype == 0 && ma_len > 1024 {
             return Err(CudaRviError::InvalidInput(
                 "SMA with ma_len > 1024 not supported by CUDA many-series kernel without semantic change (would degrade to EMA)."
@@ -665,7 +665,7 @@ impl CudaRvi {
             ));
         }
 
-        // Per-series first_valid detection
+        
         let mut firsts = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -695,7 +695,7 @@ impl CudaRvi {
             ));
         }
 
-        // VRAM estimate
+        
         let elems = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(2))
@@ -719,7 +719,7 @@ impl CudaRvi {
             }
         }
 
-        // Upload buffers
+        
         let h_data = LockedBuffer::from_slice(data_tm)?;
         let h_firsts = LockedBuffer::from_slice(&firsts)?;
         let elems = cols * rows;
@@ -803,7 +803,7 @@ impl CudaRvi {
                 &mut t_i as *mut _ as *mut c_void,
                 &mut d_i as *mut _ as *mut c_void,
                 &mut o_ptr as *mut _ as *mut c_void,
-                std::ptr::null_mut(), // placeholder to keep array length stable if modified
+                std::ptr::null_mut(), 
             ];
             self.stream
                 .launch(&func, grid, block, 0, &mut args)?;
@@ -812,14 +812,14 @@ impl CudaRvi {
     }
 }
 
-// -------- Bench Profiles --------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        // Device-resident batch: 100k samples, 128 combos
+        
         v.push(CudaBenchScenario::new(
             "rvi",
             "one_series_many_params",
@@ -833,10 +833,10 @@ pub mod benches {
                     data[i] = (x * 0.00123).sin() + 0.0002 * x;
                 }
                 let sweep = RviBatchRange {
-                    period: (10, 25, 1),   // 16
-                    ma_len: (14, 21, 1),   // 8  -> 128 combos
-                    matype: (1, 1, 0),     // EMA
-                    devtype: (0, 0, 0),    // StdDev
+                    period: (10, 25, 1),   
+                    ma_len: (14, 21, 1),   
+                    matype: (1, 1, 0),     
+                    devtype: (0, 0, 0),    
                 };
 
                 let combos = CudaRvi::expand_grid(&sweep).expect("expand_grid");
@@ -924,7 +924,7 @@ pub mod benches {
         )
         .with_sample_size(20));
 
-        // Device-resident many-series: 512 series x 2048 rows
+        
         v.push(CudaBenchScenario::new(
             "rvi",
             "many_series_one_param",

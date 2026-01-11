@@ -8,7 +8,7 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; // common VRAM handle
+use crate::cuda::moving_averages::DeviceArrayF32; 
 use crate::indicators::rocr::RocrBatchRange;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -82,7 +82,7 @@ impl CudaRocr {
     pub fn new(device_id: usize) -> Result<Self, CudaRocrError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        // Cache SM count for launch heuristics
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let context = Arc::new(Context::new(device)?);
@@ -136,7 +136,7 @@ impl CudaRocr {
         self.device_id
     }
 
-    // Build inverse table on device: inv[j] = 0.0 if data[j] is 0 or NaN; else 1/data[j]
+    
     pub fn prepare_inv_device(
         &self,
         d_data: &DeviceBuffer<f32>,
@@ -167,7 +167,7 @@ impl CudaRocr {
         }
         Ok(())
     }
-    // ---------- Batch (one series × many params) ----------
+    
 
     fn expand_grid(range: &RocrBatchRange) -> Result<Vec<usize>, CudaRocrError> {
         let (start, end, step) = range.period;
@@ -331,11 +331,11 @@ impl CudaRocr {
             )));
         }
 
-        // Heuristic: only build inverse table when it likely pays off.
-        // Use device-side precompute when n_combos >= 3 and len >= 4096.
+        
+        
         let use_inv = combos.len() >= 3 && len >= 4096;
 
-        // VRAM estimate (checked arithmetic)
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let prices_bytes = len
             .checked_mul(elem_f32)
@@ -372,14 +372,14 @@ impl CudaRocr {
             }
         }
 
-        // Upload inputs
+        
         let d_data = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
         let d_periods =
             unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total_elems, &self.stream)? };
-        // Optional device-side inverse precompute and usage
+        
         let mut d_inv_opt: Option<DeviceBuffer<f32>> = None;
         if use_inv {
             let mut d_inv: DeviceBuffer<f32> = unsafe {
@@ -408,7 +408,7 @@ impl CudaRocr {
     pub fn rocr_batch_device(
         &self,
         d_data: &DeviceBuffer<f32>,
-        d_inv_opt: Option<&DeviceBuffer<f32>>, // Some(inv) or None for direct divide
+        d_inv_opt: Option<&DeviceBuffer<f32>>, 
         d_periods: &DeviceBuffer<i32>,
         len: usize,
         first_valid: usize,
@@ -444,7 +444,7 @@ impl CudaRocr {
 
         self.assert_current_device()?;
 
-        // Debug selection logging (once per instance)
+        
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if !self
                 .debug_once
@@ -459,7 +459,7 @@ impl CudaRocr {
             }
         }
 
-        // grid.y chunking to <= 65_535
+        
         let mut launched = 0usize;
             while launched < n_combos {
             let remain = n_combos - launched;
@@ -497,7 +497,7 @@ impl CudaRocr {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
 
     pub fn rocr_many_series_one_param_time_major_dev(
         &self,
@@ -523,7 +523,7 @@ impl CudaRocr {
             return Err(CudaRocrError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -547,7 +547,7 @@ impl CudaRocr {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate: data + first_valids + output
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let series_bytes = total_elems
             .checked_mul(elem_f32)
@@ -613,14 +613,14 @@ impl CudaRocr {
                 name: "rocr_many_series_one_param_f32",
             })?;
 
-        // 2D launch mapping for time-major data: threads span series (x) and time (y)
+        
         let (block_x, block_y) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => (128u32, 4u32),
             ManySeriesKernelPolicy::OneD { block_x } => (block_x.max(64), 4u32),
         };
         let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
         let mut grid_y = ((rows as u32) + block_y - 1) / block_y;
-        if grid_y > 65_535 { grid_y = 65_535; } // hardware limit; kernel grid-strides across time
+        if grid_y > 65_535 { grid_y = 65_535; } 
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if !self
                 .debug_once
@@ -660,7 +660,7 @@ impl CudaRocr {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
@@ -727,7 +727,7 @@ pub mod benches {
         let n_combos = combos.len();
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
-        // Build inverse on device to avoid host pass and H2D copy
+        
         let mut d_inv: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.expect("d_inv");
         cuda.prepare_inv_device(&d_prices, len, &mut d_inv).expect("prepare_inv_device");

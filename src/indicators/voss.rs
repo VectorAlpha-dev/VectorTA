@@ -331,7 +331,7 @@ fn voss_compute_into(
 pub fn voss_with_kernel(input: &VossInput, kernel: Kernel) -> Result<VossOutput, VossError> {
     let (data, period, predict, bandwidth, first, min_index, chosen) = voss_prepare(input, kernel)?;
 
-    // Use alloc_with_nan_prefix for proper memory allocation
+    
     let warmup_period = first + min_index;
     let mut voss = alloc_with_nan_prefix(data.len(), warmup_period);
     let mut filt = alloc_with_nan_prefix(data.len(), warmup_period);
@@ -365,7 +365,7 @@ pub fn voss_into_slice(
         });
     }
 
-    // Pre-fill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    
     let warmup_end = first + min_index;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let v_end = if warmup_end < voss_dst.len() { warmup_end } else { voss_dst.len() };
@@ -377,7 +377,7 @@ pub fn voss_into_slice(
         *v = qnan;
     }
 
-    // Compute into provided slices (Kernel::chosen may overwrite a subset of warmup, matching Vec API)
+    
     voss_compute_into(
         data, period, predict, bandwidth, first, min_index, chosen, voss_dst, filt_dst,
     );
@@ -406,7 +406,7 @@ pub fn voss_scalar(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    // Delegate to the row-optimized scalar path to keep single-source behavior
+    
     voss_row_scalar(data, first, period, predict, bandwidth, voss, filt)
 }
 
@@ -432,14 +432,14 @@ unsafe fn voss_simd128(
     let g1 = (bandwidth * 2.0 * PI / period as f64).cos();
     let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
 
-    // Initialize the first couple of filt values to avoid NaN propagation
+    
     let start_idx = first + min_idx;
     if start_idx >= 2 {
         filt[start_idx - 2] = 0.0;
         filt[start_idx - 1] = 0.0;
     }
 
-    // First pass: compute filt values (scalar for dependencies)
+    
     let coeff1 = 0.5 * (1.0 - s1);
     let coeff2 = f1 * (1.0 + s1);
     let coeff3 = -s1;
@@ -452,22 +452,22 @@ unsafe fn voss_simd128(
         filt[i] = coeff1 * (current - prev_2) + coeff2 * prev_filt_1 + coeff3 * prev_filt_2;
     }
 
-    // Second pass: compute voss values
+    
     let scale = (3 + order) as f64 / 2.0;
     let inv_order = 1.0 / order as f64;
 
     for i in start_idx..data.len() {
-        // SIMD sum for the weighted voss values
+        
         let mut sum = 0.0;
         let base_idx = i - order;
 
-        // Process pairs with SIMD
+        
         let pairs = order / 2;
         for j in 0..pairs {
             let idx1 = base_idx + j * 2;
             let idx2 = base_idx + j * 2 + 1;
 
-            // Use previous voss values, defaulting to 0 if they're NaN (like TradingView's nz() function)
+            
             let voss_val1 = if idx1 >= first && !voss[idx1].is_nan() {
                 voss[idx1]
             } else {
@@ -491,7 +491,7 @@ unsafe fn voss_simd128(
             sum += f64x2_extract_lane::<0>(prod) + f64x2_extract_lane::<1>(prod);
         }
 
-        // Handle odd order
+        
         if order % 2 != 0 {
             let idx = base_idx + order - 1;
             let voss_val = if idx >= first && !voss[idx].is_nan() {
@@ -517,7 +517,7 @@ pub unsafe fn voss_avx2(
     voss: &mut [f64],
     filt: &mut [f64],
 ) {
-    // Use an unchecked scalar row kernel to avoid bounds checks; recursion is inherently serial.
+    
     voss_row_scalar_unchecked(data, first, period, predict, bandwidth, voss, filt)
 }
 
@@ -572,29 +572,29 @@ pub struct VossStream {
     period: usize,
     predict: usize,
     bandwidth: f64,
-    // coefficients
+    
     f1: f64,
     s1: f64,
-    c1: f64, // 0.5*(1-s1)
-    c2: f64, // f1*(1+s1)
-    c3: f64, // -s1
+    c1: f64, 
+    c2: f64, 
+    c3: f64, 
     order: usize,
     warm_left: usize,
-    // state for the 2‑pole bandpass (Filt)
+    
     prev_f1: f64,
     prev_f2: f64,
     last_x1: f64,
     last_x2: f64,
-    // O(1) predictor state for Voss feedback
-    ring: Vec<f64>, // last `order` Voss values (nz = NaN->0)
-    rpos: usize,    // write position in `ring`
-    a_sum: f64,     // A_t = sum of last `order` Voss values
-    d_sum: f64,     // D_t = sum of k * Voss[t-k], k=1..order
-    ord_f: f64,     // m as f64
-    inv_order: f64, // 1/m
-    scale: f64,     // (3 + m)/2
+    
+    ring: Vec<f64>, 
+    rpos: usize,    
+    a_sum: f64,     
+    d_sum: f64,     
+    ord_f: f64,     
+    inv_order: f64, 
+    scale: f64,     
 
-    // optional flag preserved for compatibility
+    
     filled: bool,
 }
 
@@ -613,15 +613,15 @@ impl VossStream {
 
         let order = 3 * predict;
         let min_index = period.max(5).max(order);
-        // Base radian frequency
+        
         let w0 = 2.0 * PI / period as f64;
         let f1 = w0.cos();
         let g1 = (bandwidth * w0).cos();
 
-        // Numerically-stable s1 computation to avoid cancellation when g1 ≈ 1:
-        // s1 = 1/g1 - sqrt(1/g1^2 - 1) == 1 / (1/g1 + sqrt(1/g1^2 - 1))
+        
+        
         let inv_g1 = 1.0 / g1;
-        let root = (inv_g1.mul_add(inv_g1, -1.0)).sqrt(); // sqrt(inv_g1^2 - 1)
+        let root = (inv_g1.mul_add(inv_g1, -1.0)).sqrt(); 
         let s1 = 1.0 / (inv_g1 + root);
 
         Ok(Self {
@@ -657,13 +657,13 @@ impl VossStream {
 
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<(f64, f64)> {
-        // Track last two raw inputs to form x[i] - x[i-2] for the bandpass
+        
         let x_im2 = self.last_x2;
         self.last_x2 = self.last_x1;
         self.last_x1 = x;
 
-        // Two‑pole bandpass (Ehlers)
-        // Filt[i] = c1*(x - x[i-2]) + c2*Filt[i-1] + c3*Filt[i-2]
+        
+        
         let filt_val = if x_im2.is_nan() {
             0.0
         } else {
@@ -675,24 +675,24 @@ impl VossStream {
             f
         };
 
-        // Voss predictor with O(1) feedback update
+        
         let voss_val = if self.order == 0 {
-            // Predict==0: degenerate case, no feedback window
+            
             self.scale * filt_val
         } else {
-            // SumC_t = (1/m) * D_t, where D_t = sum_{k=1..m} k * v_{t-k}
+            
             let sumc = self.d_sum * self.inv_order;
             let vi = self.scale.mul_add(filt_val, -sumc);
 
-            // Slide the window in O(1):
-            // A' = A - v_old + v_new;    D' = (D - A) + m * v_new
+            
+            
             let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
             let v_old = self.ring[self.rpos];
             let a_prev = self.a_sum;
             self.a_sum = a_prev - v_old + v_new_nz;
             self.d_sum = self.ord_f.mul_add(v_new_nz, self.d_sum - a_prev);
 
-            // write & advance ring
+            
             self.ring[self.rpos] = v_new_nz;
             self.rpos += 1;
             if self.rpos == self.order {
@@ -960,7 +960,7 @@ pub fn voss_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Validate output buffers with checked arithmetic
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| VossError::InvalidRange {
@@ -982,7 +982,7 @@ pub fn voss_batch_inner_into(
     }
 
     let do_row = |row: usize, vo: &mut [f64], fo: &mut [f64]| {
-        // Initialize warmup as NaN
+        
         let p = combos[row].period.unwrap_or(20);
         let q = combos[row].predict.unwrap_or(3);
         let order = 3 * q;
@@ -1098,7 +1098,7 @@ fn voss_batch_inner(
             step: "rows*cols".into(),
         })?;
 
-    // Calculate warmup periods for each combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1110,13 +1110,13 @@ fn voss_batch_inner(
         })
         .collect();
 
-    // Use make_uninit_matrix and init_matrix_prefixes for proper memory allocation
+    
     let mut voss_mu = make_uninit_matrix(rows, cols);
     let mut filt_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut voss_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut filt_mu, cols, &warmup_periods);
 
-    // Convert to mutable slices
+    
     let mut voss_guard = core::mem::ManuallyDrop::new(voss_mu);
     let mut filt_guard = core::mem::ManuallyDrop::new(filt_mu);
     let voss_slice: &mut [f64] = unsafe {
@@ -1177,7 +1177,7 @@ fn voss_batch_inner(
         }
     }
 
-    // Convert back to Vec for output
+    
     let voss_vec = unsafe {
         let raw_vec = Vec::from_raw_parts(
             voss_guard.as_mut_ptr() as *mut f64,
@@ -1206,7 +1206,7 @@ fn voss_batch_inner(
     })
 }
 
-// (batch predictor-only helper removed to avoid memory copies of filt across rows)
+
 
 #[inline(always)]
 fn voss_row_scalar(
@@ -1276,7 +1276,7 @@ fn voss_row_scalar(
         let vi = scale.mul_add(f, -sumc);
         voss[i] = vi;
 
-        // Roll the O(1) recurrence via ring buffer to avoid voss[i - order] reads
+        
         let v_new_nz = if vi.is_nan() { 0.0 } else { vi };
         let v_old = ring[rpos];
 
@@ -1292,8 +1292,8 @@ fn voss_row_scalar(
     }
 }
 
-// Unsafe unchecked variant for AVX2/AVX512 wrappers to remove bounds checks in hot loops.
-// The algorithm is identical to voss_row_scalar, but uses get_unchecked and mul_add throughout.
+
+
 #[inline(always)]
 unsafe fn voss_row_scalar_unchecked(
     data: &[f64],
@@ -1317,8 +1317,8 @@ unsafe fn voss_row_scalar_unchecked(
     let w0 = 2.0 * PI / period as f64;
     let f1 = w0.cos();
     let g1 = (bandwidth * w0).cos();
-    // Match scalar path operation order for bitwise-consistent results across kernels
-    // Scalar uses: 1/g1 - sqrt(1/g1^2 - 1)
+    
+    
     let s1 = 1.0 / g1 - (1.0 / (g1 * g1) - 1.0).sqrt();
     let c1 = 0.5 * (1.0 - s1);
     let c2 = f1 * (1.0 + s1);
@@ -1445,7 +1445,7 @@ pub fn expand_grid_voss(r: &VossBatchRange) -> Result<Vec<VossParams>, VossError
     expand_grid(r)
 }
 
-// ================== PYTHON MODULE REGISTRATION ==================
+
 #[cfg(feature = "python")]
 pub fn register_voss_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(voss_py, m)?)?;
@@ -1492,7 +1492,7 @@ impl VossDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producing stream is synchronized before return; omit explicit stream per CAI v3.
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2306,7 +2306,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // For reference, only test length and NaN propagation
+        
         for (i, &v) in row.iter().enumerate() {
             if i < def.period.unwrap() {
                 assert!(
@@ -2331,7 +2331,7 @@ mod tests {
             .bandwidth_range(0.1, 0.2, 0.1);
 
         let output = builder.apply_candles(&c, "close")?;
-        let expected_param_count = ((14 - 10) / 2 + 1) * (4 - 2 + 1) * 2; // periods x predicts x bandwidths
+        let expected_param_count = ((14 - 10) / 2 + 1) * (4 - 2 + 1) * 2; 
         assert_eq!(
             output.combos.len(),
             expected_param_count,
@@ -2391,15 +2391,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, predict_start, predict_end, predict_step, bandwidth_start, bandwidth_end, bandwidth_step)
-            (2, 10, 2, 1, 3, 1, 0.1, 0.3, 0.1), // Small periods and predicts
-            (5, 25, 5, 2, 4, 1, 0.2, 0.4, 0.1), // Medium periods
-            (30, 60, 15, 5, 8, 1, 0.3, 0.6, 0.15), // Large periods
-            (2, 5, 1, 1, 2, 1, 0.1, 0.2, 0.05), // Dense small range
-            (10, 30, 10, 3, 5, 1, 0.25, 0.5, 0.25), // Medium range
-            (50, 100, 25, 8, 10, 1, 0.5, 0.75, 0.25), // Very large periods
+            
+            (2, 10, 2, 1, 3, 1, 0.1, 0.3, 0.1), 
+            (5, 25, 5, 2, 4, 1, 0.2, 0.4, 0.1), 
+            (30, 60, 15, 5, 8, 1, 0.3, 0.6, 0.15), 
+            (2, 5, 1, 1, 2, 1, 0.1, 0.2, 0.05), 
+            (10, 30, 10, 3, 5, 1, 0.25, 0.5, 0.25), 
+            (50, 100, 25, 8, 10, 1, 0.5, 0.75, 0.25), 
         ];
 
         for (cfg_idx, config) in test_configs.iter().enumerate() {
@@ -2410,7 +2410,7 @@ mod tests {
                 .bandwidth_range(config.6, config.7, config.8)
                 .apply_candles(&c, "close")?;
 
-            // Check voss output
+            
             for (idx, &val) in output.voss.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2421,7 +2421,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2456,7 +2456,7 @@ mod tests {
                 }
             }
 
-            // Check filt output
+            
             for (idx, &val) in output.filt.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2467,7 +2467,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2539,9 +2539,9 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ============================================================================
-// Python Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "voss")]

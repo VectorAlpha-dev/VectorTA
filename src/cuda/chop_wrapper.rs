@@ -10,7 +10,7 @@
 #![cfg(feature = "cuda")]
 
 use crate::indicators::chop::{ChopBatchRange, ChopParams};
-use crate::indicators::willr::build_willr_gpu_tables; // reuse sparse-table prep for H/L
+use crate::indicators::willr::build_willr_gpu_tables; 
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
@@ -22,11 +22,11 @@ use cust::stream::{Stream, StreamFlags};
 use std::sync::Arc;
 use thiserror::Error;
 
-// Keep this in sync with the kernel's register-ring threshold
+
 const CHOP_REG_RING_MAX: usize = 64;
 
-// Above this, stage through pinned memory for truly async H->D
-const PINNED_STAGING_THRESHOLD: usize = 1 << 20; // 1 MiB
+
+const PINNED_STAGING_THRESHOLD: usize = 1 << 20; 
 
 #[derive(Debug, Error)]
 pub enum CudaChopError {
@@ -77,7 +77,7 @@ impl CudaChop {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/chop_kernel.ptx"));
-        // Prefer high JIT opt level, fallback gracefully
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -98,7 +98,7 @@ impl CudaChop {
             .checked_mul(size_of::<T>())
             .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
         if bytes >= PINNED_STAGING_THRESHOLD {
-            // Stage through pinned host memory so cudaMemcpyAsync stays non-blocking.
+            
             let mut pinned: LockedBuffer<T> = unsafe { LockedBuffer::uninitialized(slice.len()) }?;
             pinned.as_mut_slice().copy_from_slice(slice);
 
@@ -127,17 +127,17 @@ impl CudaChop {
                     })
                 }
             }
-            Err(_) => Ok(()), // be permissive if the driver can't report
+            Err(_) => Ok(()), 
         }
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
 
     fn expand_grid(range: &ChopBatchRange) -> Result<Vec<ChopParams>, CudaChopError> {
         let (ps, pe, pt) = range.period;
         let (ss, se, st) = range.scalar;
         let (ds, de, dt) = range.drift;
-        // usize axes: support reversed bounds
+        
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
         } else if ps < pe {
@@ -148,7 +148,7 @@ impl CudaChop {
             while x >= pe { v.push(x); if x < pe + pt { break; } x -= pt; if x == 0 { break; } }
             v
         };
-        // f64 axis: respect step sign for direction
+        
         let scalars: Vec<f64> = if st.abs() < 1e-12 || (ss - se).abs() < f64::EPSILON {
             vec![ss]
         } else if ss <= se && st > 0.0 {
@@ -187,7 +187,7 @@ impl CudaChop {
 
         let combos = Self::expand_grid(sweep)?;
 
-        // first_valid where H/L/C are all finite (match scalar)
+        
         let mut first = -1isize;
         for i in 0..n {
             let h = high_f32[i];
@@ -210,15 +210,15 @@ impl CudaChop {
             )));
         }
 
-        // Host precompute: H/L sparse tables for O(1) window range queries
+        
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        // Pack params
+        
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let drifts_i32: Vec<i32> = combos.iter().map(|c| c.drift.unwrap() as i32).collect();
         let scalars_f32: Vec<f32> = combos.iter().map(|c| c.scalar.unwrap() as f32).collect();
 
-        // VRAM estimate (+64MB headroom)
+        
         let out_elems = combos
             .len()
             .checked_mul(n)
@@ -307,7 +307,7 @@ impl CudaChop {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        // Upload inputs/params (prefer truly async copies with pinned staging for large buffers)
+        
         let d_high    = self.upload_slice_async(high_f32)?;
         let d_low     = self.upload_slice_async(low_f32)?;
         let d_close   = self.upload_slice_async(close_f32)?;
@@ -323,13 +323,13 @@ impl CudaChop {
 
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Kernel launch
+        
         let mut func = self
             .module
             .get_function("chop_batch_f32")
             .map_err(|_| CudaChopError::MissingKernelSymbol { name: "chop_batch_f32" })?;
 
-        // Choose dynamic shared mem per regime and set cache preference
+        
         let shared_bytes: usize = if max_period <= CHOP_REG_RING_MAX {
             0
         } else {
@@ -343,7 +343,7 @@ impl CudaChop {
             func.set_cache_config(CacheConfig::PreferShared)
         };
 
-        // Chunk rows to keep grid.x <= 65_535
+        
         let rows = combos.len();
         let mut launched = 0usize;
         while launched < rows {
@@ -382,7 +382,7 @@ impl CudaChop {
         Ok((DeviceArrayF32 { buf: d_out, rows, cols: n, ctx: self.context.clone(), device_id: self.device_id }, combos))
     }
 
-    // ---------- Many-series × one param (time-major) ----------
+    
 
     pub fn chop_many_series_one_param_time_major_dev(
         &self,
@@ -407,7 +407,7 @@ impl CudaChop {
         let scalar = params.scalar.unwrap_or(100.0) as f32;
         if period == 0 || drift == 0 { return Err(CudaChopError::InvalidInput("invalid params".into())); }
 
-        // first-valid per series: H/L/C all finite
+        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -423,7 +423,7 @@ impl CudaChop {
             first_valids[s] = fv;
         }
 
-        // Validate max tail
+        
         for s in 0..cols {
             let fv = first_valids[s];
             if fv < 0 { return Err(CudaChopError::InvalidInput("all values are NaN".into())); }
@@ -432,7 +432,7 @@ impl CudaChop {
             }
         }
 
-        // Host precompute: ATR series per series and prefix sums (rows+1) × cols
+        
         let atr_rows = rows
             .checked_add(1)
             .ok_or_else(|| CudaChopError::InvalidInput("rows overflow".into()))?;
@@ -447,9 +447,9 @@ impl CudaChop {
                 let mut prev_close = close_tm_f32[fv * cols + s] as f64;
                 let mut rma_atr: f64 = f64::NAN;
                 let mut sum_tr = 0.0f64;
-                let mut acc = 0.0f64; // prefix
-                                      // prefix psum[0..fv] already zero
-                                      // prefix psum[0..fv] already zero
+                let mut acc = 0.0f64; 
+                                      
+                                      
                 for r in fv..rows {
                     let hi = high_tm_f32[r * cols + s] as f64;
                     let lo = low_tm_f32[r * cols + s] as f64;
@@ -497,7 +497,7 @@ impl CudaChop {
             }
         }
 
-        // VRAM estimate (+64MB)
+        
         let mut bytes: usize = 0;
         bytes = bytes
             .checked_add(
@@ -533,7 +533,7 @@ impl CudaChop {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        // Upload
+        
         let d_high  = self.upload_slice_async(high_tm_f32)?;
         let d_low   = self.upload_slice_async(low_tm_f32)?;
         let d_psum  = self.upload_slice_async(&atr_psum_tm)?;
@@ -546,7 +546,7 @@ impl CudaChop {
             .map_err(|_| CudaChopError::MissingKernelSymbol { name: "chop_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // 256 threads per block
+        
         let block: BlockSize = (256u32, 1u32, 1u32).into();
         let grid: GridSize = (((cols as u32 + 255) / 256).max(1), 1u32, 1u32).into();
         let stream = &self.stream;
@@ -571,7 +571,7 @@ impl CudaChop {
         Ok(DeviceArrayF32 { buf: d_out, rows, cols, ctx: self.context.clone(), device_id: self.device_id })
     }
 
-    // ---------- Host-copy helpers (optional) ----------
+    
     pub fn chop_batch_into_host_f32(
         &self,
         high_f32: &[f32],
@@ -593,7 +593,7 @@ impl CudaChop {
     }
 }
 
-// ---------- Benches (wrapper-owned) ----------
+
 pub mod benches {
     use super::*;
     use std::ffi::c_void;
@@ -622,15 +622,15 @@ pub mod benches {
     }
 
     fn bytes_sparse_tables(n: usize) -> usize {
-        // Upper-bound-ish estimate: 2x (max+min) sparse tables plus small metadata.
-        // levels ~= floor(log2(n)) + 1
+        
+        
         let levels = (usize::BITS as usize).saturating_sub(n.max(1).leading_zeros() as usize);
         let st_elems = n.saturating_mul(levels);
-        // st_max + st_min
+        
         let st_bytes = 2usize
             .saturating_mul(st_elems)
             .saturating_mul(std::mem::size_of::<f32>());
-        // log2 + nan_psum + level_offsets
+        
         let meta_i32 = (n + 1).saturating_mul(2).saturating_add(levels + 1);
         let meta_bytes = meta_i32.saturating_mul(std::mem::size_of::<i32>());
         st_bytes + meta_bytes
@@ -646,7 +646,7 @@ pub mod benches {
 
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_COLS * MANY_ROWS;
-        let in_bytes = 2 * elems * std::mem::size_of::<f32>(); // high + low
+        let in_bytes = 2 * elems * std::mem::size_of::<f32>(); 
         let psum_bytes = (MANY_ROWS + 1) * MANY_COLS * std::mem::size_of::<f32>();
         let first_bytes = MANY_COLS * std::mem::size_of::<i32>();
         let out_bytes = elems * std::mem::size_of::<f32>();

@@ -35,14 +35,14 @@ use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use cust::memory::DeviceBuffer;
 use thiserror::Error;
 
-// Core numeric computation functions that mirror alma.rs patterns
+
 #[inline(always)]
 fn ttm_numeric_compute_into(
     source: &[f64],
     close: &[f64],
     period: usize,
     first: usize,
-    out: &mut [f64], // NaN prefix already set by caller
+    out: &mut [f64], 
 ) {
     let mut sum = 0.0;
     for &v in &source[first..first + period] {
@@ -1089,7 +1089,7 @@ pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResu
     Ok(())
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1720,13 +1720,13 @@ mod tests {
             let input = TtmTrendInput::from_slices(&source, &close, params);
             let result = ttm_trend_with_kernel(&input, kernel)?;
 
-            // At index 1: avg = (100 + 200)/2 = 150, close[1] = 250 > 150, so should be true
+            
             assert!(
                 result.values[1],
                 "Manual test failed at index 1 for {}",
                 test_name
             );
-            // At index 2: avg = (200 + 300)/2 = 250, close[2] = 350 > 250, so should be true
+            
             assert!(
                 result.values[2],
                 "Manual test failed at index 2 for {}",
@@ -1734,19 +1734,19 @@ mod tests {
             );
         }
 
-        // Strategy for generating realistic test data
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             let data_len = period * 2 + 50;
             (
-                // Generate starting price
+                
                 (100f64..10000f64),
-                // Generate price changes (more realistic random walk)
+                
                 prop::collection::vec(
-                    (-0.02f64..0.02f64), // ±2% changes
+                    (-0.02f64..0.02f64), 
                     data_len - 1,
                 ),
                 Just(period),
-                // Spread factor for OHLC generation
+                
                 (0.005f64..0.02f64),
             )
         });
@@ -1755,35 +1755,35 @@ mod tests {
             .run(
                 &strat,
                 |(start_price, price_changes, period, spread_factor)| {
-                    // Generate realistic price series using random walk
+                    
                     let mut base_prices = Vec::with_capacity(price_changes.len() + 1);
                     base_prices.push(start_price);
 
-                    // Build price series as random walk
+                    
                     let mut current_price = start_price;
                     for &change_pct in &price_changes {
                         current_price *= 1.0 + change_pct;
-                        current_price = current_price.max(10.0); // Ensure price stays positive
+                        current_price = current_price.max(10.0); 
                         base_prices.push(current_price);
                     }
 
-                    // Generate realistic source and close from base prices
+                    
                     let mut source = Vec::with_capacity(base_prices.len());
                     let mut close = Vec::with_capacity(base_prices.len());
 
-                    // Simple deterministic variation for reproducibility
+                    
                     for (i, &base) in base_prices.iter().enumerate() {
-                        // Create OHLC-like data
+                        
                         let spread = base * spread_factor;
                         let high = base + spread;
                         let low = base - spread;
 
-                        // Source is typically hl2 (average of high and low)
+                        
                         source.push((high + low) / 2.0);
 
-                        // Close varies within the high-low range
-                        // Use a deterministic pattern based on index
-                        let close_ratio = ((i as f64 * 0.3).sin() + 1.0) / 2.0; // 0 to 1
+                        
+                        
+                        let close_ratio = ((i as f64 * 0.3).sin() + 1.0) / 2.0; 
                         close.push(low + (high - low) * close_ratio);
                     }
                     let params = TtmTrendParams {
@@ -1791,15 +1791,15 @@ mod tests {
                     };
                     let input = TtmTrendInput::from_slices(&source, &close, params);
 
-                    // Test with the specified kernel
+                    
                     let result = ttm_trend_with_kernel(&input, kernel)?;
                     let values = result.values;
 
-                    // Also get scalar reference for comparison
+                    
                     let ref_result = ttm_trend_with_kernel(&input, Kernel::Scalar)?;
                     let ref_values = ref_result.values;
 
-                    // Find first valid index
+                    
                     let first_valid = source
                         .iter()
                         .zip(close.iter())
@@ -1807,11 +1807,11 @@ mod tests {
                         .unwrap_or(0);
                     let warmup_end = first_valid + period - 1;
 
-                    // Property 1: Output length should match input length
+                    
                     prop_assert_eq!(values.len(), source.len());
                     prop_assert_eq!(values.len(), close.len());
 
-                    // Property 2: Warmup period should have false values
+                    
                     for i in 0..warmup_end.min(values.len()) {
                         prop_assert!(
                             !values[i],
@@ -1821,20 +1821,20 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Verify core calculation correctness
-                    // Note: The implementation has a quirk at the first calculated index where it only
-                    // sets to true conditionally but relies on the false initialization.
-                    // In debug mode, this can cause issues due to poison values.
-                    // We'll verify the calculation logic for indices after the first.
+                    
+                    
+                    
+                    
+                    
                     if warmup_end + 1 < values.len() {
-                        // Start from warmup_end + 1 to avoid the first value quirk
-                        // Calculate initial sum for the rolling window
+                        
+                        
                         let mut sum = 0.0;
                         for j in (first_valid + 1)..(first_valid + period + 1) {
                             sum += source[j];
                         }
 
-                        // Check rolling values starting from warmup_end + 1
+                        
                         for i in (warmup_end + 1)..values.len() {
                             let avg = sum / (period as f64);
                             let expected = close[i] > avg;
@@ -1845,14 +1845,14 @@ mod tests {
 							i, close[i], avg, expected, values[i]
 						);
 
-                            // Update rolling sum for next iteration
+                            
                             if i + 1 < source.len() {
                                 sum += source[i + 1] - source[i + 1 - period];
                             }
                         }
                     }
 
-                    // Property 4: All kernels should produce identical results
+                    
                     for i in 0..values.len() {
                         prop_assert_eq!(
                             values[i],
@@ -1865,7 +1865,7 @@ mod tests {
                         );
                     }
 
-                    // Property 5: Test period=1 edge case
+                    
                     if period == 1 {
                         for i in first_valid..values.len() {
                             let expected = close[i] > source[i];
@@ -1877,7 +1877,7 @@ mod tests {
                         }
                     }
 
-                    // Property 6: Test constant input case
+                    
                     let all_source_same = source.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                     let all_close_same = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                     if all_source_same && all_close_same && !source.is_empty() && !close.is_empty()
@@ -1895,23 +1895,23 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Test boundary conditions (values near threshold)
-                    // Count transitions to verify they occur at the right threshold
+                    
+                    
                     let mut transitions = 0;
                     for i in (warmup_end + 1)..values.len() {
                         if values[i] != values[i - 1] {
                             transitions += 1;
-                            // When a transition occurs, verify it's justified
+                            
                             let mut sum = 0.0;
                             for j in (i + 1 - period)..=i {
                                 sum += source[j];
                             }
                             let avg = sum / (period as f64);
-                            // The transition should happen when close crosses the average
+                            
                             prop_assert!(
-                                (close[i] - avg).abs() < source[i] * 0.1 || // Near the boundary
-							(values[i] && close[i] > avg) || // Clearly above
-							(!values[i] && close[i] <= avg), // Clearly below
+                                (close[i] - avg).abs() < source[i] * 0.1 || 
+							(values[i] && close[i] > avg) || 
+							(!values[i] && close[i] <= avg), 
                                 "Invalid transition at index {}: close={:.4}, avg={:.4}, value={}",
                                 i,
                                 close[i],
@@ -1921,10 +1921,10 @@ mod tests {
                         }
                     }
 
-                    // Property 8: Test extreme period edge case (period approaching data length)
+                    
                     if period == source.len() - 1 && source.len() > 2 {
-                        // With period = len - 1, only the last value should potentially be true
-                        // All others should be false (in warmup)
+                        
+                        
                         for i in 0..(source.len() - 1) {
                             prop_assert!(
                                 !values[i],
@@ -1936,7 +1936,7 @@ mod tests {
                         }
                     }
 
-                    // Property 9: Values should be deterministic - same input produces same output
+                    
                     let result2 = ttm_trend_with_kernel(&input, kernel)?;
                     for i in 0..values.len() {
                         prop_assert_eq!(
@@ -1959,9 +1959,9 @@ mod tests {
     generate_all_ttm_tests!(check_ttm_trend_property);
 }
 
-// ============================
-// ==== Python Bindings =======
-// ============================
+
+
+
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2075,7 +2075,7 @@ pub fn ttm_trend_batch_py<'py>(
         .map_err(|e: String| PyValueError::new_err(e))?;
 
     let dict = PyDict::new(py);
-    // zero-copy into NumPy and reshape to (rows, cols)
+    
     let arr = unsafe { PyArray1::<f64>::from_vec(py, vals_f64) }.reshape((rows, cols))?;
     dict.set_item("values", arr)?;
     dict.set_item(
@@ -2089,9 +2089,9 @@ pub fn ttm_trend_batch_py<'py>(
     Ok(dict)
 }
 
-// ================================
-// WASM Bindings
-// ================================
+
+
+
 
 /// Write TTM Trend values directly to output slice - no allocations
 /// Note: This writes boolean values, but for WASM we'll convert to u8 (0/1)

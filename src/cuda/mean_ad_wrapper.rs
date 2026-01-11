@@ -11,7 +11,7 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; // reuse common VRAM handle
+use crate::cuda::moving_averages::DeviceArrayF32; 
 use crate::indicators::mean_ad::{MeanAdBatchRange, MeanAdParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -20,7 +20,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu_sys; // raw driver API interop
+use cust::sys as cu_sys; 
 use std::ffi::c_void;
 use std::sync::Arc;
 
@@ -75,8 +75,8 @@ pub struct CudaMeanAd {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaMeanAdPolicy,
-    sm_count: i32,           // cached SMs on device
-    max_smem_per_block: i32, // cached per-block dynamic shared memory limit (bytes)
+    sm_count: i32,           
+    max_smem_per_block: i32, 
 }
 
 impl CudaMeanAd {
@@ -85,14 +85,14 @@ impl CudaMeanAd {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Cache device attributes we use for launch sizing
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)?;
         let max_smem_per_block = device
             .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mean_ad_kernel.ptx"));
-        // Highest JIT opt level
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -208,8 +208,8 @@ impl CudaMeanAd {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaMeanAdError::InvalidInput("all values are NaN".into()))?;
 
-        // Local expansion mirroring CPU batch grid rules:
-        // (start, end, step) with step==0 or start==end => static; support reversed bounds.
+        
+        
         let combos: Vec<MeanAdParams> = {
             let (start, end, step) = sweep.period;
             if step == 0 || start == end {
@@ -239,7 +239,7 @@ impl CudaMeanAd {
                 }
                 v
             } else {
-                // reversed bounds
+                
                 let st = step.max(1);
                 let mut v = Vec::new();
                 let mut x = start as isize;
@@ -292,7 +292,7 @@ impl CudaMeanAd {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate: prices + periods + warms + out
+        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
@@ -399,8 +399,8 @@ impl CudaMeanAd {
                 name: "mean_ad_batch_f32",
             })?;
 
-        // --- Launch policy for warp-per-combo kernel ---
-        // Start with a warp-aligned block size; default 128 if not specified.
+        
+        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x >= 32 => (block_x / 32) * 32,
             _ => 128u32,
@@ -408,7 +408,7 @@ impl CudaMeanAd {
         .max(32);
         let mut warps_per_block = (block_x / 32) as usize;
 
-        // Per-warp ring shared memory requirement
+        
         let mut shared_bytes = (max_period * warps_per_block * std::mem::size_of::<f32>()) as u32;
         let smem_limit = (self.max_smem_per_block as usize).max(1);
         if (shared_bytes as usize) > smem_limit {
@@ -417,16 +417,16 @@ impl CudaMeanAd {
             shared_bytes = (max_period * warps_per_block * std::mem::size_of::<f32>()) as u32;
         }
 
-        // Ensure the grid keeps SMs busy; kernel has warp-grid-stride internally
+        
         let ceil_div = |a: usize, b: usize| -> usize { (a + b - 1) / b };
         let base_blocks = ceil_div(n_combos, warps_per_block) as u32;
-        let min_busy = (self.sm_count.max(1) as u32) * 2; // a few waves over SMs
+        let min_busy = (self.sm_count.max(1) as u32) * 2; 
         let grid_x = base_blocks.max(min_busy).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
 
-        // Best-effort: request larger dynamic SMEM when supported (no-op if unsupported)
+        
         unsafe {
             let _ = cu_sys::cuFuncSetAttribute(
                 func.to_raw(),
@@ -484,7 +484,7 @@ impl CudaMeanAd {
                 "period exceeds series length".into(),
             ));
         }
-        // first_valid per series (column)
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut f = -1;
@@ -512,13 +512,13 @@ impl CudaMeanAd {
             .checked_mul(rows)
             .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
 
-        // Heuristic for dynamic shared memory: ring per thread => period * block_x * 4 bytes
-        let max_shmem: usize = 48 * 1024; // conservative default
+        
+        let max_shmem: usize = 48 * 1024; 
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x as usize,
             _ => 128,
         };
-        // If period is small (<= SMALL_PERIOD_MAX in kernel), kernel uses register ring => no dyn smem needed
+        
         let small_period_max: usize = 64;
         if period > small_period_max {
             block_x = block_x
@@ -535,7 +535,7 @@ impl CudaMeanAd {
         };
         self.validate_launch(grid_x, 1, 1, block_x as u32, 1, 1)?;
 
-        // VRAM estimate: prices + firsts + out
+        
         let prices_bytes = total_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
@@ -624,13 +624,13 @@ impl CudaMeanAd {
             ));
         }
 
-        // Heuristic for dynamic shared memory: ring per thread => period * block_x * 4 bytes
-        let max_shmem: usize = 48 * 1024; // conservative default
+        
+        let max_shmem: usize = 48 * 1024; 
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x as usize,
             _ => 128,
         };
-        // If period is small (<= SMALL_PERIOD_MAX in kernel), kernel uses register ring => no dyn smem needed
+        
         let small_period_max: usize = 64;
         if period > small_period_max {
             block_x = block_x
@@ -677,7 +677,7 @@ impl CudaMeanAd {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

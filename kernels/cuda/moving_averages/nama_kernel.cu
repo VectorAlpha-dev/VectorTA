@@ -1,9 +1,9 @@
-// CUDA kernels for the New Adaptive Moving Average (NAMA).
-//
-// Kernels operate on FP32 buffers (matching the public interface) while
-// promoting arithmetic that benefits from extended precision to FP64. We keep
-// shared data such as the sliding-window deques in shared memory to avoid
-// repeated global reads.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -42,7 +42,7 @@ __device__ inline double nama_true_range(
     return fabs(cur - prev);
 }
 
-// --- helpers: wrap-around without modulo ------------------------------------
+
 __device__ __forceinline__ int add_wrap(int a, int b, int cap) {
     int s = a + b;
     return (s >= cap) ? (s - cap) : s;
@@ -118,25 +118,25 @@ void nama_batch_f32(const float* __restrict__ prices,
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    // Initialize outputs to NaN cooperatively
+    
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) out[base + idx] = NAN;
     __syncthreads();
 
     if (threadIdx.x != 0 || warm >= series_len) return;
 
-    // --- shared memory layout: [dq_max | dq_min | tr_ring]
+    
     extern __shared__ int shared_i[];
-    const int cap = period + 1;                    // deque capacity
-    int* dq_max = shared_i;                        // int[cap]
-    int* dq_min = shared_i + cap;                  // int[cap]
-    float* tr_ring = reinterpret_cast<float*>(shared_i + 2*cap); // float[period]
+    const int cap = period + 1;                    
+    int* dq_max = shared_i;                        
+    int* dq_min = shared_i + cap;                  
+    float* tr_ring = reinterpret_cast<float*>(shared_i + 2*cap); 
 
     int max_front = 0, max_size = 0;
     int min_front = 0, min_size = 0;
 
-    // --- Seed window [first_valid..warm] ---------------------------------
+    
     double eff_sum = 0.0;
-    int wr = 0; // write pointer into TR ring (points to oldest)
+    int wr = 0; 
 
     if (has_ohlc) {
         float prev_c = 0.0f;
@@ -189,7 +189,7 @@ void nama_batch_f32(const float* __restrict__ prices,
     double prev = alpha * static_cast<double>(prices[warm]);
     out[base + warm] = static_cast<float>(prev);
 
-    // --- Rolling loop -----------------------------------------------------
+    
     if (has_ohlc) {
         float prev_c = close[warm];
         for (int i = warm + 1; i < series_len; ++i) {
@@ -200,7 +200,7 @@ void nama_batch_f32(const float* __restrict__ prices,
             dq_pop_older(win_start, cap, dq_max, max_front, max_size);
             dq_pop_older(win_start, cap, dq_min, min_front, min_size);
 
-            // TR ring update (OHLC)
+            
             float tr_new;
             {
                 const float h = high[i], l = low[i];
@@ -234,7 +234,7 @@ void nama_batch_f32(const float* __restrict__ prices,
             dq_pop_older(win_start, cap, dq_max, max_front, max_size);
             dq_pop_older(win_start, cap, dq_min, min_front, min_size);
 
-            // TR ring update (close-only)
+            
             const float cur = prices[i];
             const float tr_new = fabsf(cur - prev_p);
             const float tr_old = tr_ring[wr];
@@ -255,15 +255,15 @@ void nama_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Prefix-optimized batch kernel (degenerate TR only):
-// Uses host-precomputed prefix of |p[t] - p[t-1]| (NaN-insensitive) to seed the
-// initial eff_sum for the warmup window in O(1), then updates eff_sum using
-// prefix differences. Mirrors the CPU batch optimization that precomputes TR
-// once and reuses it across rows.
-//
-// prefix_tr must have length = series_len + 1 and follow:
-//   prefix_tr[0] = 0
-//   prefix_tr[t] = sum_{k=1..t} |p[k] - p[k-1]|  (with NaN-insensitive accumulation)
+
+
+
+
+
+
+
+
+
 extern "C" __global__
 void nama_batch_prefix_f32(const float* __restrict__ prices,
                            const float* __restrict__ prefix_tr,
@@ -284,7 +284,7 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    // Initialize NaNs up-front (all threads cooperate)
+    
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[base + idx] = NAN;
     }
@@ -304,7 +304,7 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     int min_front = 0;
     int min_size = 0;
 
-    // Seed deques over [first_valid..warm]
+    
     for (int j = first_valid; j <= warm; ++j) {
         dq_push_max(j, capacity, dq_max, max_front, max_size, prices);
         dq_push_min(j, capacity, dq_min, min_front, min_size, prices);
@@ -314,8 +314,8 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Seed eff_sum using prefix differences: sum_{j=first..warm} TR[j]
-    // For degenerate TR, TR[first] = 0, so this equals prefix_tr[warm] - prefix_tr[first]
+    
+    
     double eff_sum = static_cast<double>(prefix_tr[warm] - prefix_tr[first_valid]);
 
     const double hi = static_cast<double>(prices[dq_max[max_front]]);
@@ -328,18 +328,18 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     out[base + warm] = static_cast<float>(prev);
 
     for (int i = warm + 1; i < series_len; ++i) {
-        // push current index
+        
         dq_push_max(i, capacity, dq_max, max_front, max_size, prices);
         dq_push_min(i, capacity, dq_min, min_front, min_size, prices);
 
-        // pop older indices
+        
         const int win_start = i + 1 - period;
         dq_pop_older(win_start, capacity, dq_max, max_front, max_size);
         dq_pop_older(win_start, capacity, dq_min, min_front, min_size);
 
-        // Update eff_sum using prefix differences (degenerate TR):
-        // eff_sum += TR[i] - TR[i - period]
-        // TR[t] = prefix_tr[t] - prefix_tr[t-1]
+        
+        
+        
         const double tr_add = static_cast<double>(prefix_tr[i] - prefix_tr[i - 1]);
         const double tr_sub = static_cast<double>(prefix_tr[i - period] - prefix_tr[i - period - 1]);
         eff_sum = eff_sum + tr_add - tr_sub;
@@ -453,7 +453,7 @@ void nama_many_series_one_param_time_major_f32(
         min_size += 1;
     };
 
-    // Seed window
+    
     double eff_sum = 0.0;
     int wr = 0;
 

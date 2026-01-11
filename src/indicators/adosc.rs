@@ -245,12 +245,12 @@ fn adosc_prepare<'a>(
         &'a [f64],
         &'a [f64],
         &'a [f64],
-        &'a [f64], // high, low, close, volume
+        &'a [f64], 
         usize,
-        usize, // short, long
+        usize, 
         usize,
-        usize,  // first=0, len
-        Kernel, // chosen
+        usize,  
+        Kernel, 
     ),
     AdoscError,
 > {
@@ -260,7 +260,7 @@ fn adosc_prepare<'a>(
             if n == 0 {
                 return Err(AdoscError::EmptyInputData);
             }
-            // Enforce equal lengths like alma.rs does for single-slice shape safety
+            
             let (hh, ll, cc, vv) = (
                 candles.high.as_slice(),
                 candles.low.as_slice(),
@@ -323,7 +323,7 @@ fn adosc_prepare<'a>(
         return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
     }
 
-    // NaN guard check - ADOSC can process NaN values but this helps detect data issues early
+    
     let all_nan = |s: &[f64]| s.iter().all(|x| x.is_nan());
     if all_nan(high) && all_nan(low) && all_nan(close) && all_nan(volume) {
         return Err(AdoscError::AllValuesNaN);
@@ -387,17 +387,17 @@ pub unsafe fn adosc_scalar(
     let one_minus_alpha_short = 1.0 - alpha_short;
     let one_minus_alpha_long = 1.0 - alpha_long;
 
-    // Allocate output (no warmup for ADOSC)
+    
     let mut out = alloc_with_nan_prefix(len, 0);
 
-    // Use raw pointers to avoid bounds checks in hot loop
+    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
     let vp = volume.as_ptr();
     let op = out.as_mut_ptr();
 
-    // Bootstrap at i = 0
+    
     let h0 = *hp;
     let l0 = *lp;
     let c0 = *cp;
@@ -412,9 +412,9 @@ pub unsafe fn adosc_scalar(
     let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
     let mut long_ema = sum_ad;
-    *op = short_ema - long_ema; // exactly 0.0
+    *op = short_ema - long_ema; 
 
-    // i = 1..len-1 hot loop
+    
     let mut i = 1usize;
     while i < len {
         let h = *hp.add(i);
@@ -685,7 +685,7 @@ fn adosc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AdoscBatchOutput, AdoscError> {
-    // Check for empty input first
+    
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
         return Err(AdoscError::EmptySlices {
             high: high.len(),
@@ -704,23 +704,23 @@ fn adosc_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| AdoscError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Use zero-copy memory allocation
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     debug_assert_eq!(buf_mu.len(), expected);
 
-    // ADOSC computes from index 0, so warmup period is 0 for all rows
+    
     let warm: Vec<usize> = vec![0; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
-    // Precompute ADL once and share across rows
+    
     let mut adl = vec![0.0f64; len];
     unsafe {
-        // Use the same algebra and order to preserve parity
+        
         let hp = high.as_ptr();
         let lp = low.as_ptr();
         let cp = close.as_ptr();
@@ -738,7 +738,7 @@ fn adosc_batch_inner(
             0.0
         };
         let mfv0 = mfm0 * v0;
-        *ap = mfv0; // sum_ad at i=0
+        *ap = mfv0; 
 
         let mut i = 1usize;
         while i < len {
@@ -764,7 +764,7 @@ fn adosc_batch_inner(
         let short = prm.short_period.unwrap();
         let long = prm.long_period.unwrap();
 
-        // EMA over precomputed ADL (kernel choice does not matter here; SIMD stubs defer to scalar)
+        
         let alpha_short = 2.0 / (short as f64 + 1.0);
         let alpha_long = 2.0 / (long as f64 + 1.0);
         let one_minus_alpha_short = 1.0 - alpha_short;
@@ -773,9 +773,9 @@ fn adosc_batch_inner(
         let ap = adl.as_ptr();
         let op = out_row.as_mut_ptr();
 
-        let mut short_ema = *ap; // adl[0]
+        let mut short_ema = *ap; 
         let mut long_ema = *ap;
-        *op = short_ema - long_ema; // 0.0
+        *op = short_ema - long_ema; 
 
         let mut i = 1usize;
         while i < cols {
@@ -807,7 +807,7 @@ fn adosc_batch_inner(
         }
     }
 
-    // Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -835,7 +835,7 @@ pub fn adosc_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<AdoscParams>, AdoscError> {
-    // Check for empty input first
+    
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
         return Err(AdoscError::EmptySlices {
             high: high.len(),
@@ -857,7 +857,7 @@ pub fn adosc_batch_inner_into(
         return Err(AdoscError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Precompute ADL once and share across rows
+    
     let mut adl = vec![0.0f64; len];
     unsafe {
         let hp = high.as_ptr();
@@ -910,7 +910,7 @@ pub fn adosc_batch_inner_into(
 
         let ap = adl.as_ptr();
         let op = out_row.as_mut_ptr();
-        let mut short_ema = *ap; // adl[0]
+        let mut short_ema = *ap; 
         let mut long_ema = *ap;
         *op = short_ema - long_ema;
 
@@ -972,7 +972,7 @@ pub unsafe fn adosc_row_scalar(
     let vp = volume.as_ptr();
     let op = out.as_mut_ptr();
 
-    // i = 0 bootstrap
+    
     let h0 = *hp;
     let l0 = *lp;
     let c0 = *cp;
@@ -989,7 +989,7 @@ pub unsafe fn adosc_row_scalar(
     let mut long_ema = sum_ad;
     *op = short_ema - long_ema;
 
-    // i = 1..len-1
+    
     let mut i = 1usize;
     while i < len {
         let h = *hp.add(i);
@@ -1077,12 +1077,12 @@ pub unsafe fn adosc_row_avx512_long(
 pub struct AdoscStream {
     short_period: usize,
     long_period: usize,
-    // EMA coefficients
+    
     alpha_short: f64,
     alpha_long: f64,
     one_minus_alpha_short: f64,
     one_minus_alpha_long: f64,
-    // ADL state and EMA states
+    
     sum_ad: f64,
     short_ema: f64,
     long_ema: f64,
@@ -1105,7 +1105,7 @@ impl AdoscStream {
             return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
         }
 
-        // α = 2/(n+1) — standard EMA smoothing factor
+        
         let alpha_short = 2.0 / (short as f64 + 1.0);
         let alpha_long = 2.0 / (long as f64 + 1.0);
 
@@ -1126,27 +1126,27 @@ impl AdoscStream {
     /// O(1) update per bar. Preserves batch parity (no FMA; same MFM algebra/order).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
-        // Fast paths that provably imply MFM == 0.0 (skip divide & extra flops):
+        
         if volume != 0.0 {
             let hl = high - low;
             if hl != 0.0 {
-                // Keep algebra/order identical to batch/scalar path:
+                
                 let mfm = ((close - low) - (high - close)) / hl;
                 self.sum_ad += mfm * volume;
             }
-            // else: range==0 → mfm=0 → ADL unchanged
+            
         }
-        // else: volume==0 → mfv=0 → ADL unchanged
+        
 
         if !self.initialized {
-            // Bootstrap: EMA short == EMA long == ADL at i=0 → oscillator = 0.0
+            
             self.short_ema = self.sum_ad;
             self.long_ema = self.sum_ad;
             self.initialized = true;
             return 0.0;
         }
 
-        // One multiply-add per EMA with precomputed complements (no FMA to keep parity)
+        
         let x = self.sum_ad;
         self.short_ema = self.alpha_short * x + self.one_minus_alpha_short * self.short_ema;
         self.long_ema = self.alpha_long * x + self.one_minus_alpha_long * self.long_ema;
@@ -1434,7 +1434,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Fill poison values
+        
         let len = candles.close.len();
         let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
         let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
@@ -1446,13 +1446,13 @@ mod tests {
         close.resize(len, f64::from_bits(0x33333333_33333333));
         volume.resize(len, f64::from_bits(0x11111111_11111111));
 
-        // Copy real data
+        
         high.copy_from_slice(&candles.high);
         low.copy_from_slice(&candles.low);
         close.copy_from_slice(&candles.close);
         volume.copy_from_slice(&candles.volume);
 
-        // Run calculation
+        
         let params = AdoscParams {
             short_period: Some(3),
             long_period: Some(10),
@@ -1460,7 +1460,7 @@ mod tests {
         let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
         let result = adosc_with_kernel(&input, kernel)?;
 
-        // Check for poison values - ADOSC has no warmup period
+        
         for (i, &val) in result.values.iter().enumerate() {
             assert_ne!(
                 val.to_bits(),
@@ -1496,20 +1496,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Use smaller dataset for batch testing
+        
         let slice_end = candles.close.len().min(1000);
         let high_slice = &candles.high[..slice_end];
         let low_slice = &candles.low[..slice_end];
         let close_slice = &candles.close[..slice_end];
         let volume_slice = &candles.volume[..slice_end];
 
-        // Create configuration with comprehensive parameter sweep
+        
         let batch_config = AdoscBatchRange {
-            short_period: (2, 5, 1), // 2, 3, 4, 5
-            long_period: (8, 12, 2), // 8, 10, 12
+            short_period: (2, 5, 1), 
+            long_period: (8, 12, 2), 
         };
 
-        // Run batch calculation
+        
         let result = adosc_batch_with_kernel(
             high_slice,
             low_slice,
@@ -1519,9 +1519,9 @@ mod tests {
             kernel,
         )?;
 
-        // Check for poison values
+        
         for (i, &val) in result.values.iter().enumerate() {
-            // ADOSC has no warmup, so no NaN values expected
+            
             assert_ne!(
                 val.to_bits(),
                 0x11111111_11111111,
@@ -1545,7 +1545,7 @@ mod tests {
             );
         }
 
-        // Verify dimensions
+        
         let expected_rows = result.combos.len();
         let expected_cols = slice_end;
         assert_eq!(
@@ -1555,10 +1555,10 @@ mod tests {
             test_name
         );
 
-        // Test with different sweep ranges
+        
         let batch_config2 = AdoscBatchRange {
-            short_period: (3, 7, 2),  // 3, 5, 7
-            long_period: (10, 20, 5), // 10, 15, 20
+            short_period: (3, 7, 2),  
+            long_period: (10, 20, 5), 
         };
 
         let result2 = adosc_batch_with_kernel(
@@ -1570,7 +1570,7 @@ mod tests {
             kernel,
         )?;
 
-        // Check second configuration
+        
         for (i, &val) in result2.values.iter().enumerate() {
             assert_ne!(
                 val.to_bits(),
@@ -1594,17 +1594,17 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         let strat = (1usize..=10, 11usize..=30).prop_flat_map(|(short_period, long_period)| {
-            // Generate realistic OHLC data where High >= Close >= Low
+            
             let len = long_period..400;
             (
                 prop::collection::vec(
-                    // Generate base prices
+                    
                     (1f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     len.clone(),
                 )
                 .prop_flat_map(move |base_prices| {
                     let len = base_prices.len();
-                    // Generate spreads for high and low
+                    
                     let high_spreads = prop::collection::vec(
                         (0f64..100f64).prop_filter("finite", |x| x.is_finite()),
                         len,
@@ -1613,7 +1613,7 @@ mod tests {
                         (0f64..100f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     );
-                    // Generate close position between 0 and 1 (0 = at low, 1 = at high)
+                    
                     let close_positions = prop::collection::vec(0f64..=1f64, len);
 
                     (
@@ -1650,13 +1650,13 @@ mod tests {
             .run(
                 &strat,
                 |((high, low, close), volume, short_period, long_period)| {
-                    // Ensure all vectors have the same length
+                    
                     let len = high.len();
                     prop_assert_eq!(low.len(), len);
                     prop_assert_eq!(close.len(), len);
                     prop_assert_eq!(volume.len(), len);
 
-                    // Verify OHLC relationships are valid
+                    
                     for i in 0..len {
                         prop_assert!(
                             high[i] >= low[i],
@@ -1686,10 +1686,10 @@ mod tests {
 
                     let AdoscOutput { values: out } = result.unwrap();
 
-                    // Property 1: Output length matches input
+                    
                     prop_assert_eq!(out.len(), len, "Output length mismatch");
 
-                    // Property 2: All values are finite (ADOSC has no warmup period)
+                    
                     for (i, &val) in out.iter().enumerate() {
                         prop_assert!(
                             val.is_finite(),
@@ -1699,18 +1699,18 @@ mod tests {
                         );
                     }
 
-                    // Property 3: First value should be 0 (short_ema - long_ema both start at same value)
+                    
                     prop_assert!(
                         out[0].abs() < 1e-10,
                         "First ADOSC value should be 0, got {}",
                         out[0]
                     );
 
-                    // Property 4: Zero volume should maintain previous AD value
+                    
                     if volume.iter().all(|&v| v == 0.0) {
-                        // With zero volume, MFV is always 0, so AD never changes
-                        // This means short_ema and long_ema decay towards 0
-                        // ADOSC = short_ema - long_ema should approach 0
+                        
+                        
+                        
                         for &val in out.iter() {
                             prop_assert!(
                                 val.abs() < 1e-9,
@@ -1720,8 +1720,8 @@ mod tests {
                         }
                     }
 
-                    // Property 5: MFM bounds check
-                    // Money Flow Multiplier should always be between -1 and 1
+                    
+                    
                     for i in 0..len {
                         let h = high[i];
                         let l = low[i];
@@ -1738,14 +1738,14 @@ mod tests {
                         }
                     }
 
-                    // Property 6: Values should be bounded reasonably
-                    // Since MFM is bounded [-1, 1], the maximum AD change per step is volume
-                    // The maximum cumulative AD is sum of all volumes * 1
-                    // ADOSC is the difference between two EMAs of AD
+                    
+                    
+                    
+                    
                     let total_volume: f64 = volume.iter().sum();
-                    // The maximum possible difference between EMAs is proportional to total volume
-                    // Using a tighter bound based on the fact that EMAs converge
-                    let expected_bound = total_volume * 0.5; // Tighter bound
+                    
+                    
+                    let expected_bound = total_volume * 0.5; 
                     for (i, &val) in out.iter().enumerate() {
                         prop_assert!(
                             val.abs() <= expected_bound,
@@ -1756,18 +1756,18 @@ mod tests {
                         );
                     }
 
-                    // Property 7: Verify period relationship
+                    
                     prop_assert!(
                         short_period < long_period,
                         "Short period must be less than long period"
                     );
 
-                    // Property 8: Formula validation - manually calculate first few values
+                    
                     if len >= 3 {
                         let alpha_short = 2.0 / (short_period as f64 + 1.0);
                         let alpha_long = 2.0 / (long_period as f64 + 1.0);
 
-                        // First value calculation
+                        
                         let h0 = high[0];
                         let l0 = low[0];
                         let c0 = close[0];
@@ -1780,7 +1780,7 @@ mod tests {
                         };
                         let mfv0 = mfm0 * v0;
                         let sum_ad0 = mfv0;
-                        let expected_first = 0.0; // short_ema - long_ema both start at sum_ad0
+                        let expected_first = 0.0; 
                         prop_assert!(
                             (out[0] - expected_first).abs() < 1e-9,
                             "First value mismatch: expected {}, got {}",
@@ -1788,7 +1788,7 @@ mod tests {
                             out[0]
                         );
 
-                        // Second value calculation
+                        
                         let h1 = high[1];
                         let l1 = low[1];
                         let c1 = close[1];
@@ -1812,7 +1812,7 @@ mod tests {
                         );
                     }
 
-                    // Property 9: Kernel consistency - all kernels should produce the same result
+                    
                     let ref_output = adosc_with_kernel(&input, Kernel::Scalar);
                     prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
                     let AdoscOutput { values: ref_out } = ref_output.unwrap();
@@ -1892,7 +1892,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_adosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a deterministic OHLCV series with realistic constraints: high >= close >= low
+        
         let len = 512usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -1901,11 +1901,11 @@ mod tests {
 
         for i in 0..len {
             let base = 100.0 + (i as f64) * 0.05 + ((i % 13) as f64) * 0.01;
-            let spread = 0.5 + ((i % 7) as f64) * 0.03; // 0.5..0.68
+            let spread = 0.5 + ((i % 7) as f64) * 0.03; 
             let lo = base - spread;
             let hi = base + spread;
-            // place close between low and high using a bounded fraction
-            let frac = ((i % 97) as f64) / 96.0; // [0,1]
+            
+            let frac = ((i % 97) as f64) / 96.0; 
             let cl = lo + (hi - lo) * frac;
             let vol = 1_000.0 + ((i * 37) % 10_000) as f64;
 
@@ -1917,10 +1917,10 @@ mod tests {
 
         let input = AdoscInput::from_slices(&high, &low, &close, &volume, AdoscParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = adosc(&input)?.values;
 
-        // Preallocate and compute via new no-allocation API
+        
         let mut out = vec![0.0; len];
         adosc_into(&input, &mut out)?;
 
@@ -2079,7 +2079,7 @@ impl DeviceArrayF32AdoscPy {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream is synchronized before return
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2089,7 +2089,7 @@ impl DeviceArrayF32AdoscPy {
             .inner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
-        // 2 == kDLCUDA per DLPack
+        
         Ok((2, inner.device_id as i32))
     }
 
@@ -2104,8 +2104,8 @@ impl DeviceArrayF32AdoscPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Producer synchronizes its CUDA stream before returning; we only reject
-        // explicitly disallowed stream==0 per Array API semantics.
+        
+        
         if let Some(obj) = &stream {
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
@@ -2116,7 +2116,7 @@ impl DeviceArrayF32AdoscPy {
             }
         }
 
-        // Validate `dl_device` hint against allocation device.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2136,7 +2136,7 @@ impl DeviceArrayF32AdoscPy {
             }
         }
 
-        // Move VRAM handle out; subsequent exports are not allowed.
+        
         let inner = self
             .inner
             .take()

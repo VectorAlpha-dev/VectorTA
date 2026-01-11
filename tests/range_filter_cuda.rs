@@ -1,15 +1,15 @@
-// Integration tests for CUDA Range Filter kernels
 
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaRangeFilter;
+use vector_ta::cuda::CudaRangeFilter;
 
-use my_project::indicators::range_filter::{
+use vector_ta::indicators::range_filter::{
     range_filter_batch_with_kernel, range_filter_with_kernel, RangeFilterBatchRange,
     RangeFilterInput, RangeFilterParams,
 };
@@ -68,7 +68,7 @@ fn range_filter_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     dev.high.copy_to(&mut g_h)?;
     dev.low.copy_to(&mut g_l)?;
 
-    let tol = 1.5e-3; // f32 kernel vs f64 CPU
+    let tol = 1.5e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.filter_values[idx], g_f[idx] as f64, tol),
@@ -98,8 +98,8 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         return Ok(());
     }
 
-    let cols = 10usize; // series
-    let rows = 8_192usize; // time
+    let cols = 10usize; 
+    let rows = 8_192usize; 
     let mut data_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         for t in s..rows {
@@ -112,7 +112,7 @@ fn range_filter_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
     let smooth_range = true;
     let smooth_period = 27usize;
 
-    // CPU baseline per series
+    
     let mut f_cpu_tm = vec![f64::NAN; rows * cols];
     let mut h_cpu_tm = vec![f64::NAN; rows * cols];
     let mut l_cpu_tm = vec![f64::NAN; rows * cols];

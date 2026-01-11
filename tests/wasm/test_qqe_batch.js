@@ -1,5 +1,5 @@
-// Batch and zero-copy tests for QQE
-// These are added as a separate file to avoid conflicts
+
+
 
 import test from 'node:test';
 import assert from 'node:assert';
@@ -22,7 +22,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -37,27 +37,27 @@ test.before(async () => {
     testData = loadTestData();
 });
 
-// Batch functions not yet implemented in WASM bindings
+
 test.skip('QQE batch single parameter set', () => {
-    // Test batch with single parameter combination
-    const close = new Float64Array(testData.close.slice(0, 100));  // Use smaller dataset for speed
+    
+    const close = new Float64Array(testData.close.slice(0, 100));  
     const expected = EXPECTED_OUTPUTS.qqe;
     
-    // Using the new batch API
+    
     const batchResult = wasm.qqe_batch_unified_js(close, {
         rsi_period_range: [14, 14, 0],
         smoothing_factor_range: [5, 5, 0],
         fast_factor_range: [4.236, 4.236, 0]
     });
     
-    // Check structure
+    
     assert.ok(batchResult.fast_values, 'Should have fast_values');
     assert.ok(batchResult.slow_values, 'Should have slow_values');
     assert.ok(batchResult.combos, 'Should have combos');
     assert.strictEqual(batchResult.rows, 1, 'Should have 1 row');
     assert.strictEqual(batchResult.cols, 100, 'Should have 100 columns');
     
-    // Should match single calculation
+    
     const singleResult = wasm.qqe_js(close, 14, 5, 4.236);
     const singleFast = singleResult.values.slice(0, singleResult.cols);
     const singleSlow = singleResult.values.slice(singleResult.cols, singleResult.cols * 2);
@@ -67,33 +67,33 @@ test.skip('QQE batch single parameter set', () => {
 });
 
 test.skip('QQE batch multiple parameters', () => {
-    // Test batch with multiple parameter combinations
-    const close = new Float64Array(testData.close.slice(0, 50));  // Use smaller dataset for speed
+    
+    const close = new Float64Array(testData.close.slice(0, 50));  
     
     const batchResult = wasm.qqe_batch_unified_js(close, {
-        rsi_period_range: [10, 14, 2],      // 10, 12, 14
-        smoothing_factor_range: [3, 5, 2],  // 3, 5
-        fast_factor_range: [3.0, 4.0, 1.0]  // 3.0, 4.0
+        rsi_period_range: [10, 14, 2],      
+        smoothing_factor_range: [3, 5, 2],  
+        fast_factor_range: [3.0, 4.0, 1.0]  
     });
     
-    // Should have 3 * 2 * 2 = 12 combinations
+    
     assert.strictEqual(batchResult.combos.length, 12);
     assert.strictEqual(batchResult.rows, 12);
     assert.strictEqual(batchResult.cols, 50);
     assert.strictEqual(batchResult.fast_values.length, 12 * 50);
     assert.strictEqual(batchResult.slow_values.length, 12 * 50);
     
-    // Check first combination parameters
+    
     assert.strictEqual(batchResult.combos[0].rsi_period, 10);
     assert.strictEqual(batchResult.combos[0].smoothing_factor, 3);
     assertClose(batchResult.combos[0].fast_factor, 3.0, 1e-10, "fast_factor mismatch");
     
-    // Each combination should have different results
+    
     const firstRowFast = batchResult.fast_values.slice(0, 50);
     const secondRowFast = batchResult.fast_values.slice(50, 100);
     
     let hasDifference = false;
-    for (let i = 30; i < 50; i++) {  // Check after warmup
+    for (let i = 30; i < 50; i++) {  
         if (!isNaN(firstRowFast[i]) && !isNaN(secondRowFast[i])) {
             if (Math.abs(firstRowFast[i] - secondRowFast[i]) > 1e-10) {
                 hasDifference = true;
@@ -105,10 +105,10 @@ test.skip('QQE batch multiple parameters', () => {
 });
 
 test.skip('QQE batch edge cases', () => {
-    // Test edge cases for batch processing
+    
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     
-    // Single value sweep
+    
     const singleBatch = wasm.qqe_batch_unified_js(close, {
         rsi_period_range: [5, 5, 1],
         smoothing_factor_range: [3, 3, 0],
@@ -119,18 +119,18 @@ test.skip('QQE batch edge cases', () => {
     assert.strictEqual(singleBatch.fast_values.length, 15);
     assert.strictEqual(singleBatch.slow_values.length, 15);
     
-    // Step larger than range
+    
     const largeBatch = wasm.qqe_batch_unified_js(close, {
-        rsi_period_range: [5, 7, 10],  // Step larger than range
+        rsi_period_range: [5, 7, 10],  
         smoothing_factor_range: [3, 3, 0],
         fast_factor_range: [3.0, 3.0, 0]
     });
     
-    // Should only have rsi_period=5
+    
     assert.strictEqual(largeBatch.combos.length, 1);
     assert.strictEqual(largeBatch.combos[0].rsi_period, 5);
     
-    // Empty data should throw
+    
     assert.throws(() => {
         wasm.qqe_batch_unified_js(new Float64Array([]), {
             rsi_period_range: [14, 14, 0],
@@ -141,30 +141,30 @@ test.skip('QQE batch edge cases', () => {
 });
 
 test('QQE zero-copy API', () => {
-    // Test zero-copy API with in-place computation
+    
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
     const len = data.length;
     
-    // Allocate buffer for input and output
+    
     const inPtr = wasm.qqe_alloc(len);
     const outPtr = wasm.qqe_alloc(len);
     assert(inPtr !== 0, 'Failed to allocate input memory');
     assert(outPtr !== 0, 'Failed to allocate output memory');
     
     try {
-        // Get memory view and copy data
+        
         const memory = wasm.__wasm.memory.buffer;
         const inView = new Float64Array(memory, inPtr, len);
         inView.set(data);
         
-        // Compute QQE into output buffer
+        
         wasm.qqe_into(inPtr, outPtr, len, 14, 5, 4.236);
         
-        // Read results (layout: [fast..len][slow..len])
-        const memory2 = wasm.__wasm.memory.buffer;  // Re-get in case it grew
+        
+        const memory2 = wasm.__wasm.memory.buffer;  
         const outView = new Float64Array(memory2, outPtr, len * 2);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.qqe_js(data, 14, 5, 4.236);
         const regularFast = regularResult.values.slice(0, regularResult.cols);
         const regularSlow = regularResult.values.slice(regularResult.cols, regularResult.cols * 2);
@@ -172,7 +172,7 @@ test('QQE zero-copy API', () => {
         const fast = outView.subarray(0, len);
         const slow = outView.subarray(len, len * 2);
         
-        // Compare results
+        
         for (let i = 0; i < len; i++) {
             if (isNaN(regularFast[i]) && isNaN(fast[i])) continue;
             if (isNaN(regularSlow[i]) && isNaN(slow[i])) continue;
@@ -183,14 +183,14 @@ test('QQE zero-copy API', () => {
                        `Zero-copy slow mismatch at index ${i}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.qqe_free(inPtr, len);
         wasm.qqe_free(outPtr, len);
     }
 });
 
 test('QQE zero-copy with large dataset', () => {
-    // Test with larger dataset to verify memory handling
+    
     const size = 10000;
     const data = new Float64Array(size);
     for (let i = 0; i < size; i++) {
@@ -209,15 +209,15 @@ test('QQE zero-copy with large dataset', () => {
         
         wasm.qqe_into(inPtr, outPtr, size, 14, 5, 4.236);
         
-        // Recreate view in case memory grew
+        
         const memory2 = wasm.__wasm.memory.buffer;
         const outView = new Float64Array(memory2, outPtr, size * 2);
         const fast = outView.subarray(0, size);
         const slow = outView.subarray(size, size * 2);
         
-        // Warmup semantics:
-        // - fast (smoothed RSI) becomes defined starting at rsi_start (= first + rsi_period)
-        // - slow becomes defined starting at warm (= first + rsi_period + smoothing_factor - 2)
+        
+        
+        
         const rsiStart = EXPECTED_OUTPUTS.qqe.defaultParams.rsiPeriod;
         const slowWarmup = EXPECTED_OUTPUTS.qqe.warmupPeriod;
 
@@ -241,21 +241,21 @@ test('QQE zero-copy with large dataset', () => {
 });
 
 test('QQE zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.qqe_into(0, 0, 10, 14, 5, 4.236);
     }, /null pointer|invalid memory/i);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.qqe_alloc(20);
     const outPtr = wasm.qqe_alloc(20);
     try {
-        // Invalid rsi_period
+        
         assert.throws(() => {
             wasm.qqe_into(ptr, outPtr, 20, 0, 5, 4.236);
         }, /Invalid period/);
         
-        // Invalid smoothing_factor
+        
         assert.throws(() => {
             wasm.qqe_into(ptr, outPtr, 20, 14, 0, 4.236);
         }, /Invalid|smoothing/);
@@ -266,26 +266,26 @@ test('QQE zero-copy error handling', () => {
 });
 
 test('QQE memory leak prevention', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 5000];
     
     for (const size of sizes) {
         const ptr = wasm.qqe_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
-        // Write pattern to verify memory
+        
         const memory = wasm.__wasm.memory.buffer;
         const memView = new Float64Array(memory, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 2.5;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(memView[i], i * 2.5, `Memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.qqe_free(ptr, size);
     }
 });

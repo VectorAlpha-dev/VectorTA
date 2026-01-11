@@ -19,8 +19,8 @@
 //! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
 //! - **Decision log**: Fused scalar kernel enabled for default params (14,5,4.236); ~30% faster vs prior scalar at 100k. SIMD kept as stubs due to loop-carried dependencies; CUDA wrapper provided with CAI v3 + DLPack v1.x handles for batch/many-series, numerical parity vs scalar within fp32 tolerances.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -30,13 +30,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaQqe};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -53,21 +53,21 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
+
 impl<'a> AsRef<[f64]> for QqeInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -78,7 +78,7 @@ impl<'a> AsRef<[f64]> for QqeInput<'a> {
     }
 }
 
-// ==================== DATA STRUCTURES ====================
+
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum QqeData<'a> {
@@ -163,7 +163,7 @@ impl<'a> QqeInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 /// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct QqeBuilder {
@@ -247,7 +247,7 @@ impl QqeBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum QqeError {
     #[error("qqe: Input data slice is empty.")]
@@ -275,7 +275,7 @@ pub enum QqeError {
     DependentIndicatorError { message: String },
 }
 
-// ==================== CORE COMPUTATION FUNCTIONS ====================
+
 /// Main entry point with automatic kernel detection
 #[inline]
 pub fn qqe(input: &QqeInput) -> Result<QqeOutput, QqeError> {
@@ -287,9 +287,9 @@ pub fn qqe_with_kernel(input: &QqeInput, kernel: Kernel) -> Result<QqeOutput, Qq
     let (data, rsi_p, ema_p, fast_k, first, chosen) = qqe_prepare(input, kernel)?;
     let warm = first + rsi_p + ema_p - 2;
 
-    // Check for classic kernel conditions (default parameters)
+    
     if chosen == Kernel::Scalar && rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
-        // Use optimized classic kernel for default parameters
+        
         let mut fast = alloc_with_nan_prefix(data.len(), warm);
         let mut slow = alloc_with_nan_prefix(data.len(), warm);
         unsafe {
@@ -298,11 +298,11 @@ pub fn qqe_with_kernel(input: &QqeInput, kernel: Kernel) -> Result<QqeOutput, Qq
         return Ok(QqeOutput { fast, slow });
     }
 
-    // match alma.rs: allocate with NaN prefix, no full-vector fill
+    
     let mut fast = alloc_with_nan_prefix(data.len(), warm);
     let mut slow = alloc_with_nan_prefix(data.len(), warm);
 
-    // compute directly into the preallocated slices
+    
     qqe_into_slices(&mut fast, &mut slow, input, chosen)?;
     Ok(QqeOutput { fast, slow })
 }
@@ -319,7 +319,7 @@ fn qqe_scalar(
     let mut fast = alloc_with_nan_prefix(data.len(), fast_warm);
     let mut slow = alloc_with_nan_prefix(data.len(), fast_warm);
 
-    // Use classic kernel for default parameters
+    
     if rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
         unsafe {
             qqe_scalar_classic(data, rsi_p, ema_p, fast_k, first, &mut fast, &mut slow)?;
@@ -353,7 +353,7 @@ unsafe fn qqe_avx2(
     first: usize,
     fast_warm: usize,
 ) -> Result<QqeOutput, QqeError> {
-    // For now, fallback to scalar
+    
     qqe_scalar(data, rsi_p, ema_p, fast_k, first, fast_warm)
 }
 
@@ -368,7 +368,7 @@ unsafe fn qqe_avx512(
     first: usize,
     fast_warm: usize,
 ) -> Result<QqeOutput, QqeError> {
-    // For now, fallback to scalar
+    
     qqe_scalar(data, rsi_p, ema_p, fast_k, first, fast_warm)
 }
 
@@ -393,9 +393,9 @@ pub fn qqe_into_slices(
     }
     let warm = first + rsi_p + ema_p - 2;
 
-    // Classic default parameters: route to fused scalar kernel for exact parity
+    
     if chosen == Kernel::Scalar && rsi_p == 14 && ema_p == 5 && fast_k == 4.236 {
-        // Enforce NaN warm prefixes to mirror allocation-based paths
+        
         let prefix = warm.min(dst_fast.len());
         for v in &mut dst_fast[..prefix] {
             *v = f64::NAN;
@@ -409,12 +409,12 @@ pub fn qqe_into_slices(
         return Ok(());
     }
 
-    // Temporary row buffer for RSI (no copies of existing data)
+    
     let mut tmp_mu = make_uninit_matrix(1, data.len());
     let tmp: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(tmp_mu.as_mut_ptr() as *mut f64, data.len()) };
 
-    // RSI → tmp
+    
     let rsi_in = RsiInput::from_slice(
         data,
         RsiParams {
@@ -425,7 +425,7 @@ pub fn qqe_into_slices(
         message: e.to_string(),
     })?;
 
-    // EMA(tmp) → dst_fast
+    
     let ema_in = EmaInput::from_slice(
         tmp,
         EmaParams {
@@ -436,12 +436,12 @@ pub fn qqe_into_slices(
         message: e.to_string(),
     })?;
 
-    // Enforce NaN warm prefix for the slow output only; fast is defined from rsi_start
+    
     for v in &mut dst_slow[..warm] {
         *v = f64::NAN;
     }
 
-    // Slow from fast
+    
     qqe_compute_slow_from(dst_fast, fast_k, warm, dst_slow);
     Ok(())
 }
@@ -489,7 +489,7 @@ fn qqe_prepare<'a>(
     let smoothing_factor = input.get_smoothing_factor();
     let fast_factor = input.get_fast_factor();
 
-    // Validation
+    
     if rsi_period == 0 || rsi_period > len {
         return Err(QqeError::InvalidPeriod {
             period: rsi_period,
@@ -504,7 +504,7 @@ fn qqe_prepare<'a>(
         });
     }
 
-    // Need enough data for RSI + EMA smoothing
+    
     let needed = rsi_period + smoothing_factor;
     if len - first < needed {
         return Err(QqeError::NotEnoughValidData {
@@ -534,15 +534,15 @@ fn qqe_compute_slow_from(qqef: &[f64], fast_factor: f64, start: usize, qqes: &mu
     let len = qqef.len();
     debug_assert!(start < len);
 
-    // write first valid slow = qqef[start]
+    
     qqes[start] = qqef[start];
 
-    let alpha = 1.0 / 14.0; // ATR smoothing for RSI delta
+    let alpha = 1.0 / 14.0; 
     let mut wwma = 0.0;
     let mut atrrsi = 0.0;
 
     for i in (start + 1)..len {
-        // qqef[start..] are valid by construction
+        
         let tr = (qqef[i] - qqef[i - 1]).abs();
         wwma = alpha * tr + (1.0 - alpha) * wwma;
         atrrsi = alpha * wwma + (1.0 - alpha) * atrrsi;
@@ -566,7 +566,7 @@ fn qqe_compute_slow_from(qqef: &[f64], fast_factor: f64, start: usize, qqes: &mu
     }
 }
 
-// ==================== CLASSIC KERNEL ====================
+
 /// Optimized classic kernel for QQE with default parameters (rsi=14, ema=5, fast_k=4.236).
 /// Fully fused: RSI (Wilder) → EMA warmup (running mean) → EMA phase → QQE slow (ATR-of-RSI bands).
 /// No temporary buffers, no full prefill, only writes where values are defined.
@@ -595,7 +595,7 @@ pub unsafe fn qqe_scalar_classic(
     let warm = first + rsi_period + smoothing_factor - 2;
     let ema_warmup_end = (rsi_start + smoothing_factor).min(len);
 
-    // 1) Wilder RSI: initialize averaged gain/loss over the first rsi_period deltas
+    
     let inv_rsi = 1.0 / rsi_period as f64;
     let beta_rsi = 1.0 - inv_rsi;
 
@@ -603,7 +603,7 @@ pub unsafe fn qqe_scalar_classic(
     let mut avg_loss = 0.0f64;
     let mut any_nan = false;
 
-    // inclusive range [first+1, min(first+rsi_period, len-1)]
+    
     let init_end = (first + rsi_period).min(len - 1);
     {
         let mut i = first + 1;
@@ -623,24 +623,24 @@ pub unsafe fn qqe_scalar_classic(
     }
 
     if any_nan {
-        // NaN encountered during warmup; rely on caller's NaN prefixing
+        
         return Ok(());
     }
 
     avg_gain *= inv_rsi;
     avg_loss *= inv_rsi;
 
-    // First RSI value at rsi_start
+    
     let mut rsi = if avg_gain + avg_loss == 0.0 {
         50.0
     } else {
         100.0 * avg_gain / (avg_gain + avg_loss)
     };
 
-    // 2) EMA of RSI: running-mean warmup then recursive EMA
+    
     *dst_fast.get_unchecked_mut(rsi_start) = rsi;
 
-    // If warm falls at/before rsi_start, initialize slow anchor here
+    
     if warm <= rsi_start {
         *dst_slow.get_unchecked_mut(rsi_start) = rsi;
     }
@@ -649,7 +649,7 @@ pub unsafe fn qqe_scalar_classic(
     let ema_alpha = 2.0 / (smoothing_factor as f64 + 1.0);
     let ema_beta = 1.0 - ema_alpha;
 
-    // 3) QQE slow: ATR-of-RSI over the smoothed RSI (fast line)
+    
     const ATR_ALPHA: f64 = 1.0 / 14.0;
     const ATR_BETA: f64 = 1.0 - ATR_ALPHA;
     let mut wwma = 0.0f64;
@@ -659,7 +659,7 @@ pub unsafe fn qqe_scalar_classic(
     let mut prev_ema = rsi;
     let mut i = rsi_start + 1;
     while i < len {
-        // Wilder RSI update
+        
         let delta = *data.get_unchecked(i) - *data.get_unchecked(i - 1);
         let gain = if delta > 0.0 { delta } else { 0.0 };
         let loss = if delta < 0.0 { -delta } else { 0.0 };
@@ -672,12 +672,12 @@ pub unsafe fn qqe_scalar_classic(
             100.0 * avg_gain / (avg_gain + avg_loss)
         };
 
-        // FAST (smoothed RSI)
+        
         let fast_i = if i < ema_warmup_end {
-            // running mean: mean += (x - mean)/n
+            
             let n = (i - rsi_start + 1) as f64;
             mean = ((n - 1.0) * mean + rsi) / n;
-            // seed EMA recursion with the last running-mean value
+            
             prev_ema = mean;
             mean
         } else {
@@ -686,12 +686,12 @@ pub unsafe fn qqe_scalar_classic(
         };
         *dst_fast.get_unchecked_mut(i) = fast_i;
 
-        // Initialize SLOW at warm index (anchor)
+        
         if i == warm {
             *dst_slow.get_unchecked_mut(i) = fast_i;
             last_fast = fast_i;
         } else if i > warm {
-            // QQE slow update from (warm+1) onward
+            
             let tr = (fast_i - last_fast).abs();
             wwma = ATR_ALPHA * tr + ATR_BETA * wwma;
             atrrsi = ATR_ALPHA * wwma + ATR_BETA * atrrsi;
@@ -722,7 +722,7 @@ pub unsafe fn qqe_scalar_classic(
     Ok(())
 }
 
-// ==================== STREAMING SUPPORT (drop-in replacement) ====================
+
 /// Streaming calculator for real-time updates (O(1) per tick).
 /// Mirrors batch semantics:
 ///  • Wilder RSI with n-delta seed
@@ -730,43 +730,43 @@ pub unsafe fn qqe_scalar_classic(
 ///  • Slow line anchored at `rsi_start + smoothing_factor - 2`, then ATR-of-RSI bands
 #[derive(Debug, Clone)]
 pub struct QqeStream {
-    // Parameters
+    
     rsi_period: usize,
     smoothing_factor: usize,
     fast_factor: f64,
 
-    // Precomputed coefficients (avoid per-tick division)
-    rsi_alpha: f64, // = 1 / rsi_period
-    rsi_beta: f64,  // = 1 - rsi_alpha
-    ema_alpha: f64, // = 2 / (smoothing_factor + 1)
-    ema_beta: f64,  // = 1 - ema_alpha
-    atr_alpha: f64, // = 1 / 14
-    atr_beta: f64,  // = 1 - atr_alpha
+    
+    rsi_alpha: f64, 
+    rsi_beta: f64,  
+    ema_alpha: f64, 
+    ema_beta: f64,  
+    atr_alpha: f64, 
+    atr_beta: f64,  
 
-    // Running state
+    
     have_prev: bool,
-    prev_price: f64, // last input
-    deltas: usize,   // how many deltas processed (bars-1)
+    prev_price: f64, 
+    deltas: usize,   
 
-    // RSI warmup (seed)
+    
     sum_gain: f64,
     sum_loss: f64,
 
-    // Wilder RSI (post-seed)
+    
     avg_gain: f64,
     avg_loss: f64,
 
-    // EMA-of-RSI warmup & phase
-    rsi_count: usize,  // # of RSI samples seen since first RSI
-    running_mean: f64, // running mean during EMA warmup
-    prev_ema: f64,     // EMA-of-RSI (fast) after warmup begins
+    
+    rsi_count: usize,  
+    running_mean: f64, 
+    prev_ema: f64,     
 
-    // Slow-line (QQE) state
-    anchored: bool, // whether slow has been anchored
-    prev_fast: f64, // fast(t-1)
-    prev_slow: f64, // slow(t-1)
-    wwma: f64,      // Wilder smoothing of |Δfast|
-    atrrsi: f64,    // double-smoothed ATR-of-RSI
+    
+    anchored: bool, 
+    prev_fast: f64, 
+    prev_slow: f64, 
+    wwma: f64,      
+    atrrsi: f64,    
 }
 
 impl QqeStream {
@@ -829,31 +829,31 @@ impl QqeStream {
     /// returns (fast, fast) and anchors slow at the correct warm index.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // First observation
+        
         if !self.have_prev {
             self.have_prev = true;
             self.prev_price = value;
             return None;
         }
 
-        // Δ price and book-keeping
+        
         let delta = value - self.prev_price;
         self.prev_price = value;
         self.deltas += 1;
 
-        // ---- 1) Wilder RSI seed over the first `rsi_period` deltas ----
+        
         if self.deltas <= self.rsi_period {
             if delta > 0.0 {
                 self.sum_gain += delta;
             } else {
-                self.sum_loss -= delta; // absolute loss
+                self.sum_loss -= delta; 
             }
 
             if self.deltas < self.rsi_period {
-                return None; // still seeding
+                return None; 
             }
 
-            // finalize initial averages
+            
             self.avg_gain = self.sum_gain * self.rsi_alpha;
             self.avg_loss = self.sum_loss * self.rsi_alpha;
 
@@ -864,13 +864,13 @@ impl QqeStream {
                 100.0 * self.avg_gain / denom
             };
 
-            // first RSI -> first fast
+            
             self.rsi_count = 1;
             self.running_mean = rsi;
             self.prev_ema = rsi;
             self.prev_fast = rsi;
 
-            // Anchor when smoothing_factor ≤ 2 (warm index may coincide with first RSI)
+            
             let anchor_count = self.smoothing_factor.saturating_sub(1);
             if self.rsi_count >= anchor_count && !self.anchored {
                 self.prev_slow = rsi;
@@ -879,10 +879,10 @@ impl QqeStream {
             return Some((rsi, if self.anchored { self.prev_slow } else { rsi }));
         }
 
-        // ---- 2) Wilder RSI recursive update (O(1)) ----
+        
         let gain = if delta > 0.0 { delta } else { 0.0 };
         let loss = if delta < 0.0 { -delta } else { 0.0 };
-        // avg = beta*avg + alpha*new  (use FMA when available)
+        
         self.avg_gain = self.rsi_beta.mul_add(self.avg_gain, self.rsi_alpha * gain);
         self.avg_loss = self.rsi_beta.mul_add(self.avg_loss, self.rsi_alpha * loss);
 
@@ -895,21 +895,21 @@ impl QqeStream {
 
         self.rsi_count += 1;
 
-        // ---- 3) EMA-of-RSI with running-mean seed ----
+        
         let fast = if self.rsi_count <= self.smoothing_factor {
-            // running mean: mean += (x - mean)/n
+            
             let n = self.rsi_count as f64;
             self.running_mean = ((n - 1.0) * self.running_mean + rsi) / n;
-            self.prev_ema = self.running_mean; // seed EMA with last mean
+            self.prev_ema = self.running_mean; 
             self.running_mean
         } else {
-            // ema = beta*ema + alpha*x   (FMA-form)
+            
             self.prev_ema = self.ema_beta.mul_add(self.prev_ema, self.ema_alpha * rsi);
             self.prev_ema
         };
 
-        // ---- 4) Slow-line (QQE) ----
-        // Anchor exactly at warm index: rsi_count == smoothing_factor - 1
+        
+        
         let anchor_count = self.smoothing_factor.saturating_sub(1);
         if !self.anchored && self.rsi_count >= anchor_count {
             self.prev_slow = fast;
@@ -919,7 +919,7 @@ impl QqeStream {
         }
 
         if self.anchored {
-            // true range over fast, double Wilder smoothing
+            
             let tr = (fast - self.prev_fast).abs();
             self.wwma = self.atr_beta.mul_add(self.wwma, self.atr_alpha * tr);
             self.atrrsi = self
@@ -946,18 +946,18 @@ impl QqeStream {
             self.prev_fast = fast;
             Some((fast, slow))
         } else {
-            // Rare path if smoothing_factor == 1
+            
             self.prev_fast = fast;
             Some((fast, fast))
         }
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 /// Batch processing for parameter sweeps
 #[derive(Clone, Debug)]
 pub struct QqeBatchRange {
-    pub rsi_period: (usize, usize, usize), // (start, end, step)
+    pub rsi_period: (usize, usize, usize), 
     pub smoothing_factor: (usize, usize, usize),
     pub fast_factor: (f64, f64, f64),
 }
@@ -1046,11 +1046,11 @@ impl QqeBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct QqeBatchOutput {
-    pub fast_values: Vec<f64>, // rows*cols flattened
-    pub slow_values: Vec<f64>, // rows*cols flattened
+    pub fast_values: Vec<f64>, 
+    pub slow_values: Vec<f64>, 
     pub combos: Vec<QqeParams>,
-    pub rows: usize, // = combos.len()
-    pub cols: usize, // = data.len()
+    pub rows: usize, 
+    pub cols: usize, 
 }
 
 impl QqeBatchOutput {
@@ -1178,7 +1178,7 @@ pub fn qqe_batch_with_kernel(
         });
     }
 
-    // NEW: enforce batch-kernel or auto
+    
     let actual = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
@@ -1212,7 +1212,7 @@ pub fn qqe_batch_with_kernel(
     init_matrix_prefixes(&mut fast_mu, cols, &warm);
     init_matrix_prefixes(&mut slow_mu, cols, &warm);
 
-    // Materialize flat views
+    
     let fast_out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(fast_mu.as_mut_ptr() as *mut f64, total)
     };
@@ -1220,7 +1220,7 @@ pub fn qqe_batch_with_kernel(
         core::slice::from_raw_parts_mut(slow_mu.as_mut_ptr() as *mut f64, total)
     };
 
-    // Reusable tmp buffer for RSI
+    
     let mut tmp_mu = make_uninit_matrix(1, cols);
     let tmp: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(tmp_mu.as_mut_ptr() as *mut f64, cols) };
@@ -1234,7 +1234,7 @@ pub fn qqe_batch_with_kernel(
         let dst_fast = &mut fast_out[row * cols..(row + 1) * cols];
         let dst_slow = &mut slow_out[row * cols..(row + 1) * cols];
 
-        // RSI → tmp
+        
         let rsi_in = RsiInput::from_slice(
             data,
             RsiParams {
@@ -1245,7 +1245,7 @@ pub fn qqe_batch_with_kernel(
             message: e.to_string(),
         })?;
 
-        // EMA(tmp) → dst_fast
+        
         let ema_in = EmaInput::from_slice(
             tmp,
             EmaParams {
@@ -1256,7 +1256,7 @@ pub fn qqe_batch_with_kernel(
             message: e.to_string(),
         })?;
 
-        // warm NaNs already inited, compute slow
+        
         qqe_compute_slow_from(dst_fast, fast_k, start, dst_slow);
     }
 
@@ -1328,7 +1328,7 @@ fn qqe_batch_inner(
     init_matrix_prefixes(&mut fast_mu, cols, &warm);
     init_matrix_prefixes(&mut slow_mu, cols, &warm);
 
-    // NEW: enforce batch-kernel or auto
+    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
@@ -1347,7 +1347,7 @@ fn qqe_batch_inner(
         use crate::indicators::moving_averages::ema::ema_into_slice;
         use crate::indicators::rsi::rsi_into_slice;
 
-        // Per-task tmp
+        
         let mut tmp_mu = make_uninit_matrix(1, cols);
         let tmp: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(tmp_mu.as_mut_ptr() as *mut f64, cols) };
@@ -1362,7 +1362,7 @@ fn qqe_batch_inner(
         let dst_slow =
             unsafe { core::slice::from_raw_parts_mut(s_mu.as_mut_ptr() as *mut f64, cols) };
 
-        // RSI → tmp
+        
         let rsi_in = RsiInput::from_slice(
             data,
             RsiParams {
@@ -1373,7 +1373,7 @@ fn qqe_batch_inner(
             message: e.to_string(),
         })?;
 
-        // EMA(tmp) → dst_fast
+        
         let ema_in = EmaInput::from_slice(
             tmp,
             EmaParams {
@@ -1384,7 +1384,7 @@ fn qqe_batch_inner(
             message: e.to_string(),
         })?;
 
-        // Slow from fast
+        
         qqe_compute_slow_from(dst_fast, fast_k, start, dst_slow);
 
         Ok::<(), QqeError>(())
@@ -1454,7 +1454,7 @@ pub fn qqe_batch_par_slice(
     qqe_batch_inner(data, sweep, kern, true)
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "qqe")]
 #[pyo3(signature = (data, rsi_period=14, smoothing_factor=5, fast_factor=4.236, kernel=None))]
@@ -1735,13 +1735,13 @@ pub fn qqe_cuda_many_series_one_param_dev_py<'py>(
     Ok(handle)
 }
 
-// ==================== WASM BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct QqeJsResult {
-    pub values: Vec<f64>, // [fast..., slow...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -1759,13 +1759,13 @@ pub fn qqe_js(
     };
     let input = QqeInput::from_slice(data, params);
 
-    // Preallocate result vector
+    
     let mut values = vec![f64::NAN; data.len() * 2];
 
-    // Split into fast and slow slices
+    
     let (fast_slice, slow_slice) = values.split_at_mut(data.len());
 
-    // Compute directly into slices
+    
     qqe_into_slices(fast_slice, slow_slice, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1793,13 +1793,13 @@ pub fn qqe_unified_js(
     };
     let input = QqeInput::from_slice(data, params);
 
-    // Preallocate result vector
+    
     let mut result = vec![f64::NAN; data.len() * 2];
 
-    // Split into fast and slow slices
+    
     let (fast_slice, slow_slice) = result.split_at_mut(data.len());
 
-    // Compute directly into slices
+    
     qqe_into_slices(fast_slice, slow_slice, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1809,7 +1809,7 @@ pub fn qqe_unified_js(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn qqe_alloc(len: usize) -> *mut f64 {
-    let mut vec = Vec::<f64>::with_capacity(len * 2); // Allocate for both fast and slow
+    let mut vec = Vec::<f64>::with_capacity(len * 2); 
     let ptr = vec.as_mut_ptr();
     std::mem::forget(vec);
     ptr
@@ -1845,7 +1845,7 @@ pub fn qqe_into(
         };
         let input = QqeInput::from_slice(data, params);
 
-        // layout: [fast..len][slow..len]
+        
         if in_ptr == out_ptr {
             let mut tmp = vec![f64::NAN; len * 2];
             let (tmp_fast, tmp_slow) = tmp.split_at_mut(len);
@@ -1940,16 +1940,16 @@ pub fn qqe_batch_into(
             return Err(JsValue::from_str("Empty parameter combination"));
         }
 
-        // Layout: [fast rows...][slow rows...]
+        
         let total = rows * len * 2;
         let dst = core::slice::from_raw_parts_mut(out_ptr, total);
         let (dst_fast_all, dst_slow_all) = dst.split_at_mut(rows * len);
 
-        // Reusable tmp for RSI
+        
         let mut tmp_mu = make_uninit_matrix(1, len);
         let tmp: &mut [f64] = core::slice::from_raw_parts_mut(tmp_mu.as_mut_ptr() as *mut f64, len);
 
-        // Kernel
+        
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1972,7 +1972,7 @@ pub fn qqe_batch_into(
             let dst_fast = &mut dst_fast_all[row * len..(row + 1) * len];
             let dst_slow = &mut dst_slow_all[row * len..(row + 1) * len];
 
-            // RSI → tmp
+            
             rsi_into_slice(
                 tmp,
                 &RsiInput::from_slice(
@@ -1984,7 +1984,7 @@ pub fn qqe_batch_into(
                 simd,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-            // EMA(tmp) → fast row
+            
             ema_into_slice(
                 dst_fast,
                 &EmaInput::from_slice(
@@ -1997,7 +1997,7 @@ pub fn qqe_batch_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // warm NaNs
+            
             for v in &mut dst_fast[..start] {
                 *v = f64::NAN;
             }
@@ -2005,14 +2005,14 @@ pub fn qqe_batch_into(
                 *v = f64::NAN;
             }
 
-            // slow from fast
+            
             qqe_compute_slow_from(dst_fast, fast_k, start, dst_slow);
         }
         Ok(rows)
     }
 }
 
-// ==================== UNIT TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2031,7 +2031,7 @@ mod tests {
         let input = QqeInput::from_candles(&candles, "close", QqeParams::default());
         let result = qqe_with_kernel(&input, kernel)?;
 
-        // REFERENCE VALUES FROM PINESCRIPT
+        
         let expected_fast = [
             42.68548144,
             42.68200826,
@@ -2209,7 +2209,7 @@ mod tests {
 
         let result = qqe_batch_with_kernel(&data, &sweep, kernel)?;
 
-        // Should have 3 * 3 * 3 = 27 combinations
+        
         assert_eq!(result.combos.len(), 27);
         assert_eq!(result.rows, 27);
         assert_eq!(result.cols, 100);
@@ -2223,7 +2223,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let mut stream = QqeStream::try_new(QqeParams::default())?;
 
-        // Feed data
+        
         let data: Vec<f64> = (0..50).map(|i| 50.0 + (i as f64).sin() * 10.0).collect();
         let mut results = Vec::new();
 
@@ -2233,14 +2233,14 @@ mod tests {
             }
         }
 
-        // Should get results after warmup
+        
         assert!(
             !results.is_empty(),
             "[{}] Should have streaming results",
             test_name
         );
 
-        // Verify results are valid
+        
         for (fast, slow) in &results {
             assert!(
                 !fast.is_nan(),
@@ -2268,12 +2268,12 @@ mod tests {
 
         qqe_into_slices(&mut dst_fast, &mut dst_slow, &input, kernel)?;
 
-        // Compare with regular computation
+        
         let regular = qqe_with_kernel(&input, kernel)?;
 
         for i in 0..data.len() {
             if dst_fast[i].is_nan() && regular.fast[i].is_nan() {
-                // Both NaN is ok
+                
             } else {
                 assert_eq!(
                     dst_fast[i], regular.fast[i],
@@ -2283,7 +2283,7 @@ mod tests {
             }
 
             if dst_slow[i].is_nan() && regular.slow[i].is_nan() {
-                // Both NaN is ok
+                
             } else {
                 assert_eq!(
                     dst_slow[i], regular.slow[i],
@@ -2298,16 +2298,16 @@ mod tests {
 
     fn check_qqe_poison_sentinel(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Test that no uninitialized memory is exposed
+        
         let test_data = vec![
             50.0, 51.0, 52.0, 51.5, 50.5, 49.5, 50.0, 51.0, 52.0, 53.0, 52.5, 51.5, 50.5, 51.0,
             52.0, 53.0, 54.0, 53.5, 52.5, 51.5, 50.5, 51.5, 52.5, 53.5, 54.5, 55.0, 54.5, 53.5,
             52.5, 51.5,
         ];
 
-        // Test single computation
+        
         {
-            // Allocate buffers with poison pattern
+            
             const POISON: f64 = f64::from_bits(0xDEADBEEF_DEADBEEF);
             let mut fast = vec![POISON; test_data.len()];
             let mut slow = vec![POISON; test_data.len()];
@@ -2315,10 +2315,10 @@ mod tests {
             let params = QqeParams::default();
             let input = QqeInput::from_slice(&test_data, params);
 
-            // Compute directly into buffers
+            
             qqe_into_slices(&mut fast[..], &mut slow[..], &input, kernel)?;
 
-            // Check that all values are either NaN (warmup) or valid numbers
+            
             for (i, &val) in fast.iter().enumerate() {
                 assert!(
                     val.is_nan() || (val.is_finite() && val != POISON),
@@ -2340,7 +2340,7 @@ mod tests {
             }
         }
 
-        // Test batch computation
+        
         {
             let sweep = QqeBatchRange {
                 rsi_period: (10, 14, 2),
@@ -2350,7 +2350,7 @@ mod tests {
 
             let batch_out = qqe_batch_with_kernel(&test_data, &sweep, kernel)?;
 
-            // Check all batch values
+            
             for (i, &val) in batch_out.fast_values.iter().enumerate() {
                 assert!(
                     val.is_nan() || val.is_finite(),
@@ -2382,7 +2382,7 @@ mod tests {
         let p = QqeParams::default();
 
         let out1 = qqe_with_kernel(&QqeInput::from_candles(&c, "close", p.clone()), kernel)?;
-        // reinput on FAST leg is intentional here to stress NaN handling and alignment
+        
         let out2 = qqe_with_kernel(&QqeInput::from_slice(&out1.fast, p), kernel)?;
 
         assert_eq!(out1.fast.len(), out2.fast.len());
@@ -2488,7 +2488,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // generate periods and data long enough for warmup
+        
         let strat = (1usize..=64).prop_flat_map(|rsi_p| {
             (1usize..=32).prop_flat_map(move |ema_p| {
                 let need = rsi_p + ema_p + 8;
@@ -2514,10 +2514,10 @@ mod tests {
                 };
                 let input = QqeInput::from_slice(&data, p);
 
-                // reference via with_kernel
+                
                 let ref_out = qqe_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // into_slices path must match exactly
+                
                 let mut f = vec![0.0; data.len()];
                 let mut s = vec![0.0; data.len()];
                 qqe_into_slices(&mut f, &mut s, &input, Kernel::Scalar).unwrap();
@@ -2549,7 +2549,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate tests for all kernel variants
+    
     macro_rules! generate_all_qqe_tests {
         ($($test_fn:ident),+ $(,)?) => {
 

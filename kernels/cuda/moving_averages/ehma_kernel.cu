@@ -1,15 +1,15 @@
-// CUDA kernels for Ehlers Hann Moving Average (EHMA).
-//
-// This file provides ALMA-parity CUDA implementations for EHMA:
-// - Plain batch kernel (on-device Hann weights)
-// - Precomputed-weight tiled batch kernels (2x fused outputs per thread)
-// - Many-series 1D kernel (time-major)
-// - Many-series 2D tiled kernels (time-major, tx=128 x ty={2,4})
-//
-// Memory/layout policies mirror ALMA’s reference:
-// - 16-byte aligned dynamic shared layout
-// - Vectorized float4 loads when aligned; scalar tails fixed; OOB zero-fill
-// - Coalesced global reads; NaN warmup boundaries enforced in all variants
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -19,7 +19,7 @@
 #include <math.h>
 #include <stdint.h>
 
-// Async copy (cp.async) via Cooperative Groups
+
 #include <cooperative_groups.h>
 #include <cooperative_groups/memcpy_async.h>
 #include <cuda/pipeline>
@@ -30,15 +30,15 @@ namespace cg = cooperative_groups;
 #endif
 
 __device__ __forceinline__ float ehma_hann_weight(int period, int idx) {
-    // idx is [0, period) where 0 indexes the oldest sample.
-    // Use 1 - cos(2*pi*x) = 2*sin^2(pi*x) and CUDA's sinpif for better accuracy.
-    const float i = static_cast<float>(period - idx);      // maps to 1..P
+    
+    
+    const float i = static_cast<float>(period - idx);      
     const float x = i / (static_cast<float>(period) + 1.0f);
-    const float s = sinpif(x);                              // sin(pi*x)
-    return 2.0f * s * s;                                    // 1 - cos = 2*sin^2
+    const float s = sinpif(x);                              
+    return 2.0f * s * s;                                    
 }
 
-// One-series × many-parameter kernel (batch mode).
+
 extern "C" __global__
 void ehma_batch_f32(const float* __restrict__ prices,
                     const int* __restrict__ periods,
@@ -59,13 +59,13 @@ void ehma_batch_f32(const float* __restrict__ prices,
 
     extern __shared__ float weights[];
 
-    // Build Hann weights in shared; exact normalization uses identity sum = (period+1)
+    
     for (int idx = threadIdx.x; idx < period; idx += blockDim.x) {
         weights[idx] = ehma_hann_weight(period, idx);
     }
     __syncthreads();
 
-    const float inv_norm = 1.0f / (static_cast<float>(period) + 1.0f); // exact in real arithmetic
+    const float inv_norm = 1.0f / (static_cast<float>(period) + 1.0f); 
 
     const int warm = warm_indices[combo];
     const int first = warm - period + 1;
@@ -79,7 +79,7 @@ void ehma_batch_f32(const float* __restrict__ prices,
             out[base_out + t] = NAN;
         } else {
             const int start = t - period + 1;
-            // Pairwise FMA accumulation in registers to reduce error
+            
             float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
             int k = 0;
             #pragma unroll 4
@@ -99,7 +99,7 @@ void ehma_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Many-series × one-parameter kernel (time-major input).
+
 extern "C" __global__
 void ehma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const float* __restrict__ weights,
@@ -132,7 +132,7 @@ void ehma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
             out_tm[out_idx] = NAN;
         } else {
             const int start = t - period + 1;
-            // Pairwise FMA accumulation over strided input for improved accuracy
+            
             float s0 = 0.0f, s1 = 0.0f, s2 = 0.0f, s3 = 0.0f;
             int k = 0;
             #pragma unroll 4
@@ -157,10 +157,10 @@ void ehma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Precomputed-weight tiled batch (2x outputs per-thread), ALMA-style layout
-// Signature mirrors ALMA for wrapper parity (inv_norms is a dummy; weights are
-// pre-normalized on the host or via a precompute kernel).
+
+
+
+
 
 __device__ __forceinline__ size_t ehma_align_up(size_t x, size_t a) {
     return (x + (a - 1)) & ~(a - 1);
@@ -169,7 +169,7 @@ __device__ __forceinline__ size_t ehma_align_up(size_t x, size_t a) {
 __device__ __forceinline__ float ehma_dot_uncomp(const float* __restrict__ x,
                                                  const float* __restrict__ w,
                                                  int n) {
-    // Pairwise-in-register dot to reduce summation error at low cost.
+    
     float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
     int i = 0;
     #pragma unroll 4
@@ -190,7 +190,7 @@ __device__ __forceinline__ void ehma_dot2_shared(const float* __restrict__ buf,
                                                   int n,
                                                   float& s0_out,
                                                   float& s1_out) {
-    // Pairwise accumulation for two consecutive outputs from shared buffer
+    
     float s00 = 0.f, s01 = 0.f, s02 = 0.f, s03 = 0.f;
     float s10 = 0.f, s11 = 0.f, s12 = 0.f, s13 = 0.f;
     int i = 0;
@@ -223,13 +223,13 @@ struct EhmaBatchTiledPrecomputed2X {
     void run(const float* __restrict__ prices,
              const float* __restrict__ weights_flat,
              const int*   __restrict__ periods,
-             const float* __restrict__ inv_norms, // ignored (weights are pre-normalized)
+             const float* __restrict__ inv_norms, 
              int max_period,
              int series_len,
              int n_combos,
              int first_valid,
              float* __restrict__ out) {
-        const int THREADS = TILE / 2; // 2 outputs per thread
+        const int THREADS = TILE / 2; 
         if (blockDim.x != THREADS) return;
 
         const int combo = blockIdx.y;
@@ -244,13 +244,13 @@ struct EhmaBatchTiledPrecomputed2X {
         size_t off = 0;
         float* w = reinterpret_cast<float*>(shraw + off);
         off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
-        float* buf = reinterpret_cast<float*>(shraw + off); // [TILE+period-1]
+        float* buf = reinterpret_cast<float*>(shraw + off); 
 
-        // Load weights for this combo (vectorized when aligned)
+        
         const float* wsrc = weights_flat + combo * max_period;
         uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
         if ((waddr & 0xF) == 0) {
-            int ve = period >> 2; // /4
+            int ve = period >> 2; 
             for (int vi = threadIdx.x; vi < ve; vi += THREADS) {
                 reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
             }
@@ -263,7 +263,7 @@ struct EhmaBatchTiledPrecomputed2X {
         }
         __syncthreads();
 
-        // Cooperative load of tile into shared (vectorized when aligned)
+        
         const int p_base0 = t0 - (period - 1);
         bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
         if (in_bounds) {
@@ -292,8 +292,8 @@ struct EhmaBatchTiledPrecomputed2X {
         const int warm = first_valid + period - 1;
         const int combo_base = combo * series_len;
 
-        // Each thread computes two consecutive outputs from the tile
-        int b = 2 * threadIdx.x; // within tile
+        
+        int b = 2 * threadIdx.x; 
         int t = t0 + b;
         float out0 = NAN, out1 = NAN;
         if (t < series_len) {
@@ -332,11 +332,11 @@ DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile128, 128)
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile256, 256)
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X(ehma_batch_tiled_f32_2x_tile512, 512)
 
-// ---------------------------------------------------------------------------
-// Async, streamed precomputed-weight tiled batch (2x outputs/thread)
-//   - Uses cooperative_groups::memcpy_async (cp.async on SM >= 80)
-//   - Streams tiles across time within a block to overlap copy/compute
-//   - Keeps ALMA parity and existing EHMA math/warmup behavior
+
+
+
+
+
 
 template<int TILE>
 struct EhmaBatchTiledPrecomputed2X_Async {
@@ -344,11 +344,11 @@ struct EhmaBatchTiledPrecomputed2X_Async {
     void run(const float* __restrict__ prices,
              const float* __restrict__ weights_flat,
              const int*   __restrict__ periods,
-             const float* __restrict__ inv_norms, // ignored (weights are pre-normalized)
+             const float* __restrict__ inv_norms, 
              int max_period, int series_len, int n_combos, int first_valid,
              float* __restrict__ out) {
 
-        const int THREADS = TILE / 2;    // two outputs per thread
+        const int THREADS = TILE / 2;    
         if (blockDim.x != THREADS) return;
 
         const int combo = blockIdx.y;
@@ -357,16 +357,16 @@ struct EhmaBatchTiledPrecomputed2X_Async {
         const int period = periods[combo];
         if (period <= 0 || period > max_period) return;
 
-        // dynamic shared: weights + tile buffer
+        
         extern __shared__ __align__(16) unsigned char shraw[];
         size_t off = 0;
         float* w = reinterpret_cast<float*>(shraw + off);
         off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
-        // We allocate only one tile buffer; we still get cp.async benefits without double buffering
+        
         float* buf = reinterpret_cast<float*>(shraw + off);
-        const int total = TILE + period - 1;  // elements per tile load
+        const int total = TILE + period - 1;  
 
-        // Load weights for this combo into shared (retain vectorized float4 path)
+        
         const float* wsrc = weights_flat + combo * max_period;
         uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
         if ((waddr & 0xF) == 0) {
@@ -386,24 +386,24 @@ struct EhmaBatchTiledPrecomputed2X_Async {
         const int warm = first_valid + period - 1;
         const int combo_base = combo * series_len;
 
-        // --- stream tiles along x dimension (block covers multiple tiles) ---
+        
         for (int t0 = blockIdx.x * TILE; t0 < series_len; t0 += gridDim.x * TILE) {
 
-            // Compute tile base in input and whether the whole tile is in-bounds
+            
             const int p_base0 = t0 - (period - 1);
             const bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
 
 #if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
             if (in_bounds) {
-                // Cooperative async copy: whole [total] floats to shared
+                
                 auto block = cg::this_thread_block();
                 cg::memcpy_async(block, buf, prices + p_base0, sizeof(float) * total);
-                cg::wait(block);   // ensure cp.async completion
+                cg::wait(block);   
                 __syncthreads();
             } else
 #endif
             {
-                // Fallback (OOB zero-fill), also used on pre-Ampere
+                
                 for (int i = threadIdx.x; i < total; i += THREADS) {
                     int idx = p_base0 + i;
                     buf[i] = (0 <= idx && idx < series_len) ? prices[idx] : 0.f;
@@ -411,8 +411,8 @@ struct EhmaBatchTiledPrecomputed2X_Async {
                 __syncthreads();
             }
 
-            // Each thread computes two consecutive outputs from shared buffer
-            int b = 2 * threadIdx.x;     // index within this tile
+            
+            int b = 2 * threadIdx.x;     
             int t = t0 + b;
 
             if (t < series_len) {
@@ -432,7 +432,7 @@ struct EhmaBatchTiledPrecomputed2X_Async {
                 if ((t + 1) < series_len) out[combo_base + t + 1] = out1;
             }
             __syncthreads();
-        } // tile streaming loop
+        } 
     }
 };
 
@@ -451,13 +451,13 @@ DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile128_async, 
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile256_async, 256)
 DEFINE_EHMA_BATCH_TILED_PRECOMP_2X_ASYNC(ehma_batch_tiled_f32_2x_tile512_async, 512)
 
-// ---------------------------------------------------------------------------
-// Many-series tiled (time-major), precomputed weights. Matches ALMA signature.
+
+
 
 __device__ __forceinline__
 float ehma_dot_stride_uncomp(const float* __restrict__ x, int stride,
                              const float* __restrict__ w, int n) {
-    // Pairwise-in-register accumulation over strided memory
+    
     float s0 = 0.f, s1 = 0.f, s2 = 0.f, s3 = 0.f;
     int i = 0;
     #pragma unroll 4
@@ -477,7 +477,7 @@ __device__ __forceinline__
 void ehma_ms1p_tiled_core(const float* __restrict__ prices_tm,
                           const float* __restrict__ weights,
                           int period,
-                          float inv_norm, // ignored (weights pre-normalized)
+                          float inv_norm, 
                           int num_series,
                           int series_len,
                           const int* __restrict__ first_valids,
@@ -486,7 +486,7 @@ void ehma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     const int s0 = blockIdx.y * TY;
     if (t0 >= series_len || s0 >= num_series) return;
 
-    // Shared: weights + tile [ (TX+period-1) x TY ]
+    
     const int total = TX + period - 1;
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
@@ -494,7 +494,7 @@ void ehma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
     float* tile = reinterpret_cast<float*>(shraw + off);
 
-    // Load weights into shared (vectorized if aligned)
+    
     uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
     const int THREADS = blockDim.x * blockDim.y;
     if ((waddr & 0xF) == 0) {
@@ -513,7 +513,7 @@ void ehma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    // Cooperative load of tile across series and time
+    
     const bool vec_ok = (TY == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
     const int p0 = t0 - (period - 1);
     for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
@@ -546,7 +546,7 @@ void ehma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     int out_idx = t * num_series + s;
     if (t < warm) { out_tm[out_idx] = NAN; return; }
 
-    int start = threadIdx.x; // within tile
+    int start = threadIdx.x; 
     const float* xptr = &tile[start * TY + threadIdx.y];
     float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
     out_tm[out_idx] = acc;
@@ -565,14 +565,14 @@ extern "C" __global__ void NAME(                                                
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty2, 128, 2)
 DEFINE_EHMA_MS1P_TILED(ehma_ms1p_tiled_f32_tx128_ty4, 128, 4)
 
-// ---------------------------------------------------------------------------
-// Many-series tiled (time-major), async copy of row segments
+
+
 
 template<int TX, int TY>
 __device__ __forceinline__
 void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
                                 const float* __restrict__ weights,
-                                int period, float inv_norm,    // inv_norm ignored (pre-normalized)
+                                int period, float inv_norm,    
                                 int num_series, int series_len,
                                 const int* __restrict__ first_valids,
                                 float* __restrict__ out_tm) {
@@ -585,9 +585,9 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     size_t off = 0;
     float* w = reinterpret_cast<float*>(shraw + off);
     off = ehma_align_up(off + size_t(period) * sizeof(float), 16);
-    float* tile = reinterpret_cast<float*>(shraw + off); // [total * TY]
+    float* tile = reinterpret_cast<float*>(shraw + off); 
 
-    // weights → shared (vectorized if aligned)
+    
     uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
     const int THREADS = blockDim.x * blockDim.y;
     if ((waddr & 0xF) == 0) {
@@ -604,11 +604,11 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    // Cooperative async staging of each tile row's TY segment
+    
     const int p0 = t0 - (period - 1);
 #if EHMA_USE_ASYNC && (__CUDA_ARCH__ >= 800)
-    // NOTE: cg::memcpy_async is a *group algorithm*; only a subset of threads calling it per row
-    // can result in a no-op copy. Use per-thread cuda::memcpy_async (cp.async) instead.
+    
+    
     const bool vec_ok = (TY == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
     auto block = cg::this_thread_block();
     __shared__ cuda::pipeline_shared_state<cuda::thread_scope_block, 1> pss;
@@ -643,7 +643,7 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     pipe.consumer_wait();
     __syncthreads();
 
-    // Compute exactly as original tiled core
+    
     int s = s0 + threadIdx.y;
     int t = t0 + threadIdx.x;
     if (s < num_series && t < series_len) {
@@ -652,7 +652,7 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
         if (t < warm) {
             out_tm[out_idx] = NAN;
         } else {
-            int start = threadIdx.x; // within tile
+            int start = threadIdx.x; 
             const float* xptr = &tile[start * TY + threadIdx.y];
             float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
             out_tm[out_idx] = acc;
@@ -679,7 +679,7 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    // Compute exactly as original tiled core
+    
     int s = s0 + threadIdx.y;
     int t = t0 + threadIdx.x;
     if (s >= num_series || t >= series_len) return;
@@ -687,7 +687,7 @@ void ehma_ms1p_tiled_core_async(const float* __restrict__ prices_tm,
     int out_idx = t * num_series + s;
     if (t < warm) { out_tm[out_idx] = NAN; return; }
 
-    int start = threadIdx.x; // within tile
+    int start = threadIdx.x; 
     const float* xptr = &tile[start * TY + threadIdx.y];
     float acc = ehma_dot_stride_uncomp(xptr, TY, w, period);
     out_tm[out_idx] = acc;

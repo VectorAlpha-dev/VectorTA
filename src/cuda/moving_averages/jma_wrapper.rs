@@ -48,7 +48,7 @@ pub enum CudaJmaError {
     NotImplemented,
 }
 
-// -------- Kernel policy + introspection (for parity with ALMA) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -65,14 +65,14 @@ pub enum BatchKernelPolicy {
     Tiled {
         tile: u32,
         per_thread: BatchThreadsPerOutput,
-    }, // not used by JMA
+    }, 
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    Tiled2D { tx: u32, ty: u32 }, // not used by JMA
+    Tiled2D { tx: u32, ty: u32 }, 
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -190,11 +190,11 @@ impl CudaJma {
         self.stream.synchronize().map_err(CudaJmaError::from)
     }
 
-    // --- Heuristics and helpers -------------------------------------------------
+    
     #[inline]
     fn choose_block_x_auto(n: usize) -> u32 {
-        // Default for tiny-register kernels (Ada+): 256 threads per block.
-        // For small n, use next power-of-two up to 256 but at least one warp (32).
+        
+        
         let hard = 256u32;
         if n >= hard as usize {
             hard
@@ -215,9 +215,9 @@ impl CudaJma {
                 {
                     return v.clamp(32, 1024);
                 }
-                // JMA batch kernel is 1 thread per combo with long sequential work.
-                // Avoid picking a block size >= n_combos (which would collapse to a
-                // single block and underutilize the GPU) for common sweep sizes like 250.
+                
+                
+                
                 let bx = Self::choose_block_x_auto(needed);
                 if needed > 32 && (bx as usize) >= needed {
                     32
@@ -249,10 +249,10 @@ impl CudaJma {
         ((n as u64 + d as u64 - 1) / d as u64) as u32
     }
 
-    // Only chunks when grid.x would overflow for given block_x
+    
     #[inline]
     fn grid_chunks_v2(n: usize, block_x: u32) -> impl Iterator<Item = (usize, usize)> {
-        const MAX_GRID_X: usize = i32::MAX as usize; // conservative
+        const MAX_GRID_X: usize = i32::MAX as usize; 
         let max_elems = MAX_GRID_X.saturating_mul(block_x as usize);
         (0..n).step_by(max_elems).map(move |start| {
             let len = (n - start).min(max_elems);
@@ -407,7 +407,7 @@ impl CudaJma {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        // Checked arithmetic for byte sizing to avoid overflow
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_bytes = series_len
             .checked_mul(sz_f32)
@@ -433,14 +433,14 @@ impl CudaJma {
             .and_then(|v| v.checked_add(phase_bytes))
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaJmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64 MB safety margin
+        let headroom = 64 * 1024 * 1024; 
 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
             return Err(CudaJmaError::OutOfMemory { required, free, headroom });
         }
 
-        // Async allocations/copies (reduce host stalls)
+        
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
             .map_err(|e| CudaJmaError::Cuda(e))?;
         let d_alphas = unsafe { DeviceBuffer::from_slice_async(&inputs.alphas, &self.stream) }
@@ -455,7 +455,7 @@ impl CudaJma {
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }
                 .map_err(|e| CudaJmaError::Cuda(e))?;
 
-        // Select block size and record selection
+        
         let block_x = self.resolve_batch_block_x(n_combos);
         unsafe {
             let this = self as *const _ as *mut CudaJma;
@@ -463,7 +463,7 @@ impl CudaJma {
         }
         self.maybe_log_batch_debug();
 
-        // Modern chunking (rarely triggers, kept for correctness)
+        
         for (start, len) in Self::grid_chunks_v2(n_combos, block_x) {
             self.launch_batch_kernel_chunk(
                 &d_prices,
@@ -499,7 +499,7 @@ impl CudaJma {
         let first_valid_bytes = prepared.first_valids.len() * std::mem::size_of::<i32>();
         let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
         let required = prices_bytes + first_valid_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32 MB safety margin
+        let headroom = 32 * 1024 * 1024; 
 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
@@ -512,7 +512,7 @@ impl CudaJma {
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(prices_tm_f32.len(), &self.stream) }?;
 
-        // Selection/introspection (plain 1D mapping)
+        
         let block_x = self.resolve_many_block_x(num_series);
         unsafe {
             let this = self as *const _ as *mut CudaJma;
@@ -549,7 +549,7 @@ impl CudaJma {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaJmaError> {
-        // Back-compat: single-shot launch for all combos (no chunking)
+        
         let block_x = self.resolve_batch_block_x(n_combos);
         self.launch_batch_kernel_chunk(
             d_prices,
@@ -598,14 +598,14 @@ impl CudaJma {
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-            // Offset per-combo arrays by start_combo
+            
             let mut alphas_ptr = d_alphas.as_device_ptr().add(start_combo).as_raw();
             let mut beta_ptr = d_one_minus_betas.as_device_ptr().add(start_combo).as_raw();
             let mut phase_ptr = d_phase_ratios.as_device_ptr().add(start_combo).as_raw();
             let mut series_len_i = series_len as i32;
             let mut combos_i = len_combos as i32;
             let mut first_valid_i = first_valid as i32;
-            // Offset output by start_combo * series_len
+            
             let mut out_ptr = d_out.as_device_ptr().add(out_offset).as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
@@ -873,7 +873,7 @@ impl CudaJma {
 
     #[inline]
     fn grid_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
-        const MAX: usize = 65_535; // conservative limit for a single grid dim
+        const MAX: usize = 65_535; 
         (0..n).step_by(MAX).map(move |start| {
             let len = (n - start).min(MAX);
             (start, len)
@@ -919,7 +919,7 @@ impl CudaJma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

@@ -1,9 +1,9 @@
-// CUDA kernels for Average True Range (ATR) using Wilder's RMA smoothing.
-//
-// Pattern mirrors wilders_kernel.cu: a block cooperatively seeds the initial
-// window via reduction, then a single lane performs the sequential recurrence.
-// True Range (TR) per time t is max(high-low, |high-prev_close|, |low-prev_close|),
-// with t==first_valid using (high-low) as the seed per scalar behavior.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,7 +13,7 @@
 #include <math.h>
 #include <stdint.h>
 
-// ---- Common helpers ---------------------------------------------------------
+
 static __forceinline__ __device__ float warp_reduce_sum(float v) {
     unsigned mask = __activemask();
     #pragma unroll
@@ -24,7 +24,7 @@ static __forceinline__ __device__ float warp_reduce_sum(float v) {
 }
 
 static __forceinline__ __device__ float block_reduce_sum(float v) {
-    __shared__ float warp_sums[32]; // up to 1024 threads
+    __shared__ float warp_sums[32]; 
     const int lane = threadIdx.x & (warpSize - 1);
     const int wid  = threadIdx.x >> 5;
 
@@ -38,10 +38,10 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         block_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
         block_sum = warp_reduce_sum(block_sum);
     }
-    return block_sum; // valid in lane 0 of warp 0
+    return block_sum; 
 }
 
-// Branchless True Range at t. Seed rule: t==first_valid uses hi-lo.
+
 static __forceinline__ __device__ float tr_at_branchless(
     const float hi, const float lo, const float pc, int t, int first_valid)
 {
@@ -52,8 +52,8 @@ static __forceinline__ __device__ float tr_at_branchless(
     return (t == first_valid) ? seed : m;
 }
 
-// ---- Double-fp32 compensated sums (float2 hi/lo) ---------------------------
-// Neumaier/Kahan style compensated accumulate: (hi, lo) += x
+
+
 static __forceinline__ __device__ void acc_add(float &hi, float &lo, float x) {
     float s = hi + x;
     float bp = s - hi;
@@ -62,13 +62,13 @@ static __forceinline__ __device__ void acc_add(float &hi, float &lo, float x) {
     lo += err;
 }
 
-// (hi, lo) += (bhi, blo)
+
 static __forceinline__ __device__ void acc_add2(float &hi, float &lo, float bhi, float blo) {
     acc_add(hi, lo, bhi);
     acc_add(hi, lo, blo);
 }
 
-// r = a - b for float2 accumulators, stored back into (rhi, rlo)
+
 static __forceinline__ __device__ void acc_sub2(float ahi, float alo, float bhi, float blo,
                                                 float &rhi, float &rlo) {
     rhi = 0.0f; rlo = 0.0f;
@@ -78,7 +78,7 @@ static __forceinline__ __device__ void acc_sub2(float ahi, float alo, float bhi,
     acc_add(rhi, rlo, -blo);
 }
 
-// Precompute TR from H/L/C (optional helper)
+
 extern "C" __global__
 void tr_from_hlc_f32(const float* __restrict__ high,
                      const float* __restrict__ low,
@@ -102,7 +102,7 @@ void tr_from_hlc_f32(const float* __restrict__ high,
     }
 }
 
-// Exclusive prefix using double-fp32 accumulator (size N+1)
+
 extern "C" __global__
 void exclusive_prefix_float2_from_tr(const float* __restrict__ tr,
                                      int series_len,
@@ -119,7 +119,7 @@ void exclusive_prefix_float2_from_tr(const float* __restrict__ tr,
     }
 }
 
-// Unified batch kernel (one series × many params) with runtime seeding path
+
 extern "C" __global__
 void atr_batch_unified_f32(const float* __restrict__ high,
                            const float* __restrict__ low,
@@ -145,13 +145,13 @@ void atr_batch_unified_f32(const float* __restrict__ high,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    // Only NaN-fill the pre-warm range
+    
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    // Seed
+    
     float seed_mean = 0.0f;
     if (prefix2 != nullptr) {
         if (threadIdx.x == 0) {
@@ -164,7 +164,7 @@ void atr_batch_unified_f32(const float* __restrict__ high,
         __syncthreads();
     } else {
         float local = 0.0f;
-        const int end = start + period; // exclusive
+        const int end = start + period; 
         for (int k = threadIdx.x; k < period; k += blockDim.x) {
             const int t = start + k;
             float tri;
@@ -183,7 +183,7 @@ void atr_batch_unified_f32(const float* __restrict__ high,
         __syncthreads();
     }
 
-    // Sequential RMA per combo
+    
     if (threadIdx.x == 0) {
         float y = seed_mean;
         out[base + warm] = y;
@@ -203,7 +203,7 @@ void atr_batch_unified_f32(const float* __restrict__ high,
     }
 }
 
-// Backward-compatible symbol: one-series × many-params, on-the-fly TR path
+
 extern "C" __global__
 void atr_batch_f32(const float* __restrict__ high,
                    const float* __restrict__ low,
@@ -227,13 +227,13 @@ void atr_batch_f32(const float* __restrict__ high,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    // Only pre-warm NaNs
+    
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    // Seed via reduction over first window
+    
     float local = 0.0f;
     for (int k = threadIdx.x; k < period; k += blockDim.x) {
         const int t = start + k;
@@ -258,7 +258,7 @@ void atr_batch_f32(const float* __restrict__ high,
     }
 }
 
-// Optimized batch kernel using shared precomputed TR and its prefix sums.
+
 extern "C" __global__
 void atr_batch_from_tr_prefix_f32(const float* __restrict__ tr,
                                   const double* __restrict__ prefix_tr,
@@ -280,17 +280,17 @@ void atr_batch_from_tr_prefix_f32(const float* __restrict__ tr,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    // Only pre-warm NaNs
+    
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    // Prefer prefix path if provided, else reduce over TR
+    
     float seed_mean = 0.0f;
     if (prefix_tr != nullptr) {
         if (threadIdx.x == 0) {
-            // Avoid FP64 math: cast each endpoint to f32 before subtracting
+            
             const float a = (float)prefix_tr[warm + 1];
             const float b = (float)prefix_tr[start];
             seed_mean = (a - b) / (float)period;
@@ -318,7 +318,7 @@ void atr_batch_from_tr_prefix_f32(const float* __restrict__ tr,
     }
 }
 
-// Many-series × one-param, time-major, coalesced across series per warp
+
 extern "C" __global__
 void atr_many_series_one_param_f32(const float* __restrict__ high_tm,
                                    const float* __restrict__ low_tm,
@@ -344,16 +344,16 @@ void atr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) continue;
-        const int warm_end = first_valid + period; // exclusive
+        const int warm_end = first_valid + period; 
         if (warm_end > series_len) continue;
         const int warm = warm_end - 1;
 
-        // Pre-warm NaNs for this series
+        
         for (int t = 0; t < warm; ++t) {
             out_tm[t * stride + s] = NAN;
         }
 
-        // Seed over first window with coalesced loads
+        
         float sum = 0.0f;
         #pragma unroll 1
         for (int k = 0; k < period; ++k) {
@@ -367,7 +367,7 @@ void atr_many_series_one_param_f32(const float* __restrict__ high_tm,
         float y = sum / (float)period;
         out_tm[warm * stride + s] = y;
 
-        // Sequential RMA per series across time (coalesced streaming)
+        
         for (int t = warm + 1; t < series_len; ++t) {
             const float hi = high_tm[t * stride + s];
             const float lo = low_tm[t * stride + s];

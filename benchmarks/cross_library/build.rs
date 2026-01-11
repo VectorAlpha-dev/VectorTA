@@ -5,14 +5,14 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../third_party/tulipindicators");
 
-    // Build Tulip Indicators
+    
     build_tulip();
 
-    // Generate bindings for Tulip
+    
     generate_tulip_bindings();
 
-    // TA-Lib requires manual installation on Windows
-    // Users should download from https://ta-lib.org and set LIB/INCLUDE paths
+    
+    
     #[cfg(feature = "talib")]
     {
         build_talib();
@@ -23,7 +23,7 @@ fn main() {
 fn build_tulip() {
     let tulip_path = "../../third_party/tulipindicators";
 
-    // Build Tulip indicators C library
+    
     let mut build = cc::Build::new();
 
     build
@@ -132,21 +132,21 @@ fn build_tulip() {
         .file(format!("{}/indicators/willr.c", tulip_path))
         .file(format!("{}/indicators/wma.c", tulip_path))
         .file(format!("{}/indicators/zlema.c", tulip_path))
-        // Add utility files needed by some indicators
+        
         .file(format!("{}/utils/buffer.c", tulip_path))
-        // Add the main indicator list - use indicators.c instead of tiamalgamation.c for MSVC compatibility
+        
         .file(format!("{}/indicators.c", tulip_path));
 
-    // Set optimization flags
+    
     build
         .opt_level(3)
         .flag_if_supported("-march=native")
         .flag_if_supported("/arch:AVX2");
 
-    // Compile the library
+    
     build.compile("tulipindicators");
 
-    // Link the library
+    
     println!("cargo:rustc-link-lib=static=tulipindicators");
 }
 
@@ -155,12 +155,12 @@ fn generate_tulip_bindings() {
 
     let bindings = bindgen::Builder::default()
         .header(format!("{}/indicators.h", tulip_path))
-        // Include necessary types
+        
         .allowlist_type("ti_indicator_info")
         .allowlist_function("ti_.*")
         .allowlist_var("ti_.*")
         .allowlist_type("TI_.*")
-        // Generate bindings
+        
         .generate()
         .expect("Unable to generate Tulip bindings");
 
@@ -172,13 +172,13 @@ fn generate_tulip_bindings() {
 
 #[cfg(feature = "talib")]
 fn build_talib() {
-    // TA-Lib is more complex to build automatically, especially on Windows
-    // Users should install it manually and set environment variables
+    
+    
 
-    // Check for TA-Lib installation
+    
     if let Ok(talib_path) = env::var("TALIB_PATH") {
         println!("cargo:rustc-link-search={}/lib", talib_path);
-        // TA-LIB 0.6.x uses 'ta-lib' instead of 'ta_lib'
+        
         println!("cargo:rustc-link-lib=ta-lib");
     } else {
         println!("cargo:warning=TA-Lib not found. Set TALIB_PATH environment variable.");
@@ -201,7 +201,7 @@ fn generate_talib_bindings() {
             .write_to_file(out_path.join("talib_bindings.rs"))
             .expect("Couldn't write TA-Lib bindings!");
     } else {
-        // Create dummy bindings if TA-Lib is not available
+        
         let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
         std::fs::write(
             out_path.join("talib_bindings.rs"),

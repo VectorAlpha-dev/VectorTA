@@ -8,8 +8,8 @@
 //! - Minimal policy + introspection for kernel selection (OneD with block_x)
 //!
 //! Kernels expected:
-//! - `tradjema_batch_f32`                          // one-series × many-params (OHLC)
-//! - `tradjema_many_series_one_param_time_major_f32` // many-series × one-param (time-major OHLC)
+//! - `tradjema_batch_f32`                          
+//! - `tradjema_many_series_one_param_time_major_f32` 
 
 #![cfg(feature = "cuda")]
 

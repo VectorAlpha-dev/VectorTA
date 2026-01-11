@@ -4,24 +4,24 @@ import * as wasm from '../../pkg/my_project.js';
 import { loadTestData, assertArrayClose, assertClose, isNaN, assertAllNaN, assertNoNaN, EXPECTED_OUTPUTS } from './test_utils.js';
 
 test('DVDIQQE with default parameters', () => {
-    // Load real test data from CSV
+    
     const testData = loadTestData();
     const expected = EXPECTED_OUTPUTS.dvdiqqe;
     
-    // Use all available data
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
-    // Calculate DVDIQQE with default parameters
+    
     const result = wasm.dvdiqqe(
         open,
         high,
         low,
         close,
-        Array.from(volume),  // Convert to regular array for optional parameter
+        Array.from(volume),  
         expected.defaultParams.period,
         expected.defaultParams.smoothingPeriod,
         expected.defaultParams.fastMultiplier,
@@ -31,29 +31,29 @@ test('DVDIQQE with default parameters', () => {
         expected.defaultParams.tickSize
     );
     
-    // Check output structure (flattened format)
+    
     assert.ok(result.values, 'Result should have values array');
     assert.strictEqual(result.rows, 4, 'Result should have 4 rows');
     assert.strictEqual(result.cols, close.length, 'Columns should match input length');
     assert.strictEqual(result.values.length, 4 * close.length, 'Values should be 4×input length');
     
-    // Extract individual arrays from flattened format
+    
     const dvdi = result.values.slice(0, result.cols);
     const fast_tl = result.values.slice(result.cols, 2 * result.cols);
     const slow_tl = result.values.slice(2 * result.cols, 3 * result.cols);
     const center_line = result.values.slice(3 * result.cols, 4 * result.cols);
     
-    // Check warmup period
-    const warmup = 25; // (13 * 2) - 1 for wper calculation
     
-    // First warmup values should be NaN
+    const warmup = 25; 
+    
+    
     for (let i = 0; i < warmup; i++) {
         assert(isNaN(dvdi[i]), `Expected NaN at warmup index ${i} for DVDI`);
         assert(isNaN(fast_tl[i]), `Expected NaN at warmup index ${i} for Fast TL`);
         assert(isNaN(slow_tl[i]), `Expected NaN at warmup index ${i} for Slow TL`);
     }
     
-    // After warmup should have valid values
+    
     for (let i = warmup; i < Math.min(warmup + 50, result.cols); i++) {
         assert(!isNaN(dvdi[i]), `Unexpected NaN at index ${i} for DVDI`);
         assert(!isNaN(fast_tl[i]), `Unexpected NaN at index ${i} for Fast TL`);
@@ -63,7 +63,7 @@ test('DVDIQQE with default parameters', () => {
 });
 
 test('DVDIQQE with custom parameters', () => {
-    // Use real test data
+    
     const testData = loadTestData();
     const n_samples = 50;
     
@@ -73,28 +73,28 @@ test('DVDIQQE with custom parameters', () => {
     const close = new Float64Array(testData.close.slice(0, n_samples));
     const volume = new Float64Array(testData.volume.slice(0, n_samples));
     
-    // Calculate with custom parameters
+    
     const result = wasm.dvdiqqe(
         open,
         high,
         low,
         close,
         Array.from(volume),
-        10,     // period
-        5,      // smoothing_period
-        2.0,    // fast_multiplier
-        4.0,    // slow_multiplier
-        "tick", // volume_type
-        "static" // center_type
+        10,     
+        5,      
+        2.0,    
+        4.0,    
+        "tick", 
+        "static" 
     );
     
-    // Verify outputs (flattened format)
+    
     assert.ok(result.values, 'Result should have values array');
     assert.strictEqual(result.rows, 4, 'Result should have 4 rows');
     assert.strictEqual(result.cols, n_samples, 'Columns should match input length');
     assert.strictEqual(result.values.length, 4 * n_samples, 'Values should be 4×input length');
     
-    // Check static center line (should be constant)
+    
     const center_line = result.values.slice(3 * result.cols, 4 * result.cols);
     const validCenterValues = center_line.filter(v => !isNaN(v));
     const uniqueCenter = [...new Set(validCenterValues)];
@@ -102,7 +102,7 @@ test('DVDIQQE with custom parameters', () => {
 });
 
 test('DVDIQQE without volume', () => {
-    // Use real test data
+    
     const testData = loadTestData();
     const n_samples = 50;
     
@@ -111,23 +111,23 @@ test('DVDIQQE without volume', () => {
     const low = new Float64Array(testData.low.slice(0, n_samples));
     const close = new Float64Array(testData.close.slice(0, n_samples));
     
-    // Calculate without volume (should use tick volume internally)
+    
     const result = wasm.dvdiqqe(
         open, 
         high, 
         low, 
         close,
-        undefined,  // No volume provided
-        13,         // period
-        6,          // smoothing_period
-        3.0,        // fast_multiplier
-        5.0,        // slow_multiplier
-        "tick",     // volume_type (will use tick volume)
-        "dynamic",  // center_type
-        0.0001      // tick_size
+        undefined,  
+        13,         
+        6,          
+        3.0,        
+        5.0,        
+        "tick",     
+        "dynamic",  
+        0.0001      
     );
     
-    // Verify outputs (flattened format)
+    
     assert.ok(result.values, 'Result should have values array');
     assert.strictEqual(result.rows, 4, 'Result should have 4 rows');
     assert.strictEqual(result.cols, n_samples, 'Columns should match input length');
@@ -135,10 +135,10 @@ test('DVDIQQE without volume', () => {
 });
 
 test('DVDIQQE accuracy check', () => {
-    // Load reference values from test_utils
+    
     const expected = EXPECTED_OUTPUTS.dvdiqqe;
     
-    // Use real test data for accuracy
+    
     const testData = loadTestData();
     const n_samples = 100;
     
@@ -148,7 +148,7 @@ test('DVDIQQE accuracy check', () => {
     const close = new Float64Array(testData.close.slice(0, n_samples));
     const volume = new Float64Array(testData.volume.slice(0, n_samples));
     
-    // Calculate DVDIQQE with default params
+    
     const result = wasm.dvdiqqe(
         open,
         high,
@@ -164,18 +164,18 @@ test('DVDIQQE accuracy check', () => {
         expected.defaultParams.tickSize
     );
     
-    // Verify basic properties
+    
     assert.ok(result.values);
     assert.strictEqual(result.values.length, 4 * n_samples);
     
-    // Extract individual arrays from flattened format
+    
     const dvdi = result.values.slice(0, result.cols);
     const fast_tl = result.values.slice(result.cols, 2 * result.cols);
     const slow_tl = result.values.slice(2 * result.cols, 3 * result.cols);
     const center_line = result.values.slice(3 * result.cols, 4 * result.cols);
     
-    // After warmup period, all values should be finite
-    const warmup = 25; // (13 * 2) - 1 for wper calculation
+    
+    const warmup = 25; 
     for (let i = warmup; i < n_samples; i++) {
         assert.ok(isFinite(dvdi[i]), `DVDI at ${i} should be finite`);
         assert.ok(isFinite(fast_tl[i]), `Fast TL at ${i} should be finite`);
@@ -183,18 +183,18 @@ test('DVDIQQE accuracy check', () => {
         assert.ok(isFinite(center_line[i]), `Center line at ${i} should be finite`);
     }
     
-    // Check that dynamic center line changes over time
+    
     const centerValues = center_line.slice(warmup);
     const centerSet = new Set(centerValues);
     assert.ok(centerSet.size > 1, 'Dynamic center line should vary over time');
 });
 
 test('DVDIQQE matches Rust reference values (last 5)', () => {
-    // These are the same reference values and parameters used in the Rust unit tests
+    
     const expectedDvdi = [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595];
     const expectedSlow = [-990.21769695, -955.69385266, -951.82562405, -903.39071943, -903.39071943];
     const expectedFast = [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895];
-    // Center line depends on full CSV history; these match the Rust test dataset
+    
     const expectedCenter = [
         21.98929919135097,
         21.969910753134442,
@@ -210,17 +210,17 @@ test('DVDIQQE matches Rust reference values (last 5)', () => {
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
 
-    // Use the exact parameters from Rust tests
+    
     const result = wasm.dvdiqqe(
         open,
         high,
         low,
         close,
         Array.from(volume),
-        13,     // period
-        6,      // smoothing_period
-        2.618,  // fast_multiplier
-        4.236,  // slow_multiplier
+        13,     
+        6,      
+        2.618,  
+        4.236,  
         'default',
         'dynamic'
     );
@@ -231,7 +231,7 @@ test('DVDIQQE matches Rust reference values (last 5)', () => {
     const slow_tl = result.values.slice(2 * cols, 3 * cols);
     const center_line = result.values.slice(3 * cols, 4 * cols);
 
-    // Compare last 5 values to Rust references with <= 1e-6 absolute tolerance
+    
     const last5 = (arr) => arr.slice(arr.length - 5);
     assertArrayClose(last5(dvdi), expectedDvdi, 1e-6, 'DVDI last-5 mismatch vs Rust');
     assertArrayClose(last5(slow_tl), expectedSlow, 1e-6, 'Slow TL last-5 mismatch vs Rust');
@@ -278,13 +278,13 @@ test('DVDIQQE error handling - period too large', () => {
             data,
             data,
             undefined,
-            20  // Period too large for 5 samples
+            20  
         );
     }, /Not enough data|Period too large|Invalid period/, 'Should throw when period exceeds data length');
 });
 
 test('DVDIQQE NaN handling', () => {
-    // Use real test data
+    
     const testData = loadTestData();
     const expected = EXPECTED_OUTPUTS.dvdiqqe;
     const n_samples = 100;
@@ -301,19 +301,19 @@ test('DVDIQQE NaN handling', () => {
         expected.defaultParams.smoothingPeriod
     );
     
-    // Extract individual arrays
+    
     const dvdi = result.values.slice(0, result.cols);
     const fast_tl = result.values.slice(result.cols, 2 * result.cols);
     const slow_tl = result.values.slice(2 * result.cols, 3 * result.cols);
     const center_line = result.values.slice(3 * result.cols, 4 * result.cols);
     
-    // Check warmup period has NaN values
+    
     const warmup = 25;
     for (let i = 0; i < warmup; i++) {
         assert(isNaN(dvdi[i]), `Expected NaN at warmup index ${i}`);
     }
     
-    // After warmup, no NaN values
+    
     for (let i = warmup; i < n_samples; i++) {
         assert(!isNaN(dvdi[i]), `Unexpected NaN at index ${i} in DVDI`);
         assert(!isNaN(fast_tl[i]), `Unexpected NaN at index ${i} in Fast TL`);
@@ -330,16 +330,16 @@ test('DVDIQQE invalid parameters', () => {
     const low = new Float64Array(testData.low.slice(0, n_samples));
     const close = new Float64Array(testData.close.slice(0, n_samples));
     
-    // Test with zero period
+    
     assert.throws(() => {
         wasm.dvdiqqe(open, high, low, close, undefined, 0);
     }, /Invalid period|Period must be positive/, 'Should throw on zero period');
     
-    // Test with negative multiplier
+    
     assert.throws(() => {
         wasm.dvdiqqe(
             open, high, low, close, undefined,
-            13, 6, -1.0  // negative fast_multiplier
+            13, 6, -1.0  
         );
     }, /Invalid multiplier|Multiplier must be positive/, 'Should throw on negative multiplier');
 });
@@ -353,7 +353,7 @@ test('DVDIQQE center types', () => {
     const close = new Float64Array(testData.close.slice(0, n_samples));
     const volume = new Float64Array(testData.volume.slice(0, n_samples));
     
-    // Test static center
+    
     const staticResult = wasm.dvdiqqe(
         open, high, low, close, Array.from(volume),
         13, 6, 3.0, 5.0, "real", "static"
@@ -364,7 +364,7 @@ test('DVDIQQE center types', () => {
     const uniqueStatic = [...new Set(validStaticCenter)];
     assert.strictEqual(uniqueStatic.length, 1, 'Static center should be constant');
     
-    // Test dynamic center
+    
     const dynamicResult = wasm.dvdiqqe(
         open, high, low, close, Array.from(volume),
         13, 6, 3.0, 5.0, "real", "dynamic"
@@ -386,38 +386,38 @@ test('DVDIQQE volume types', () => {
     const close = new Float64Array(testData.close.slice(0, n_samples));
     const volume = new Float64Array(testData.volume.slice(0, n_samples));
     
-    // Test with real volume
+    
     const realResult = wasm.dvdiqqe(
         open, high, low, close, Array.from(volume),
         13, 6, 3.0, 5.0, "real", "dynamic"
     );
     
-    // Test with tick volume
+    
     const tickResult = wasm.dvdiqqe(
         open, high, low, close, Array.from(volume),
         13, 6, 3.0, 5.0, "tick", "dynamic"
     );
     
-    // Test without volume (should use tick volume)
+    
     const noVolumeResult = wasm.dvdiqqe(
         open, high, low, close, undefined,
         13, 6, 3.0, 5.0, "real", "dynamic"
     );
     
-    // Both should produce valid outputs
-    const warmup = 25; // (13 * 2) - 1 = 25
+    
+    const warmup = 25; 
     const realDvdi = realResult.values.slice(0, realResult.cols);
     const tickDvdi = tickResult.values.slice(0, tickResult.cols);
     const noVolDvdi = noVolumeResult.values.slice(0, noVolumeResult.cols);
     
-    // Check no NaN after warmup
+    
     for (let i = warmup; i < n_samples; i++) {
         assert(!isNaN(realDvdi[i]), `Real volume DVDI has NaN at ${i}`);
         assert(!isNaN(tickDvdi[i]), `Tick volume DVDI has NaN at ${i}`);
         assert(!isNaN(noVolDvdi[i]), `No volume DVDI has NaN at ${i}`);
     }
     
-    // Verify tick volume matches no-volume behavior (both use tick volume)
+    
     let tickMatchesNoVol = true;
     for (let i = warmup; i < n_samples; i++) {
         if (Math.abs(tickDvdi[i] - noVolDvdi[i]) > 1e-10) {
@@ -427,23 +427,23 @@ test('DVDIQQE volume types', () => {
     }
     assert.ok(tickMatchesNoVol, 'Tick volume should match no-volume behavior');
     
-    // Note: Real and tick volume may produce similar results if the volume
-    // increase/decrease patterns are similar, which is expected behavior
-    // for PVI/NVI based indicators
+    
+    
+    
 });
 
 test('DVDIQQE PineScript reference validation', () => {
-    // Document the PineScript reference values for future validation
+    
     const expected = EXPECTED_OUTPUTS.dvdiqqe;
     
-    // These are the expected values from PineScript
+    
     assert.ok(expected.pinescriptDvdi, 'Should have PineScript DVDI reference values');
     assert.ok(expected.pinescriptSlowTl, 'Should have PineScript Slow TL reference values');
     assert.ok(expected.pinescriptFastTl, 'Should have PineScript Fast TL reference values');
     assert.ok(expected.pinescriptCenter, 'Should have PineScript Center reference values');
     
-    // NOTE: When the exact input data that produces these values is determined,
-    // this test should be updated to validate the actual outputs against these references.
+    
+    
 });
 
-// All tests defined
+

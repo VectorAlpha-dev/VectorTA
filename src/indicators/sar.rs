@@ -231,7 +231,7 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
         return Err(SarError::EmptyInputData);
     }
 
-    // Trim to minimum length to avoid out-of-bounds access
+    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
 
@@ -261,7 +261,7 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
         return Err(SarError::InvalidMaximum { maximum });
     }
 
-    // SAR starts calculating from the first valid data point, NaN before that
+    
     let mut out = alloc_with_nan_prefix(high.len(), first + 1);
 
     let chosen = match kernel {
@@ -301,7 +301,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::EmptyInputData);
     }
 
-    // Verify output buffer size matches input (min length when arrays mismatch)
+    
     let expected_len = high.len().min(low.len());
     if dst.len() != expected_len {
         return Err(SarError::OutputLengthMismatch {
@@ -309,7 +309,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
             got: dst.len(),
         });
     }
-    // Trim inputs to match the validated output length.
+    
     let (high, low) = (&high[..expected_len], &low[..expected_len]);
 
     let first_valid_idx = high
@@ -338,7 +338,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::InvalidMaximum { maximum });
     }
 
-    // Fill warmup with the same quiet-NaN pattern used by `alloc_with_nan_prefix`
+    
     for v in &mut dst[..first.saturating_add(1)] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -356,7 +356,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         Kernel::Avx512 | Kernel::Avx512Batch => {
             sar_avx512(high, low, first, acceleration, maximum, dst)
         }
-        // For WASM with simd128, use scalar for now (can be optimized later)
+        
         _ => sar_scalar(high, low, first, acceleration, maximum, dst),
     }
     Ok(())
@@ -383,7 +383,7 @@ pub fn sar_avx512(
     maximum: f64,
     out: &mut [f64],
 ) {
-    // Delegate to avx2-specialized scalar implementation; SAR is inherently sequential.
+    
     sar_avx2(high, low, first_valid, acceleration, maximum, out)
 }
 
@@ -400,12 +400,12 @@ pub fn sar_scalar(
     let i0 = first;
     let i1 = i0 + 1;
 
-    // Need at least two points from `first` and sufficient output/low length
+    
     if i1 >= len || i1 >= low.len() || i1 >= out.len() {
         return;
     }
 
-    // Bootstrap using Wilder's SAR initialization
+    
     let h0 = high[i0];
     let h1 = high[i1];
     let l0 = low[i0];
@@ -416,34 +416,34 @@ pub fn sar_scalar(
     let mut ep = if trend_up { h1 } else { l1 };
     let mut acc = acceleration;
 
-    // Warmup prefix behavior: NaN at i0, first computed SAR at i1
+    
     out[i0] = f64::NAN;
     out[i1] = sar;
 
-    // Track previous two highs/lows to avoid re-indexing and branches
+    
     let mut low_prev2 = l0;
     let mut low_prev = l1;
     let mut high_prev2 = h0;
     let mut high_prev = h1;
 
-    // Main loop, starting at the third valid point
+    
     let mut i = i1 + 1;
     while i < len {
         let hi = high[i];
         let lo = low[i];
 
-        // next_sar = sar + acc * (ep - sar)
+        
         let mut next_sar = acc.mul_add(ep - sar, sar);
 
         if trend_up {
             if lo < next_sar {
-                // Reversal to downtrend
+                
                 trend_up = false;
                 next_sar = ep;
                 ep = lo;
                 acc = acceleration;
             } else {
-                // Continue uptrend: possibly extend EP/AF and clamp to prior lows
+                
                 if hi > ep {
                     ep = hi;
                     acc = (acc + acceleration).min(maximum);
@@ -452,13 +452,13 @@ pub fn sar_scalar(
             }
         } else {
             if hi > next_sar {
-                // Reversal to uptrend
+                
                 trend_up = true;
                 next_sar = ep;
                 ep = hi;
                 acc = acceleration;
             } else {
-                // Continue downtrend: possibly extend EP/AF and clamp to prior highs
+                
                 if lo < ep {
                     ep = lo;
                     acc = (acc + acceleration).min(maximum);
@@ -470,7 +470,7 @@ pub fn sar_scalar(
         out[i] = next_sar;
         sar = next_sar;
 
-        // Shift previous two windows
+        
         low_prev2 = low_prev;
         low_prev = lo;
         high_prev2 = high_prev;
@@ -575,8 +575,8 @@ pub fn sar_simd128(
     maximum: f64,
     out: &mut [f64],
 ) {
-    // SIMD128 for WASM - since AVX512 exists and is not a stub, we implement SIMD128
-    // For now, delegate to scalar implementation
+    
+    
     sar_scalar(high, low, first_valid, acceleration, maximum, out)
 }
 
@@ -606,27 +606,27 @@ pub unsafe fn sar_avx512_long(
     sar_avx2(high, low, first_valid, acceleration, maximum, out)
 }
 
-// Streaming
-// Decision: Streaming path fixed to follow Wilder's clamp/init rules exactly,
-// matching scalar outputs while remaining O(1) per update.
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct SarStream {
     acceleration: f64,
     maximum: f64,
     state: Option<StreamState>,
-    // Number of valid (finite) bars processed; aligns with warmup handling
+    
     idx: usize,
 }
 
 #[derive(Debug, Clone)]
 struct StreamState {
-    // Wilder state
+    
     trend_up: bool,
     sar: f64,
     ep: f64,
     acc: f64,
-    // Track prior two highs and lows for clamping
+    
     prev_high: f64,
     prev_high2: f64,
     prev_low: f64,
@@ -659,13 +659,13 @@ impl SarStream {
     /// - `Some(next_sar)` thereafter.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        // Ignore non-finite inputs (do not advance warmup counter)
+        
         if !high.is_finite() || !low.is_finite() {
             return None;
         }
 
         match self.state.as_mut() {
-            // First valid bar: stash highs/lows, no SAR yet
+            
             None => {
                 self.state = Some(StreamState {
                     trend_up: false,
@@ -673,26 +673,26 @@ impl SarStream {
                     ep: f64::NAN,
                     acc: self.acceleration,
                     prev_high: high,
-                    prev_high2: high, // placeholder until bar #2
+                    prev_high2: high, 
                     prev_low: low,
-                    prev_low2: low, // placeholder until bar #2
+                    prev_low2: low, 
                 });
                 self.idx = 1;
                 None
             }
 
-            // We have at least one valid bar in state
+            
             Some(st) if self.idx == 1 => {
-                // Decide initial trend to match scalar path: h1 > h0
+                
                 let trend_up = high > st.prev_high;
 
-                // For bar #2 (first actionable bar):
-                // - Uptrend: SAR = previous bar's LOW
-                // - Downtrend: SAR = previous bar's HIGH
+                
+                
+                
                 let sar = if trend_up { st.prev_low } else { st.prev_high };
                 let ep = if trend_up { high } else { low };
 
-                // Rotate previous-two windows for clamp rules
+                
                 st.prev_high2 = st.prev_high;
                 st.prev_low2 = st.prev_low;
                 st.prev_high = high;
@@ -707,20 +707,20 @@ impl SarStream {
                 Some(sar)
             }
 
-            // Normal running state (>= 2 valid bars seen)
+            
             Some(st) => {
-                // next_sar = prior_sar + AF * (EP - prior_sar)
+                
                 let mut next_sar = st.acc.mul_add(st.ep - st.sar, st.sar);
 
                 if st.trend_up {
-                    // Reversal?
+                    
                     if low < next_sar {
                         st.trend_up = false;
-                        next_sar = st.ep; // reversal uses previous EP as SAR
-                        st.ep = low; // new EP is current low
+                        next_sar = st.ep; 
+                        st.ep = low; 
                         st.acc = self.acceleration;
                     } else {
-                        // Continue uptrend: maybe extend EP/AF and clamp to prior TWO lows
+                        
                         if high > st.ep {
                             st.ep = high;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -728,14 +728,14 @@ impl SarStream {
                         next_sar = min3(next_sar, st.prev_low, st.prev_low2);
                     }
                 } else {
-                    // Downtrend
+                    
                     if high > next_sar {
                         st.trend_up = true;
-                        next_sar = st.ep; // reversal uses previous EP as SAR
-                        st.ep = high; // new EP is current high
+                        next_sar = st.ep; 
+                        st.ep = high; 
                         st.acc = self.acceleration;
                     } else {
-                        // Continue downtrend: maybe extend EP/AF and clamp to prior TWO highs
+                        
                         if low < st.ep {
                             st.ep = low;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -744,7 +744,7 @@ impl SarStream {
                     }
                 }
 
-                // Slide two-bar windows
+                
                 st.prev_high2 = st.prev_high;
                 st.prev_low2 = st.prev_low;
                 st.prev_high = high;
@@ -768,7 +768,7 @@ fn max3(a: f64, b: f64, c: f64) -> f64 {
     a.max(b.max(c))
 }
 
-// Batch
+
 
 #[derive(Clone, Debug)]
 pub struct SarBatchRange {
@@ -895,14 +895,14 @@ fn axis_f64_checked(axis: (f64, f64, f64)) -> Result<Vec<f64>, SarError> {
 
     if step > 0.0 {
         if start <= end {
-            // Increasing or flat range, positive step.
+            
             let mut x = start;
             while x <= end + tol {
                 v.push(x);
                 x += step;
             }
         } else {
-            // Reversed bounds: walk downwards with positive step magnitude.
+            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
@@ -910,16 +910,16 @@ fn axis_f64_checked(axis: (f64, f64, f64)) -> Result<Vec<f64>, SarError> {
             }
         }
     } else {
-        // step < 0.0
+        
         if start >= end {
-            // Decreasing range with negative step.
+            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
-                x += step; // negative step
+                x += step; 
             }
         } else {
-            // start < end with negative step would never terminate; treat as invalid.
+            
             return Err(SarError::InvalidRange { start, end, step });
         }
     }
@@ -987,7 +987,7 @@ fn sar_batch_inner(
 ) -> Result<SarBatchOutput, SarError> {
     let combos = expand_grid(sweep)?;
 
-    // Trim to minimum length to avoid out-of-bounds access
+    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
     let first = high
@@ -1005,14 +1005,14 @@ fn sar_batch_inner(
     let rows = combos.len();
     let cols = high.len();
 
-    // Use uninitialized memory like ALMA does
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes for each row based on SAR's warmup period (2)
-    let warm = vec![first + 1; rows]; // SAR needs at least 2 points
+    
+    let warm = vec![first + 1; rows]; 
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice without copying - using ManuallyDrop pattern from ALMA
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1072,7 +1072,7 @@ fn sar_batch_inner(
         }
     }
 
-    // Convert ManuallyDrop back to Vec without copying
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1232,7 +1232,7 @@ pub fn sar_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Trim to minimum length to avoid out-of-bounds access
+    
     let min_len = high_slice.len().min(low_slice.len());
     let (high_slice, low_slice) = (&high_slice[..min_len], &low_slice[..min_len]);
 
@@ -1247,7 +1247,7 @@ pub fn sar_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("sar_batch_py: size overflow in rows*cols"))?;
 
-    // preallocate the NumPy output and write into it directly
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -1322,7 +1322,7 @@ fn sar_batch_inner_into_noalloc(
         });
     }
 
-    // poison-safe NaN prefixes without allocation
+    
     unsafe {
         let out_mu = std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1407,7 +1407,7 @@ fn sar_batch_inner_into_noalloc(
     Ok(combos)
 }
 
-// ============ WASM BINDINGS ============
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1417,7 +1417,7 @@ pub fn sar_js(
     acceleration: f64,
     maximum: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    // Trim to minimum length to avoid mismatches
+    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
 
@@ -1435,11 +1435,11 @@ pub fn sar_js(
     Ok(output)
 }
 
-// ----------------------------- PYTHON CUDA VRAM HANDLE -----------------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct SarDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>, 
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -1825,7 +1825,7 @@ pub fn sar_batch_unified_js(
         maximum: config.maximum_range,
     };
 
-    // Use Scalar kernel for WASM since SIMD128 is not implemented for batch operations
+    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::Scalar
     } else {
@@ -1956,49 +1956,49 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            SarParams::default(), // acceleration: 0.02, maximum: 0.2
+            SarParams::default(), 
             SarParams {
                 acceleration: Some(0.001),
                 maximum: Some(0.001),
-            }, // minimum viable
+            }, 
             SarParams {
                 acceleration: Some(0.01),
                 maximum: Some(0.1),
-            }, // small values
+            }, 
             SarParams {
                 acceleration: Some(0.02),
                 maximum: Some(0.3),
-            }, // default acceleration, higher max
+            }, 
             SarParams {
                 acceleration: Some(0.05),
                 maximum: Some(0.2),
-            }, // higher acceleration, default max
+            }, 
             SarParams {
                 acceleration: Some(0.05),
                 maximum: Some(0.5),
-            }, // medium values
+            }, 
             SarParams {
                 acceleration: Some(0.1),
                 maximum: Some(0.5),
-            }, // large values
+            }, 
             SarParams {
                 acceleration: Some(0.1),
                 maximum: Some(0.9),
-            }, // very large values
+            }, 
             SarParams {
                 acceleration: Some(0.2),
                 maximum: Some(0.9),
-            }, // edge case values
+            }, 
             SarParams {
                 acceleration: Some(0.001),
                 maximum: Some(0.9),
-            }, // min acceleration, max maximum
+            }, 
             SarParams {
                 acceleration: Some(0.2),
                 maximum: Some(0.01),
-            }, // max acceleration, small maximum
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2007,12 +2007,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2062,7 +2062,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_sar_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2074,40 +2074,40 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with realistic market conditions
-        // SAR needs high/low data, so we generate base prices and derive high/low from them
-        let strat = (0.001f64..0.5f64) // acceleration
+        
+        
+        let strat = (0.001f64..0.5f64) 
             .prop_flat_map(|acceleration| {
                 (
                     Just(acceleration),
-                    acceleration..1.0f64, // maximum must be >= acceleration
+                    acceleration..1.0f64, 
                 )
             })
             .prop_flat_map(|(acceleration, maximum)| {
                 (
-                    // Generate base prices and derive high/low
+                    
                     prop::collection::vec(
                         (1.0f64..1e6f64).prop_filter("finite price", |x| x.is_finite() && *x > 0.0),
-                        10..400, // Need at least 2 points for SAR
+                        10..400, 
                     ),
                     Just(acceleration),
                     Just(maximum),
-                    // Add volatility factor for variable spread
-                    0.001f64..0.1f64, // 0.1% to 10% volatility
+                    
+                    0.001f64..0.1f64, 
                 )
             });
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(base_prices, acceleration, maximum, volatility)| {
-                // Generate high/low from base prices with variable spread
+                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
 
-                // Use a simple random walk for spread variation
+                
                 let mut spread_factor = 1.0;
                 for price in &base_prices {
-                    // Vary the spread to simulate realistic market volatility
+                    
                     spread_factor = (spread_factor + (price % 0.1 - 0.05) * 0.2)
                         .max(0.5)
                         .min(2.0);
@@ -2122,16 +2122,16 @@ mod tests {
                 };
                 let input = SarInput::from_slices(&high, &low, params.clone());
 
-                // Get output from the kernel being tested
+                
                 let SarOutput { values: out } = sar_with_kernel(&input, kernel).unwrap();
 
-                // Get reference output from scalar kernel for comparison
+                
                 let SarOutput { values: ref_out } =
                     sar_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: SAR values must be within the range of high/low prices
+                
                 for i in 1..out.len() {
-                    // Skip first (NaN)
+                    
                     if !out[i].is_nan() {
                         let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
                         let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -2147,19 +2147,19 @@ mod tests {
                     }
                 }
 
-                // Property 2: Warmup period - first value should be NaN
+                
                 prop_assert!(
                     out[0].is_nan(),
                     "First SAR value should be NaN during warmup, got {}",
                     out[0]
                 );
 
-                // Property 3: Kernel consistency - all implementations must match
+                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Both NaN or both finite
+                    
                     if y.is_nan() {
                         prop_assert!(
                             r.is_nan(),
@@ -2177,7 +2177,7 @@ mod tests {
                             r
                         );
                     } else {
-                        // Check values are close enough
+                        
                         let diff = (y - r).abs();
                         prop_assert!(
                             diff < 1e-9,
@@ -2190,15 +2190,15 @@ mod tests {
                     }
                 }
 
-                // Property 4: Acceleration increases up to maximum
-                // When SAR doesn't reverse, acceleration should increase each time a new extreme is hit
+                
+                
                 if out.len() > 10 {
-                    // Track acceleration changes by monitoring SAR movement
+                    
                     let mut last_movement = 0.0;
                     let mut increasing_count = 0;
 
                     for i in 2..out.len().min(20) {
-                        // Check first 20 points
+                        
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
                             let movement = (out[i] - out[i - 1]).abs();
                             if movement > last_movement {
@@ -2208,7 +2208,7 @@ mod tests {
                         }
                     }
 
-                    // Acceleration should increase at least sometimes
+                    
                     prop_assert!(
                         increasing_count > 0 || out.len() < 5,
                         "SAR acceleration never increases (count: {})",
@@ -2216,18 +2216,18 @@ mod tests {
                     );
                 }
 
-                // Property 5: Trend properties - Fixed to check correct boundaries
-                // In a strong uptrend, SAR should be below the low prices
+                
+                
                 let strong_uptrend = high.windows(2).all(|w| w[1] > w[0] + 1e-9)
                     && low.windows(2).all(|w| w[1] > w[0] + 1e-9);
                 if strong_uptrend && out.len() > 10 {
-                    // Check last quarter of values
+                    
                     let start = out.len() * 3 / 4;
                     for i in start..out.len() {
                         if !out[i].is_nan() {
-                            // SAR should be below or at the low in an uptrend
+                            
                             prop_assert!(
-                                out[i] <= low[i] + 1e-6, // Small tolerance for floating point
+                                out[i] <= low[i] + 1e-6, 
                                 "In uptrend, SAR[{}] = {} should be <= low[{}] = {}",
                                 i,
                                 out[i],
@@ -2238,16 +2238,16 @@ mod tests {
                     }
                 }
 
-                // Similarly for downtrend
+                
                 let strong_downtrend = high.windows(2).all(|w| w[1] < w[0] - 1e-9)
                     && low.windows(2).all(|w| w[1] < w[0] - 1e-9);
                 if strong_downtrend && out.len() > 10 {
                     let start = out.len() * 3 / 4;
                     for i in start..out.len() {
                         if !out[i].is_nan() {
-                            // SAR should be above or at the high in a downtrend
+                            
                             prop_assert!(
-                                out[i] >= high[i] - 1e-6, // Small tolerance for floating point
+                                out[i] >= high[i] - 1e-6, 
                                 "In downtrend, SAR[{}] = {} should be >= high[{}] = {}",
                                 i,
                                 out[i],
@@ -2258,24 +2258,24 @@ mod tests {
                     }
                 }
 
-                // Property 6: SAR reversal mechanism
-                // When SAR is penetrated by price, it should flip to the other side
+                
+                
                 if out.len() > 5 {
                     for i in 2..out.len() {
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
-                            // Check for large jumps that indicate reversal
+                            
                             let jump = (out[i] - out[i - 1]).abs();
                             let avg_price = (high[i] + low[i]) / 2.0;
 
-                            // A reversal typically causes a jump larger than the normal movement
+                            
                             if jump > avg_price * 0.05 {
-                                // Jump > 5% of price
-                                // After reversal, SAR should be on opposite side of price
+                                
+                                
                                 let prev_below = out[i - 1] < low[i - 1];
                                 let curr_below = out[i] < low[i];
 
-                                // They should be on different sides (reversal occurred)
-                                // or SAR moved significantly (indicating potential reversal)
+                                
+                                
                                 prop_assert!(
                                     prev_below != curr_below || jump > avg_price * 0.03,
                                     "Large SAR jump without proper reversal at index {}",
@@ -2286,10 +2286,10 @@ mod tests {
                     }
                 }
 
-                // Property 7: Monotonic price behavior with reasonable tolerance
-                // For strictly increasing prices, SAR should generally trend upward
+                
+                
                 if base_prices.windows(2).all(|w| w[1] > w[0]) && out.len() > 20 {
-                    // Compare first quarter average with last quarter average
+                    
                     let quarter = out.len() / 4;
                     let first_quarter: Vec<f64> = out[quarter..quarter * 2]
                         .iter()
@@ -2307,17 +2307,17 @@ mod tests {
                             first_quarter.iter().sum::<f64>() / first_quarter.len() as f64;
                         let last_avg = last_quarter.iter().sum::<f64>() / last_quarter.len() as f64;
 
-                        // For monotonically increasing prices, last average should generally be higher
-                        // Allow more tolerance as SAR can have temporary reversals
+                        
+                        
                         prop_assert!(
-							last_avg >= first_avg * 0.95,  // Allow 5% tolerance for reversals
+							last_avg >= first_avg * 0.95,  
 							"For increasing prices, SAR should generally trend up: first_avg={}, last_avg={}",
 							first_avg, last_avg
 						);
                     }
                 }
 
-                // Property 8: No poison values in debug mode
+                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out.iter().enumerate() {
@@ -2415,16 +2415,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (accel_start, accel_end, accel_step, max_start, max_end, max_step)
-            (0.01, 0.05, 0.01, 0.1, 0.3, 0.1), // Small acceleration/maximum ranges
-            (0.02, 0.1, 0.02, 0.2, 0.5, 0.1),  // Medium ranges
-            (0.05, 0.2, 0.05, 0.3, 0.9, 0.2),  // Large ranges
-            (0.001, 0.005, 0.001, 0.05, 0.1, 0.05), // Very small values
-            (0.02, 0.02, 0.0, 0.2, 0.2, 0.0),  // Static values (default)
-            (0.1, 0.2, 0.025, 0.5, 0.9, 0.1),  // Edge case ranges
-            (0.001, 0.01, 0.003, 0.1, 0.5, 0.2), // Mixed small/large
+            
+            (0.01, 0.05, 0.01, 0.1, 0.3, 0.1), 
+            (0.02, 0.1, 0.02, 0.2, 0.5, 0.1),  
+            (0.05, 0.2, 0.05, 0.3, 0.9, 0.2),  
+            (0.001, 0.005, 0.001, 0.05, 0.1, 0.05), 
+            (0.02, 0.02, 0.0, 0.2, 0.2, 0.0),  
+            (0.1, 0.2, 0.025, 0.5, 0.9, 0.1),  
+            (0.001, 0.01, 0.003, 0.1, 0.5, 0.2), 
         ];
 
         for (cfg_idx, &(a_start, a_end, a_step, m_start, m_end, m_step)) in
@@ -2446,7 +2446,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2502,7 +2502,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2530,16 +2530,16 @@ mod tests {
 
     #[test]
     fn test_sar_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use repository CSV candles to mirror existing SAR tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = SarInput::from_candles(&candles, SarParams::default());
 
-        // Baseline via Vec-returning API
+        
         let SarOutput { values: expected } = sar(&input)?;
 
-        // Into API into a preallocated buffer
+        
         let mut actual = vec![0.0; candles.high.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2547,13 +2547,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native symbol name collides; use the slice variant for parity
+            
             sar_into_slice(&mut actual, &input, Kernel::Auto)?;
         }
 
         assert_eq!(expected.len(), actual.len());
 
-        // Treat NaN == NaN as equal; else require exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

@@ -267,17 +267,17 @@ pub fn ift_rsi_with_kernel(
             valid: len - first,
         });
     }
-    // SIMD kernels are currently stubs (they call the scalar classic kernel). Avoid paying
-    // runtime detection overhead for `Kernel::Auto` on the single-series API.
+    
+    
     if kernel.is_batch() {
         return Err(IftRsiError::WrongKernelForBatch);
     }
 
-    // Calculate warmup period: first + rsi_period + wma_period - 1
+    
     let warmup_period = first + rsi_period + wma_period - 1;
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
-    // Use classic kernel for optimized loop-jammed implementation
+    
     unsafe {
         ift_rsi_scalar_classic(data, rsi_period, wma_period, first, &mut out)?;
     }
@@ -392,13 +392,13 @@ pub fn ift_rsi_into_slice(
         });
     }
 
-    // Initialize dst with NaN for warmup period (matching alma.rs pattern)
+    
     let warmup_period = (first + rsi_period + wma_period - 1).min(dst.len());
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
 
-    // Use classic kernel for optimized loop-jammed implementation
+    
     unsafe {
         return ift_rsi_scalar_classic(data, rsi_period, wma_period, first, dst);
     }
@@ -644,23 +644,23 @@ fn ift_rsi_batch_inner(
         step: sweep.rsi_period.2,
     })?;
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.rsi_period.unwrap() + c.wma_period.unwrap() - 1)
         .collect();
 
-    // Use uninitialized memory with proper NaN prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute gains/losses once for all rows to avoid duplicate work
+    
     let sliced = &data[first..];
     let n = sliced.len();
     let mut gains = Vec::with_capacity(n.saturating_sub(1));
@@ -675,7 +675,7 @@ fn ift_rsi_batch_inner(
             losses.push(-d);
         }
     }
-    // Prefix sums for O(1) seeding per row
+    
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -685,7 +685,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    // Prefix sums for O(1) seeding per row
+    
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -695,7 +695,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    // Prefix sums for O(1) seeding per row
+    
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -705,7 +705,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    // Prefix sums for O(1) seeding per row
+    
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -752,7 +752,7 @@ fn ift_rsi_batch_inner(
         }
     }
 
-    // Convert back to Vec for output
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -802,7 +802,7 @@ fn ift_rsi_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Initialize NaN prefixes for each row based on warmup period
+    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = (first + combo.rsi_period.unwrap() + combo.wma_period.unwrap() - 1).min(cols);
         let row_start = row * cols;
@@ -811,7 +811,7 @@ fn ift_rsi_batch_inner_into(
         }
     }
 
-    // Precompute gains/losses once for all rows to avoid duplicate work
+    
     let sliced = &data[first..];
     let n = sliced.len();
     let mut gains = Vec::with_capacity(n.saturating_sub(1));
@@ -826,7 +826,7 @@ fn ift_rsi_batch_inner_into(
             losses.push(-d);
         }
     }
-    // Prefix sums for O(1) seeding per row
+    
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -883,7 +883,7 @@ unsafe fn ift_rsi_row_scalar(
     wma_period: usize,
     out: &mut [f64],
 ) {
-    // Fallback to precomputed path by computing diffs locally
+    
     let sliced = &data[first..];
     let n = sliced.len();
     if n == 0 {
@@ -913,7 +913,7 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     first: usize,
     out: &mut [f64],
 ) {
-    let n1 = gains.len(); // equals losses.len(), and equals sliced.len() - 1
+    let n1 = gains.len(); 
     if rsi_period == 0 || wma_period == 0 {
         return;
     }
@@ -921,7 +921,7 @@ unsafe fn ift_rsi_row_scalar_precomputed(
         return;
     }
 
-    // Seed Wilder averages
+    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     for i in 0..rsi_period {
@@ -934,7 +934,7 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    // LWMA state
+    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
@@ -945,12 +945,12 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     let mut sum = 0.0f64;
     let mut num = 0.0f64;
 
-    // Iterate timesteps i over RSI indices (0-based on sliced): i=rsi_period..n-1
+    
     let mut i = rsi_period;
     while i <= n1 {
-        // since gains/losses are indexed by diff at t, RSI index i uses diff i (for i>rp)
+        
         if i > rsi_period {
-            let g = *gains.get_unchecked(i - 1); // diff at (i-1)
+            let g = *gains.get_unchecked(i - 1); 
             let l = *losses.get_unchecked(i - 1);
             avg_gain = f64::mul_add(avg_gain, beta, alpha * g);
             avg_loss = f64::mul_add(avg_loss, beta, alpha * l);
@@ -1017,7 +1017,7 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
         return;
     }
 
-    // Seed with prefix sums: avg over gains[0..rsi_period-1], losses[0..rsi_period-1]
+    
     let sum_gain = *pg.get_unchecked(rsi_period) - *pg.get_unchecked(0);
     let sum_loss = *pl.get_unchecked(rsi_period) - *pl.get_unchecked(0);
     let rp_f = rsi_period as f64;
@@ -1026,7 +1026,7 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    // LWMA state
+    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
@@ -1142,11 +1142,11 @@ unsafe fn ift_rsi_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct IftRsiStream {
-    // params
+    
     rsi_period: usize,
     wma_period: usize,
 
-    // --- RSI (Wilder SMMA) state ---
+    
     prev: f64,
     have_prev: bool,
     seed_g: f64,
@@ -1158,7 +1158,7 @@ pub struct IftRsiStream {
     alpha: f64,
     beta: f64,
 
-    // --- LWMA (weights 1..wp) state over x = 0.1*(RSI-50) ---
+    
     buf: Vec<f64>,
     head: usize,
     filled: usize,
@@ -1216,40 +1216,40 @@ impl IftRsiStream {
             return None;
         }
 
-        // First sample: just store and wait for a diff
+        
         if !self.have_prev {
             self.prev = value;
             self.have_prev = true;
             return None;
         }
 
-        // Compute one-step diff and split into gain/loss (positive)
+        
         let d = value - self.prev;
         self.prev = value;
         let gain = if d > 0.0 { d } else { 0.0 };
         let loss = if d < 0.0 { -d } else { 0.0 };
 
-        // --- Seed Wilder averages for first rsi_period diffs ---
+        
         if !self.seeded {
             self.seed_g += gain;
             self.seed_l += loss;
             self.seed_cnt += 1;
             if self.seed_cnt < self.rsi_period {
-                return None; // still seeding
+                return None; 
             }
-            // Initialize averages on the tick where we collected rsi_period diffs
+            
             self.avg_gain = self.seed_g / (self.rsi_period as f64);
             self.avg_loss = self.seed_l / (self.rsi_period as f64);
             self.seeded = true;
 
-            // We also produce an RSI value on this same tick and feed it into LWMA below.
+            
         } else {
-            // --- Regular Wilder update: O(1) ---
+            
             self.avg_gain = f64::mul_add(self.avg_gain, self.beta, self.alpha * gain);
             self.avg_loss = f64::mul_add(self.avg_loss, self.beta, self.alpha * loss);
         }
 
-        // --- Transform RSI -> x = 0.1 * (RSI - 50) ---
+        
         let rs = if self.avg_loss != 0.0 {
             self.avg_gain / self.avg_loss
         } else {
@@ -1258,9 +1258,9 @@ impl IftRsiStream {
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1 * (rsi - 50.0);
 
-        // --- O(1) LWMA update over x with weights 1..wp ---
+        
         if self.filled < self.wma_period {
-            // build phase: num += (filled+1)*x ; sum += x
+            
             self.sum += x;
             self.num = f64::mul_add((self.filled as f64) + 1.0, x, self.num);
             self.buf[self.head] = x;
@@ -1276,7 +1276,7 @@ impl IftRsiStream {
             }
             return None;
         } else {
-            // steady-state: rotate buffer, update (sum, num)
+            
             let x_old = self.buf[self.head];
             self.buf[self.head] = x;
             self.head += 1;
@@ -1284,7 +1284,7 @@ impl IftRsiStream {
                 self.head = 0;
             }
 
-            // num' = num + wp*x - sum
+            
             let sum_prev = self.sum;
             self.num = f64::mul_add(self.wp_f, x, self.num) - sum_prev;
             self.sum = sum_prev + x - x_old;
@@ -1296,7 +1296,7 @@ impl IftRsiStream {
 
     #[inline]
     fn reset_soft(&mut self) {
-        // lightweight reset on NaN input so subsequent values seed cleanly
+        
         self.have_prev = false;
         self.seed_g = 0.0;
         self.seed_l = 0.0;
@@ -1343,18 +1343,18 @@ pub unsafe fn ift_rsi_scalar_classic(
         return Ok(());
     }
 
-    // Need at least rsi_period diffs, then wma_period transformed values
+    
     if rsi_period + wma_period - 1 >= n {
         return Ok(());
     }
 
-    // Wilder RSI smoothing parameters
+    
     let rp = rsi_period;
     let rp_f = rp as f64;
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    // Seed averages over the first `rp` differences
+    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     {
@@ -1364,7 +1364,7 @@ pub unsafe fn ift_rsi_scalar_classic(
             if d > 0.0 {
                 avg_gain += d;
             } else {
-                avg_loss -= d; // make loss positive
+                avg_loss -= d; 
             }
             i += 1;
         }
@@ -1372,26 +1372,26 @@ pub unsafe fn ift_rsi_scalar_classic(
         avg_loss /= rp_f;
     }
 
-    // LWMA rolling state
+    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
     let denom_rcp = 1.0f64 / denom;
 
-    // Circular buffer for last `wp` transformed RSI values
+    
     let mut buf: Vec<f64> = vec![0.0; wp];
     let mut head: usize = 0;
     let mut filled: usize = 0;
 
-    // Rolling sums for LWMA
-    let mut sum = 0.0f64; // Σ x
-    let mut num = 0.0f64; // Σ j*x_j with j=1..wp
+    
+    let mut sum = 0.0f64; 
+    let mut num = 0.0f64; 
 
-    // Process stream
-    let mut i = rp; // first RSI index available
+    
+    let mut i = rp; 
     while i < n {
         if i > rp {
-            // Wilder smoothing update with FMA
+            
             let d = *sliced.get_unchecked(i) - *sliced.get_unchecked(i - 1);
             let gain = if d > 0.0 { d } else { 0.0 };
             let loss = if d < 0.0 { -d } else { 0.0 };
@@ -1399,7 +1399,7 @@ pub unsafe fn ift_rsi_scalar_classic(
             avg_loss = f64::mul_add(avg_loss, beta, alpha * loss);
         }
 
-        // Compute transformed RSI value x = 0.1*(RSI-50)
+        
         let rs = if avg_loss != 0.0 {
             avg_gain / avg_loss
         } else {
@@ -1409,7 +1409,7 @@ pub unsafe fn ift_rsi_scalar_classic(
         let x = 0.1f64 * (rsi - 50.0);
 
         if filled < wp {
-            // Build initial window
+            
             sum += x;
             num = f64::mul_add((filled as f64) + 1.0, x, num);
             *buf.get_unchecked_mut(head) = x;
@@ -1424,7 +1424,7 @@ pub unsafe fn ift_rsi_scalar_classic(
                 *out.get_unchecked_mut(first_valid + i) = wma.tanh();
             }
         } else {
-            // Steady-state O(1) LWMA recurrence
+            
             let x_old = *buf.get_unchecked(head);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
@@ -1433,8 +1433,8 @@ pub unsafe fn ift_rsi_scalar_classic(
             }
 
             let sum_t = sum;
-            num = f64::mul_add(wp_f, x, num) - sum_t; // mul_add tweak
-            sum = sum_t + x - x_old; // then update plain sum
+            num = f64::mul_add(wp_f, x, num) - sum_t; 
+            sum = sum_t + x - x_old; 
 
             let wma = num * denom_rcp;
             *out.get_unchecked_mut(first_valid + i) = wma.tanh();
@@ -1468,14 +1468,14 @@ mod tests {
 
     #[test]
     fn test_ift_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
-            if i < 3 { // ensure first-valid > 0 to exercise warmup logic
+            if i < 3 { 
                 data.push(f64::NAN);
             } else {
-                // oscillatory but bounded series
+                
                 let x = (i as f64).sin() * 5.0 + 100.0 + ((i % 7) as f64);
                 data.push(x);
             }
@@ -1483,10 +1483,10 @@ mod tests {
 
         let input = IftRsiInput::from_slice(&data, IftRsiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = ift_rsi(&input)?.values;
 
-        // New into-API into a preallocated buffer
+        
         let mut out = vec![0.0; data.len()];
         ift_rsi_into(&input, &mut out)?;
 
@@ -1513,7 +1513,7 @@ mod tests {
         let input = IftRsiInput::from_candles(&candles, "close", IftRsiParams::default());
         let result = ift_rsi_with_kernel(&input, kernel)?;
 
-        // Updated reference values using correct tanh formula
+        
         let expected_last_five = [
             -0.35919800205778424,
             -0.3275464113984847,
@@ -1662,7 +1662,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            IftRsiParams::default(), // rsi_period: 5, wma_period: 9
+            IftRsiParams::default(), 
             IftRsiParams {
                 rsi_period: Some(2),
                 wma_period: Some(2),
@@ -1715,12 +1715,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1770,7 +1770,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ift_rsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1778,17 +1778,17 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data with realistic price movements
-        // Note: RSI period starts from 2 since RSI needs at least 2 values
+        
+        
         let strat = (2usize..=50, 2usize..=50)
             .prop_flat_map(|(rsi_period, wma_period)| {
-                let min_len = (rsi_period + wma_period) * 2; // Ensure sufficient data for meaningful testing
+                let min_len = (rsi_period + wma_period) * 2; 
                 (
-                    // Base price level and volatility
+                    
                     (100.0f64..5000.0f64, 0.01f64..0.1f64),
-                    // Trend strength (-2% to +2% per step)
+                    
                     -0.02f64..0.02f64,
-                    // Generate periods and data length
+                    
                     Just(rsi_period),
                     Just(wma_period),
                     min_len..400,
@@ -1796,14 +1796,14 @@ mod tests {
             })
             .prop_map(
                 |((base_price, volatility), trend, rsi_period, wma_period, len)| {
-                    // Generate realistic price data with trend and noise
+                    
                     let mut prices = Vec::with_capacity(len);
                     let mut current_price = base_price;
 
                     for i in 0..len {
-                        // Apply trend
+                        
                         current_price *= 1.0 + trend;
-                        // Add noise
+                        
                         let noise = 1.0 + (i as f64 * 0.1).sin() * volatility;
                         prices.push(current_price * noise);
                     }
@@ -1821,16 +1821,16 @@ mod tests {
                 };
                 let input = IftRsiInput::from_slice(&data, params);
 
-                // Test with the specified kernel
+                
                 let IftRsiOutput { values: out } = ift_rsi_with_kernel(&input, kernel)?;
 
-                // Also compute with scalar kernel for reference
+                
                 let IftRsiOutput { values: ref_out } = ift_rsi_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input length
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period handling
+                
                 let warmup_period = rsi_period + wma_period - 1;
                 for i in 0..warmup_period.min(data.len()) {
                     prop_assert!(
@@ -1841,14 +1841,14 @@ mod tests {
                     );
                 }
 
-                // Properties for values after warmup
+                
                 for i in warmup_period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 3: Mathematical bounds - IFT RSI bounded to [-1, 1]
-                    // The Inverse Fisher Transform formula: (2w)^2 - 1 / (2w)^2 + 1
-                    // This is mathematically bounded to [-1, 1]
+                    
+                    
+                    
                     if y.is_finite() {
                         prop_assert!(
                             y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
@@ -1858,7 +1858,7 @@ mod tests {
                         );
                     }
 
-                    // Property 4: Kernel consistency
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1880,19 +1880,19 @@ mod tests {
                         );
                     }
 
-                    // Property 5: Response to trending markets
-                    // NOTE: This property currently exposes a bug in the IFT RSI implementation
-                    // The formula (2w)^2 loses sign information, making both up and down trends positive
-                    // Check if we have enough data for trend analysis
+                    
+                    
+                    
+                    
                     if i >= warmup_period + 10 {
                         let lookback = 10;
                         let recent_prices = &data[i - lookback..=i];
                         let price_change =
                             (recent_prices[lookback] - recent_prices[0]) / recent_prices[0];
 
-                        // For strong uptrends (>5%), IFT RSI should be distinctly positive
+                        
                         if price_change > 0.05 && y.is_finite() {
-                            // Tightened from > -0.5 to > 0.2 to catch directionality issues
+                            
                             prop_assert!(
 								y > 0.2,
 								"Strong uptrend should produce positive IFT RSI > 0.2, got {} at index {}",
@@ -1901,10 +1901,10 @@ mod tests {
 							);
                         }
 
-                        // For strong downtrends (<-5%), IFT RSI should be distinctly negative
-                        // WARNING: Due to implementation bug using (2w)^2, this will likely fail
+                        
+                        
                         if price_change < -0.05 && y.is_finite() {
-                            // Tightened from < 0.5 to < -0.2 to properly test directionality
+                            
                             prop_assert!(
 								y < -0.2,
 								"Strong downtrend should produce negative IFT RSI < -0.2, got {} at index {}",
@@ -1914,21 +1914,21 @@ mod tests {
                         }
                     }
 
-                    // Property 6: No NaN values after warmup (unless input has NaN)
+                    
                     if !data[..=i].iter().any(|x| x.is_nan()) {
                         prop_assert!(!y.is_nan(), "Unexpected NaN at index {} after warmup", i);
                     }
                 }
 
-                // Property 7: Response to constant prices
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && data.len() > warmup_period
                 {
-                    // Mathematical derivation for constant prices:
-                    // 1. RSI = 50 (no gains or losses)
-                    // 2. Transformed: 0.1 * (50 - 50) = 0
-                    // 3. WMA of zeros = 0
-                    // 4. IFT formula: ((2*0)^2 - 1) / ((2*0)^2 + 1) = -1/1 = -1
+                    
+                    
+                    
+                    
+                    
                     for i in warmup_period..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -1941,7 +1941,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Response to extreme volatility
+                
                 let volatility = if data.len() > 2 {
                     let returns: Vec<f64> = data.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
                     let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
@@ -1955,7 +1955,7 @@ mod tests {
                     0.0
                 };
 
-                // For extreme volatility (>10% per period), values should still be bounded
+                
                 if volatility > 0.1 {
                     for &val in out.iter() {
                         if val.is_finite() {
@@ -1968,18 +1968,18 @@ mod tests {
                     }
                 }
 
-                // Property 9: Sign preservation check (currently exposes implementation bug)
-                // The IFT RSI should preserve directional information from RSI
-                // However, due to (2w)^2 in the formula, sign information is lost
-                // This property will likely FAIL, confirming the mathematical issue
+                
+                
+                
+                
                 if data.len() > warmup_period + 20 {
-                    // Sample a few points to check sign preservation
+                    
                     for check_idx in (warmup_period + 10..data.len()).step_by(20) {
                         if check_idx + 5 >= data.len() {
                             break;
                         }
 
-                        // Calculate approximate RSI direction
+                        
                         let recent_window = &data[check_idx - 5..=check_idx];
                         let gains: f64 = recent_window
                             .windows(2)
@@ -1991,7 +1991,7 @@ mod tests {
                             .sum();
 
                         if gains > losses * 1.5 && out[check_idx].is_finite() {
-                            // Strong bullish momentum should yield positive IFT RSI
+                            
                             prop_assert!(
 								out[check_idx] > -0.1,
 								"Bullish momentum (gains > losses*1.5) should yield IFT RSI > -0.1, got {} at index {}",
@@ -2001,8 +2001,8 @@ mod tests {
                         }
 
                         if losses > gains * 1.5 && out[check_idx].is_finite() {
-                            // Strong bearish momentum should yield negative IFT RSI
-                            // This will likely FAIL due to the (2w)^2 bug
+                            
+                            
                             prop_assert!(
 								out[check_idx] < 0.1,
 								"Bearish momentum (losses > gains*1.5) should yield IFT RSI < 0.1, got {} at index {}",
@@ -2083,16 +2083,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (rsi_start, rsi_end, rsi_step, wma_start, wma_end, wma_step)
-            (2, 10, 2, 2, 10, 2),     // Small periods
-            (5, 25, 5, 5, 25, 5),     // Medium periods
-            (30, 60, 15, 30, 60, 15), // Large periods
-            (2, 5, 1, 2, 5, 1),       // Dense small range
-            (9, 15, 3, 9, 15, 3),     // Mid-range dense
-            (2, 2, 0, 2, 20, 2),      // Static RSI, varying WMA
-            (2, 20, 2, 9, 9, 0),      // Varying RSI, static WMA
+            
+            (2, 10, 2, 2, 10, 2),     
+            (5, 25, 5, 5, 25, 5),     
+            (30, 60, 15, 30, 60, 15), 
+            (2, 5, 1, 2, 5, 1),       
+            (9, 15, 3, 9, 15, 3),     
+            (2, 2, 0, 2, 20, 2),      
+            (2, 20, 2, 9, 9, 0),      
         ];
 
         for (cfg_idx, &(rsi_start, rsi_end, rsi_step, wma_start, wma_end, wma_step)) in
@@ -2114,7 +2114,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2170,7 +2170,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2318,7 +2318,7 @@ pub fn ift_rsi_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ift_rsi_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, rsi_range, wma_range, device_id=0))]
@@ -2343,7 +2343,7 @@ pub fn ift_rsi_cuda_batch_dev_py(
         let (dev, _combos) = cuda
             .ift_rsi_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?; // CAI stream can be omitted
+        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?; 
         Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
     let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
@@ -2393,7 +2393,7 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
     };
     let input = IftRsiInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()]; 
 
     let kernel = Kernel::Scalar;
 
@@ -2427,7 +2427,7 @@ pub fn ift_rsi_into(
         let kernel = Kernel::Scalar;
 
         if in_ptr == out_ptr as *const f64 {
-            // CRITICAL: Aliasing check
+            
             let mut temp = vec![0.0; len];
             ift_rsi_into_slice(&mut temp, &input, kernel)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

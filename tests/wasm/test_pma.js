@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -40,16 +40,16 @@ test.before(async () => {
 });
 
 test('PMA default parameters', () => {
-    // Test with default parameters - mirrors check_pma_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.pma_js(close);
     
-    // PMA returns flattened array [predict..., trigger...]
+    
     assert(result, 'Should have result array');
     assert.strictEqual(result.length, close.length * 2, 'Should have predict and trigger arrays concatenated');
     
-    // Split the result
+    
     const predict = result.slice(0, close.length);
     const trigger = result.slice(close.length);
     
@@ -58,12 +58,12 @@ test('PMA default parameters', () => {
 });
 
 test('PMA accuracy', async () => {
-    // Test PMA matches expected values from Rust tests - mirrors check_pma_expected_values
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const hl2 = new Float64Array(high.length);
     
-    // Calculate HL2
+    
     for (let i = 0; i < high.length; i++) {
         hl2[i] = (high[i] + low[i]) / 2;
     }
@@ -75,7 +75,7 @@ test('PMA accuracy', async () => {
     assert.strictEqual(predict.length, hl2.length);
     assert.strictEqual(trigger.length, hl2.length);
     
-    // Expected values from Rust test
+    
     const expectedPredict = [
         59208.18749999999,
         59233.83609693878,
@@ -91,7 +91,7 @@ test('PMA accuracy', async () => {
         59123.05019132652,
     ];
     
-    // Check last 5 values match expected
+    
     const last5Predict = Array.from(predict.slice(-5));
     const last5Trigger = Array.from(trigger.slice(-5));
     
@@ -110,7 +110,7 @@ test('PMA accuracy', async () => {
 });
 
 test('PMA with slice', () => {
-    // Test PMA with simple slice data - mirrors check_pma_with_slice
+    
     const data = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]);
     
     const result = wasm.pma_js(data);
@@ -122,7 +122,7 @@ test('PMA with slice', () => {
 });
 
 test('PMA not enough data', () => {
-    // Test PMA fails with not enough data - mirrors check_pma_not_enough_data
+    
     const data = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -131,7 +131,7 @@ test('PMA not enough data', () => {
 });
 
 test('PMA all values NaN', () => {
-    // Test PMA fails with all NaN values - mirrors check_pma_all_values_nan
+    
     const data = new Float64Array([NaN, NaN, NaN]);
     
     assert.throws(() => {
@@ -140,7 +140,7 @@ test('PMA all values NaN', () => {
 });
 
 test('PMA empty input', () => {
-    // Test PMA fails with empty input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -149,7 +149,7 @@ test('PMA empty input', () => {
 });
 
 test('PMA NaN handling', () => {
-    // Test PMA handles NaN values correctly
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.pma_js(close);
@@ -159,8 +159,8 @@ test('PMA NaN handling', () => {
     assert.strictEqual(predict.length, close.length);
     assert.strictEqual(trigger.length, close.length);
     
-    // First 6 values should be NaN (warmup period is first_valid_idx + 6)
-    // Since test data may have NaN values at the beginning, we need to find the first valid value
+    
+    
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -171,7 +171,7 @@ test('PMA NaN handling', () => {
     
     const expectedWarmup = firstValid + 6;
     
-    // Check that warmup period values are NaN
+    
     for (let i = 0; i < Math.min(expectedWarmup, close.length); i++) {
         assert(isNaN(predict[i]), `Expected NaN in predict warmup at index ${i}`);
         assert(isNaN(trigger[i]), `Expected NaN in trigger warmup at index ${i}`);
@@ -179,31 +179,31 @@ test('PMA NaN handling', () => {
 });
 
 test('PMA fast API', () => {
-    // Test fast/unsafe API
+    
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate memory
+    
     const inPtr = wasm.pma_alloc(len);
     const predictPtr = wasm.pma_alloc(len);
     const triggerPtr = wasm.pma_alloc(len);
     
     try {
-        // Copy data to WASM memory
+        
         const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inView.set(close);
         
-        // Call fast API
+        
         wasm.pma_into(inPtr, predictPtr, triggerPtr, len);
         
-        // Read results
+        
         const predictView = new Float64Array(wasm.__wasm.memory.buffer, predictPtr, len);
         const triggerView = new Float64Array(wasm.__wasm.memory.buffer, triggerPtr, len);
         
         const predict = Array.from(predictView);
         const trigger = Array.from(triggerView);
         
-        // Compare with safe API
+        
         const safeResult = wasm.pma_js(close);
         const safePredict = Array.from(safeResult.slice(0, len));
         const safeTrigger = Array.from(safeResult.slice(len));
@@ -212,7 +212,7 @@ test('PMA fast API', () => {
         assertArrayClose(trigger, safeTrigger, 1e-10, "Fast API trigger mismatch");
         
     } finally {
-        // Free memory
+        
         wasm.pma_free(inPtr, len);
         wasm.pma_free(predictPtr, len);
         wasm.pma_free(triggerPtr, len);
@@ -220,33 +220,33 @@ test('PMA fast API', () => {
 });
 
 test('PMA streaming', () => {
-    // Test streaming API
+    
     const close = new Float64Array(testData.close);
     
-    // Create stream
+    
     const stream = new wasm.PmaStreamWasm();
     const streamResults = [];
     
-    // Feed data points one by one
+    
     for (let i = 0; i < Math.min(20, close.length); i++) {
         const result = stream.update(close[i]);
         streamResults.push(result);
     }
     
-    // First 6 updates should return NaN values (warmup period)
+    
     for (let i = 0; i < 6; i++) {
         assert(isNaN(streamResults[i][0]), `Expected NaN predict during warmup at index ${i}`);
         assert(isNaN(streamResults[i][1]), `Expected NaN trigger during warmup at index ${i}`);
     }
     
-    // After warmup, predict should be valid but trigger needs more values
+    
     for (let i = 6; i < 9 && i < streamResults.length; i++) {
         const [predict, trigger] = streamResults[i];
         assert(!isNaN(predict), `Expected valid predict value after warmup at index ${i}`);
         assert(isNaN(trigger), `Expected NaN trigger (still warming up) at index ${i}`);
     }
     
-    // After index 9 (10th value), both should be valid
+    
     for (let i = 9; i < streamResults.length; i++) {
         const [predict, trigger] = streamResults[i];
         assert(!isNaN(predict), `Expected valid predict value at index ${i}`);
@@ -255,10 +255,10 @@ test('PMA streaming', () => {
 });
 
 test('PMA batch API', () => {
-    // Test batch operation
+    
     const close = new Float64Array(testData.close);
     
-    // PMA has no parameters to sweep, so batch just returns a single run
+    
     const result = wasm.pma_batch(close, {});
     
     assert(result.predict, 'Should have predict output');
@@ -266,7 +266,7 @@ test('PMA batch API', () => {
     assert.strictEqual(result.rows, 1, 'Should have 1 row (no parameter sweep)');
     assert.strictEqual(result.cols, close.length, 'Should have same columns as input length');
     
-    // Compare with single run
+    
     const singleResult = wasm.pma_js(close);
     const singlePredict = singleResult.slice(0, close.length);
     const singleTrigger = singleResult.slice(close.length);
@@ -286,12 +286,12 @@ test('PMA batch API', () => {
 });
 
 test('Rust parity', async () => {
-    // Test that WASM bindings match Rust implementation
+    
     const close = new Float64Array(testData.close);
     const wasmResult = wasm.pma_js(close);
-    // PMA returns flattened [predict..., trigger...], we compare predict (first half)
+    
     const predict = wasmResult.slice(0, close.length);
     
-    // compareWithRust throws on error, no need to check return value
+    
     await compareWithRust('pma', predict);
 });

@@ -1,11 +1,11 @@
-// TrendFlex CUDA kernels — CUDA 13, sm_89+ (Ada OK)
-// Decision note:
-// - Many-series × one-param kernel uses the fused pass (SSF + volatility in one sweep),
-//   FMA, and prev_price carry. Tests show accuracy within tolerance and speed is improved.
-// - Batch (one series × many params) retains a two-pass structure but computes SSF and
-//   normalization in double internally (casting to f32 for storage) to match the f64 CPU
-//   baseline within strict unit-test tolerances. This avoids tiny drift observed with the
-//   fully fused f32 path on some period sweeps.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,18 +18,18 @@
 #define TRENDFLEX_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// --- Tunables ---------------------------------------------------------------
-// If 1, we assume the host prefills the output buffer with NaNs once up-front.
-// If 0, this kernel fills [0, warm) to NaN per row/series.
+
+
+
 #ifndef TRENDFLEX_ASSUME_OUT_PREFILLED
 #define TRENDFLEX_ASSUME_OUT_PREFILLED 0
 #endif
 
-// If 1, use rsqrtf + one NR refinement (~1 ulp, faster). If 0, use sqrtf.
+
 #ifndef TRENDFLEX_USE_RSQRT_NR
 #define TRENDFLEX_USE_RSQRT_NR 0
 #endif
-// ---------------------------------------------------------------------------
+
 
 static __device__ __forceinline__ float trendflex_round_half(float v) {
     return roundf(v);
@@ -37,8 +37,8 @@ static __device__ __forceinline__ float trendflex_round_half(float v) {
 
 static __device__ __forceinline__ float inv_sqrt_pos(float x) {
 #if TRENDFLEX_USE_RSQRT_NR
-    // rsqrtf + one Newton-Raphson step: fast and very accurate (nearly 1 ulp).
-    // See CUDA libdevice __nv_rsqrtf and common NR refinement guidance.
+    
+    
     float y = rsqrtf(x);
     y = y * (1.5f - 0.5f * x * y * y);
     return y;
@@ -47,7 +47,7 @@ static __device__ __forceinline__ float inv_sqrt_pos(float x) {
 #endif
 }
 
-// ------------------------------ Batch: one series × many parameter combos ---
+
 extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
                                                const int*   __restrict__ periods,
                                                int series_len,
@@ -71,7 +71,7 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
     if (ss_period < 1) ss_period = 1;
     if (tail_len < ss_period) return;
 
-    // Coefficients and recurrence in FP64 to stay within the CPU-parity tolerances.
+    
     const double PI    = 3.1415926535897932384626433832795;
     const double ROOT2 = 1.4142135623730951;
 
@@ -95,14 +95,14 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
 #endif
     if (warm >= series_len) return;
 
-    // Shared per-thread ring: [threadIdx.x][max_period]
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ sh = reinterpret_cast<float*>(shraw);
     float* __restrict__ ring = sh + (size_t)threadIdx.x * (size_t)max_period;
 
     const int fidx = first_valid;
 
-    // Seed SSF ring for the first `period` points starting at `first_valid`.
+    
     double prev2 = (double)prices[fidx];
     ring[0] = (float)prev2;
     double rolling_sum = (double)ring[0];
@@ -161,7 +161,7 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// --------------- Many-series × one-parameter (time-major, single period) ---
+
 extern "C" __global__ void trendflex_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -200,7 +200,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
     const float  b      = (float)b_d;
     const float  c      = (float)c_d;
 
-    // helper for time-major addressing
+    
     auto at = [stride, series](int row) { return row * stride + series; };
 
     const int warm = first_valid + period;
@@ -212,15 +212,15 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
 #endif
     if (warm >= series_len) return;
 
-    // Seed ss and rolling sum on [first_valid, first_valid+period)
+    
     const int fidx = first_valid;
 
-    // t=0
+    
     float prev2 = prices_tm[at(fidx)];
     ssf_tm[at(fidx)] = prev2;
     float rolling_sum = prev2;
 
-    // t=1
+    
     float prev1, prev_price;
     if (tail_len > 1) {
         const float p1 = prices_tm[at(fidx + 1)];
@@ -232,7 +232,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
         return;
     }
 
-    // t=2..period-1
+    
     for (int t = 2; t < period; ++t) {
         const float cur_price = prices_tm[at(fidx + t)];
         const float ss = fmaf(c, (cur_price + prev_price),
@@ -244,7 +244,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
         prev_price = cur_price;
     }
 
-    // main loop
+    
     const float tp_f   = (float)period;
     const float inv_tp = 1.0f / tp_f;
     float ms_prev = 0.0f;

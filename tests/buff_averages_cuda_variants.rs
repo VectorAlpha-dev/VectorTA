@@ -1,16 +1,16 @@
-// Variant coverage tests for Buff Averages CUDA wrapper
+
 
 #![cfg(feature = "cuda")]
 
 use cust::memory::CopyDestination;
-use my_project::cuda::cuda_available;
-use my_project::cuda::moving_averages::buff_averages_wrapper::{
+use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::moving_averages::buff_averages_wrapper::{
     BatchKernelPolicy, CudaBuffAverages, CudaBuffPolicy, ManySeriesKernelPolicy,
 };
-use my_project::indicators::moving_averages::buff_averages::{
+use vector_ta::indicators::moving_averages::buff_averages::{
     buff_averages_batch_with_kernel, BuffAveragesBatchRange,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn approx_eq(a: f32, b: f32, tol: f32) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -51,7 +51,7 @@ fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    let len = 12_000usize; // ensure plenty of room
+    let len = 12_000usize; 
     let (price, volume) = synth(len);
     let sweep = BuffAveragesBatchRange {
         fast_period: (4, 20, 4),

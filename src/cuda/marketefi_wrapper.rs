@@ -221,7 +221,7 @@ impl CudaMarketefi {
         }
     }
 
-    // ---------- Public device entry points ----------
+    
 
     /// One-series compute on device (paramless): returns a single row DeviceArrayF32 (1 x len)
     pub fn marketefi_batch_dev(
@@ -243,7 +243,7 @@ impl CudaMarketefi {
             })
             .ok_or_else(|| CudaMarketefiError::InvalidInput("all values are NaN".into()))?;
 
-        // VRAM estimate: 3 inputs + 1 output (FP32), ~64MB headroom
+        
         let elem_bytes = std::mem::size_of::<f32>();
         let per_vec = len
             .checked_mul(elem_bytes)
@@ -350,7 +350,7 @@ impl CudaMarketefi {
             return Err(CudaMarketefiError::InvalidInput("length mismatch".into()));
         }
 
-        // Compute first-valid per series: first index t where H,L,V are finite
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0i32;
@@ -369,7 +369,7 @@ impl CudaMarketefi {
             first_valids[s] = if found { fv } else { rows as i32 };
         }
 
-        // VRAM check: 3 inputs + output (all f32) + first_valids (i32)
+        
         let f_bytes = n
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_mul(4))
@@ -432,7 +432,7 @@ impl CudaMarketefi {
             return Err(CudaMarketefiError::InvalidInput("first_valids length mismatch".into()));
         }
 
-        // --- Kernel entry ---
+        
         let func = self
             .module
             .get_function("marketefi_many_series_one_param_f32")
@@ -440,17 +440,17 @@ impl CudaMarketefi {
                 name: "marketefi_many_series_one_param_f32",
             })?;
 
-        // --- Launch policy (2D grid: time tiles × series tiles) ---
-        // block.x spans series; grid.x tiles time; grid.y tiles series.
+        
+        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
 
-        // Must match the CUDA kernel's MKT_T_TILE (default 128)
+        
         const T_TILE: u32 = 128;
 
-        // Host-side precheck for vectorization: need cols % 4 == 0 and 16B alignment.
+        
         let mut h_ptr = d_high_tm.as_device_ptr().as_raw();
         let mut l_ptr = d_low_tm.as_device_ptr().as_raw();
         let mut v_ptr = d_vol_tm.as_device_ptr().as_raw();
@@ -460,10 +460,10 @@ impl CudaMarketefi {
         let aligned16 = ((h_ptr | l_ptr | v_ptr | o_ptr | fv_ptr) & 0xF) == 0;
         let host_vec4_ok = aligned16 && ((cols & 3) == 0);
 
-        // Series groups: 1 per series in scalar path, 1 per 4 series in vector path.
+        
         let series_groups: u32 = if host_vec4_ok { (cols as u32) >> 2 } else { cols as u32 };
 
-        // grid.x: number of time tiles; grid.y: number of series tiles
+        
         let grid_x = ((rows as u32) + T_TILE - 1) / T_TILE;
         let grid_y = (series_groups + block_x - 1) / block_x;
 
@@ -485,7 +485,7 @@ impl CudaMarketefi {
             self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
 
-        // Keep the API the same; record chosen block size
+        
         unsafe {
             (*(self as *const _ as *mut CudaMarketefi)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -494,7 +494,7 @@ impl CudaMarketefi {
         Ok(())
     }
 
-    // Back-compat alias for API parity with other wrappers
+    
     pub fn marketefi_dev(
         &self,
         h: &[f32],
@@ -505,14 +505,14 @@ impl CudaMarketefi {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        // One-series (100k)
+        
         v.push(CudaBenchScenario::new(
             "marketefi",
             "one_series",
@@ -570,7 +570,7 @@ pub mod benches {
                 })
             },
         ));
-        // Many-series (64 x 16k)
+        
         v.push(CudaBenchScenario::new(
             "marketefi",
             "many_series_one_param",

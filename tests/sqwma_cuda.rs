@@ -1,16 +1,16 @@
-// Integration tests for CUDA SQWMA kernels
 
-use my_project::indicators::moving_averages::sqwma::{
+
+use vector_ta::indicators::moving_averages::sqwma::{
     sqwma_batch_with_kernel, SqwmaBatchRange, SqwmaBuilder,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaSqwma;
+use vector_ta::cuda::moving_averages::CudaSqwma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -44,10 +44,10 @@ fn sqwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = SqwmaBatchRange { period: (5, 35, 3) };
 
-    // CPU baseline using scalar batch kernel
+    
     let cpu = sqwma_batch_with_kernel(&prices, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU execution
+    
     let cuda = CudaSqwma::new(0).expect("CudaSqwma::new");
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -76,7 +76,7 @@ fn sqwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Spot-check builder output for a single period
+    
     let row_idx = cpu
         .combos
         .iter()
@@ -112,7 +112,7 @@ fn sqwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let period = 16usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series_idx in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
@@ -128,7 +128,7 @@ fn sqwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    // GPU execution
+    
     let cuda = CudaSqwma::new(0).expect("CudaSqwma::new");
     let prices_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda

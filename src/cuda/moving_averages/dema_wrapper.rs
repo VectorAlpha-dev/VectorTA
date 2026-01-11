@@ -58,7 +58,7 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    // DEMA does not benefit from tiled dot-product kernels; keep variant for API parity
+    
     Tiled {
         tile: u32,
         per_thread: BatchThreadsPerOutput,
@@ -69,7 +69,7 @@ pub enum BatchKernelPolicy {
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    // Kept for parity with ALMA; falls back to OneD for DEMA
+    
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -222,7 +222,7 @@ impl CudaDema {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate and guard (add ~64MB headroom like ALMA) with checked arithmetic
+        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or(CudaDemaError::InvalidInput("size overflow computing prices_bytes".into()))?;
@@ -239,7 +239,7 @@ impl CudaDema {
             .checked_add(periods_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaDemaError::InvalidInput("size overflow summing required bytes".into()))?;
-        // VRAM guard with ~64MB headroom (mirrors ALMA wrapper semantics)
+        
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -326,7 +326,7 @@ impl CudaDema {
             )));
         }
 
-        // VRAM guard (prices already on device, so only periods + output + headroom) with checked math
+        
         let periods_bytes = periods.len()
             .checked_mul(std::mem::size_of::<i32>())
             .ok_or(CudaDemaError::InvalidInput("size overflow computing periods_bytes".into()))?;
@@ -446,7 +446,7 @@ impl CudaDema {
             .get_function("dema_batch_f32")
             .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_batch_f32" })?;
 
-        // Single-threaded sequential recurrence per combo
+        
         let mut block_x: u32 = 1;
         if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch {
             block_x = bx.max(1);
@@ -460,7 +460,7 @@ impl CudaDema {
         let grid_x: u32 = n_combos as u32;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Optional host-side limits check
+        
         {
             let dev = Device::get_device(self.device_id)?;
             let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -488,11 +488,11 @@ impl CudaDema {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        // No implicit sync; public API decides synchronization
+        
         Ok(())
     }
 
-    // ---------- many-series (time-major) ----------
+    
     pub fn dema_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -503,7 +503,7 @@ impl CudaDema {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate and guard (~64MB headroom like ALMA)
+        
         let elems = num_series * series_len;
         let required =
             elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
@@ -611,8 +611,8 @@ impl CudaDema {
             .get_function("dema_many_series_one_param_time_major_f32")
             .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_many_series_one_param_time_major_f32" })?;
 
-        // Warp-mapped launch config
-        let mut block_x_req: u32 = 128; // default 4 warps per block
+        
+        let mut block_x_req: u32 = 128; 
         if let ManySeriesKernelPolicy::OneD { block_x: bx } = self.policy.many_series {
             block_x_req = bx.max(32);
         }
@@ -658,7 +658,7 @@ impl CudaDema {
         Ok(())
     }
 
-    // ---------- helpers ----------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -718,7 +718,7 @@ impl CudaDema {
                 CudaDemaError::InvalidInput(format!("series {} contains only NaNs", s))
             })?;
             let remaining = series_len - fv as usize;
-            // Match CPU acceptance: require >= 2*(period - 1) valid samples
+            
             if remaining < needed {
                 return Err(CudaDemaError::InvalidInput(format!(
                     "series {} does not have enough valid data: need >= {}, have {}",
@@ -752,7 +752,7 @@ fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     vals.into_iter().map(|p| DemaParams { period: Some(p) }).collect()
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

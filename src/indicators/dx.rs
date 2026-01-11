@@ -259,7 +259,7 @@ fn dx_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -305,7 +305,7 @@ pub fn dx_into(input: &DxInput, out: &mut [f64]) -> Result<(), DxError> {
     dx_into_slice(out, input, Kernel::Auto)
 }
 
-// Scalar implementation (single-pass, loop-jammed; follows DxStream algebra)
+
 #[inline]
 pub fn dx_scalar(
     high: &[f64],
@@ -320,16 +320,16 @@ pub fn dx_scalar(
         return;
     }
 
-    // Hoist invariants
+    
     let p_f64 = period as f64;
     let hundred = 100.0f64;
 
-    // Seed state at first valid index
+    
     let mut prev_high = high[first_valid_idx];
     let mut prev_low = low[first_valid_idx];
     let mut prev_close = close[first_valid_idx];
 
-    // Wilder running sums
+    
     let mut plus_dm_sum = 0.0f64;
     let mut minus_dm_sum = 0.0f64;
     let mut tr_sum = 0.0f64;
@@ -342,7 +342,7 @@ pub fn dx_scalar(
             let l = *low.get_unchecked(i);
             let cl = *close.get_unchecked(i);
 
-            // On NaNs, carry forward last DX and reset prev_* to current
+            
             if h.is_nan() | l.is_nan() | cl.is_nan() {
                 *out.get_unchecked_mut(i) = if i > 0 {
                     *out.get_unchecked(i - 1)
@@ -356,7 +356,7 @@ pub fn dx_scalar(
                 continue;
             }
 
-            // Directional movement (Wilder)
+            
             let up_move = h - prev_high;
             let down_move = prev_low - l;
             let mut plus_dm = 0.0f64;
@@ -367,20 +367,20 @@ pub fn dx_scalar(
                 minus_dm = down_move;
             }
 
-            // True Range (Wilder)
+            
             let tr1 = h - l;
             let tr2 = (h - prev_close).abs();
             let tr3 = (l - prev_close).abs();
             let tr = tr1.max(tr2).max(tr3);
 
             if initial_count < (period - 1) {
-                // Prime sums over the first window
+                
                 plus_dm_sum += plus_dm;
                 minus_dm_sum += minus_dm;
                 tr_sum += tr;
                 initial_count += 1;
 
-                // First DX produced right after priming completes
+                
                 if initial_count == (period - 1) {
                     let plus_di = (plus_dm_sum / tr_sum) * hundred;
                     let minus_di = (minus_dm_sum / tr_sum) * hundred;
@@ -392,12 +392,12 @@ pub fn dx_scalar(
                     };
                 }
             } else {
-                // Wilder smoothing (preserve algebraic order to match streaming path)
+                
                 plus_dm_sum = plus_dm_sum - (plus_dm_sum / p_f64) + plus_dm;
                 minus_dm_sum = minus_dm_sum - (minus_dm_sum / p_f64) + minus_dm;
                 tr_sum = tr_sum - (tr_sum / p_f64) + tr;
 
-                // Convert to +DI/-DI and DX
+                
                 let plus_di = if tr_sum != 0.0 {
                     (plus_dm_sum / tr_sum) * hundred
                 } else {
@@ -416,7 +416,7 @@ pub fn dx_scalar(
                 };
             }
 
-            // Advance previous bar references
+            
             prev_high = h;
             prev_low = l;
             prev_close = cl;
@@ -452,7 +452,7 @@ pub fn dx_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Stub points to scalar for API parity
+    
     dx_scalar(high, low, close, period, first_valid, out)
 }
 
@@ -482,30 +482,30 @@ pub fn dx_avx512_long(
     dx_scalar(high, low, close, period, first_valid, out)
 }
 
-// Stream implementation (emulates alma.rs streaming)
-// Decision: SIMD stubs delegate to scalar; streaming matches batch numerics at 1e-9.
+
+
 #[derive(Debug, Clone)]
 pub struct DxStream {
     period: usize,
-    // Hoisted invariants
-    p_f64: f64,   // period as f64
-    hundred: f64, // 100.0
+    
+    p_f64: f64,   
+    hundred: f64, 
 
-    // Wilder running sums
+    
     plus_dm_sum: f64,
     minus_dm_sum: f64,
     tr_sum: f64,
 
-    // Previous bar refs
+    
     prev_high: f64,
     prev_low: f64,
     prev_close: f64,
 
-    // Warmup bookkeeping
-    initial_count: usize, // counts [1 .. period-1]
-    filled: bool,         // first DX emitted?
+    
+    initial_count: usize, 
+    filled: bool,         
 
-    // Carry-forward of last emitted DX (for sum_di==0 steady-state & NaN carry)
+    
     last_dx: f64,
 }
 
@@ -539,7 +539,7 @@ impl DxStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // (Re)seed on the very first valid bar or right after a NaN encounter.
+        
         if self.prev_high.is_nan() || self.prev_low.is_nan() || self.prev_close.is_nan() {
             self.prev_high = high;
             self.prev_low = low;
@@ -547,8 +547,8 @@ impl DxStream {
             return None;
         }
 
-        // Mid-series NaN: carry forward last DX for this bar, and set prev_* to current
-        // (matching scalar/batch carry semantics). Next valid bar will re-seed above.
+        
+        
         if high.is_nan() || low.is_nan() || close.is_nan() {
             let carried = if self.filled { self.last_dx } else { f64::NAN };
             self.prev_high = high;
@@ -557,7 +557,7 @@ impl DxStream {
             return Some(carried);
         }
 
-        // Wilder DM terms
+        
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
         let plus_dm = if up_move > 0.0 && up_move > down_move {
@@ -571,7 +571,7 @@ impl DxStream {
             0.0
         };
 
-        // Wilder True Range
+        
         let tr1 = high - low;
         let tr2 = (high - self.prev_close).abs();
         let tr3 = (low - self.prev_close).abs();
@@ -580,34 +580,34 @@ impl DxStream {
         let mut out: Option<f64> = None;
 
         if self.initial_count < (self.period - 1) {
-            // Prime first window
+            
             self.plus_dm_sum += plus_dm;
             self.minus_dm_sum += minus_dm;
             self.tr_sum += tr;
             self.initial_count += 1;
 
-            // First DX is output immediately after priming completes
+            
             if self.initial_count == (self.period - 1) {
-                let plus_di = (self.plus_dm_sum / self.tr_sum) * self.hundred; // keep order: div then mul
+                let plus_di = (self.plus_dm_sum / self.tr_sum) * self.hundred; 
                 let minus_di = (self.minus_dm_sum / self.tr_sum) * self.hundred;
                 let sum_di = plus_di + minus_di;
 
                 let dx = if sum_di != 0.0 {
                     self.hundred * ((plus_di - minus_di).abs() / sum_di)
                 } else {
-                    0.0 // first emission: scalar path outputs 0.0 here
+                    0.0 
                 };
                 self.filled = true;
                 self.last_dx = dx;
                 out = Some(dx);
             }
         } else {
-            // Wilder smoothing: preserve scalar algebraic order to maintain stream==batch at 1e-9
+            
             self.plus_dm_sum = self.plus_dm_sum - (self.plus_dm_sum / self.p_f64) + plus_dm;
             self.minus_dm_sum = self.minus_dm_sum - (self.minus_dm_sum / self.p_f64) + minus_dm;
             self.tr_sum = self.tr_sum - (self.tr_sum / self.p_f64) + tr;
 
-            // Compute +DI/-DI -> DX using same op order as scalar
+            
             let plus_di = if self.tr_sum != 0.0 {
                 (self.plus_dm_sum / self.tr_sum) * self.hundred
             } else {
@@ -620,7 +620,7 @@ impl DxStream {
             };
             let sum_di = plus_di + minus_di;
 
-            // Steady-state carry: if sum_di==0 use previous DX (matches scalar path)
+            
             let dx = if sum_di != 0.0 {
                 self.hundred * ((plus_di - minus_di).abs() / sum_di)
             } else if self.filled {
@@ -632,7 +632,7 @@ impl DxStream {
             out = Some(dx);
         }
 
-        // Advance previous bar refs last
+        
         self.prev_high = high;
         self.prev_low = low;
         self.prev_close = close;
@@ -641,7 +641,7 @@ impl DxStream {
     }
 }
 
-// Batch/grid sweep types
+
 #[derive(Clone, Debug)]
 pub struct DxBatchRange {
     pub period: (usize, usize, usize),
@@ -728,12 +728,12 @@ impl DxBatchOutput {
 #[inline(always)]
 fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
     let (start, end, step) = r.period;
-    // Zero step means a static value (single element); also if start==end
+    
     if step == 0 || start == end {
         return Ok(vec![DxParams { period: Some(start) }]);
     }
 
-    // Build an inclusive range supporting reversed bounds
+    
     let mut out: Vec<usize> = Vec::new();
     if start < end {
         let mut v = start;
@@ -745,9 +745,9 @@ fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
             }
         }
     } else {
-        // reversed
+        
         let mut v = start;
-        // ensure we won’t wrap below zero in unsigned math
+        
         loop {
             out.push(v);
             if v <= end { break; }
@@ -755,7 +755,7 @@ fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
             if dec == v { break; }
             v = dec;
         }
-        // normalize order ascending for combos (stable with other indicators)
+        
         out.sort_unstable();
     }
     if out.is_empty() {
@@ -772,7 +772,7 @@ pub fn dx_batch_with_kernel(
     k: Kernel,
 ) -> Result<DxBatchOutput, DxError> {
     let kernel = match k {
-        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(DxError::InvalidKernelForBatch(other)),
@@ -858,13 +858,13 @@ fn dx_batch_inner_into(
         _ => unreachable!(),
     };
 
-    // Row-optimized precompute shared across all rows: +DM, -DM, TR, and carry mask
+    
     let (plus_dm, minus_dm, tr, carry) = dx_precompute_terms(high, low, close, first, len);
 
     let do_row = |row: usize, dst_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
         dx_row_scalar_precomputed(&plus_dm, &minus_dm, &tr, &carry, first, p, dst_row);
-        // warmup NaNs already placed by init_matrix_prefixes before we were called
+        
     };
 
     if parallel {
@@ -895,10 +895,10 @@ fn dx_precompute_terms(
     let mut plus_dm: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
     let mut minus_dm: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
     let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
-    // Carry flag per index: 1 = carry-forward (input had NaN), 0 = normal
+    
     let mut carry: Vec<u8> = vec![0; len];
 
-    // Initialize arrays with zeros up to full len
+    
     for _ in 0..len {
         plus_dm.push(0.0);
     }
@@ -913,7 +913,7 @@ fn dx_precompute_terms(
         return (plus_dm, minus_dm, tr, carry);
     }
 
-    // Precompute per-bar terms starting at the first usable transition
+    
     for i in (first + 1)..len {
         let h = high[i];
         let l = low[i];
@@ -923,7 +923,7 @@ fn dx_precompute_terms(
             continue;
         }
 
-        // DM terms relative to previous bar values
+        
         let up_move = h - high[i - 1];
         let down_move = low[i - 1] - l;
         let pdm = if up_move > 0.0 && up_move > down_move {
@@ -937,7 +937,7 @@ fn dx_precompute_terms(
             0.0
         };
 
-        // True Range using previous close
+        
         let tr1 = h - l;
         let tr2 = (h - close[i - 1]).abs();
         let tr3 = (l - close[i - 1]).abs();
@@ -1151,7 +1151,7 @@ unsafe fn dx_row_avx512_long(
 
 #[inline(always)]
 pub fn expand_grid_dx(r: &DxBatchRange) -> Vec<DxParams> {
-    // Retain legacy name for external callers; fall back to empty on error
+    
     expand_grid_checked(r).unwrap_or_else(|_| vec![])
 }
 
@@ -1176,7 +1176,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_dx_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a small but non-trivial HLC series
+        
         let n = 512usize;
         let mut close = vec![0.0f64; n];
         for i in 0..n {
@@ -1187,7 +1187,7 @@ mod tests {
         let mut low = vec![0.0f64; n];
         for i in 0..n {
             let t = i as f64;
-            // Keep high above low with mild variability around close
+            
             high[i] = close[i] + 0.6 + 0.05 * (t * 0.3).sin();
             low[i] = close[i] - 0.6 - 0.05 * (t * 0.3).cos();
             if low[i] > high[i] {
@@ -1198,14 +1198,14 @@ mod tests {
         let params = DxParams { period: Some(14) };
         let input = DxInput::from_hlc_slices(&high, &low, &close, params);
 
-        // Baseline via Vec-returning API
+        
         let base = dx(&input)?.values;
 
-        // Into API writes directly into caller buffer
+        
         let mut into_out = vec![0.0f64; n];
         dx_into(&input, &mut into_out)?;
 
-        // Equality helper: NaN == NaN; finite compare exactly (or tight epsilon)
+        
         #[inline]
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
@@ -1446,23 +1446,23 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             DxParams::default(),
-            // Minimum period
+            
             DxParams { period: Some(2) },
-            // Small periods
+            
             DxParams { period: Some(5) },
             DxParams { period: Some(7) },
-            // Medium periods
+            
             DxParams { period: Some(10) },
-            DxParams { period: Some(14) }, // Default value
+            DxParams { period: Some(14) }, 
             DxParams { period: Some(20) },
-            // Large periods
+            
             DxParams { period: Some(30) },
             DxParams { period: Some(50) },
-            // Very large periods
+            
             DxParams { period: Some(100) },
             DxParams { period: Some(200) },
         ];
@@ -1473,12 +1473,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1525,7 +1525,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_dx_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(test)]
@@ -1537,32 +1537,32 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy generates realistic OHLC data
-        let strat = (2usize..=50) // DX requires minimum period of 2
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    100.0f64..5000.0f64, // Base price
-                    (period + 20)..400,  // Data length
-                    0.001f64..0.05f64,   // Volatility factor
-                    -0.01f64..0.01f64,   // Trend factor
+                    100.0f64..5000.0f64, 
+                    (period + 20)..400,  
+                    0.001f64..0.05f64,   
+                    -0.01f64..0.01f64,   
                     Just(period),
                 )
             })
             .prop_map(|(base_price, data_len, volatility, trend, period)| {
-                // Generate synthetic OHLC data
+                
                 let mut high = Vec::with_capacity(data_len);
                 let mut low = Vec::with_capacity(data_len);
                 let mut close = Vec::with_capacity(data_len);
 
                 let mut price = base_price;
                 for i in 0..data_len {
-                    // Add trend and random volatility
+                    
                     let trend_component = trend * i as f64;
                     let random_component = ((i * 7 + 13) % 17) as f64 / 17.0 - 0.5;
                     price =
                         base_price + trend_component + random_component * volatility * base_price;
 
-                    // Generate OHLC with realistic constraints
+                    
                     let daily_volatility = volatility * price;
                     let h = price + daily_volatility * (0.5 + ((i * 3) % 7) as f64 / 14.0);
                     let l = price - daily_volatility * (0.5 + ((i * 5) % 7) as f64 / 14.0);
@@ -1584,7 +1584,7 @@ mod tests {
 				let DxOutput { values: out } = dx_with_kernel(&input, kernel).unwrap();
 				let DxOutput { values: ref_out } = dx_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: DX values should be between 0 and 100
+				
 				for (i, &val) in out.iter().enumerate() {
 					if !val.is_nan() {
 						prop_assert!(
@@ -1595,9 +1595,9 @@ mod tests {
 					}
 				}
 
-				// Property 2: Warmup period should be respected
-				// Note: Since synthetic data has no NaN values, first_valid_idx = 0
-				// Therefore warmup = 0 + period - 1 = period - 1
+				
+				
+				
 				let warmup = period - 1;
 				for i in 0..warmup {
 					prop_assert!(
@@ -1607,7 +1607,7 @@ mod tests {
 					);
 				}
 
-				// Property 3: After warmup, values should not be NaN (unless input has NaN)
+				
 				if out.len() > warmup + 10 {
 					for i in (warmup + 10)..out.len() {
 						prop_assert!(
@@ -1618,7 +1618,7 @@ mod tests {
 					}
 				}
 
-				// Property 4: Kernel consistency - all kernels should produce same results
+				
 				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
 					if val.is_nan() && ref_val.is_nan() {
 						continue;
@@ -1632,19 +1632,19 @@ mod tests {
 					);
 				}
 
-				// Property 5: Special case - constant prices
+				
 				let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
 				if all_same_high && all_same_low && all_same_close {
-					// With no directional movement, DX should be near 0
+					
 					if out.len() > warmup + 10 {
 						let stable_vals = &out[warmup + 10..];
 						for (i, &val) in stable_vals.iter().enumerate() {
 							if !val.is_nan() {
 								prop_assert!(
-									val < 1.0,  // Tightened threshold - no movement means DX near 0
+									val < 1.0,  
 									"[{}] With constant prices, expected DX < 1.0, got {} at index {}",
 									test_name, val, warmup + 10 + i
 								);
@@ -1653,17 +1653,17 @@ mod tests {
 					}
 				}
 
-				// Property 6: Improved trend detection (for longer series)
+				
 				if period <= 20 && out.len() > 100 {
-					// Calculate actual trend in the data
+					
 					let mid = out.len() / 2;
 					let first_half_avg_price = close[..mid].iter().sum::<f64>() / mid as f64;
 					let second_half_avg_price = close[mid..].iter().sum::<f64>() / (out.len() - mid) as f64;
 					let price_change = ((second_half_avg_price - first_half_avg_price) / first_half_avg_price).abs();
 
-					// For significant price changes, DX should reflect trend strength
+					
 					if price_change > 0.05 {
-						// Compare average DX in second half vs first half
+						
 						let first_half_dx = &out[warmup..mid];
 						let second_half_dx = &out[mid..];
 
@@ -1674,7 +1674,7 @@ mod tests {
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / second_half_dx.len() as f64;
 
-						// In trending markets, average DX should be meaningful (> 20)
+						
 						prop_assert!(
 							second_avg > 20.0 || first_avg > 20.0,
 							"[{}] Expected higher average DX in trending market. First half avg: {}, Second half avg: {}",
@@ -1683,15 +1683,15 @@ mod tests {
 					}
 				}
 
-				// Property 7: Perfect trend test
-				// Generate a perfect uptrend or downtrend and verify high DX
+				
+				
 				if period <= 14 && out.len() > 50 {
-					// Use the first close price as base for perfect trend
+					
 					let trend_base = close[0];
 					let perfect_trend = (0..50)
 						.map(|i| {
-							let price = trend_base + (i as f64 * trend_base * 0.01); // 1% per period
-							let h = price * 1.005;  // Small high-low range
+							let price = trend_base + (i as f64 * trend_base * 0.01); 
+							let h = price * 1.005;  
 							let l = price * 0.995;
 							let c = price;
 							(h, l, c)
@@ -1705,7 +1705,7 @@ mod tests {
 					let perfect_input = DxInput::from_hlc_slices(&perfect_high, &perfect_low, &perfect_close, params.clone());
 					let DxOutput { values: perfect_out } = dx_with_kernel(&perfect_input, kernel).unwrap();
 
-					// In a perfect trend, DX should be high after stabilization
+					
 					if perfect_out.len() > warmup + 10 {
 						let stable_dx = &perfect_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
@@ -1713,21 +1713,21 @@ mod tests {
 							.sum::<f64>() / stable_dx.len() as f64;
 
 						prop_assert!(
-							avg_dx > 50.0,  // Strong trend should show DX > 50
+							avg_dx > 50.0,  
 							"[{}] Expected high DX (>50) in perfect trend, got avg {}",
 							test_name, avg_dx
 						);
 					}
 				}
 
-				// Property 8: Ranging market test
-				// Generate oscillating prices and verify low DX
+				
+				
 				if period <= 14 && out.len() > 50 {
-					// Use the first close price as base for ranging market
+					
 					let range_base = close[0];
 					let ranging_data = (0..50)
 						.map(|i| {
-							// Oscillate between two price levels
+							
 							let price = if i % 4 < 2 {
 								range_base * 1.01
 							} else {
@@ -1747,17 +1747,17 @@ mod tests {
 					let ranging_input = DxInput::from_hlc_slices(&ranging_high, &ranging_low, &ranging_close, params.clone());
 					let DxOutput { values: ranging_out } = dx_with_kernel(&ranging_input, kernel).unwrap();
 
-					// In a ranging market, DX should be low after stabilization
+					
 					if ranging_out.len() > warmup + 10 {
 						let stable_dx = &ranging_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / stable_dx.len() as f64;
 
-						// Note: Even small oscillations can produce moderate DX values
-						// since DX measures absolute directional movement
+						
+						
 						prop_assert!(
-							avg_dx < 65.0,  // More realistic threshold for oscillating markets
+							avg_dx < 65.0,  
 							"[{}] Expected moderate DX (<65) in ranging market, got avg {}",
 							test_name, avg_dx
 						);
@@ -1848,7 +1848,7 @@ mod tests {
             .period_range(10, 30, 5)
             .apply_candles(&c)?;
 
-        let expected_combos = 5; // periods: 10, 15, 20, 25, 30
+        let expected_combos = 5; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -1863,17 +1863,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (30, 60, 15),   // Large periods
-            (2, 5, 1),      // Dense small range
-            (10, 20, 2),    // Medium range with small steps
-            (14, 14, 0),    // Single period (default)
-            (5, 50, 15),    // Wide range
-            (100, 200, 50), // Very large periods
+            
+            (2, 10, 2),     
+            (5, 25, 5),     
+            (30, 60, 15),   
+            (2, 5, 1),      
+            (10, 20, 2),    
+            (14, 14, 0),    
+            (5, 50, 15),    
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1996,14 +1996,14 @@ pub fn dx_batch_py<'py>(
     let combos = expand_grid_checked(&sweep)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
-    // Use the minimum input length to mirror core logic
+    
     let cols = h.len().min(l.len()).min(c.len());
     let kern = validate_kernel(kernel, true)?;
     let DxBatchOutput { values, .. } = py
         .allow_threads(|| dx_batch_with_kernel(h, l, c, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Move values into a NumPy array with shape (rows, cols)
+    
     let out_arr = PyArray1::from_vec(py, values);
 
     let dict = PyDict::new(py);
@@ -2019,7 +2019,7 @@ pub fn dx_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ----- Python CUDA bindings -----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dx_wrapper::CudaDx;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2101,7 +2101,7 @@ pub fn dx_cuda_many_series_one_param_dev_py(
     Ok(DxDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
 }
 
-// CUDA device array class with context guard and CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DxDeviceArrayF32Py {

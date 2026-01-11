@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -41,7 +41,7 @@ test.before(async () => {
 });
 
 test('EFI partial params', () => {
-    // Test with default parameters - mirrors check_efi_partial_params
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
@@ -50,7 +50,7 @@ test('EFI partial params', () => {
 });
 
 test('EFI accuracy', async () => {
-    // Test EFI matches expected values from Rust tests - mirrors check_efi_accuracy
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const expected = EXPECTED_OUTPUTS.efi;
@@ -63,7 +63,7 @@ test('EFI accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -74,7 +74,7 @@ test('EFI accuracy', async () => {
 });
 
 test('EFI zero period', () => {
-    // Test EFI fails with zero period - mirrors check_efi_zero_period
+    
     const price = new Float64Array([10.0, 20.0, 30.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
@@ -84,7 +84,7 @@ test('EFI zero period', () => {
 });
 
 test('EFI period exceeds length', () => {
-    // Test EFI fails when period exceeds data length - mirrors check_efi_period_exceeds_length
+    
     const price = new Float64Array([10.0, 20.0, 30.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
@@ -94,22 +94,22 @@ test('EFI period exceeds length', () => {
 });
 
 test('EFI nan handling', () => {
-    // Test EFI handles NaN values correctly - mirrors check_efi_nan_handling
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     
     const result = wasm.efi_js(close, volume, 13);
     assert.strictEqual(result.length, close.length);
     
-    // First value should be NaN (need at least 2 values for difference)
+    
     assert(isNaN(result[0]), "First value should be NaN");
     
-    // After sufficient data, no NaN values should exist
-    // Check that we have non-NaN values after warmup
+    
+    
     const nonNanStart = result.findIndex(v => !isNaN(v));
     assert(nonNanStart >= 0, "All values are NaN");
     
-    // After index 50, no NaN values should exist
+    
     if (result.length > 50) {
         const hasNaNAfter50 = result.slice(50).some(v => isNaN(v));
         assert(!hasNaNAfter50, "Found NaN values after warmup period");
@@ -117,7 +117,7 @@ test('EFI nan handling', () => {
 });
 
 test('EFI empty data', () => {
-    // Test EFI with empty data - mirrors Rust empty data test
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -126,9 +126,9 @@ test('EFI empty data', () => {
 });
 
 test('EFI mismatched lengths', () => {
-    // Test EFI with mismatched price and volume lengths
+    
     const price = new Float64Array([1.0, 2.0, 3.0]);
-    const volume = new Float64Array([100.0, 200.0]);  // Different length
+    const volume = new Float64Array([100.0, 200.0]);  
     
     assert.throws(() => {
         wasm.efi_js(price, volume, 2);
@@ -136,7 +136,7 @@ test('EFI mismatched lengths', () => {
 });
 
 test('EFI all nan', () => {
-    // Test EFI with all NaN values
+    
     const allNan = new Float64Array(100).fill(NaN);
     
     assert.throws(() => {
@@ -145,46 +145,46 @@ test('EFI all nan', () => {
 });
 
 test('EFI memory allocation', () => {
-    // Test memory allocation and deallocation
+    
     const len = 1000;
     const ptr = wasm.efi_alloc(len);
     
     assert(ptr !== 0, "Failed to allocate memory");
     
-    // Cleanup
+    
     wasm.efi_free(ptr, len);
 });
 
 test('EFI fast API', () => {
-    // Test the fast API (_into function)
+    
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const len = close.length;
     
-    // Allocate memory for inputs and output
+    
     const pricePtr = wasm.efi_alloc(len);
     const volumePtr = wasm.efi_alloc(len);
     const outPtr = wasm.efi_alloc(len);
     
     try {
-        // Copy input data to WASM memory
+        
         const priceView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
         const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         priceView.set(close);
         volumeView.set(volume);
         
-        // Run calculation
+        
         wasm.efi_into(pricePtr, volumePtr, outPtr, len, 13);
         
-        // Read result (recreate view in case memory grew)
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(memory);
         
-        // Verify result matches safe API
+        
         const safeResult = wasm.efi_js(close, volume, 13);
         assertArrayClose(result, safeResult, 1e-10, "Fast API result mismatch");
     } finally {
-        // Cleanup
+        
         wasm.efi_free(pricePtr, len);
         wasm.efi_free(volumePtr, len);
         wasm.efi_free(outPtr, len);
@@ -192,12 +192,12 @@ test('EFI fast API', () => {
 });
 
 test('EFI batch processing', () => {
-    // Test batch processing
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
+    
+    const close = new Float64Array(testData.close.slice(0, 100)); 
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
     const config = {
-        period_range: [10, 20, 5]  // 10, 15, 20
+        period_range: [10, 20, 5]  
     };
     
     const result = wasm.efi_batch(close, volume, config);
@@ -208,7 +208,7 @@ test('EFI batch processing', () => {
     assert.strictEqual(result.cols, 100, "Expected 100 columns");
     assert.strictEqual(result.values.length, 300, "Expected 300 values total");
     
-    // Verify each row matches individual calculation
+    
     const periods = [10, 15, 20];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -226,37 +226,37 @@ test('EFI batch processing', () => {
 });
 
 test('EFI aliasing detection', () => {
-    // Test that the fast API handles aliasing correctly
+    
     const close = new Float64Array(testData.close.slice(0, 100));
     const volume = new Float64Array(testData.volume.slice(0, 100));
     const len = close.length;
     
-    // Allocate memory for inputs
+    
     const pricePtr = wasm.efi_alloc(len);
     const volumePtr = wasm.efi_alloc(len);
     
     try {
-        // Copy input data to WASM memory
+        
         const priceView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
         const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
         priceView.set(close);
         volumeView.set(volume);
         
-        // Use price array as output (aliasing)
+        
         wasm.efi_into(pricePtr, volumePtr, pricePtr, len, 13);
         
-        // Read result from the aliased buffer
+        
         const resultView = new Float64Array(wasm.__wasm.memory.buffer, pricePtr, len);
         
-        // The result should be valid EFI values, not corrupted
+        
         assert(!isNaN(resultView[10]), "Aliasing produced NaN at index 10");
         assert(Math.abs(resultView[10]) > 0.001, "Aliasing produced zero");
         
-        // Should still match the regular calculation
+        
         const safeResult = wasm.efi_js(close, volume, 13);
         assertArrayClose(Array.from(resultView), safeResult, 1e-10, "Aliasing result mismatch");
     } finally {
-        // Cleanup
+        
         wasm.efi_free(pricePtr, len);
         wasm.efi_free(volumePtr, len);
     }

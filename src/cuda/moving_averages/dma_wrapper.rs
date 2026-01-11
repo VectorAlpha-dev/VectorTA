@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// -------- Kernel selection policy (mirrors ALMA shape) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -41,7 +41,7 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    // For DMA, tiled means 1D tiling across parameter combos; `tile` = threads/block
+    
     Tiled {
         tile: u32,
         per_thread: BatchThreadsPerOutput,
@@ -52,7 +52,7 @@ pub enum BatchKernelPolicy {
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    // 2D tiled across series; tx is kept for API parity (unused), ty = threads on series
+    
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -71,7 +71,7 @@ impl Default for CudaDmaPolicy {
     }
 }
 
-// -------- Introspection --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -188,16 +188,16 @@ impl CudaDma {
         d_prices_bytes: usize,
         d_prices_ptr: u64,
     ) -> Result<(), CudaDmaError> {
-        // Default-on best-effort: if unsupported, quietly no-op.
+        
         unsafe {
-            // Get current device from context
+            
             let mut dev: cu::CUdevice = 0;
             let rc_dev = cu::cuCtxGetDevice(&mut dev as *mut _);
             if rc_dev != cu::CUresult::CUDA_SUCCESS {
                 return Ok(());
             }
 
-            // Query device caps
+            
             let mut max_persist_bytes: i32 = 0;
             let _ = cu::cuDeviceGetAttribute(
                 &mut max_persist_bytes as *mut i32,
@@ -218,11 +218,11 @@ impl CudaDma {
                 return Ok(());
             }
 
-            // Set context limit (set-aside)
+            
             let set_aside = d_prices_bytes.min(max_persist_bytes as usize);
             let _ = cu::cuCtxSetLimit(cu::CUlimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, set_aside);
 
-            // Configure stream access policy window
+            
             let mut apw: cu::CUaccessPolicyWindow = zeroed();
             apw.base_ptr = d_prices_ptr as usize as *mut c_void;
             apw.num_bytes = d_prices_bytes.min(max_window as usize);
@@ -282,7 +282,7 @@ impl CudaDma {
         }
     }
 
-    // ---------- Utilities ----------
+    
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -315,7 +315,7 @@ impl CudaDma {
         })
     }
 
-    // ---------- Public API: one-series × many-params ----------
+    
 
     /// Host input → VRAM output; batches parameter combos. Parallelizes across combos.
     pub fn dma_batch_dev(
@@ -402,7 +402,7 @@ impl CudaDma {
         )
     }
 
-    // ---------- Public API: many-series × one-param (time-major) ----------
+    
 
     /// Device path for many-series one-param.
     pub fn dma_many_series_one_param_device(
@@ -507,7 +507,7 @@ impl CudaDma {
         Ok(())
     }
 
-    // ---------- Internal runners ----------
+    
 
     fn run_batch_with_prices_host(
         &self,
@@ -539,7 +539,7 @@ impl CudaDma {
         Self::ensure_fit(required, 0)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
-        // Enable L2 persisting cache hint for prices (best-effort)
+        
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
@@ -579,7 +579,7 @@ impl CudaDma {
         max_sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaDmaError> {
         let n_combos = combos.len();
-        // VRAM check: output + parameter vectors + headroom (input already resident)
+        
         let out_elems = n_combos
             .checked_mul(series_len)
             .ok_or_else(|| CudaDmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -624,7 +624,7 @@ impl CudaDma {
         let d_gains = unsafe { DeviceBuffer::from_slice_async(&gains, &self.stream) }?;
         let d_types = unsafe { DeviceBuffer::from_slice_async(&types, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
-        // Hint L2 persistence for device-resident prices
+        
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
@@ -662,7 +662,7 @@ impl CudaDma {
         max_sqrt_len: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDmaError> {
-        // Prefer 1D tiled across combos when available and combos are large
+        
         let has_tx128 = self
             .module
             .get_function("dma_batch_tiled_f32_tx128")
@@ -815,7 +815,7 @@ impl CudaDma {
             DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e))?
         };
-        // Hint L2 persist for entire slab (time-major)
+        
         let _ = self.maybe_enable_l2_persist_for_prices(
             elems * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
@@ -957,7 +957,7 @@ impl CudaDma {
         Ok(())
     }
 
-    // ---------- Input preparation ----------
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -1230,7 +1230,7 @@ struct BatchInputs {
     max_sqrt_len: usize,
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1247,7 +1247,7 @@ pub mod benches {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let params_bytes = PARAM_SWEEP * 4 * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // plus shared scratch headroom
+        
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {

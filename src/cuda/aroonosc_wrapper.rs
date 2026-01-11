@@ -102,7 +102,7 @@ impl CudaAroonOsc {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/aroonosc_kernel.ptx"));
-        // Prefer context target + O2; retry with simpler options if needed
+        
         let module = Module::from_ptx(
             ptx,
             &[
@@ -148,7 +148,7 @@ impl CudaAroonOsc {
         Ok(())
     }
 
-    // ---------- Batch: one-series × many-params ----------
+    
 
     pub fn aroonosc_batch_dev(
         &self,
@@ -164,7 +164,7 @@ impl CudaAroonOsc {
             .map(|p| p.length.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate with 64 MB headroom
+        
         let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
         let param_bytes = lengths_i32.len().saturating_mul(4);
         let out_bytes = n_combos
@@ -201,7 +201,7 @@ impl CudaAroonOsc {
             &mut d_out,
             avg_len,
         )?;
-        // Ensure producing stream is synchronized before handing off VRAM handle
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Aroonosc { buf: d_out, rows: n_combos, cols: series_len, ctx: self.context.clone(), device_id: self.device_id })
@@ -231,7 +231,7 @@ impl CudaAroonOsc {
         let by = 1u32;
         let bz = 1u32;
 
-        // Optional safety: clamp against device launch limits
+        
         if let Ok(dev) = Device::get_device(self.device_id) {
             use cust::device::DeviceAttribute;
             let max_threads = dev
@@ -289,7 +289,7 @@ impl CudaAroonOsc {
                 .launch(&func, grid, block, 0, args)
                 .map_err(CudaAroonOscError::Cuda)?;
         }
-        // For debug logging parity; print once per process when BENCH_DEBUG=1
+        
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if self.last_batch_block != Some(block_x) {
                 eprintln!("[DEBUG] aroonosc batch block_x={}", block_x);
@@ -305,7 +305,7 @@ impl CudaAroonOsc {
     fn select_block_x_batch(&self, avg_len: f32) -> u32 {
         if let BatchKernelPolicy::OneD { block_x } = self.policy.batch {
             if block_x > 0 {
-                // Ensure at least one full warp and round to 32-multiple
+                
                 return ((block_x + 31) / 32) * 32;
             }
         }
@@ -374,7 +374,7 @@ impl CudaAroonOsc {
         Ok((combos, first_valid, len))
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
 
     pub fn aroonosc_many_series_one_param_time_major_dev(
         &self,
@@ -396,7 +396,7 @@ impl CudaAroonOsc {
             return Err(CudaAroonOscError::InvalidInput("shape mismatch".into()));
         }
 
-        // first_valid per series (time-major layout)
+        
         let mut first_valids: Vec<i32> = vec![0; rows];
         for s in 0..rows {
             let mut fv = -1i32;
@@ -412,7 +412,7 @@ impl CudaAroonOsc {
             first_valids[s] = fv.max(0);
         }
 
-        // VRAM estimate (64 MB headroom)
+        
         let in_bytes = high_tm_f32.len().saturating_mul(4)
             + low_tm_f32.len().saturating_mul(4);
         let fv_bytes = first_valids.len().saturating_mul(4);
@@ -442,7 +442,7 @@ impl CudaAroonOsc {
             length as i32,
             &mut d_out,
         )?;
-        // Ensure producing stream is synchronized before handing off VRAM handle
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Aroonosc { buf: d_out, rows, cols, ctx: self.context.clone(), device_id: self.device_id })
@@ -536,7 +536,7 @@ impl CudaAroonOsc {
         Ok(())
     }
 
-    // Convenience: copy device output to host slice (FP32)
+    
     pub fn aroonosc_batch_into_host_f32(
         &self,
         high_f32: &[f32],
@@ -557,7 +557,7 @@ impl CudaAroonOsc {
                 expected
             )));
         }
-        // VRAM estimate (64 MB headroom)
+        
         let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
         let param_bytes = combos.len().saturating_mul(4);
         let out_bytes = expected
@@ -597,7 +597,7 @@ impl CudaAroonOsc {
             &mut d_out,
             avg_len,
         )?;
-        // Ensure the kernel finished, then single D2H copy
+        
         self.stream.synchronize().map_err(CudaAroonOscError::Cuda)?;
         d_out.copy_to(out).map_err(CudaAroonOscError::Cuda)?;
         Ok((combos.len(), series_len, combos))
@@ -625,7 +625,7 @@ impl CudaAroonOsc {
             )));
         }
 
-        // VRAM estimate (64 MB headroom)
+        
         let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
         let param_bytes = combos.len().saturating_mul(4);
         let out_bytes = expected
@@ -702,7 +702,7 @@ fn expand_lengths(range: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, Cud
     Ok(v.into_iter().map(|l| AroonOscParams { length: Some(l) }).collect())
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -712,7 +712,7 @@ pub mod benches {
     const PARAM_SWEEP: usize = 128;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 2 * ONE_SERIES_LEN * 4; // high+low
+        let in_bytes = 2 * ONE_SERIES_LEN * 4; 
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4;
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

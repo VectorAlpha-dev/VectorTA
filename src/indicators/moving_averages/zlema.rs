@@ -47,7 +47,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::JsValue;
 
-// Python CUDA handle for ZLEMA: keeps CUDA context alive and exposes CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -379,12 +379,12 @@ pub fn zlema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
     for i in first..len {
         if i > first {
             // For de-lagging, we need to ensure we're not accessing NaN values
-            // We can only de-lag if we have enough valid history
+            
             let val = if i < first + lag {
-                // Not enough valid history for de-lagging, use regular value
+                
                 data[i]
             } else {
-                // Apply de-lagging formula
+                
                 2.0 * data[i] - data[i - lag]
             };
             last_ema = alpha * val + (1.0 - alpha) * last_ema;
@@ -412,7 +412,7 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         unsafe { *out.get_unchecked_mut(first) = last_ema };
     }
 
-    // Phase A: scalar
+    
     let mut i = first + 1;
     let phase_a_end = if lag > 0 {
         core::cmp::min(len, first + lag)
@@ -430,7 +430,7 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
     }
 
-    // Phase B: vectorized de-lagging
+    
     let start_b = if lag > 0 {
         first + lag
     } else {
@@ -454,7 +454,7 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             {
                 let j = i;
                 let v = *tmp.get_unchecked(0);
-                // FMA form: last += alpha * (v - last)
+                
                 last_ema = (v - last_ema).mul_add(alpha, last_ema);
                 if j >= warm {
                     *out.get_unchecked_mut(j) = last_ema;
@@ -504,7 +504,7 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn zlema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // AVX512 path delegates to AVX2 FMA variant to keep behavior consistent
+    
     zlema_avx2(data, period, first, out)
 }
 
@@ -537,16 +537,16 @@ pub fn zlema_row_scalar(
 
     let mut last_ema = data[first];
 
-    // Process all values starting from first
+    
     for i in first..len {
         if i > first {
-            // For de-lagging, we need to ensure we're not accessing NaN values
-            // We can only de-lag if we have enough valid history
+            
+            
             let val = if i < first + lag {
-                // Not enough valid history for de-lagging, use regular value
+                
                 data[i]
             } else {
-                // Apply de-lagging formula
+                
                 2.0 * data[i] - data[i - lag]
             };
             last_ema = alpha * val + (1.0 - alpha) * last_ema;
@@ -615,19 +615,19 @@ pub fn zlema_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct ZlemaStream {
-    // configuration
+    
     period: usize,
     lag: usize,
     alpha: f64,
-    decay: f64, // 1 - alpha
+    decay: f64, 
 
-    // state
-    last_ema: f64, // current EMA state (NaN until first finite)
+    
+    last_ema: f64, 
     ring: Vec<f64>,
-    head: usize,              // write index in ring [0 .. ring.len())
-    idx: usize,               // total samples seen since construction (absolute index)
-    first_idx: Option<usize>, // absolute index of first non-NaN sample
-    warm_idx: Option<usize>,  // absolute index where outputs become valid: first + period - 1
+    head: usize,              
+    idx: usize,               
+    first_idx: Option<usize>, 
+    warm_idx: Option<usize>,  
 }
 
 impl ZlemaStream {
@@ -643,8 +643,8 @@ impl ZlemaStream {
         let lag = (period - 1) / 2;
         let alpha = 2.0 / (period as f64 + 1.0);
 
-        // ring holds the last (lag + 1) raw inputs (including NaN), which is the
-        // minimum needed to access x[t - lag] at any time t without modulo.
+        
+        
         let ring_len = (lag + 1).max(1);
         Ok(Self {
             period,
@@ -667,51 +667,51 @@ impl ZlemaStream {
     ///   - any NaN taints EMA forever (as in batch)
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // 0) write new sample into the ring at current head
+        
         let pos = self.head;
         self.ring[pos] = x;
-        // advance head with a single predictable branch (no %)
+        
         self.head += 1;
         if self.head == self.ring.len() {
             self.head = 0;
         }
 
-        // 1) capture absolute index for this sample
+        
         let i = self.idx;
-        // wrapping add to avoid potential overflow panics on extremely long runs
+        
         self.idx = self.idx.wrapping_add(1);
 
-        // 2) NaN handling: preserve batch semantics
+        
         if x.is_nan() {
-            // Any NaN encountered makes EMA NaN permanently in the batch algorithm.
+            
             self.last_ema = f64::NAN;
-            // warm decision uses absolute warm index if we have one
+            
             return match self.warm_idx {
                 Some(w) if i >= w => Some(self.last_ema),
                 _ => None,
             };
         }
 
-        // 3) initialize on the first finite sample (exactly like batch)
+        
         if self.first_idx.is_none() {
             self.first_idx = Some(i);
-            // warm index is now known
+            
             let w = i + (self.period - 1);
             self.warm_idx = Some(w);
-            // first EMA sample is the raw first value (no recurrence)
+            
             self.last_ema = x;
 
             return if i >= w { Some(self.last_ema) } else { None };
         }
 
-        // 4) compute de-lagged input using absolute gating: i < first + lag ? x : 2x - x[i-lag]
+        
         let first = self.first_idx.unwrap();
         let val = if self.lag == 0 || i < first + self.lag {
             x
         } else {
-            // with ring.len() = lag + 1, the slot holding x[i - lag] is:
-            //  - pos >= lag : pos - lag
-            //  - else       : pos + 1   (since ring_len - lag == 1)
+            
+            
+            
             let lag_pos = if pos >= self.lag {
                 pos - self.lag
             } else {
@@ -721,11 +721,11 @@ impl ZlemaStream {
             2.0 * x - x_lag
         };
 
-        // 5) standard EMA recurrence (no FMA to match batch/scalar exactly)
-        // last = alpha * val + (1 - alpha) * last
+        
+        
         self.last_ema = self.alpha * val + self.decay * self.last_ema;
 
-        // 6) warm gate using absolute warm index
+        
         match self.warm_idx {
             Some(w) if i >= w => Some(self.last_ema),
             _ => None,
@@ -792,19 +792,19 @@ pub fn zlema_batch_with_kernel(
     sweep: &ZlemaBatchRange,
     k: Kernel,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
-    // Auto-map non-batch kernels to their batch equivalents for better UX
+    
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::Scalar => Kernel::ScalarBatch,
         Kernel::Avx2 => Kernel::Avx2Batch,
         Kernel::Avx512 => Kernel::Avx512Batch,
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch, // Fallback for any unknown kernels
+        _ => Kernel::ScalarBatch, 
     };
 
-    // Disable SIMD for batch: ZLEMA is sequential and period-varying; negligible wins observed
-    // and AVX-512 downclock can dominate. Keep the kernel parameter for API parity but execute
-    // the scalar batch path.
+    
+    
+    
     let kernel = match kernel {
         Kernel::Avx512Batch | Kernel::Avx2Batch => Kernel::ScalarBatch,
         other => other,
@@ -846,7 +846,7 @@ fn expand_grid(r: &ZlemaBatchRange) -> Vec<ZlemaParams> {
                 vals.push(v);
             }
         } else {
-            // Support reversed bounds using descending sequence
+            
             let mut v = start;
             loop {
                 vals.push(v);
@@ -895,7 +895,7 @@ fn zlema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
-    // Select batch kernel (require batch or Auto)
+    
     let simd = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -907,7 +907,7 @@ fn zlema_batch_inner(
         other => return Err(ZlemaError::InvalidKernelForBatch(other)),
     };
 
-    // grid
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
@@ -930,12 +930,12 @@ fn zlema_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    // checked multiplication for allocation sizes
+    
     let _cap = rows
         .checked_mul(cols)
         .ok_or(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    // allocate uninit and stamp only warm prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -943,12 +943,12 @@ fn zlema_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // reinterpret once
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // write rows without touching the warm prefix
+    
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = combos[row].period.unwrap();
         match simd {
@@ -976,7 +976,7 @@ fn zlema_batch_inner(
         }
     }
 
-    // move out the flat f64 buffer safely
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1007,7 +1007,7 @@ pub fn zlema_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ZlemaParams>, ZlemaError> {
-    // Select batch kernel (require batch or Auto)
+    
     let simd = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1048,7 +1048,7 @@ pub fn zlema_batch_inner_into(
         return Err(ZlemaError::OutputLengthMismatch { expected: total, got: out.len() });
     }
 
-    // Reinterpret the target as MaybeUninit and stamp ONLY warm prefixes once.
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1058,7 +1058,7 @@ pub fn zlema_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Now write rows beyond warm
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let dst = unsafe {
@@ -1192,9 +1192,9 @@ mod tests {
         let second_input = ZlemaInput::from_slice(&first_result.values, second_params);
         let second_result = zlema_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), first_result.values.len());
-        // First result has warmup at index 20 (period 21 - 1)
-        // So second calculation starts from index 20 and has warmup at 20 + 14 - 1 = 33
-        // Values should be valid from index 33 onwards
+        
+        
+        
         for (idx, &val) in second_result.values.iter().enumerate().skip(34) {
             assert!(val.is_finite(), "NaN found at index {}", idx);
         }
@@ -1265,7 +1265,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_zlema_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1273,8 +1273,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to catch uninitialized memory reads
-        // Include edge cases like odd/even periods, small and large values
+        
+        
         let test_periods = vec![1, 2, 3, 5, 7, 10, 14, 20, 21, 30, 50, 100, 200];
 
         for period in test_periods {
@@ -1283,23 +1283,23 @@ mod tests {
             };
             let input = ZlemaInput::from_candles(&candles, "close", params);
 
-            // Skip if period is too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = zlema_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1307,7 +1307,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1315,7 +1315,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1328,7 +1328,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_zlema_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1343,8 +1343,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // ZLEMA only has period parameter, no offset/sigma like ALMA
-        // Strategy: period from 1..=100, then generate matching data
+        
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1366,16 +1366,16 @@ mod tests {
                 let ZlemaOutput { values: ref_out } =
                     zlema_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length should match input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period check
-                // ZLEMA starts calculating from the first non-NaN value, but uses a warmup period
-                // The actual warmup is first + period - 1, where first is the first non-NaN index
+                
+                
+                
                 let first_non_nan = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_non_nan + period - 1;
 
-                // Essential: Values before first_non_nan input must be NaN
+                
                 for i in 0..first_non_nan.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1384,7 +1384,7 @@ mod tests {
                     );
                 }
 
-                // Essential: After warmup period, must have valid calculated values
+                
                 for i in warmup..data.len() {
                     prop_assert!(
                         !out[i].is_nan(),
@@ -1393,21 +1393,21 @@ mod tests {
                     );
                 }
 
-                // Implementation detail: During warmup (first_non_nan..warmup),
-                // the implementation may choose to output NaN or calculated values.
-                // The current implementation produces values, but this is not a requirement.
+                
+                
+                
 
-                // Property 3: De-lagging behavior verification
-                // ZLEMA uses: lag = (period - 1) / 2
-                // de-lagged value = 2.0 * data[i] - data[i - lag]
+                
+                
+                
                 let lag = (period - 1) / 2;
                 let alpha = 2.0 / (period as f64 + 1.0);
 
-                // Property 4: Values should be within reasonable bounds
-                //
-                // ZLEMA is an EMA of a de-lagged input series. EMA is a convex combination of
-                // all previous inputs, so it must stay within the running min/max of that
-                // de-lagged series (up to floating-point rounding).
+                
+                
+                
+                
+                
                 let mut min_delag = f64::INFINITY;
                 let mut max_delag = f64::NEG_INFINITY;
                 for i in first_non_nan..data.len() {
@@ -1432,9 +1432,9 @@ mod tests {
                     }
                 }
 
-                // Property 5: Period=1 edge case
-                // With period=1, lag=0, so de-lagged value = 2*data[i] - data[i] = data[i]
-                // And alpha = 2/2 = 1, so EMA = data[i]
+                
+                
+                
                 if period == 1 && data.len() > 0 {
                     for i in 1..data.len() {
                         let expected = data[i];
@@ -1449,9 +1449,9 @@ mod tests {
                     }
                 }
 
-                // Property 6: Constant data should converge to that constant
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.len() > warmup {
-                    // After sufficient iterations, ZLEMA should converge to the constant value
+                    
                     let constant_val = data[first_non_nan];
                     for i in (warmup + period * 2)..data.len() {
                         prop_assert!(
@@ -1464,13 +1464,13 @@ mod tests {
                     }
                 }
 
-                // Property 7: Cross-kernel validation
-                // Compare against scalar reference implementation
+                
+                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Handle NaN/infinity cases
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -1482,12 +1482,12 @@ mod tests {
                         continue;
                     }
 
-                    // Check ULP difference for finite values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    // ZLEMA is relatively simple, so use tighter ULP tolerance
+                    
                     let max_ulp = if matches!(kernel, Kernel::Avx512) {
                         10
                     } else {
@@ -1563,7 +1563,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1571,20 +1571,20 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple different batch configurations to catch edge cases
-        // ZLEMA uses lag = (period - 1) / 2, so test odd/even periods
+        
+        
         let batch_configs = vec![
-            (1, 10, 1),   // All small periods including edge cases
-            (3, 21, 3),   // Odd periods with gaps
-            (2, 20, 2),   // Even periods
-            (10, 50, 10), // Larger periods
-            (7, 7, 1),    // Single odd period (edge case)
-            (8, 8, 1),    // Single even period (edge case)
-            (5, 100, 5),  // Wide range with step
+            (1, 10, 1),   
+            (3, 21, 3),   
+            (2, 20, 2),   
+            (10, 50, 10), 
+            (7, 7, 1),    
+            (8, 8, 1),    
+            (5, 100, 5),  
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip if the largest period exceeds data length
+            
             if end > c.close.len() {
                 continue;
             }
@@ -1594,9 +1594,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1610,7 +1610,7 @@ mod tests {
                     0
                 };
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1618,7 +1618,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1626,7 +1626,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1639,7 +1639,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1681,8 +1681,8 @@ pub fn zlema_compute_into(
         return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
-    // Initialize the warmup period with the same quiet-NaN pattern used by Vec API
-    // to preserve exact warmup semantics/parity.
+    
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
@@ -1693,7 +1693,7 @@ pub fn zlema_compute_into(
         other => other,
     };
 
-    // Write directly into the provided buffer
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1725,7 +1725,7 @@ pub fn zlema_into_slice(
     if dst.len() != data.len() {
         return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
-    // Initialize only the prefix, zero-copy style, with quiet-NaN to match Vec API
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
         *v = qnan;
@@ -1755,7 +1755,7 @@ pub fn zlema_into_slice(
 /// - Uses the same kernel-selection semantics as `zlema()` (Auto → Scalar for parity).
 #[cfg(not(feature = "wasm"))]
 pub fn zlema_into(input: &ZlemaInput, out: &mut [f64]) -> Result<(), ZlemaError> {
-    // Match `zlema_with_kernel` Auto semantics by forcing Scalar here for parity.
+    
     zlema_compute_into(input, Kernel::Scalar, out)
 }
 
@@ -1769,7 +1769,7 @@ fn eq_or_both_nan(a: f64, b: f64) -> bool {
 #[cfg(not(feature = "wasm"))]
 #[test]
 fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-    // Construct a small but non-trivial input (no leading NaNs; default period = 14)
+    
     let n = 256usize;
     let mut data = Vec::with_capacity(n);
     for i in 0..n {
@@ -1779,10 +1779,10 @@ fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
 
     let input = ZlemaInput::from_slice(&data, ZlemaParams::default());
 
-    // Baseline via existing Vec-returning API
+    
     let baseline = zlema(&input)?.values;
 
-    // Preallocate and compute via new into API
+    
     let mut out = vec![0.0f64; n];
     zlema_into(&input, &mut out)?;
 
@@ -1842,12 +1842,12 @@ pub fn zlema_py<'py>(
     };
     let zlema_in = ZlemaInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| zlema_with_kernel(&zlema_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1910,21 +1910,21 @@ pub fn zlema_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
+    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let combos = py
         .allow_threads(|| zlema_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
@@ -2037,7 +2037,7 @@ pub fn zlema_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     zlema_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2147,7 +2147,7 @@ pub fn zlema_into(
         let input = ZlemaInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check - handle in-place operations
+            
             let mut temp = vec![0.0; len];
             zlema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

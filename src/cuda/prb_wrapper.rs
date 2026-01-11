@@ -87,8 +87,8 @@ impl CudaPrb {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"));
-        // Let the JIT run at its default maximum optimization and
-        // target the active context's architecture.
+        
+        
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -153,7 +153,7 @@ impl CudaPrb {
         }
     }
 
-    // -------- Helpers --------
+    
     fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaPrbError> {
         let (s, e, st) = a;
         if st == 0 || s == e {
@@ -279,7 +279,7 @@ impl CudaPrb {
         let mut y2 = f32::NAN;
         for i in first..len {
             let x = data[i];
-            // Pine fallback: prev1 = nz(y1, x); prev2 = nz(y2, nz(y1, x))
+            
             let prev1 = if y1.is_nan() { x } else { y1 };
             let prev2 = if y2.is_nan() { prev1 } else { y2 };
             let y = c1 * x + c2 * prev1 + c3 * prev2;
@@ -305,11 +305,11 @@ impl CudaPrb {
     }
 
     fn build_a_inv(n: usize, k: usize) -> Vec<f32> {
-        // Build normal matrix A (m x m), then invert with Gauss-Jordan (double), return row-major f32.
+        
         let m = k + 1;
         let max_m = 8usize;
         let mut a = vec![0.0f64; m * m];
-        // Power sums Sx[p] for p in 0..=2k
+        
         let mut sx = vec![0.0f64; 2 * k + 1];
         for j in 1..=n {
             let jf = j as f64;
@@ -325,7 +325,7 @@ impl CudaPrb {
                 a[i * m + j] = sx[i + j];
             }
         }
-        // Augment with identity
+        
         let mut aug = vec![0.0f64; m * 2 * m];
         for r in 0..m {
             for c in 0..m {
@@ -334,7 +334,7 @@ impl CudaPrb {
             aug[r * (2 * m) + (m + r)] = 1.0;
         }
         for i in 0..m {
-            // pivot
+            
             let mut piv = i;
             let mut best = aug[i * (2 * m) + i].abs();
             for r in (i + 1)..m {
@@ -367,7 +367,7 @@ impl CudaPrb {
                 }
             }
         }
-        let mut inv = vec![0.0f32; max_m * max_m]; // pad to max stride expected by kernels
+        let mut inv = vec![0.0f32; max_m * max_m]; 
         for r in 0..m {
             for c in 0..m {
                 inv[r * max_m + c] = aug[r * (2 * m) + (m + c)] as f32;
@@ -392,7 +392,7 @@ impl CudaPrb {
             .ok_or_else(|| CudaPrbError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep, smooth_data)?;
 
-        // Validate params; collect unique (n,k) and unique smooth_period
+        
         let mut uniq_nk: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut uniq_sp: BTreeSet<usize> = BTreeSet::new();
         for c in &combos {
@@ -408,12 +408,12 @@ impl CudaPrb {
                 uniq_sp.insert(c.smooth_period.unwrap_or(10));
             }
         }
-        // Precompute A^{-1} per (n,k)
+        
         let mut a_inv_map: BTreeMap<(usize, usize), Vec<f32>> = BTreeMap::new();
         for &(n, k) in &uniq_nk {
             a_inv_map.insert((n, k), Self::build_a_inv(n, k));
         }
-        // Prepare groups by smooth_period
+        
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         if smooth_data {
             for (idx, c) in combos.iter().enumerate() {
@@ -424,7 +424,7 @@ impl CudaPrb {
             groups.insert(0, (0..combos.len()).collect());
         }
 
-        // Allocate output buffers on device once
+        
         let total_elems = combos
             .len()
             .checked_mul(len)
@@ -451,24 +451,24 @@ impl CudaPrb {
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
-        // Persistent device staging (reused per group)
+        
         let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-        // Keep pinned host buffers alive until the final synchronize()
-        // to satisfy async copy lifetime guarantees for page-locked memory.
+        
+        
         let mut h_src_keepalive: Vec<LockedBuffer<f32>> = Vec::new();
         let mut h_contig_keepalive: Vec<LockedBuffer<i32>> = Vec::new();
 
-        // For each smoothing group: build source, contig, and rows slice; then launch
-        // Keep device parameter buffers alive until the final synchronize
+        
+        
         let mut keep_periods: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_orders: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_offsets: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_ainv: Vec<DeviceBuffer<f32>> = Vec::new();
         let mut keep_rowmap: Vec<DeviceBuffer<i32>> = Vec::new();
         for (sp, rows_idx) in groups.iter() {
-            // Build source series (possibly smoothed)
+            
             let source: Vec<f32> = if smooth_data {
                 Self::ssf_filter_f32(data_f32, *sp, first_valid)
             } else {
@@ -478,11 +478,11 @@ impl CudaPrb {
             let contig = if smooth_data {
                 Self::contig_valid(&source)
             } else {
-                // avoid recomputing from a cloned vector; compute directly on original input
+                
                 Self::contig_valid(data_f32)
             };
 
-            // H2D for this group using pinned host buffers for async copies
+            
             let h_src = LockedBuffer::from_slice(&source)?;
             let h_contig = LockedBuffer::from_slice(&contig)?;
             unsafe {
@@ -493,11 +493,11 @@ impl CudaPrb {
                     .async_copy_from(h_contig.as_slice(), &self.stream)
                     ?;
             }
-            // keep pinned buffers alive until final stream synchronize
+            
             h_src_keepalive.push(h_src);
             h_contig_keepalive.push(h_contig);
 
-            // Row-wise parameters for this group
+            
             let mut periods: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let mut orders: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let mut offsets: Vec<i32> = Vec::with_capacity(rows_idx.len());
@@ -523,7 +523,7 @@ impl CudaPrb {
             let d_ainv = DeviceBuffer::from_slice(&a_invs)?;
             let d_rowmap = DeviceBuffer::from_slice(&row_map)?;
 
-            // Launch kernel: grid.y chunking to <= 65535
+            
             const PRB_BATCH_CHUNK_LEN: usize = 4096;
             let use_chunked = matches!(self.policy.batch, BatchKernelPolicy::Auto) && !has_nan_after_first;
             let (func, block_x, grid_x): (Function, u32, u32) = if use_chunked {
@@ -565,7 +565,7 @@ impl CudaPrb {
                 });
             }
 
-            const MAX_GRID_Y: usize = 65_535; // y/z limited to 65,535
+            const MAX_GRID_Y: usize = 65_535; 
             let mut start = 0usize;
             while start < rows_idx.len() {
                 let chunk = (rows_idx.len() - start).min(MAX_GRID_Y);
@@ -594,7 +594,7 @@ impl CudaPrb {
                         .wrapping_add((start * ainv_stride_elems * std::mem::size_of::<f32>()) as u64);
                     let mut stride_i = ainv_stride_elems as i32;
                     let mut p_contig = d_contig.as_device_ptr().as_raw();
-                    let mut ndev_f = 2.0f32; // fixed for batch (as in CPU batch grid)
+                    let mut ndev_f = 2.0f32; 
                     let mut p_rowmap = d_rowmap
                         .as_device_ptr()
                         .as_raw()
@@ -624,16 +624,16 @@ impl CudaPrb {
                 }
                 start += chunk;
             }
-            // Move device param buffers into keepalive vectors so they outlive the in-flight kernels
+            
             keep_periods.push(d_periods);
             keep_orders.push(d_orders);
             keep_offsets.push(d_offsets);
             keep_ainv.push(d_ainv);
             keep_rowmap.push(d_rowmap);
-            // no per-group synchronize; stream ordering preserves correctness
+            
         }
 
-        // Single end-of-path synchronize; safe to drop pinned keepalive buffers afterwards
+        
         self.stream.synchronize()?;
         drop(h_src_keepalive);
         drop(h_contig_keepalive);
@@ -681,7 +681,7 @@ impl CudaPrb {
                 "invalid regression_period".into(),
             ));
         }
-        // Per-column first_valid
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -699,7 +699,7 @@ impl CudaPrb {
                 }
             }
         }
-        // Host smoothing (single smooth_period per call)
+        
         let smooth = params.smooth_data.unwrap_or(true);
         let sp = params.smooth_period.unwrap_or(10);
         let mut sm_tm = vec![f32::NAN; elems];
@@ -709,7 +709,7 @@ impl CudaPrb {
                 if fv < 0 {
                     continue;
                 }
-                // gather column
+                
                 let mut col = vec![f32::NAN; rows];
                 for t in 0..rows {
                     col[t] = data_tm_f32[t * cols + s];
@@ -740,7 +740,7 @@ impl CudaPrb {
         };
 
         let ainv = Self::build_a_inv(n, k);
-        // Use pinned+async copies for the big time-major grids
+        
         let mut d_prices_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_contig_tm: DeviceBuffer<i32> =
@@ -848,7 +848,7 @@ impl CudaPrb {
     }
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1115,7 +1115,7 @@ pub mod benches {
         let off = params.regression_offset.unwrap_or(0);
         let ndev = params.ndev.unwrap_or(2.0) as f32;
 
-        // Per-column first_valid and contig (no smoothing in this bench).
+        
         let elems = cols.checked_mul(rows).expect("cols*rows overflow");
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {

@@ -1,14 +1,14 @@
-// CUDA integration tests for MSW (Mesa Sine Wave)
 
-use my_project::indicators::msw::{
+
+use vector_ta::indicators::msw::{
     msw_batch_with_kernel, msw_with_kernel, MswBatchRange, MswInput, MswParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaMsw};
+use vector_ta::cuda::{cuda_available, CudaMsw};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -56,11 +56,11 @@ fn msw_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
 
-    // Compare row by row (GPU rows: 2 per period -> sine, lead)
-    let tol = 1.5e-3; // f32 vs f64 allowance
+    
+    let tol = 1.5e-3; 
     for (r, prm) in combos.iter().enumerate() {
         let base = r * cpu.cols;
-        // GPU sine and lead rows
+        
         let g_sine = &out[(2 * r) * cpu.cols..(2 * r + 1) * cpu.cols];
         let g_lead = &out[(2 * r + 1) * cpu.cols..(2 * r + 2) * cpu.cols];
         let c_sine = &cpu.sine[base..base + cpu.cols];
@@ -94,19 +94,19 @@ fn msw_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[msw_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; // number of series
-    let rows = 1024usize; // timesteps
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            // stagger validity
+            
             let x = (t as f64) + (s as f64) * 0.25;
             price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 21usize;
 
-    // CPU baseline per series
+    
     let mut cpu_sine_tm = vec![f64::NAN; cols * rows];
     let mut cpu_lead_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -124,7 +124,7 @@ fn msw_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaMsw::new(0).expect("CudaMsw::new");
     let dev = cuda

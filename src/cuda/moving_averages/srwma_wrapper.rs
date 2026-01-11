@@ -24,7 +24,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::ffi::CString;
-// no Display impl; keep errors via thiserror
+
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -121,7 +121,7 @@ struct PreparedSrwmaManySeries {
 }
 
 impl CudaSrwma {
-    // ----- Helpers: dynamic shared memory sizing, attributes, occupancy -----
+    
     #[inline]
     fn dyn_smem_bytes_batch(block_x: u32, max_wlen: usize) -> u32 {
         let floats = max_wlen + (block_x as usize + max_wlen - 1);
@@ -292,7 +292,7 @@ impl CudaSrwma {
         }
     }
 
-    // VRAM helpers
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -330,7 +330,7 @@ impl CudaSrwma {
     ) -> Result<DeviceArrayF32Srwma, CudaSrwmaError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
-        // VRAM estimate (prices + weights + periods + warm + inv + out) with checked arithmetic
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let prices_bytes = prepared
@@ -365,7 +365,7 @@ impl CudaSrwma {
             .and_then(|x| x.checked_add(inv_bytes))
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSrwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
             return Err(CudaSrwmaError::OutOfMemory { required, free, headroom });
@@ -485,7 +485,7 @@ impl CudaSrwma {
     ) -> Result<DeviceArrayF32Srwma, CudaSrwmaError> {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
-        // VRAM estimate (prices + first_valids + weights + out) with checked arithmetic
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let prices_bytes = num_series
@@ -509,7 +509,7 @@ impl CudaSrwma {
             .and_then(|x| x.checked_add(weights_bytes))
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSrwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; // 32MB
+        let headroom = 32 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
             return Err(CudaSrwmaError::OutOfMemory { required, free, headroom });
@@ -528,7 +528,7 @@ impl CudaSrwma {
                 .map_err(CudaSrwmaError::from)?
         };
 
-        // If constant-memory weights are available in the compiled module, upload once.
+        
         if let Ok(mut sym) = self
             .module
             .get_global::<[f32; 4096]>(&CString::new("srwma_const_w").unwrap())
@@ -537,7 +537,7 @@ impl CudaSrwma {
             let wlen = prepared.weights.len().min(4096);
             buf[..wlen].copy_from_slice(&prepared.weights[..wlen]);
             sym.copy_from(&buf).map_err(CudaSrwmaError::from)?;
-            // Kernel ignores the weights pointer in const-weight variant; safe to keep passing it.
+            
         }
 
         self.launch_many_series_kernel(
@@ -629,7 +629,7 @@ impl CudaSrwma {
             series_len,
             params,
         )?;
-        // Ensure prior async work is complete before host copy
+        
         self.stream
             .synchronize()
             .map_err(|e| CudaSrwmaError::Cuda(e.to_string()))?;
@@ -651,7 +651,7 @@ impl CudaSrwma {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSrwmaError> {
-        // Policy: Plain only (no tiled variants for SRWMA). Allow block size override.
+        
         let mut block_x: u32 = 128;
         if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch {
             block_x = bx.max(1);
@@ -662,7 +662,7 @@ impl CudaSrwma {
             Err(_) => return Err(CudaSrwmaError::MissingKernelSymbol { name: "srwma_batch_f32" }),
         };
 
-        // Decide block size: Auto uses occupancy with dynamic smem footprint
+        
         let mut block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
             BatchKernelPolicy::Auto => {
@@ -671,7 +671,7 @@ impl CudaSrwma {
             _ => 256,
         };
 
-        // Compute/fit dynamic shared memory; opt-in for >48KiB
+        
         let mut shared_bytes = Self::dyn_smem_bytes_batch(block_x, max_wlen);
         if let Ok(dev) = Device::get_device(self.device_id) {
             if let Ok(max_optin) = dev.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock) {
@@ -685,7 +685,7 @@ impl CudaSrwma {
         Self::prefer_shared(&mut func)?;
 
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        // Validate against device attributes
+        
         if let Ok(dev) = Device::get_device(self.device_id) {
             if let (Ok(max_b), Ok(max_gx), Ok(max_gy), Ok(max_gz)) = (
                 dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock),
@@ -758,7 +758,7 @@ impl CudaSrwma {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSrwmaError> {
-        // OneD policy only (no tiled 2D variant provided for SRWMA)
+        
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -794,7 +794,7 @@ impl CudaSrwma {
         Self::opt_in_dynamic_smem(&func, shared_bytes)?;
         Self::prefer_shared(&mut func)?;
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
-        // Validate against device attributes
+        
         if let Ok(dev) = Device::get_device(self.device_id) {
             if let (Ok(max_b), Ok(max_gx), Ok(max_gy), Ok(max_gz)) = (
                 dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock),
@@ -999,7 +999,7 @@ impl CudaSrwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

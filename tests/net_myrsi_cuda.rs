@@ -1,17 +1,17 @@
-// CUDA integration tests for NET MyRSI
 
-use my_project::indicators::net_myrsi::{
+
+use vector_ta::indicators::net_myrsi::{
     net_myrsi_batch_with_kernel, net_myrsi_with_kernel, NetMyrsiBatchRange, NetMyrsiInput,
     NetMyrsiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaNetMyrsi;
+use vector_ta::cuda::CudaNetMyrsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -40,7 +40,7 @@ fn net_myrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut data = vec![f64::NAN; len];
     for i in 6..len {
         let x = i as f64;
-        // Inject a few NaNs to exercise handling
+        
         data[i] = (x * 0.00071).sin() + 0.0003 * (i % 11) as f64;
         if i % 997 == 0 {
             data[i] = f64::NAN;
@@ -68,7 +68,7 @@ fn net_myrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut gpu = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu)?;
 
-    let tol = 1e-3; // recurrence path; small FP32 differences are expected
+    let tol = 1e-3; 
     for (idx, (&a, &b)) in cpu.values.iter().zip(gpu.iter()).enumerate() {
         assert!(
             approx_eq(a, b as f64, tol),
@@ -102,7 +102,7 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let data_tm32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    // CPU per-series baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     let p = NetMyrsiParams { period: Some(14) };
     for s in 0..cols {

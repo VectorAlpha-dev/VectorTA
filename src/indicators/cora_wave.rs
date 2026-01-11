@@ -301,7 +301,7 @@ pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), Cora
         return Err(CoraWaveError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
-    // Prefill warmup prefix with quiet-NaNs to match alloc_with_nan_prefix behavior
+    
     let warm = first + weights.len() - 1 + smooth_period.saturating_sub(1);
     let warm = warm.min(out.len());
     if warm > 0 {
@@ -311,7 +311,7 @@ pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), Cora
         }
     }
 
-    // Compute into the provided buffer
+    
     cora_wave_compute_into(
         data,
         &weights,
@@ -852,7 +852,7 @@ impl CoraWaveStream {
         // a_old := "a" in the recurrence; here it's simply start_wt
         let a_old = start_wt;
 
-        // base^p and final weight on newest element when window is full
+        
         let base_pow_p = if (base - 1.0).abs() < 1e-16 {
             1.0
         } else {
@@ -860,19 +860,19 @@ impl CoraWaveStream {
         };
         let w_last = a_old * base_pow_p;
 
-        // geometric series: sum_{j=0}^{p-1} start_wt * base^(j+1)
+        
         let weight_sum = if (base - 1.0).abs() < 1e-16 {
-            // r_multi == 0 ⇒ base == 1 ⇒ all weights equal to start_wt
+            
             a_old * (p as f64)
         } else {
             a_old * base * (base_pow_p - 1.0) / (base - 1.0)
         };
         let inv_wsum = 1.0 / weight_sum;
 
-        // ----- WMA fixed denominator -----
+        
         let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
-        // Default behavior: keep exact WMA numerics (same order as scalar path).
+        
         const FAST_WMA_O1_DEFAULT: bool = false;
 
         Ok(Self {
@@ -904,25 +904,25 @@ impl CoraWaveStream {
     /// Push one value. Returns Some(value) when warm-up is complete, else None.
     #[inline]
     pub fn update(&mut self, x_new: f64) -> Option<f64> {
-        // write new sample into ring_x; remember outgoing when the window is full
+        
         let pos = self.head_x;
         let x_old = self.ring_x[pos];
         self.ring_x[pos] = x_new;
         self.head_x = (pos + 1) % self.period;
         self.idx += 1;
 
-        // Build initial S when the window first fills
+        
         if !self.have_S {
             if self.idx < self.period {
                 return None;
             }
-            // idx == period here: compute initial dot product S = Σ w_j * x_{oldest..newest}
-            //   oldest is at head_x, newest at head_x+(p-1)
+            
+            
             let mut S = 0.0;
-            let mut w = self.a_old * self.base; // start_wt * base^(0+1)
+            let mut w = self.a_old * self.base; 
             let mut i = 0usize;
             while i < self.period {
-                // chronological order: oldest..newest
+                
                 let xi = self.ring_x[(self.head_x + i) % self.period];
                 S = xi.mul_add(w, S);
                 w *= self.base;
@@ -931,63 +931,63 @@ impl CoraWaveStream {
             self.S = S;
             self.have_S = true;
 
-            // First CoRa output
+            
             let y = self.S * self.inv_wsum;
             if self.m == 1 {
                 return Some(y);
             }
-            // store for smoothing warm-up
+            
             self.ring_y[self.y_count] = y;
             self.y_count += 1;
-            // next write position advances accordingly
+            
             self.head_y = self.y_count % self.m;
             if self.fast_smooth {
                 self.Ssum_y += y;
-                self.Wsum_y += (self.y_count as f64) * y; // weights 1..k during warm-up
+                self.Wsum_y += (self.y_count as f64) * y; 
             }
             return None;
         }
 
-        // O(1) CoRa recurrence:
-        // S' = (S / R) - a_old * x_old + (a_old * R^p) * x_new
+        
+        
         self.S = (self.S * self.inv_R) - self.a_old * x_old + self.w_last * x_new;
         let y = self.S * self.inv_wsum;
 
-        // No smoothing?
+        
         if self.m == 1 {
             return Some(y);
         }
 
-        // Smoothing path
+        
         if !self.fast_smooth {
-            // ---- Exact per-emission recompute (matches scalar path numerically) ----
-            // Maintain a ring of last m CoRa values.
+            
+            
             if self.y_count < self.m {
-                // still filling the window
+                
                 self.ring_y[self.head_y] = y;
                 self.head_y = (self.head_y + 1) % self.m;
                 self.y_count += 1;
                 if self.y_count < self.m {
                     return None;
                 }
-                // just reached full window: emit initial WMA
+                
                 let mut acc = 0.0;
                 let mut k = 0usize;
                 while k < self.m {
-                    let idx = (self.head_y + k) % self.m; // oldest..newest
+                    let idx = (self.head_y + k) % self.m; 
                     let v = self.ring_y[idx];
                     acc = v.mul_add((k + 1) as f64, acc);
                     k += 1;
                 }
                 return Some(acc / self.wma_sum);
             } else {
-                // steady-state: overwrite oldest, then compute
+                
                 self.ring_y[self.head_y] = y;
                 self.head_y = (self.head_y + 1) % self.m;
                 let mut acc = 0.0;
                 let mut k = 0usize;
                 while k < self.m {
-                    let idx = (self.head_y + k) % self.m; // oldest..newest
+                    let idx = (self.head_y + k) % self.m; 
                     let v = self.ring_y[idx];
                     acc = v.mul_add((k + 1) as f64, acc);
                     k += 1;
@@ -995,9 +995,9 @@ impl CoraWaveStream {
                 return Some(acc / self.wma_sum);
             }
         } else {
-            // ---- FAST O(1) WMA update ----
+            
             if self.y_count < self.m {
-                // still filling the y-ring
+                
                 self.ring_y[self.y_count] = y;
                 self.y_count += 1;
                 self.Ssum_y += y;
@@ -1005,14 +1005,14 @@ impl CoraWaveStream {
                 if self.y_count < self.m {
                     return None;
                 }
-                // just reached full window: emit initial WMA
+                
                 self.head_y = 0;
                 return Some(self.Wsum_y / self.wma_sum);
             }
 
-            // slide window by 1 in O(1)
+            
             let y_old = self.ring_y[self.head_y];
-            // update weighted sum and simple sum
+            
             self.Wsum_y = self.Wsum_y - self.Ssum_y + (self.m as f64) * y;
             self.ring_y[self.head_y] = y;
             self.Ssum_y = self.Ssum_y + y - y_old;
@@ -1023,7 +1023,7 @@ impl CoraWaveStream {
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct CoraWaveBatchRange {
     pub period: (usize, usize, usize),
@@ -1075,7 +1075,7 @@ fn axis_usize((s, e, t): (usize, usize, usize)) -> Result<Vec<usize>, CoraWaveEr
     if s < e {
         v = (s..=e).step_by(t).collect();
     } else if s > e {
-        // reversed bounds: descend by t
+        
         let mut x = s;
         loop {
             v.push(x);
@@ -1085,9 +1085,9 @@ fn axis_usize((s, e, t): (usize, usize, usize)) -> Result<Vec<usize>, CoraWaveEr
             if next < e { break; }
             x = next;
         }
-        // ensure last element is within bounds
+        
         if *v.last().unwrap_or(&s) != e && s >= e {
-            // if we didn't land exactly on e, it's still a valid expansion as long as >= e
+            
         }
     }
     if v.is_empty() {
@@ -1197,7 +1197,7 @@ fn cora_wave_batch_inner(
 
     let cols = data.len();
     if cols == 0 {
-        // Align with ALMA behavior for consistency
+        
         return Err(CoraWaveError::AllValuesNaN);
     }
 
@@ -1213,7 +1213,7 @@ fn cora_wave_batch_inner(
         });
     }
 
-    // Allocate rows×cols uninit and prefill warm prefixes with NaN
+    
     let rows = combos.len();
     let _total = rows
         .checked_mul(cols)
@@ -1234,7 +1234,7 @@ fn cora_wave_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // Prepare flattened per-row weights and inv_sums
+    
     let flat_len = rows
         .checked_mul(max_p)
         .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
@@ -1256,17 +1256,17 @@ fn cora_wave_batch_inner(
 
             let mut sum = 0.0;
             for j in 0..p {
-                // before: (p - j)
+                
                 let w = start_wt * base.powi((j + 1) as i32);
                 flat_w[row * max_p + j] = w;
                 sum += w;
             }
             inv_sums[row] = 1.0 / sum;
         }
-        // trailing region [p..max_p) stays 0.0; never read
+        
     }
 
-    // Write rows in place
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_uninit: &mut [MaybeUninit<f64>] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
@@ -1375,7 +1375,7 @@ pub fn cora_wave_batch_inner_into(
         });
     }
 
-    // Prepare warmup lengths per row
+    
     let warms: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1389,13 +1389,13 @@ pub fn cora_wave_batch_inner_into(
         })
         .collect();
 
-    // Cast user buffer to MaybeUninit and prefill warm prefixes with NaN
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_mu, cols, &warms);
 
-    // Precompute row weights and inv sums
+    
     let flat_len = rows
         .checked_mul(max_p)
         .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
@@ -1416,7 +1416,7 @@ pub fn cora_wave_batch_inner_into(
 
             let mut sum = 0.0;
             for j in 0..p {
-                // before: (p - j)
+                
                 let w = start_wt * base.powi((j + 1) as i32);
                 flat_w[row * max_p + j] = w;
                 sum += w;
@@ -1439,7 +1439,7 @@ pub fn cora_wave_batch_inner_into(
         };
         let w_ptr = flat_w[row * max_p..].as_ptr();
         let inv = inv_sums[row];
-        // Safe to view row as f64 now for writing initialized cells
+        
         let dst: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols) };
         match actual {
@@ -1484,7 +1484,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
     data: &[f64],
     first: usize,
     period: usize,
-    w_ptr: *const f64, // row's weights start
+    w_ptr: *const f64, 
     inv_wsum: f64,
     smooth_period: usize,
     out: &mut [f64],
@@ -1495,7 +1495,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    // No smoothing
+    
     if smooth_period == 1 {
         if p == 1 {
             let warm0 = first;
@@ -1507,12 +1507,12 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        // geometric params
+        
         let w0 = *w_ptr.add(0);
         let w1 = *w_ptr.add(1);
-        let inv_R = w0 / w1; // 1/R
-        let a_old = w0 * inv_R; // a
-        let w_last = *w_ptr.add(p - 1); // a*R^p
+        let inv_R = w0 / w1; 
+        let a_old = w0 * inv_R; 
+        let w_last = *w_ptr.add(p - 1); 
 
         let warm0 = first + p - 1;
         if warm0 >= n {
@@ -1520,7 +1520,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
         }
         let start0 = warm0 + 1 - p;
 
-        // initial dot
+        
         let mut acc0 = 0.0;
         let mut acc1 = 0.0;
         let mut acc2 = 0.0;
@@ -1557,7 +1557,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
 
         *out.get_unchecked_mut(warm0) = S * inv_wsum;
 
-        // stream recurrence
+        
         let mut i = warm0;
         while i + 1 < n {
             let x_old = *data.get_unchecked(i + 1 - p);
@@ -1569,7 +1569,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    // Smoothing path (WMA 1..m) with O(1) updates
+    
     let m = smooth_period;
     let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
@@ -1579,7 +1579,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        // O(1) WMA update with ring buffer
+        
         let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
         let mut fill = 0usize;
 
@@ -1596,7 +1596,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        // Seed sums
+        
         let mut Ssum = 0.0;
         let mut Wsum = 0.0;
         for k in 0..m {
@@ -1624,12 +1624,12 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    // p >= 2
+    
     let w0 = *w_ptr.add(0);
     let w1 = *w_ptr.add(1);
-    let inv_R = w0 / w1; // 1/R
-    let a_old = w0 * inv_R; // a
-    let w_last = *w_ptr.add(p - 1); // a*R^p
+    let inv_R = w0 / w1; 
+    let a_old = w0 * inv_R; 
+    let w_last = *w_ptr.add(p - 1); 
 
     let warm0 = first + p - 1;
     if warm0 >= n {
@@ -1637,7 +1637,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
     }
     let start0 = warm0 + 1 - p;
 
-    // Initial dot
+    
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     let mut acc2 = 0.0;
@@ -1671,7 +1671,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
         j += 1;
     }
 
-    // WMA ring for CoRa(y) with O(1) update
+    
     let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
     let mut fill = 0usize;
 
@@ -1694,7 +1694,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    // Seed sums
+    
     let mut Ssum = 0.0;
     let mut Wsum = 0.0;
     for k in 0..m {
@@ -1705,7 +1705,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
     let mut head = 0usize;
     *out.get_unchecked_mut(warm_total) = Wsum / wma_sum;
 
-    // Stream forward
+    
     while i + 1 < n {
         let x_old = *data.get_unchecked(i + 1 - p);
         let x_new = *data.get_unchecked(i + 1);
@@ -1873,7 +1873,7 @@ pub fn cora_wave_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // 1D buffer, we will reshape in Python without copying
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -1916,7 +1916,7 @@ pub fn cora_wave_batch_py<'py>(
     Ok(dict)
 }
 
-// ------------------------- Python CUDA bindings ----------------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cora_wave_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, r_multi_range=(2.0,2.0,0.0), smooth=true, device_id=0))]
@@ -1938,9 +1938,9 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
         smooth,
     };
 
-    // Mirror expand_grid for returning combo metadata
+    
     fn combos_for_py(sweep: &CoraWaveBatchRange) -> Vec<CoraWaveParams> {
-        // Mirror robust expand_grid rules (zero step => static; support reversed)
+        
         let (ps, pe, pt) = sweep.period;
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]

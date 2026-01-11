@@ -1,16 +1,16 @@
-// Integration tests for CUDA ROCR kernels
 
-use my_project::indicators::rocr::{
+
+use vector_ta::indicators::rocr::{
     rocr_batch_with_kernel, rocr_with_kernel, RocrBatchRange, RocrData, RocrInput, RocrParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaRocr;
+use vector_ta::cuda::CudaRocr;
 
 fn approx_eq(a: f64, b: f64, rel_tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -58,7 +58,7 @@ fn rocr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-5; // relative tolerance
+    let tol = 2e-5; 
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -92,7 +92,7 @@ fn rocr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let period = 14usize;
 
-    // CPU per-series baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -122,7 +122,7 @@ fn rocr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let mut host_tm = vec![0f32; dev_tm.len()];
     dev_tm.buf.copy_to(&mut host_tm)?;
-    let tol = 2e-5; // relative tolerance
+    let tol = 2e-5; 
     for idx in 0..host_tm.len() {
         assert!(
             approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),

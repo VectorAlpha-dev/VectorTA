@@ -49,7 +49,7 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// Import required indicators
+
 use crate::indicators::cmo::{cmo, CmoData, CmoInput, CmoParams};
 use crate::indicators::moving_averages::dema::{dema, DemaData, DemaInput, DemaParams};
 use crate::indicators::moving_averages::ema::{ema, EmaData, EmaInput, EmaParams};
@@ -61,7 +61,7 @@ use crate::indicators::moving_averages::wma::{wma, WmaData, WmaInput, WmaParams}
 use crate::indicators::moving_averages::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
 use crate::indicators::tsf::{tsf, TsfData, TsfInput, TsfParams};
 
-// AVec not used in this file
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -209,7 +209,7 @@ pub enum OttoError {
     InvalidInput(String),
 }
 
-// ============= BUILDER PATTERN =============
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct OttoBuilder {
@@ -326,11 +326,11 @@ impl OttoBuilder {
     }
 }
 
-// ============= STREAMING SUPPORT =============
+
 
 #[derive(Debug, Clone)]
 pub struct OttoStream {
-    // --- params ---
+    
     ott_period: usize,
     ott_percent: f64,
     fast_vidya_length: usize,
@@ -338,24 +338,24 @@ pub struct OttoStream {
     correcting_constant: f64,
     ma_type: String,
 
-    // --- warmup gate (preserve existing behavior) ---
-    required_len: usize, // = slow * fast + 10 (keeps previous warmup semantics)
-    idx: usize,          // number of updates seen so far
+    
+    required_len: usize, 
+    idx: usize,          
 
-    // --- precomputed constants (VIDYA/OTT) ---
-    // for VIDYA on source
-    a1_base: f64, // 2/(slow/2 + 1)
-    a2_base: f64, // 2/(slow + 1)
-    a3_base: f64, // 2/(slow*fast + 1)
-    // for MA(LOTT) when ma_type == "VAR"
-    a_ott_base: f64, // 2/(ott_period + 1)
+    
+    
+    a1_base: f64, 
+    a2_base: f64, 
+    a3_base: f64, 
+    
+    a_ott_base: f64, 
 
-    // OTT % scaling
-    fark: f64,     // ott_percent * 0.01
-    scale_up: f64, // (200+ott_percent)/200
-    scale_dn: f64, // (200-ott_percent)/200
+    
+    fark: f64,     
+    scale_up: f64, 
+    scale_dn: f64, 
 
-    // --- CMO(9) on input (ring buffers) ---
+    
     ring_up_in: [f64; 9],
     ring_dn_in: [f64; 9],
     sum_up_in: f64,
@@ -364,16 +364,16 @@ pub struct OttoStream {
     prev_x_in: f64,
     have_prev_in: bool,
 
-    // --- VIDYA states on source ---
+    
     v1: f64,
     v2: f64,
     v3: f64,
 
-    // --- LOTT current ---
+    
     last_lott: f64,
 
-    // --- MA(LOTT) path states ---
-    // VAR: CMO(9) on LOTT + VIDYA(LOTT)
+    
+    
     ring_up_lott: [f64; 9],
     ring_dn_lott: [f64; 9],
     sum_up_lott: f64,
@@ -381,33 +381,33 @@ pub struct OttoStream {
     head_lott: usize,
     prev_lott: f64,
     have_prev_lott: bool,
-    ma_prev: f64, // used by VAR/EMA/WWMA/ZLEMA/DEMA (ema2 uses its own)
+    ma_prev: f64, 
 
-    // EMA/WWMA
+    
     ema_alpha: f64,
     ema_init: bool,
 
-    // DEMA
+    
     dema_alpha: f64,
     dema_ema1: f64,
     dema_ema2: f64,
     dema_init: bool,
 
-    // SMA
+    
     sma_sum: f64,
     sma_buf: Vec<f64>,
     sma_head: usize,
     sma_count: usize,
 
-    // WMA (linear weights 1..p): O(1) with running sums
+    
     wma_buf: Vec<f64>,
     wma_head: usize,
     wma_count: usize,
-    wma_sumx: f64,  // sum of x (plain sum)
-    wma_sumwx: f64, // weighted sum    (numerator)
-    wma_denom: f64, // p*(p+1)/2
+    wma_sumx: f64,  
+    wma_sumwx: f64, 
+    wma_denom: f64, 
 
-    // TMA = SMA( SMA(src, ceil(L/2)), floor(L/2)+1 )
+    
     tma_p1: usize,
     tma_p2: usize,
     tma_ring1: Vec<f64>,
@@ -419,7 +419,7 @@ pub struct OttoStream {
     tma_sum2: f64,
     tma_count2: usize,
 
-    // ZLEMA = EMA( 2*x - x_lag )
+    
     zlema_alpha: f64,
     zlema_prev: f64,
     zlema_init: bool,
@@ -428,7 +428,7 @@ pub struct OttoStream {
     zlema_head: usize,
     zlema_count: usize,
 
-    // --- OTT state machine ---
+    
     long_stop_prev: f64,
     short_stop_prev: f64,
     dir_prev: i32,
@@ -452,7 +452,7 @@ impl OttoStream {
             });
         }
 
-        // VIDYA periods (preserve scalar semantics)
+        
         let p1 = slow / 2;
         let p2 = slow;
         let p3 = slow.saturating_mul(fast);
@@ -463,26 +463,26 @@ impl OttoStream {
             });
         }
 
-        // precompute alphas
+        
         let a1_base = 2.0 / (p1 as f64 + 1.0);
         let a2_base = 2.0 / (p2 as f64 + 1.0);
         let a3_base = 2.0 / (p3 as f64 + 1.0);
         let a_ott_base = 2.0 / (ott_period as f64 + 1.0);
 
-        let required_len = p3 + 10; // keep original streaming warmup
+        let required_len = p3 + 10; 
 
-        // OTT constants
+        
         let fark = ott_percent * 0.01;
         let scale_up = (200.0 + ott_percent) / 200.0;
         let scale_dn = (200.0 - ott_percent) / 200.0;
 
-        // SMA / WMA / TMA allocs (small)
+        
         let sma_buf = vec![0.0; ott_period];
         let wma_buf = vec![0.0; ott_period];
         let wma_denom = (ott_period as f64) * (ott_period as f64 + 1.0) * 0.5;
 
-        let tma_p1 = (ott_period + 1) / 2; // ceil(L/2)
-        let tma_p2 = ott_period / 2 + 1; // floor(L/2)+1
+        let tma_p1 = (ott_period + 1) / 2; 
+        let tma_p2 = ott_period / 2 + 1; 
         let tma_ring1 = vec![0.0; tma_p1.max(1)];
         let tma_ring2 = vec![0.0; tma_p2.max(1)];
 
@@ -594,17 +594,17 @@ impl OttoStream {
         let i = self.idx;
         self.idx = self.idx.wrapping_add(1);
 
-        // Pine-style nz() on input
+        
         let x = if value.is_nan() { 0.0 } else { value };
 
-        // ---- CMO(9) on input, update ring ----
+        
         if self.have_prev_in {
             let mut d = value - self.prev_x_in;
             if !value.is_finite() || !self.prev_x_in.is_finite() {
                 d = 0.0;
             }
             if i >= 9 {
-                // remove head
+                
                 self.sum_up_in -= self.ring_up_in[self.head_in];
                 self.sum_dn_in -= self.ring_dn_in[self.head_in];
             }
@@ -622,15 +622,15 @@ impl OttoStream {
         }
         self.prev_x_in = value;
 
-        // abs(CMO) for VIDYA
+        
         let c_abs = if i >= 9 {
             Self::cmo_abs_from_ring(self.sum_up_in, self.sum_dn_in)
         } else {
             0.0
         };
 
-        // ---- three VIDYA tracks on source ----
-        // v = a*x + (1-a)*v  => use mul_add when possible
+        
+        
         let a1 = self.a1_base * c_abs;
         let a2 = self.a2_base * c_abs;
         let a3 = self.a3_base * c_abs;
@@ -639,15 +639,15 @@ impl OttoStream {
         self.v2 = a2.mul_add(x, (1.0 - a2) * self.v2);
         self.v3 = a3.mul_add(x, (1.0 - a3) * self.v3);
 
-        // LOTT = v1 / ((v2 - v3) + coco)
+        
         let denom_l = (self.v2 - self.v3) + self.correcting_constant;
         let lott = self.v1 / denom_l;
         self.last_lott = lott;
 
-        // ---- MA(LOTT) step (O(1) by ma_type) ----
+        
         let ma_opt = match self.ma_type.as_str() {
             "VAR" => {
-                // CMO(9) on LOTT, then VIDYA(LOTT) with period = ott_period
+                
                 if self.have_prev_lott {
                     let mut d = lott - self.prev_lott;
                     if !lott.is_finite() || !self.prev_lott.is_finite() {
@@ -693,7 +693,7 @@ impl OttoStream {
             }
 
             "WWMA" => {
-                // Wilder's smoothing is EMA with alpha = 1/p
+                
                 let a = 1.0 / (self.ott_period as f64);
                 if !self.ema_init {
                     self.ma_prev = lott;
@@ -705,7 +705,7 @@ impl OttoStream {
             }
 
             "DEMA" => {
-                // DEMA = 2*EMA1 - EMA2 (EMA of EMA)
+                
                 let a = self.dema_alpha;
                 if !self.dema_init {
                     self.dema_ema1 = lott;
@@ -719,7 +719,7 @@ impl OttoStream {
             }
 
             "SMA" => {
-                // classic O(1) ring + running sum
+                
                 let p = self.ott_period;
                 let _old = if self.sma_count < p {
                     self.sma_count += 1;
@@ -743,9 +743,9 @@ impl OttoStream {
             }
 
             "WMA" => {
-                // linear weights 1..p with O(1) recurrence:
-                // sumwx_{t+1} = sumwx_t - sumx_t + p * x_new
-                // sumx_{t+1}  = sumx_t + x_new - x_old
+                
+                
+                
                 let p = self.ott_period;
                 let x_old = if self.wma_count < p {
                     self.wma_count += 1;
@@ -753,13 +753,13 @@ impl OttoStream {
                 } else {
                     self.wma_buf[self.wma_head]
                 };
-                // write new
+                
                 self.wma_buf[self.wma_head] = lott;
                 self.wma_head += 1;
                 if self.wma_head == p {
                     self.wma_head = 0;
                 }
-                // update sums
+                
                 self.wma_sumwx = self.wma_sumwx - self.wma_sumx + (p as f64) * lott;
                 self.wma_sumx = self.wma_sumx + lott - x_old;
                 if self.wma_count >= p {
@@ -770,7 +770,7 @@ impl OttoStream {
             }
 
             "TMA" => {
-                // stage 1 SMA
+                
                 let p1 = self.tma_p1;
                 let _o1 = if self.tma_count1 < p1 {
                     self.tma_count1 += 1;
@@ -792,7 +792,7 @@ impl OttoStream {
                     return None;
                 };
 
-                // stage 2 SMA over stage1 outputs
+                
                 let p2 = self.tma_p2;
                 let _o2 = if self.tma_count2 < p2 {
                     self.tma_count2 += 1;
@@ -816,7 +816,7 @@ impl OttoStream {
             }
 
             "ZLEMA" => {
-                // x_adj = 2*x - x_lag  (lag = floor((p-1)/2))
+                
                 let lag = self.zlema_lag;
                 let x_lag = if self.zlema_count <= lag {
                     0.0
@@ -826,7 +826,7 @@ impl OttoStream {
                 };
                 let x_adj = 2.0 * lott - x_lag;
 
-                // push into ring
+                
                 if self.zlema_count < self.zlema_ring.len() {
                     self.zlema_count += 1;
                 }
@@ -846,11 +846,11 @@ impl OttoStream {
                 Some(self.zlema_prev)
             }
 
-            // TSF/HULL not provided in streaming kernel; return None to defer
+            
             _ => None,
         };
 
-        // --- gate + OTT state machine ---
+        
         if self.idx < self.required_len {
             return None;
         }
@@ -860,7 +860,7 @@ impl OttoStream {
             None => return None,
         };
 
-        // First bar after warmup initializes OTT trail
+        
         if !self.ott_init {
             self.long_stop_prev = ma * (1.0 - self.fark);
             self.short_stop_prev = ma * (1.0 + self.fark);
@@ -874,7 +874,7 @@ impl OttoStream {
             return Some((hott0, lott));
         }
 
-        // normal OTT step
+        
         let ls = ma * (1.0 - self.fark);
         let ss = ma * (1.0 + self.fark);
         let long_stop = if ma > self.long_stop_prev {
@@ -922,7 +922,7 @@ impl OttoStream {
     }
 }
 
-// Custom CMO calculation using sum (matching Pine's math.sum)
+
 fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
 
@@ -934,7 +934,7 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
         let mut sum_up = 0.0;
         let mut sum_down = 0.0;
 
-        // Calculate sum of up and down moves over the period
+        
         for j in 1..=period {
             let idx = i - period + j;
             if idx > 0 {
@@ -958,7 +958,7 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
     output
 }
 
-// VIDYA (Variable Index Dynamic Average) implementation with Pine-style initialization
+
 fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
@@ -972,15 +972,15 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     }
 
     let alpha = 2.0 / (period as f64 + 1.0);
-    let mut output = vec![f64::NAN; data.len()]; // Pine starts from beginning
+    let mut output = vec![f64::NAN; data.len()]; 
 
-    // Calculate CMO using sum-based approach (matching Pine)
+    
     let cmo_values = cmo_sum_based(data, 9);
 
-    // Pine-style initialization: start with 0.0 and run from index 1
+    
     let mut var_prev = 0.0;
 
-    // Process all data points from the beginning (Pine's nz() treats NaN as 0)
+    
     for i in 0..data.len() {
         let current_value = if data[i].is_nan() { 0.0 } else { data[i] };
         let current_cmo = if cmo_values[i].is_nan() {
@@ -990,7 +990,7 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         };
 
         if i == 0 {
-            // First value: Pine would use nz(VAR[1]) = 0 from initialization
+            
             let abs_cmo = current_cmo.abs();
             let adaptive_alpha = alpha * abs_cmo;
             var_prev = adaptive_alpha * current_value + (1.0 - adaptive_alpha) * 0.0;
@@ -1006,7 +1006,7 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     Ok(output)
 }
 
-// Custom TMA implementation for small periods (matching Pine's two-stage SMA)
+
 fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if period <= 0 || period > data.len() {
         return Err(OttoError::InvalidPeriod {
@@ -1015,18 +1015,18 @@ fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         });
     }
 
-    // Pine's TMA: sma(sma(src, ceil(L/2)), floor(L/2)+1)
-    let first_period = (period + 1) / 2; // ceil(L/2)
-    let second_period = period / 2 + 1; // floor(L/2) + 1
+    
+    let first_period = (period + 1) / 2; 
+    let second_period = period / 2 + 1; 
 
-    // First SMA
+    
     let params1 = SmaParams {
         period: Some(first_period),
     };
     let input1 = SmaInput::from_slice(data, params1);
     let sma1 = sma(&input1).map_err(|e| OttoError::MaError(e.to_string()))?;
 
-    // Second SMA on the first SMA result
+    
     let params2 = SmaParams {
         period: Some(second_period),
     };
@@ -1036,7 +1036,7 @@ fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     Ok(sma2.values)
 }
 
-// Wilder's Weighted Moving Average implementation
+
 fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
@@ -1052,10 +1052,10 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     let alpha = 1.0 / period as f64;
     let mut output = vec![f64::NAN; data.len()];
 
-    // Find first non-NaN value
+    
     let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 
-    // Initialize with first valid value or simple average of first period values
+    
     let mut sum = 0.0;
     let mut count = 0;
     for i in first_valid..first_valid.saturating_add(period).min(data.len()) {
@@ -1069,7 +1069,7 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         let mut wwma_prev = sum / count as f64;
         output[first_valid + period - 1] = wwma_prev;
 
-        // Calculate WWMA using recursive formula
+        
         for i in first_valid + period..data.len() {
             if !data[i].is_nan() {
                 wwma_prev = alpha * data[i] + (1.0 - alpha) * wwma_prev;
@@ -1083,7 +1083,7 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     Ok(output)
 }
 
-// Calculate moving average based on type
+
 fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, OttoError> {
     match ma_type {
         "SMA" => {
@@ -1114,7 +1114,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "WWMA" => {
-            // Wilder's Weighted Moving Average
+            
             wwma(data, period)
         }
         "DEMA" => {
@@ -1127,7 +1127,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "TMA" => {
-            // Use custom TMA implementation for Pine compatibility
+            
             tma_custom(data, period)
         }
         "VAR" => vidya(data, period),
@@ -1141,7 +1141,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "TSF" => {
-            // TSF is already correct - it does the forecast
+            
             let params = TsfParams {
                 period: Some(period),
             };
@@ -1165,7 +1165,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
     }
 }
 
-// ============= ZERO-COPY HELPERS =============
+
 
 #[inline]
 fn resolve_single_kernel(k: Kernel) -> Kernel {
@@ -1538,7 +1538,7 @@ pub fn otto_into(
     otto_into_slices(hott_out, lott_out, input, Kernel::Auto)
 }
 
-// ============= BATCH PROCESSING =============
+
 
 #[derive(Clone, Debug)]
 pub struct OttoBatchRange {
@@ -1753,7 +1753,7 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Result<Vec<OttoParams>, OttoError> {
     Ok(v)
 }
 
-// Precompute abs(CMO) with sliding window period 9 for reuse in batch
+
 #[inline]
 fn cmo_abs9_stream(data: &[f64]) -> Vec<f64> {
     const CMO_P: usize = 9;
@@ -1823,17 +1823,17 @@ pub fn otto_batch_with_kernel(
         .checked_mul(cols)
         .ok_or_else(|| OttoError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Initialize matrices with NaN
+    
     let mut hott = vec![f64::NAN; total];
     let mut lott = vec![f64::NAN; total];
 
-    // Precompute shared CMO abs(9) stream once for all rows
+    
     let cmo_abs = cmo_abs9_stream(data);
 
-    // Row loop; compute with shared CMO
+    
     for (row, prm) in combos.iter().enumerate() {
         let input = OttoInput::from_slice(data, prm.clone());
-        // Validate params and derive per-row settings via existing helper to preserve semantics
+        
         let (_d, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(&input)?;
 
         let n = data.len();
@@ -1857,7 +1857,7 @@ pub fn otto_batch_with_kernel(
         let row_l = &mut lott[row * cols..(row + 1) * cols];
         let row_h = &mut hott[row * cols..(row + 1) * cols];
 
-        // VIDYA ×3 + LOTT using shared CMO
+        
         let mut v1 = 0.0f64;
         let mut v2 = 0.0f64;
         let mut v3 = 0.0f64;
@@ -1874,7 +1874,7 @@ pub fn otto_batch_with_kernel(
             row_l[i] = v1 / ((v2 - v3) + coco);
         }
 
-        // MA(LOTT) per row and OTT state machine
+        
         let mavg = calculate_ma(row_l, ott_p, &ma_type)?;
         let fark = ott_percent * 0.01;
         let scale_up = (200.0 + ott_percent) / 200.0;
@@ -1946,7 +1946,7 @@ pub fn otto_batch_with_kernel(
     })
 }
 
-// ============= PYTHON BINDINGS =============
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "otto")]
@@ -3042,14 +3042,14 @@ mod tests {
 
         let input = super::OttoInput::from_slice(&data, super::OttoParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = super::otto(&input)?;
 
-        // In-place outputs
+        
         let mut hott_out = vec![0.0f64; n];
         let mut lott_out = vec![0.0f64; n];
 
-        // Native into API (no allocations)
+        
         super::otto_into(&input, &mut hott_out, &mut lott_out)?;
 
         assert_eq!(baseline.hott.len(), n);
@@ -3057,7 +3057,7 @@ mod tests {
         assert_eq!(hott_out.len(), n);
         assert_eq!(lott_out.len(), n);
 
-        // Helper: NaN equals NaN; otherwise exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

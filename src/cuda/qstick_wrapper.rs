@@ -6,7 +6,7 @@
 //! - Stream NON_BLOCKING
 //! - VRAM checks + chunking grid.y to <= 65_535 for batch
 //! - Host precompute for prefix-sum category; kernels consume prefixes
-//
+
 #![cfg(feature = "cuda")]
 
 use crate::indicators::qstick::{QstickBatchRange, QstickParams};
@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-// Reuse the common VRAM handle from ALMA
+
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 
 #[derive(Debug, Error)]
@@ -61,7 +61,7 @@ pub enum BatchKernelPolicy {
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    // Tiled2D could be added later if needed
+    
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,7 +108,7 @@ impl CudaQstick {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/qstick_kernel.ptx"));
-        // Follow ALMA JIT policy: determine target from context + O2, fallback
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(match env::var("QS_JIT_OPT").ok().as_deref() {
@@ -198,7 +198,7 @@ impl CudaQstick {
         }
     }
 
-    // ------------------- Utilities -------------------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -260,7 +260,7 @@ impl CudaQstick {
     }
     #[inline]
     fn pick_tiled_block(&self, len: usize) -> u32 {
-        // Prefer 256 for long series; allow override via QS_TILE
+        
         if let Ok(v) = env::var("QS_TILE") {
             if let Ok(b) = v.parse::<u32>() {
                 return b;
@@ -273,10 +273,10 @@ impl CudaQstick {
         }
     }
 
-    // ------------------- Host precompute -------------------
+    
     pub fn build_diff_prefix_f32(open: &[f32], close: &[f32]) -> (Vec<f32>, usize, usize) {
         let len = open.len().min(close.len());
-        // first valid: both non-NaN
+        
         let first = (0..len)
             .find(|&i| !open[i].is_nan() && !close[i].is_nan())
             .unwrap_or(0);
@@ -307,7 +307,7 @@ impl CudaQstick {
             .find(|&i| !open[i].is_nan() && !close[i].is_nan())
             .ok_or_else(|| CudaQstickError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand grid
+        
         let (start, end, step) = sweep.period;
         fn axis_usize(
             (start, end, step): (usize, usize, usize),
@@ -381,7 +381,7 @@ impl CudaQstick {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaQstickError> {
-        // Decide kernel
+        
         let mut use_tiled = len > 8192;
         let mut block_x: u32 = 256;
         let mut tile_choice: Option<u32> = None;
@@ -507,7 +507,7 @@ impl CudaQstick {
         period: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaQstickError> {
-        // Only OneD for now; grid.y over series, grid.x over time
+        
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -550,7 +550,7 @@ impl CudaQstick {
         Ok(())
     }
 
-    // ------------------- Public device entry points -------------------
+    
     pub fn qstick_batch_dev(
         &self,
         open_f32: &[f32],
@@ -559,7 +559,7 @@ impl CudaQstick {
     ) -> Result<DeviceArrayF32, CudaQstickError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(open_f32, close_f32, sweep)?;
 
-        // VRAM estimate: prefix (len+1) + periods + outputs
+        
         let bytes_prefix = (len + 1)
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaQstickError::InvalidInput("size overflow".into()))?;
@@ -582,7 +582,7 @@ impl CudaQstick {
             .unwrap_or(64 * 1024 * 1024);
         Self::will_fit(bytes_required, headroom)?;
 
-        // Build prefix on host
+        
         let (prefix, _fv2, _l2) = Self::build_diff_prefix_f32(open_f32, close_f32);
         let d_prefix = DeviceBuffer::from_slice(&prefix)?;
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -624,11 +624,11 @@ impl CudaQstick {
         if period == 0 || period > rows {
             return Err(CudaQstickError::InvalidInput("invalid period".into()));
         }
-        // Build (rows+1) x cols prefix of diffs, time-major
+        
         let mut prefix_tm = vec![0.0f32; (rows + 1) * cols];
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
-            // find first valid in this series
+            
             let mut fv = 0usize;
             for t in 0..rows {
                 let o = open_tm_f32[t * cols + s];
@@ -667,11 +667,11 @@ impl CudaQstick {
         rows: usize,
         period: usize,
     ) -> Result<DeviceArrayF32, CudaQstickError> {
-        // Validate + build host prefixes
+        
         let (prefix_tm, first_valids) =
             Self::prepare_many_series_inputs(open_tm_f32, close_tm_f32, cols, rows, period)?;
 
-        // VRAM estimate: prefix (rows+1)*cols + first_valids + output rows*cols
+        
         let bytes_prefix = (rows + 1)
             .checked_mul(cols)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -716,7 +716,7 @@ impl CudaQstick {
     }
 }
 
-// ---------------- Benches registration (for benches/cuda_bench.rs) ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_time_major_prices;
@@ -839,7 +839,7 @@ pub mod benches {
 
         let cols = 250usize;
         let rows = 1_000_000usize;
-        // Generate a synthetic open/close TM pair
+        
         let p_tm = gen_time_major_prices(cols, rows);
         let mut o_tm = vec![0f32; cols * rows];
         let mut c_tm = vec![0f32; cols * rows];

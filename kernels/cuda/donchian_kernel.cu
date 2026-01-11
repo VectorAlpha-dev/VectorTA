@@ -1,12 +1,12 @@
-// CUDA kernels for Donchian Channels (upper/middle/lower) in FP32.
-//
-// Semantics:
-// - Warmup: indices < (first_valid + period - 1) are NaN
-// - Any NaN in the window gates the entire output at that index to NaN
-// - Upper = max(high), Lower = min(low), Middle = (Upper + Lower)/2
-//
-// Batch variant: one series × many params (periods)
-// Many-series variant: time-major layout × one param
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -29,7 +29,7 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// read-only load hint; maps to texture/RO cache where beneficial on many archs
+
 #if __CUDA_ARCH__ >= 350
   #define LDG(p) __ldg(p)
 #else
@@ -40,9 +40,9 @@ __device__ __forceinline__ int floor_log2_u32(unsigned int x) {
     return 31 - __clz(x);
 }
 
-// ------------------------ RMQ builders (sparse tables) ------------------------
 
-// level-0 init (float copy)
+
+
 extern "C" __global__ void rmq_init_level0_f32(const float* __restrict__ in,
                                                float* __restrict__ st_lvl0,
                                                int N) {
@@ -50,7 +50,7 @@ extern "C" __global__ void rmq_init_level0_f32(const float* __restrict__ in,
     if (i < N) st_lvl0[i] = in[i];
 }
 
-// nan mask: OR(high_isnan || low_isnan), but ignore indices < first_valid
+
 extern "C" __global__ void rmq_init_nan_mask_u8(const float* __restrict__ high,
                                                 const float* __restrict__ low,
                                                 int N,
@@ -68,7 +68,7 @@ extern "C" __global__ void rmq_init_nan_mask_u8(const float* __restrict__ high,
     }
 }
 
-// Build next level for MAX (float)
+
 extern "C" __global__ void rmq_build_level_max_f32(const float* __restrict__ prev,
                                                    float* __restrict__ curr,
                                                    int N, int offset) {
@@ -82,7 +82,7 @@ extern "C" __global__ void rmq_build_level_max_f32(const float* __restrict__ pre
     }
 }
 
-// Build next level for MIN (float)
+
 extern "C" __global__ void rmq_build_level_min_f32(const float* __restrict__ prev,
                                                    float* __restrict__ curr,
                                                    int N, int offset) {
@@ -96,7 +96,7 @@ extern "C" __global__ void rmq_build_level_min_f32(const float* __restrict__ pre
     }
 }
 
-// Build next level for OR over uint8 mask
+
 extern "C" __global__ void rmq_build_level_or_u8(const unsigned char* __restrict__ prev,
                                                  unsigned char* __restrict__ curr,
                                                  int N, int offset) {
@@ -128,7 +128,7 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
     float* mo = out_middle + base;
     float* lo = out_lower + base;
 
-    // Guard invalid inputs by writing NaNs
+    
     if (UNLIKELY(period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) {
             uo[i] = DCH_NAN; mo[i] = DCH_NAN; lo[i] = DCH_NAN;
@@ -154,7 +154,7 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
         return;
     }
 
-    // Naive window scan per output index (kept simple for correctness parity)
+    
     for (int i = warm; i < series_len; ++i) {
         const int start = i + 1 - period;
         float maxv = -CUDART_INF_F;
@@ -172,8 +172,8 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
     }
 }
 
-// One series × many params using sparse-tables (RMQ)
-// st_high, st_low: [K * N] with stride N per level; st_nan: [K * N] as uint8
+
+
 extern "C" __global__ void donchian_batch_from_rmq_f32(
     const int*   __restrict__ periods,
     int series_len,
@@ -232,11 +232,11 @@ extern "C" __global__ void donchian_batch_from_rmq_f32(
     }
 }
 
-// Many series × one param (time-major I/O)
+
 extern "C" __global__ void donchian_many_series_one_param_f32(
-    const float* __restrict__ high_tm,   // time-major: [row * num_series + series]
+    const float* __restrict__ high_tm,   
     const float* __restrict__ low_tm,
-    const int*   __restrict__ first_valids, // per series (column)
+    const int*   __restrict__ first_valids, 
     int num_series,
     int series_len,
     int period,
@@ -250,7 +250,7 @@ extern "C" __global__ void donchian_many_series_one_param_f32(
     int first_valid = first_valids ? first_valids[series] : 0;
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len || period <= 0 || period > series_len || (series_len - first_valid) < period) {
-        // All NaN outputs
+        
         int idx = series;
         for (int row = 0; row < series_len; ++row, idx += num_series) {
             upper_tm[idx] = DCH_NAN; middle_tm[idx] = DCH_NAN; lower_tm[idx] = DCH_NAN;
@@ -279,7 +279,7 @@ extern "C" __global__ void donchian_many_series_one_param_f32(
         float maxv = -CUDART_INF_F;
         float minv =  CUDART_INF_F;
         bool any_nan = false;
-        // strided access in time-major layout
+        
         int idxk = (start * num_series) + series;
         for (int k = 0; k < period; ++k, idxk += num_series) {
             const float h = high_tm[idxk];

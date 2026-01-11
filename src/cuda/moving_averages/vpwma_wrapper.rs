@@ -74,7 +74,7 @@ pub enum CudaVpwmaError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (plain variants; mirrors ALMA/CWMA shape) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -132,7 +132,7 @@ impl CudaVpwma {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpwma_kernel.ptx"));
-        // Prefer context-targeted and O2; gracefully fall back for brittle drivers
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -409,7 +409,7 @@ impl CudaVpwma {
         let mut func = self.module.get_function("vpwma_batch_f32").map_err(|_| CudaVpwmaError::MissingKernelSymbol { name: "vpwma_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        // One block per combo (CTA-per-row tiled kernel path)
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -417,8 +417,8 @@ impl CudaVpwma {
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Dynamic shared memory requirement per CTA = weights(stride) + tile(T) + (stride-1)
-        // in floats, then *4 bytes.
+        
+        
         let t_tile = vpwma_tile_t();
         let smem_floats = t_tile
             .checked_add(2usize.saturating_mul(stride))
@@ -466,7 +466,7 @@ impl CudaVpwma {
 
             self.stream.launch(&func, grid, block, smem_bytes_u32, args)?;
         }
-        // Record introspection for debug once-per-run
+        
         unsafe {
             (*(self as *const _ as *mut CudaVpwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -498,7 +498,7 @@ impl CudaVpwma {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Dynamic shared memory for per-CTA weight cache: win_len floats
+        
         let win_len = period.saturating_sub(1);
         let smem_bytes_u32: u32 = win_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -536,7 +536,7 @@ impl CudaVpwma {
 
             self.stream.launch(&func, grid, block, smem_bytes_u32, args)?;
         }
-        // Record introspection for debug once-per-run
+        
         unsafe {
             (*(self as *const _ as *mut CudaVpwma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -563,7 +563,7 @@ impl CudaVpwma {
             .max()
             .unwrap_or(1);
 
-        // VRAM estimate (prices + params + weights + out) with ~64MB headroom
+        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
@@ -684,7 +684,7 @@ impl CudaVpwma {
             rows,
             &mut d_out_tm,
         )?;
-        // Synchronize producing stream so Python CAI can omit stream safely
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -786,7 +786,7 @@ impl CudaVpwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

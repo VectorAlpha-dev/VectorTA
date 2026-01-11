@@ -433,12 +433,12 @@ pub fn frama_with_kernel(input: &FramaInput, kernel: Kernel) -> Result<FramaOutp
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn frama_into(input: &FramaInput, out: &mut [f64]) -> Result<(), FramaError> {
-    // Delegate to the internal helper with Kernel::Auto
+    
     frama_into_slice(out, input, Kernel::Auto)
 }
 
-// Note: `frama_into_slice` is already provided later in this module (WASM section)
-// and is used here to avoid duplication.
+
+
 
 #[derive(Copy, Clone)]
 struct MonoDeque<const CAP: usize> {
@@ -667,7 +667,7 @@ pub fn frama_scalar(
     first: usize,
     len: usize,
 ) -> Result<FramaOutput, FramaError> {
-    // Compute warm with evenized window for consistency
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
@@ -1003,7 +1003,7 @@ unsafe fn frama_avx512_small<const WIN: usize>(
         let n3 = (max_w - min_w) / win_f64;
 
         let d = if n1 > 0.0 && n2 > 0.0 && n3 > 0.0 {
-            ((n1 + n2).ln() - n3.ln()) / LN2 // Keep exact original formula
+            ((n1 + n2).ln() - n3.ln()) / LN2 
         } else {
             d_prev
         };
@@ -1032,13 +1032,13 @@ unsafe fn frama_avx2_into(
     len: usize,
     out: &mut [f64],
 ) -> Result<(), FramaError> {
-    // Initialize seed value (already done by caller in frama_compute_into)
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
     }
 
-    // Call the appropriate AVX2 function directly on the output buffer using evenized window
+    
     if win <= 32 {
         match win {
             10 => unsafe { frama_avx2_small::<10>(high, low, close, sc, fc, first, len, out) },
@@ -1066,13 +1066,13 @@ unsafe fn frama_avx512_into(
     len: usize,
     out: &mut [f64],
 ) -> Result<(), FramaError> {
-    // Initialize seed value (already done by caller in frama_compute_into)
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
     }
 
-    // Call the appropriate AVX512 function directly on the output buffer using evenized window
+    
     if win <= 32 {
         match win {
             10 => unsafe { frama_avx512_small::<10>(high, low, close, sc, fc, first, len, out) },
@@ -1188,11 +1188,11 @@ impl FramaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &FramaBatchRange) -> Vec<FramaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Zero step → singleton; equal bounds → singleton.
+        
         if step == 0 || start == end {
             return vec![start];
         }
-        // Support reversed bounds by scanning [min..=max] and reversing if needed.
+        
         let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
         let mut v = Vec::new();
         let mut x = lo;
@@ -1211,7 +1211,7 @@ fn expand_grid(r: &FramaBatchRange) -> Vec<FramaParams> {
     let windows = axis_usize(r.window);
     let scs = axis_usize(r.sc);
     let fcs = axis_usize(r.fc);
-    // Pre-allocate with checked capacity (fallback to 0 if overflow).
+    
     let cap = windows
         .len()
         .checked_mul(scs.len())
@@ -1303,15 +1303,15 @@ fn frama_batch_inner(
 
     let rows = combos.len();
     let cols = close.len();
-    // Checked arithmetic guard for rows*cols matrix size.
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or(FramaError::ArithmeticOverflow { context: "rows*cols" })?;
 
-    // Use zero-copy allocation pattern like alma.rs
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let first = (0..cols)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(0);
@@ -1320,7 +1320,7 @@ fn frama_batch_inner(
         .iter()
         .map(|p| {
             let mut win = p.window.unwrap();
-            // FRAMA adjusts odd windows to be even
+            
             if win & 1 == 1 {
                 win += 1;
             }
@@ -1328,10 +1328,10 @@ fn frama_batch_inner(
         })
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1339,7 +1339,7 @@ fn frama_batch_inner(
 
     let combos_ret = frama_batch_inner_into(high, low, close, sweep, kern, parallel, out)?;
 
-    // Convert back to Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1366,7 +1366,7 @@ fn frama_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<FramaParams>, FramaError> {
-    // ---- parameter checking (unchanged) -----------------------------------
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         return Err(FramaError::InvalidRange {
@@ -1392,7 +1392,7 @@ fn frama_batch_inner_into(
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(FramaError::AllValuesNaN)?;
 
-    // Calculate max evenized window for validation
+    
     let max_even_w = combos
         .iter()
         .map(|c| {
@@ -1416,12 +1416,12 @@ fn frama_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    // -----------------------------------------------------------------------
-    // The buffer is already properly initialized by the caller, so we just need
-    // to process each row. No need to reinterpret or reinitialize.
-    // -----------------------------------------------------------------------
+    
+    
+    
+    
 
-    // Closure that fills ONE row
+    
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let p = &combos[row];
         let window = p.window.unwrap();
@@ -1437,9 +1437,9 @@ fn frama_batch_inner_into(
         }
     };
 
-    // -----------------------------------------------------------------------
-    // Process each row using the appropriate kernel
-    // -----------------------------------------------------------------------
+    
+    
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1475,25 +1475,25 @@ pub struct FramaStream {
     last_val: f64,
     d_prev: f64,
     alpha_prev: f64,
-    // --- O(1) sliding-window state ---
-    half: usize, // n/2 (window is evenized in try_new)
-    idx: usize,  // absolute index of the next output (starts at n when warm)
-    // deques for maxima/minima
-    dq_r_max: DqMax, // right half max(high)
-    dq_r_min: DqMin, // right half min(low)
-    dq_l_max: DqMax, // left  half max(high)
-    dq_l_min: DqMin, // left  half min(low)
-    dq_w_max: DqMax, // full  window max(high) (for N3)
-    dq_w_min: DqMin, // full  window min(low)  (for N3)
-    // previous fallbacks when a deque is temporarily empty (e.g., NaN gaps)
+    
+    half: usize, 
+    idx: usize,  
+    
+    dq_r_max: DqMax, 
+    dq_r_min: DqMin, 
+    dq_l_max: DqMax, 
+    dq_l_min: DqMin, 
+    dq_w_max: DqMax, 
+    dq_w_min: DqMin, 
+    
     pm_right: f64,
     pn_right: f64,
     pm_left: f64,
     pn_left: f64,
     pm_full: f64,
     pn_full: f64,
-    // precomputed constants
-    sc_floor: f64, // 2/(sc+1)
+    
+    sc_floor: f64, 
 }
 impl FramaStream {
     pub fn try_new(params: FramaParams) -> Result<Self, FramaError> {
@@ -1522,7 +1522,7 @@ impl FramaStream {
             last_val: f64::NAN,
             d_prev: 1.0,
             alpha_prev: 2.0 / (sc as f64 + 1.0),
-            // new:
+            
             half: n / 2,
             idx: 0,
             dq_r_max: DqMax::default(),
@@ -1542,25 +1542,25 @@ impl FramaStream {
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // Warm-up: fill circular buffer once, then seed with SMA and build deques
+        
         if !self.filled {
             self.buffer[self.head] = (high, low, close);
             self.head += 1;
 
             if self.head == self.n {
-                // wrap and mark filled
+                
                 self.head = 0;
                 self.filled = true;
 
-                // Seed = SMA over evenized window (match batch)
-                // (one-time O(n) cost)
+                
+                
                 let sum: f64 = self.buffer.iter().map(|&(_, _, c)| c).sum();
                 self.last_val = sum / self.n as f64;
 
-                // Build initial deques for i = n:
-                // left  half = [0 .. half)
-                // right half = [half .. n)
-                // full window = [0 .. n)
+                
+                
+                
+                
                 self.dq_r_max.clear();
                 self.dq_r_min.clear();
                 self.dq_l_max.clear();
@@ -1582,7 +1582,7 @@ impl FramaStream {
                         }
                     }
                 }
-                // initialize previous fallbacks
+                
                 self.pm_right = self.dq_r_max.front_val().unwrap_or(f64::NAN);
                 self.pn_right = self.dq_r_min.front_val().unwrap_or(f64::NAN);
                 self.pm_left = self.dq_l_max.front_val().unwrap_or(f64::NAN);
@@ -1590,7 +1590,7 @@ impl FramaStream {
                 self.pm_full = self.dq_w_max.front_val().unwrap_or(f64::NAN);
                 self.pn_full = self.dq_w_min.front_val().unwrap_or(f64::NAN);
 
-                // next absolute output index
+                
                 self.idx = self.n;
 
                 return Some(self.last_val);
@@ -1599,15 +1599,15 @@ impl FramaStream {
             return None;
         }
 
-        // --- Streaming pass (O(1) amortized) ---
+        
 
-        // Absolute index of this new sample (not yet inserted into buffer)
+        
         let i = self.idx;
 
-        // 1) Expire old indices for current windows (before computing):
-        //    right half: [i - half .. i)
-        //    left  half: [i - n    .. i - half)
-        //    full  win : [i - n    .. i)
+        
+        
+        
+        
         let right_lb = i.saturating_sub(self.half);
         let left_lb = i.saturating_sub(self.n);
         self.dq_r_max.expire_lt(right_lb);
@@ -1617,7 +1617,7 @@ impl FramaStream {
         self.dq_w_max.expire_lt(left_lb);
         self.dq_w_min.expire_lt(left_lb);
 
-        // 2) Read current window extrema (fallback to previous if a deque is empty)
+        
         let (max_r, min_r) = {
             let mr = self.dq_r_max.front_val().unwrap_or(self.pm_right);
             let nr = self.dq_r_min.front_val().unwrap_or(self.pn_right);
@@ -1634,7 +1634,7 @@ impl FramaStream {
             (mw, nw)
         };
 
-        // Cache the extrema used this tick (match 'front_or' behavior)
+        
         self.pm_right = max_r;
         self.pn_right = min_r;
         self.pm_left = max_l;
@@ -1642,11 +1642,11 @@ impl FramaStream {
         self.pm_full = max_w;
         self.pn_full = min_w;
 
-        // 3) Compute fractal dimension & alpha (identical math & clamps)
+        
         let half_f = self.half as f64;
         let win_f = self.n as f64;
 
-        // If current bar has any NaN, mirror batch: carry forward previous value.
+        
         let output = if !(high.is_nan() || low.is_nan() || close.is_nan()) {
             let n1 = (max_r - min_r) / half_f;
             let n2 = (max_l - min_l) / half_f;
@@ -1659,7 +1659,7 @@ impl FramaStream {
             };
             self.d_prev = d;
 
-            // a0 = exp(w*(d-1)) clamped to [0.1, 1.0]
+            
             let mut a0 = (self.w * (d - 1.0)).exp();
             if a0 < 0.1 {
                 a0 = 0.1;
@@ -1681,14 +1681,14 @@ impl FramaStream {
             }
             self.alpha_prev = alpha;
 
-            // EMA-style update with FMA (matches your SIMD/scalar code)
+            
             close.mul_add(alpha, (1.0 - alpha) * self.last_val)
         } else {
             self.last_val
         };
 
-        // 4) Post-compute: update deques for the *next* tick and rotate buffer.
-        // Push current sample (if valid) into right half & full-window deques.
+        
+        
         if !(high.is_nan() || low.is_nan()) {
             self.dq_r_max.push(i, high);
             self.dq_r_min.push(i, low);
@@ -1696,7 +1696,7 @@ impl FramaStream {
             self.dq_w_min.push(i, low);
         }
 
-        // Push the element that *moves* from right->left next tick: index (i - half)
+        
         if i >= self.half {
             let j = i - self.half;
             let (h_l, l_l, _) = self.buffer[j % self.n];
@@ -1706,18 +1706,18 @@ impl FramaStream {
             }
         }
 
-        // Write current bar into circular buffer (overwriting i-n)
+        
         self.buffer[self.head] = (high, low, close);
         self.head = (self.head + 1) % self.n;
 
-        // Advance absolute index and publish
+        
         self.idx += 1;
         self.last_val = output;
         Some(output)
     }
 }
 
-// --- Minimal monotonic deque helpers for O(1) streaming ---
+
 #[derive(Default, Debug, Clone)]
 struct DqMax {
     q: VecDeque<(usize, f64)>,
@@ -1744,7 +1744,7 @@ impl DqMax {
     }
     #[inline(always)]
     fn push(&mut self, idx: usize, val: f64) {
-        // monotone decreasing by value
+        
         while let Some(&(_, v)) = self.q.back() {
             if v >= val {
                 break;
@@ -1775,7 +1775,7 @@ impl DqMin {
     }
     #[inline(always)]
     fn push(&mut self, idx: usize, val: f64) {
-        // monotone increasing by value
+        
         while let Some(&(_, v)) = self.q.back() {
             if v <= val {
                 break;
@@ -1803,17 +1803,17 @@ pub unsafe fn frama_row_scalar(
 ) {
     let len = high.len();
 
-    // Note: NaN prefix has already been initialized by init_matrix_prefixes
-    // We just need to compute the values starting from the seed
+    
+    
 
-    // Initialize seed value with evenized window
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
     }
     seed_sma(close, first, win, out);
 
-    // Use the appropriate scalar function with evenized window
+    
     if win <= 32 {
         frama_small_scan(high, low, close, win, sc, fc, first, len, out).unwrap();
     } else {
@@ -1833,7 +1833,7 @@ pub unsafe fn frama_row_avx2(
     sc: usize,
     fc: usize,
 ) {
-    // Evenize the window first
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
@@ -1866,7 +1866,7 @@ pub unsafe fn frama_row_avx512(
     sc: usize,
     fc: usize,
 ) {
-    // Evenize the window first
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
@@ -2068,40 +2068,40 @@ mod tests {
     fn check_frama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Load real market data for testing
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let high = candles.select_candle_field("high").unwrap();
         let low = candles.select_candle_field("low").unwrap();
         let close = candles.select_candle_field("close").unwrap();
 
-        // Strategy for testing different parameter combinations with subsets of real data
+        
         let data_len = high.len();
         let strat = (
-            // window size (will be made even if odd)
+            
             4usize..=64,
-            // sc: slow constant
+            
             50usize..500,
-            // fc: fast constant
+            
             1usize..50,
-            // starting index in the data
+            
             0usize..data_len.saturating_sub(200),
-            // length of data slice to use (ensure enough for testing)
+            
             100usize..=200,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(window, sc, fc, start_idx, slice_len)| {
-                // Ensure we don't go out of bounds
+                
                 let end_idx = (start_idx + slice_len).min(data_len);
                 let actual_len = end_idx - start_idx;
 
-                // Skip if not enough data
+                
                 if actual_len < window * 2 {
                     return Ok(());
                 }
 
-                // Get slices of real data (no artificial NaN injection)
+                
                 let high_slice = &high[start_idx..end_idx];
                 let low_slice = &low[start_idx..end_idx];
                 let close_slice = &close[start_idx..end_idx];
@@ -2115,22 +2115,22 @@ mod tests {
                 let input = FramaInput::from_slices(high_slice, low_slice, close_slice, params);
                 let result = frama_with_kernel(&input, kernel);
 
-                // Should succeed with valid market data
+                
                 prop_assert!(result.is_ok(), "FRAMA failed: {:?}", result.err());
                 let FramaOutput { values: out } = result.unwrap();
 
-                // Also compute with scalar kernel for reference
+                
                 let FramaOutput { values: ref_out } =
                     frama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // The actual window used is even (adjusted if odd)
+                
                 let actual_window = if window & 1 == 1 { window + 1 } else { window };
 
-                // FRAMA starts producing values at actual_window - 1
-                // (assuming all input data is valid, which it should be from CSV)
+                
+                
                 let first_output_idx = actual_window - 1;
 
-                // Check warmup period
+                
                 for i in 0..first_output_idx.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2140,14 +2140,14 @@ mod tests {
                     );
                 }
 
-                // Check values after warmup
+                
                 for i in first_output_idx..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // FRAMA should be bounded reasonably by the data range
-                    // Since it's an adaptive EMA, it can be slightly outside recent ranges
-                    // but should be within the overall data extremes
+                    
+                    
+                    
                     let all_high_max = high_slice
                         .iter()
                         .filter(|x| x.is_finite())
@@ -2160,8 +2160,8 @@ mod tests {
                         .fold(f64::INFINITY, f64::min);
 
                     if all_high_max.is_finite() && all_low_min.is_finite() {
-                        // Allow some tolerance as FRAMA smooths the data
-                        let tolerance = (all_high_max - all_low_min) * 0.01; // 1% tolerance
+                        
+                        let tolerance = (all_high_max - all_low_min) * 0.01; 
                         prop_assert!(
                             y.is_nan()
                                 || (y >= all_low_min - tolerance && y <= all_high_max + tolerance),
@@ -2174,8 +2174,8 @@ mod tests {
                         );
                     }
 
-                    // Compare with scalar reference implementation
-                    // All kernels should produce identical results for valid data
+                    
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2185,7 +2185,7 @@ mod tests {
                             r
                         );
                     } else {
-                        // Allow small numerical differences between kernels
+                        
                         let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -2197,14 +2197,14 @@ mod tests {
                         );
                     }
 
-                    // FRAMA-specific property: smoothing factor alpha should affect responsiveness
-                    // With lower fc (fast constant), FRAMA should be more responsive
-                    // This is tested implicitly through kernel consistency
+                    
+                    
+                    
 
-                    // Test edge case: when fc >= sc, alpha should be clamped
+                    
                     if fc >= sc && i > first_output_idx {
-                        // With fc >= sc, FRAMA becomes less adaptive
-                        // The change between consecutive values should be limited
+                        
+                        
                         let change = (y - out[i - 1]).abs();
                         let price_change = (close_slice[i] - close_slice[i - 1]).abs();
                         prop_assert!(
@@ -2287,7 +2287,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_frama_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2295,17 +2295,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_cases = vec![
-            // Default parameters
+            
             FramaParams::default(),
-            // Small window
+            
             FramaParams {
                 window: Some(4),
                 sc: Some(300),
                 fc: Some(1),
             },
-            // Medium window with various sc/fc
+            
             FramaParams {
                 window: Some(8),
                 sc: Some(150),
@@ -2321,7 +2321,7 @@ mod tests {
                 sc: Some(400),
                 fc: Some(1),
             },
-            // Large window
+            
             FramaParams {
                 window: Some(20),
                 sc: Some(300),
@@ -2332,7 +2332,7 @@ mod tests {
                 sc: Some(500),
                 fc: Some(3),
             },
-            // Edge cases
+            
             FramaParams {
                 window: Some(16),
                 sc: Some(100),
@@ -2349,16 +2349,16 @@ mod tests {
             let input = FramaInput::from_candles(&candles, params.clone());
             let output = frama_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params window={:?}, sc={:?}, fc={:?}",
@@ -2366,7 +2366,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params window={:?}, sc={:?}, fc={:?}",
@@ -2374,7 +2374,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params window={:?}, sc={:?}, fc={:?}",
@@ -2387,7 +2387,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_frama_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2460,7 +2460,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2468,17 +2468,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small windows with various sc/fc combinations
+            
             ((4, 8, 2), (100, 300, 100), (1, 2, 1)),
-            // Medium windows
+            
             ((10, 20, 5), (200, 400, 100), (1, 3, 1)),
-            // Large windows
+            
             ((20, 30, 5), (300, 600, 150), (1, 4, 1)),
-            // Edge case: many parameter combinations
+            
             ((6, 12, 2), (150, 450, 50), (1, 2, 1)),
-            // Dense sweep
+            
             ((8, 16, 2), (100, 500, 100), (1, 5, 1)),
         ];
 
@@ -2490,9 +2490,9 @@ mod tests {
                 .fc_range(fc_range.0, fc_range.1, fc_range.2)
                 .apply_candles(&c)?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2502,7 +2502,7 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (params: window={:?}, sc={:?}, fc={:?})",
@@ -2510,7 +2510,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (params: window={:?}, sc={:?}, fc={:?})",
@@ -2518,7 +2518,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (params: window={:?}, sc={:?}, fc={:?})",
@@ -2531,7 +2531,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2573,7 +2573,7 @@ mod tests {
 
         let mut out = vec![0.0; candles.close.len()];
 
-        // Use native into when available; fallback to internal helper under wasm
+        
         #[cfg(not(feature = "wasm"))]
         {
             frama_into(&input, &mut out)?;
@@ -2597,7 +2597,7 @@ mod tests {
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2609,7 +2609,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// ---------------- Python CUDA device handle (CAI v3 + DLPack) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2834,7 +2834,7 @@ pub fn frama_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Extract parameters using zero-copy IntoPyArray
+    
     let windows: Vec<u64> = combos_result
         .iter()
         .map(|c| c.window.unwrap_or(10) as u64)
@@ -2994,7 +2994,7 @@ impl FramaStreamPy {
     }
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
@@ -3010,24 +3010,24 @@ pub fn frama_into_slice(
     let ((high, low, close), window, sc, fc, first, len, _warm_from_prepare, chosen) =
         frama_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != len {
         return Err(FramaError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
-    // evenized warm prefix like ALMA
+    
     let mut win = window;
     if win & 1 == 1 {
         win += 1;
     }
     let warm = first + win - 1;
 
-    // Prefill NaN values before computation to avoid overwriting the seed
+    
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
 
-    // Compute FRAMA directly into output slice (this will place the seed at index warm)
+    
     frama_compute_into(
         high, low, close, window, sc, fc, first, len, warm, chosen, dst,
     )?;
@@ -3120,22 +3120,22 @@ pub fn frama_batch_metadata_js(
     metadata
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn frama_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn frama_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -3155,7 +3155,7 @@ pub fn frama_into_js(
     sc: usize,
     fc: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if high_ptr.is_null() || low_ptr.is_null() || close_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
@@ -3177,7 +3177,7 @@ pub fn frama_into_js(
             },
         );
 
-        // handle aliasing
+        
         if out_ptr as *const f64 == high_ptr
             || out_ptr as *const f64 == low_ptr
             || out_ptr as *const f64 == close_ptr
@@ -3194,7 +3194,7 @@ pub fn frama_into_js(
     Ok(())
 }
 
-// ================== Batch Processing with Serialization ==================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
@@ -3244,7 +3244,7 @@ pub fn frama_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = frama_batch_into)]

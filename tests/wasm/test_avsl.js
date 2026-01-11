@@ -16,7 +16,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -28,27 +28,27 @@ test.before(async () => {
         throw error;
     }
     
-    // Load test data
+    
     const csvPath = path.join(__dirname, '../../src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv');
     const csvContent = fs.readFileSync(csvPath, 'utf-8');
     const records = parse(csvContent, {
-        columns: false,  // Don't treat first row as headers
+        columns: false,  
         skip_empty_lines: true,
-        from: 2  // Skip the header row
+        from: 2  
     });
     
-    // Columns: 0=timestamp, 1=open, 2=close, 3=high, 4=low, 5=volume
+    
     testData = {
-        close: new Float64Array(records.map(r => parseFloat(r[2]))),  // close is column 2
-        low: new Float64Array(records.map(r => parseFloat(r[4]))),    // low is column 4
-        volume: new Float64Array(records.map(r => parseFloat(r[5])))  // volume is column 5
+        close: new Float64Array(records.map(r => parseFloat(r[2]))),  
+        low: new Float64Array(records.map(r => parseFloat(r[4]))),    
+        volume: new Float64Array(records.map(r => parseFloat(r[5])))  
     };
 });
 
 test('AVSL accuracy', async () => {
     const { close, low, volume } = testData;
     
-    // Expected values from PineScript
+    
     const expectedLastFive = [
         56471.61721191,
         56267.11946706,
@@ -57,24 +57,24 @@ test('AVSL accuracy', async () => {
         55765.37864229,
     ];
     
-    // Calculate AVSL with default parameters
+    
     const result = wasm.avsl_js(
         close,
         low,
         volume,
-        12,  // fast_period
-        26,  // slow_period
-        2.0  // multiplier
+        12,  
+        26,  
+        2.0  
     );
     
     assert.strictEqual(result.length, close.length, 'Result length should match input length');
     
-    // Check last 5 values match expected (with 1% tolerance for this complex indicator)
+    
     const last5 = result.slice(-5);
     for (let i = 0; i < 5; i++) {
         const actual = last5[i];
         const expected = expectedLastFive[i];
-        const tolerance = Math.abs(expected) * 0.01; // 1% tolerance
+        const tolerance = Math.abs(expected) * 0.01; 
         const diff = Math.abs(actual - expected);
         
         assert.ok(
@@ -94,7 +94,7 @@ test('AVSL empty input', () => {
 
 test('AVSL mismatched lengths', () => {
     const close = new Float64Array([10.0, 20.0, 30.0]);
-    const low = new Float64Array([9.0, 19.0]); // Different length
+    const low = new Float64Array([9.0, 19.0]); 
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
     assert.throws(() => {
@@ -106,12 +106,12 @@ test('AVSL invalid period', () => {
     const data = new Float64Array([10.0, 20.0, 30.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0]);
     
-    // Zero period
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 0, 26, 2.0);
     }, /Invalid period/);
     
-    // Period exceeds data length
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 12, 100, 2.0);
     }, /Invalid period/);
@@ -128,15 +128,15 @@ test('AVSL all NaN', () => {
 test('AVSL different parameters', async () => {
     const { close, low, volume } = testData;
     
-    // Test with different fast/slow periods
+    
     const result1 = wasm.avsl_js(close, low, volume, 10, 20, 2.0);
     assert.strictEqual(result1.length, close.length);
     
-    // Test with different multiplier
+    
     const result2 = wasm.avsl_js(close, low, volume, 12, 26, 1.5);
     assert.strictEqual(result2.length, close.length);
     
-    // Results should be different with different parameters
+    
     const last10_1 = result1.slice(-10);
     const last10_2 = result2.slice(-10);
     
@@ -154,22 +154,22 @@ test('AVSL invalid multiplier', () => {
     const data = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
     const volume = new Float64Array([100.0, 200.0, 300.0, 400.0, 500.0]);
     
-    // Negative multiplier
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 2, 3, -1.0);
     }, /Invalid multiplier/);
     
-    // Zero multiplier
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 2, 3, 0.0);
     }, /Invalid multiplier/);
     
-    // NaN multiplier
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 2, 3, NaN);
     }, /Invalid multiplier/);
     
-    // Infinite multiplier
+    
     assert.throws(() => {
         wasm.avsl_js(data, data, volume, 2, 3, Infinity);
     }, /Invalid multiplier/);
@@ -182,7 +182,7 @@ test('AVSL warmup period verification', async () => {
     
     const result = wasm.avsl_js(close, low, volume, fastPeriod, slowPeriod, 2.0);
     
-    // Find first non-NaN value
+    
     let firstValid = -1;
     for (let i = 0; i < result.length; i++) {
         if (!isNaN(result[i])) {
@@ -191,19 +191,19 @@ test('AVSL warmup period verification', async () => {
         }
     }
     
-    // Warmup period should be at least slowPeriod - 1
+    
     const expectedWarmup = slowPeriod - 1;
     assert.ok(
         firstValid >= expectedWarmup,
         `First valid value at index ${firstValid}, expected >= ${expectedWarmup}`
     );
     
-    // All values before warmup should be NaN
+    
     for (let i = 0; i < expectedWarmup && i < result.length; i++) {
         assert.ok(isNaN(result[i]), `Expected NaN at warmup index ${i}`);
     }
     
-    // After sufficient data, no NaN values should exist
+    
     if (result.length > 240) {
         for (let i = 240; i < result.length; i++) {
             assert.ok(!isNaN(result[i]), `Unexpected NaN at index ${i} after warmup`);
@@ -214,7 +214,7 @@ test('AVSL warmup period verification', async () => {
 test('AVSL batch processing', async () => {
     const { close, low, volume } = testData;
     
-    // Test with single parameter set (default)
+    
     const batchResult = wasm.avsl_batch(close, low, volume, {
         fast_range: [12, 12, 0],
         slow_range: [26, 26, 0],
@@ -226,16 +226,16 @@ test('AVSL batch processing', async () => {
     assert.strictEqual(typeof batchResult.rows, 'number', 'Should have rows count');
     assert.strictEqual(typeof batchResult.cols, 'number', 'Should have cols count');
     
-    // Should have 1 combination (default params)
+    
     assert.strictEqual(batchResult.rows, 1);
     assert.strictEqual(batchResult.cols, close.length);
     assert.strictEqual(batchResult.combos.length, 1);
     assert.strictEqual(batchResult.values.length, close.length);
     
-    // Extract the single row
+    
     const defaultRow = batchResult.values;
     
-    // Expected values from Rust tests
+    
     const expectedLastFive = [
         56471.61721191,
         56267.11946706,
@@ -244,7 +244,7 @@ test('AVSL batch processing', async () => {
         55765.37864229,
     ];
     
-    // Check last 5 values match with 1% tolerance
+    
     const last5 = defaultRow.slice(-5);
     for (let i = 0; i < 5; i++) {
         const actual = last5[i];
@@ -265,23 +265,23 @@ test('AVSL batch multiple parameters', () => {
     const volume = new Float64Array(testData.volume.slice(0, 100));
     
     const result = wasm.avsl_batch(close, low, volume, {
-        fast_range: [10, 15, 5],  // 10, 15
-        slow_range: [20, 30, 10], // 20, 30
-        mult_range: [1.5, 2.5, 0.5] // 1.5, 2.0, 2.5
+        fast_range: [10, 15, 5],  
+        slow_range: [20, 30, 10], 
+        mult_range: [1.5, 2.5, 0.5] 
     });
     
-    // Should have 2 * 2 * 3 = 12 combinations
+    
     assert.strictEqual(result.rows, 12);
     assert.strictEqual(result.cols, 100);
     assert.strictEqual(result.combos.length, 12);
     assert.strictEqual(result.values.length, 12 * 100);
     
-    // Verify first combo parameters
+    
     assert.strictEqual(result.combos[0].fast_period, 10);
     assert.strictEqual(result.combos[0].slow_period, 20);
     assert.strictEqual(result.combos[0].multiplier, 1.5);
     
-    // Verify last combo parameters
+    
     assert.strictEqual(result.combos[11].fast_period, 15);
     assert.strictEqual(result.combos[11].slow_period, 30);
     assert.strictEqual(result.combos[11].multiplier, 2.5);
@@ -292,13 +292,13 @@ test('AVSL context API', () => {
     const slowPeriod = 26;
     const multiplier = 2.0;
     
-    // Create context
+    
     const context = new wasm.AvslContext(fastPeriod, slowPeriod, multiplier);
     
-    // Test warmup period getter
+    
     assert.strictEqual(context.get_warmup_period(), slowPeriod - 1);
     
-    // Test with invalid parameters
+    
     assert.throws(() => {
         new wasm.AvslContext(0, slowPeriod, multiplier);
     }, /Invalid fast period/);
@@ -319,7 +319,7 @@ test('AVSL zero-copy API', () => {
     const slowPeriod = 5;
     const multiplier = 2.0;
     
-    // Allocate buffers
+    
     const closePtr = wasm.avsl_alloc(data.length);
     const lowPtr = wasm.avsl_alloc(data.length);
     const volPtr = wasm.avsl_alloc(data.length);
@@ -331,29 +331,29 @@ test('AVSL zero-copy API', () => {
     assert.ok(outPtr !== 0, 'Failed to allocate output buffer');
     
     try {
-        // Create views into WASM memory
+        
         const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, data.length);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, data.length);
         const volView = new Float64Array(wasm.__wasm.memory.buffer, volPtr, data.length);
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
-        // Copy data into WASM memory
+        
         closeView.set(data);
-        lowView.set(data); // Using same data for low
+        lowView.set(data); 
         volView.set(volume);
         
-        // Compute AVSL using zero-copy API
+        
         wasm.avsl_into(closePtr, lowPtr, volPtr, outPtr, data.length, fastPeriod, slowPeriod, multiplier);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.avsl_js(data, data, volume, fastPeriod, slowPeriod, multiplier);
         
-        // Recreate view in case memory grew
+        
         const outView2 = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(outView2[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert.ok(
                 Math.abs(regularResult[i] - outView2[i]) < 1e-10,
@@ -361,7 +361,7 @@ test('AVSL zero-copy API', () => {
             );
         }
     } finally {
-        // Always free memory
+        
         wasm.avsl_free(closePtr, data.length);
         wasm.avsl_free(lowPtr, data.length);
         wasm.avsl_free(volPtr, data.length);
@@ -375,7 +375,7 @@ test('AVSL zero-copy in-place operation', () => {
     const low = new Float64Array(size);
     const volume = new Float64Array(size);
     
-    // Generate test data
+    
     for (let i = 0; i < size; i++) {
         close[i] = Math.sin(i * 0.1) + 100;
         low[i] = close[i] - Math.random() * 2;
@@ -395,23 +395,23 @@ test('AVSL zero-copy in-place operation', () => {
         lowView.set(low);
         volView.set(volume);
         
-        // Compute in-place (output overwrites close)
+        
         wasm.avsl_into(closePtr, lowPtr, volPtr, closePtr, size, 12, 26, 2.0);
         
-        // Recreate view
+        
         const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
         
-        // Check warmup period has NaN
-        // With first_val=0 and slow_period=26:
-        // - pre array has valid values starting at index 25 (first_val + slow_period - 1)
-        // - SMA needs 26 values to produce output, so first valid output is at 25 + 26 - 1 = 50
-        // So indices 0-49 should be NaN, and 50+ should have values
-        const warmupEnd = 50; // (0 + 26 - 1) + 26 - 1
+        
+        
+        
+        
+        
+        const warmupEnd = 50; 
         for (let i = 0; i < warmupEnd && i < size; i++) {
             assert.ok(isNaN(resultView[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values (starting from index 50)
+        
         for (let i = warmupEnd; i < Math.min(warmupEnd + 10, size); i++) {
             assert.ok(!isNaN(resultView[i]), `Unexpected NaN at index ${i}`);
         }
@@ -423,7 +423,7 @@ test('AVSL zero-copy in-place operation', () => {
 });
 
 test('AVSL SIMD128 consistency', () => {
-    // This test verifies SIMD128 produces same results as scalar
+    
     const testCases = [
         { size: 10, fast: 3, slow: 5 },
         { size: 100, fast: 12, slow: 26 },
@@ -443,16 +443,16 @@ test('AVSL SIMD128 consistency', () => {
         
         const result = wasm.avsl_js(close, low, volume, testCase.fast, testCase.slow, 2.0);
         
-        // Basic sanity checks
+        
         assert.strictEqual(result.length, close.length);
         
-        // Check warmup period
+        
         const expectedWarmup = testCase.slow - 1;
         for (let i = 0; i < expectedWarmup && i < result.length; i++) {
             assert.ok(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
         }
         
-        // Check values exist after warmup
+        
         let hasValidValues = false;
         for (let i = testCase.slow; i < result.length; i++) {
             if (!isNaN(result[i])) {
@@ -467,20 +467,20 @@ test('AVSL SIMD128 consistency', () => {
 test('AVSL memory allocation/deallocation', () => {
     const len = 1000;
     
-    // Test allocation
+    
     const ptr = wasm.avsl_alloc(len);
     assert.ok(ptr !== 0, 'Should allocate non-zero pointer');
     
-    // Free the memory
+    
     wasm.avsl_free(ptr, len);
     
-    // Test multiple allocations
+    
     const ptrs = [];
     for (let i = 0; i < 5; i++) {
         ptrs.push(wasm.avsl_alloc(100));
     }
     
-    // Free all
+    
     for (const p of ptrs) {
         wasm.avsl_free(p, 100);
     }
@@ -494,25 +494,25 @@ test('AVSL batch error handling', () => {
     low.fill(99);
     volume.fill(1000);
     
-    // Invalid config structure
+    
     assert.throws(() => {
         wasm.avsl_batch(close, low, volume, {
-            fast_range: [12, 12], // Missing step
+            fast_range: [12, 12], 
             slow_range: [26, 26, 0],
             mult_range: [2.0, 2.0, 0]
         });
     }, /Invalid config/);
     
-    // Missing required field
+    
     assert.throws(() => {
         wasm.avsl_batch(close, low, volume, {
             fast_range: [12, 12, 0],
             slow_range: [26, 26, 0]
-            // Missing mult_range
+            
         });
     }, /Invalid config/);
     
-    // Invalid data type
+    
     assert.throws(() => {
         wasm.avsl_batch(close, low, volume, {
             fast_range: "invalid",
@@ -526,12 +526,12 @@ test('AVSL very small dataset', () => {
     const smallData = new Float64Array([10.0, 11.0, 12.0, 13.0, 14.0]);
     const smallVolume = new Float64Array([100.0, 110.0, 120.0, 130.0, 140.0]);
     
-    // Default slow period is 26, data length is 5
+    
     assert.throws(() => {
         wasm.avsl_js(smallData, smallData, smallVolume, 12, 26, 2.0);
     }, /Invalid period|Not enough valid data/);
     
-    // Should work with smaller periods
+    
     const result = wasm.avsl_js(smallData, smallData, smallVolume, 2, 3, 2.0);
     assert.strictEqual(result.length, smallData.length);
 });

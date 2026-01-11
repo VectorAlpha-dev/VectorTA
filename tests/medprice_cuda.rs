@@ -1,12 +1,12 @@
-// Integration tests for CUDA MEDPRICE kernel
 
-use my_project::indicators::medprice::{medprice_with_kernel, MedpriceInput, MedpriceParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::medprice::{medprice_with_kernel, MedpriceInput, MedpriceParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaMedprice};
+use vector_ta::cuda::{cuda_available, CudaMedprice};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -32,7 +32,7 @@ fn medprice_cuda_dev_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let len = 4096usize;
-    // synth data with NaNs up front for warmup semantics
+    
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
     for i in 5..len {
@@ -82,7 +82,7 @@ fn medprice_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let rows = 1024usize;
     let mut high_tm = vec![f32::NAN; cols * rows];
     let mut low_tm = vec![f32::NAN; cols * rows];
-    // build time-major synthetic data with leading NaNs per series
+    
     for s in 0..cols {
         for t in (s + 2)..rows {
             let x = (t as f32) * 0.002 + (s as f32) * 0.01;
@@ -91,7 +91,7 @@ fn medprice_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             low_tm[t * cols + s] = base - 0.2;
         }
     }
-    // CPU baseline per series
+    
     let mut cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

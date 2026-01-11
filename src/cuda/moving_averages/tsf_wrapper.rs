@@ -191,7 +191,7 @@ impl CudaTsf {
         }
     }
 
-    // ---------------- VRAM helpers ----------------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -269,7 +269,7 @@ impl CudaTsf {
         Ok(())
     }
 
-    // --------------- Inputs (one-series × many-params) ---------------
+    
     #[allow(clippy::type_complexity)]
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -340,7 +340,7 @@ impl CudaTsf {
             }
 
             let pf = period as f64;
-            // Use x = 1..p convention to match kernels
+            
             let x_sum = pf * (pf + 1.0) * 0.5;
             let x2_sum = pf * (pf + 1.0) * (2.0 * pf + 1.0) / 6.0;
             let denom = pf * x2_sum - x_sum * x_sum;
@@ -548,7 +548,7 @@ impl CudaTsf {
         denom_invs: &[f32],
         inv_periods: &[f32],
     ) -> Result<DeviceArrayF32, CudaTsfError> {
-        // VRAM estimate
+        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaTsfError::InvalidInput("series_len * sizeof(f32) overflow".into()))?;
@@ -693,7 +693,7 @@ impl CudaTsf {
         Ok((dev.rows, dev.cols, combos))
     }
 
-    // --------------- Many-series (time-major) ---------------
+    
     #[allow(clippy::type_complexity)]
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -914,7 +914,7 @@ impl CudaTsf {
     }
 }
 
-// ---------------- Benches registration ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1087,7 +1087,7 @@ pub mod benches {
     }
 }
 
-// ---------------- Local helpers ----------------
+
 #[inline]
 fn expand_grid_local(r: &TsfBatchRange) -> Vec<TsfParams> {
     let (start, end, step) = r.period;

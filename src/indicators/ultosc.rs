@@ -439,7 +439,7 @@ fn ultosc_prepare<'a>(
     ))
 }
 
-// --- KERNEL ENTRYPOINTS ---
+
 #[inline]
 pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
     ultosc_with_kernel(input, Kernel::Auto)
@@ -631,18 +631,18 @@ unsafe fn ultosc_scalar_impl(
         let valid = !(hi.is_nan() | lo.is_nan() | ci.is_nan() | prev_c.is_nan());
 
         // Compute today's CMTL (close - true low) and True Range.
-        // Store zeros for invalid rows so eviction can be branchless.
+        
         let (c_new, t_new) = if valid {
-            // true_low = min(low, prev_close)
+            
             let tl = if lo < prev_c { lo } else { prev_c };
 
-            // True range for ULTOSC uses "true high/low":
-            //   true_low  = min(low, prev_close)
-            //   true_high = max(high, prev_close)
-            //   TR        = true_high - true_low
-            //
-            // This matches Tulip's `ultosc` and is equivalent to the standard
-            // "max of three distances" formulation when candle data is well-formed.
+            
+            
+            
+            
+            
+            
+            
             let th = if hi > prev_c { hi } else { prev_c };
             let tr = th - tl;
             (ci - tl, tr)
@@ -650,7 +650,7 @@ unsafe fn ultosc_scalar_impl(
             (0.0, 0.0)
         };
 
-        // For each window, remove the value that falls out (if the window is already full)
+        
         if count >= p1 {
             let mut old_idx1 = buf_idx + max_p - p1;
             if old_idx1 >= max_p {
@@ -676,11 +676,11 @@ unsafe fn ultosc_scalar_impl(
             sum3_b -= *tr_buf.get_unchecked(old_idx3);
         }
 
-        // Write new values into the ring buffer
+        
         *cmtl_buf.get_unchecked_mut(buf_idx) = c_new;
         *tr_buf.get_unchecked_mut(buf_idx) = t_new;
 
-        // Add today's values to all active sums (skip NaNs to match semantics)
+        
         if valid {
             sum1_a += c_new;
             sum1_b += t_new;
@@ -690,10 +690,10 @@ unsafe fn ultosc_scalar_impl(
             sum3_b += t_new;
         }
 
-        // We can produce output once the largest window is filled
+        
         count += 1;
         if i >= start_idx {
-            // Use reciprocal multiply for ratios
+            
             let t1 = if sum1_b != 0.0 {
                 sum1_a * sum1_b.recip()
             } else {
@@ -710,12 +710,12 @@ unsafe fn ultosc_scalar_impl(
                 0.0
             };
 
-            // out[i] = w1*t1 + w2*t2 + w3*t3 (use FMA chain)
+            
             let acc = f64::mul_add(w2, t2, w3 * t3);
             *out.get_unchecked_mut(i) = f64::mul_add(w1, t1, acc);
         }
 
-        // Advance ring buffer
+        
         buf_idx += 1;
         if buf_idx == max_p {
             buf_idx = 0;
@@ -725,7 +725,7 @@ unsafe fn ultosc_scalar_impl(
     }
 }
 
-// --- AVX STUBS ---
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn ultosc_avx2(
@@ -788,7 +788,7 @@ pub unsafe fn ultosc_avx512_long(
     ultosc_scalar(high, low, close, p1, p2, p3, first_valid, out)
 }
 
-// --- ROW/BATCH/BATCHBUILDER (no sweep for ultosc, but stubs for parity) ---
+
 #[inline(always)]
 pub fn ultosc_row_scalar(
     high: &[f64],
@@ -859,7 +859,7 @@ pub fn ultosc_row_avx512_long(
     unsafe { ultosc_avx512_long(high, low, close, p1, p2, p3, first_valid, out) }
 }
 
-// --- Batch APIs ---
+
 #[derive(Clone, Debug)]
 pub struct UltOscBatchRange {
     pub timeperiod1: (usize, usize, usize),
@@ -1142,7 +1142,7 @@ pub fn ultosc_batch_inner_into(
         return Err(UltOscError::InconsistentLengths);
     }
 
-    // Find first valid index (both i-1 and i must be valid)
+    
     let first_valid_idx = (1..len)
         .find(|&i| {
             !high[i - 1].is_nan()
@@ -1204,7 +1204,7 @@ pub fn ultosc_batch_inner_into(
         });
     }
 
-    // Initialize NaN warmup prefixes so no uninitialized/poison values can leak to bindings.
+    
     let out_uninit = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1213,8 +1213,8 @@ pub fn ultosc_batch_inner_into(
     };
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // Row-specific batch optimization: precompute prefix sums of CMTL and TR once
-    // pcmtl[i+1] = sum of valid CMTL up to i, ptr[i+1] = sum of valid TR up to i
+    
+    
     let mut pcmtl = vec![0.0f64; len + 1];
     let mut ptr = vec![0.0f64; len + 1];
     for i in 0..len {
@@ -1254,9 +1254,9 @@ pub fn ultosc_batch_inner_into(
         let w2: f64 = inv7_100 * 2.0f64;
         let w3: f64 = inv7_100 * 1.0f64;
 
-        // Only fill indices from start..len; warmup was already initialized to NaN
+        
         for i in start..len {
-            // Window sums via prefix differences
+            
             let s1a = pcmtl[i + 1] - pcmtl[i + 1 - p1];
             let s1b = ptr[i + 1] - ptr[i + 1 - p1];
             let s2a = pcmtl[i + 1] - pcmtl[i + 1 - p2];
@@ -1264,7 +1264,7 @@ pub fn ultosc_batch_inner_into(
             let s3a = pcmtl[i + 1] - pcmtl[i + 1 - p3];
             let s3b = ptr[i + 1] - ptr[i + 1 - p3];
 
-            // Use reciprocal multiply for ratios
+            
             let t1 = if s1b != 0.0 { s1a * s1b.recip() } else { 0.0 };
             let t2 = if s2b != 0.0 { s2a * s2b.recip() } else { 0.0 };
             let t3 = if s3b != 0.0 { s3a * s3b.recip() } else { 0.0 };
@@ -1321,7 +1321,7 @@ pub fn ultosc_batch_inner_into(
     Ok(combos)
 }
 
-// --- Tests ---
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1454,71 +1454,71 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             UltOscParams::default(),
-            // Minimum periods
+            
             UltOscParams {
                 timeperiod1: Some(1),
                 timeperiod2: Some(2),
                 timeperiod3: Some(3),
             },
-            // Small periods
+            
             UltOscParams {
                 timeperiod1: Some(2),
                 timeperiod2: Some(4),
                 timeperiod3: Some(8),
             },
-            // Small to medium periods
+            
             UltOscParams {
                 timeperiod1: Some(5),
                 timeperiod2: Some(10),
                 timeperiod3: Some(20),
             },
-            // Standard periods
+            
             UltOscParams {
                 timeperiod1: Some(7),
                 timeperiod2: Some(14),
                 timeperiod3: Some(28),
             },
-            // Medium periods
+            
             UltOscParams {
                 timeperiod1: Some(10),
                 timeperiod2: Some(20),
                 timeperiod3: Some(40),
             },
-            // Large periods
+            
             UltOscParams {
                 timeperiod1: Some(14),
                 timeperiod2: Some(28),
                 timeperiod3: Some(56),
             },
-            // Very large periods
+            
             UltOscParams {
                 timeperiod1: Some(20),
                 timeperiod2: Some(40),
                 timeperiod3: Some(80),
             },
-            // Asymmetric periods - close together
+            
             UltOscParams {
                 timeperiod1: Some(5),
                 timeperiod2: Some(6),
                 timeperiod3: Some(7),
             },
-            // Asymmetric periods - far apart
+            
             UltOscParams {
                 timeperiod1: Some(3),
                 timeperiod2: Some(10),
                 timeperiod3: Some(50),
             },
-            // Edge case - all same
+            
             UltOscParams {
                 timeperiod1: Some(14),
                 timeperiod2: Some(14),
                 timeperiod3: Some(14),
             },
-            // Edge case - reverse order
+            
             UltOscParams {
                 timeperiod1: Some(28),
                 timeperiod2: Some(14),
@@ -1530,15 +1530,15 @@ mod tests {
             let input = UltOscInput::from_candles(&candles, "high", "low", "close", params.clone());
             let output = ultosc_with_kernel(&input, kernel)?;
 
-            // Check values
+            
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1594,7 +1594,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1606,12 +1606,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate random test data for high/low/close prices with varying periods
+        
         let strat = (1usize..=50, 1usize..=50, 1usize..=50).prop_flat_map(|(p1, p2, p3)| {
             let max_period = p1.max(p2).max(p3);
             (
-                // Generate price data with realistic constraints
-                // Need at least max_period + 1 for ULTOSC (needs previous close)
+                
+                
                 prop::collection::vec(
                     (0.1f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                     (max_period + 1)..400,
@@ -1623,22 +1623,22 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(base_prices, (p1, p2, p3))| {
-                // Generate high/low/close from base prices with realistic and varied relationships
+                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
                 let mut close = Vec::with_capacity(base_prices.len());
 
-                // Use a simple pseudo-random number generator for variation
+                
                 let mut seed = p1 + p2 * 7 + p3 * 13;
                 for &price in &base_prices {
-                    // Vary the spread between 1% and 10%
+                    
                     seed = (seed * 1103515245 + 12345) % (1 << 31);
                     let spread_pct = 0.01 + (seed as f64 / (1u64 << 31) as f64) * 0.09;
                     let spread = price * spread_pct;
 
-                    // Vary where the close falls within the range
+                    
                     seed = (seed * 1103515245 + 12345) % (1 << 31);
-                    let close_position = seed as f64 / (1u64 << 31) as f64; // 0.0 to 1.0
+                    let close_position = seed as f64 / (1u64 << 31) as f64; 
 
                     let h = price + spread * 0.5;
                     let l = price - spread * 0.5;
@@ -1659,16 +1659,16 @@ mod tests {
                 let result = ultosc_with_kernel(&input, kernel).unwrap();
                 let out = result.values;
 
-                // Also compute with scalar kernel for reference
+                
                 let ref_result = ultosc_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_out = ref_result.values;
 
                 let max_period = p1.max(p2).max(p3);
-                // ULTOSC needs previous close, so warmup is max_period (includes the first_valid offset)
+                
                 let warmup = max_period;
 
-                // Property 1: Warmup period validation
-                // First warmup values should be NaN
+                
+                
                 for i in 0..warmup.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1679,8 +1679,8 @@ mod tests {
                     );
                 }
 
-                // Property 2: Kernel consistency
-                // All kernels should produce identical results
+                
+                
                 for (i, (&y, &r)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
@@ -1705,8 +1705,8 @@ mod tests {
                     }
                 }
 
-                // Property 3: Output bounds
-                // ULTOSC values must be between 0 and 100
+                
+                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1719,23 +1719,23 @@ mod tests {
                     }
                 }
 
-                // Property 4: Constant price property
-                // If all prices are constant, ULTOSC should stabilize to a specific value
+                
+                
                 if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                 {
-                    // After the largest period, the indicator should produce stable values
-                    // We need at least max_period + a few more points to see stability
+                    
+                    
                     let stability_check_start = (warmup + p3.max(p2).max(p1)).min(out.len());
                     if stability_check_start < out.len() - 2 {
-                        // Find first non-NaN value after stability point
+                        
                         let stable_region = &out[stability_check_start..];
                         let first_valid = stable_region.iter().position(|&v| !v.is_nan());
 
                         if let Some(idx) = first_valid {
                             let expected_stable = stable_region[idx];
-                            // All subsequent values should match the first stable value
+                            
                             for (i, &val) in stable_region.iter().skip(idx + 1).enumerate() {
                                 if !val.is_nan() {
                                     prop_assert!(
@@ -1749,8 +1749,8 @@ mod tests {
                     }
                 }
 
-                // Property 5: Zero range property
-                // When high = low = close for all values
+                
+                
                 let zero_range_high = vec![100.0; base_prices.len()];
                 let zero_range_low = zero_range_high.clone();
                 let zero_range_close = zero_range_high.clone();
@@ -1762,8 +1762,8 @@ mod tests {
                     params.clone(),
                 );
                 if let Ok(zero_result) = ultosc_with_kernel(&zero_input, kernel) {
-                    // After warmup, with zero range (high=low=close), true range is 0,
-                    // so ULTOSC should be 0 (as per lines 459-462 implementation)
+                    
+                    
                     for (i, &val) in zero_result.values.iter().enumerate().skip(warmup) {
                         if !val.is_nan() {
                             prop_assert!(
@@ -1777,18 +1777,18 @@ mod tests {
                     }
                 }
 
-                // Property 6: Weight relationship verification (4:2:1)
-                // ULTOSC formula: 100 * (4*BP1/TR1 + 2*BP2/TR2 + BP3/TR3) / 7
-                // This is a fundamental property of the indicator
-                // We can verify the weights are applied correctly by checking that
-                // the final result is properly weighted
+                
+                
+                
+                
+                
                 if out.len() > warmup {
-                    // The formula divides by 7 because 4+2+1=7
-                    // This is a sanity check that the implementation follows the spec
+                    
+                    
                     for i in warmup..out.len().min(warmup + 5) {
                         if !out[i].is_nan() {
-                            // ULTOSC values should be reasonable oscillator values
-                            // Not testing exact formula here, just that it's bounded reasonably
+                            
+                            
                             prop_assert!(
                                 out[i] >= 0.0 && out[i] <= 100.0,
                                 "[{}] ULTOSC at {} should be in [0,100], got {}",
@@ -1800,8 +1800,8 @@ mod tests {
                     }
                 }
 
-                // Property 7: Period ordering independence
-                // ULTOSC should work regardless of period ordering (p1, p2, p3 don't need to be ordered)
+                
+                
                 let reordered_params = UltOscParams {
                     timeperiod1: Some(p3),
                     timeperiod2: Some(p1),
@@ -1810,7 +1810,7 @@ mod tests {
                 let reordered_input =
                     UltOscInput::from_slices(&high, &low, &close, reordered_params);
 
-                // Should not error regardless of ordering
+                
                 prop_assert!(
                     ultosc_with_kernel(&reordered_input, kernel).is_ok(),
                     "[{}] ULTOSC should work with any period ordering",
@@ -1868,24 +1868,24 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with a simple parameter sweep
+        
         let sweep = UltOscBatchRange {
-            timeperiod1: (5, 9, 2),   // 5, 7, 9
-            timeperiod2: (12, 16, 2), // 12, 14, 16
-            timeperiod3: (26, 30, 2), // 26, 28, 30
+            timeperiod1: (5, 9, 2),   
+            timeperiod2: (12, 16, 2), 
+            timeperiod3: (26, 30, 2), 
         };
 
         let batch_builder = UltOscBatchBuilder::new().kernel(kernel);
         let output =
             batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
 
-        // Check structure
-        assert_eq!(output.rows, 3 * 3 * 3); // 27 combinations
+        
+        assert_eq!(output.rows, 3 * 3 * 3); 
         assert_eq!(output.cols, candles.close.len());
         assert_eq!(output.values.len(), output.rows * output.cols);
         assert_eq!(output.combos.len(), output.rows);
 
-        // Verify specific combination matches single calculation
+        
         let single_params = UltOscParams {
             timeperiod1: Some(7),
             timeperiod2: Some(14),
@@ -1895,11 +1895,11 @@ mod tests {
             UltOscInput::from_slices(&candles.high, &candles.low, &candles.close, single_params);
         let single_result = ultosc_with_kernel(&single_input, kernel)?;
 
-        // Find the row for this combination
+        
         if let Some(row_idx) = output.row_for_params(&single_params) {
             let batch_row = output.values_for(&single_params).unwrap();
 
-            // Compare last 5 values
+            
             let start = batch_row.len().saturating_sub(5);
             for i in 0..5 {
                 let diff = (batch_row[start + i] - single_result.values[start + i]).abs();
@@ -1929,16 +1929,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (tp1_start, tp1_end, tp1_step, tp2_start, tp2_end, tp2_step, tp3_start, tp3_end, tp3_step)
-            (2, 8, 2, 4, 16, 4, 8, 32, 8),   // Small to medium ranges
-            (5, 7, 1, 10, 14, 2, 20, 28, 4), // Dense small ranges
-            (7, 7, 0, 14, 14, 0, 14, 42, 7), // Static tp1/tp2, varying tp3
-            (1, 5, 1, 10, 10, 0, 20, 20, 0), // Varying tp1, static tp2/tp3
-            (10, 20, 5, 20, 40, 10, 40, 80, 20), // Large ranges
-            (3, 9, 3, 6, 18, 6, 12, 36, 12), // Multiples of 3
-            (5, 10, 1, 10, 20, 2, 20, 40, 4), // Different step sizes
+            
+            (2, 8, 2, 4, 16, 4, 8, 32, 8),   
+            (5, 7, 1, 10, 14, 2, 20, 28, 4), 
+            (7, 7, 0, 14, 14, 0, 14, 42, 7), 
+            (1, 5, 1, 10, 10, 0, 20, 20, 0), 
+            (10, 20, 5, 20, 40, 10, 40, 80, 20), 
+            (3, 9, 3, 6, 18, 6, 12, 36, 12), 
+            (5, 10, 1, 10, 20, 2, 20, 40, 4), 
         ];
 
         for (
@@ -1966,7 +1966,7 @@ mod tests {
             let output =
                 batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
 
-            // Check values
+            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2038,7 +2038,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2067,7 +2067,7 @@ mod tests {
 
     #[test]
     fn test_ultosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the existing CSV candles to mirror other tests.
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = UltOscInput::from_candles(
@@ -2087,7 +2087,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // Fallback to the slice helper on WASM to keep test compiling under wasm target
+            
             ultosc_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2111,9 +2111,9 @@ mod tests {
     }
 }
 
-// ============================================================================
-// WASM Helper Functions
-// ============================================================================
+
+
+
 
 #[inline]
 pub fn ultosc_into_slice(
@@ -2131,28 +2131,28 @@ pub fn ultosc_into_slice(
         });
     }
 
-    // Compute directly into destination
+    
     ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     dst[..start_idx].fill(qnan);
 
     Ok(())
 }
 
-// ============================================================================
-// Streaming Implementation
-// ============================================================================
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct UltOscStream {
     params: UltOscParams,
-    // Ring buffers hold the last `max_period` CMTL and TR values.
+    
     cmtl_buf: Vec<f64>,
     tr_buf: Vec<f64>,
 
-    // Rolling sums for each window: sum of CMTL ("_a") and sum of TR ("_b").
+    
     sum1_a: f64,
     sum1_b: f64,
     sum2_a: f64,
@@ -2160,22 +2160,22 @@ pub struct UltOscStream {
     sum3_a: f64,
     sum3_b: f64,
 
-    // Circular index and counters
+    
     buffer_idx: usize,
     count: usize,
 
-    // Periods
+    
     max_period: usize,
     p1: usize,
     p2: usize,
     p3: usize,
 
-    // Weights: 100 * [4,2,1] / 7 precomputed
+    
     w1: f64,
     w2: f64,
     w3: f64,
 
-    // Previous close (needed to form the first valid pair)
+    
     prev_close: Option<f64>,
 }
 
@@ -2202,8 +2202,8 @@ impl UltOscStream {
 
         let max_period = p1.max(p2).max(p3);
 
-        // Precompute weights using the canonical 4:2:1 blend scaled to 0..100.
-        // w1 = 100 * 4 / 7, w2 = 100 * 2 / 7, w3 = 100 * 1 / 7
+        
+        
         const INV7_100: f64 = 100.0 / 7.0;
         let w1 = INV7_100 * 4.0;
         let w2 = INV7_100 * 2.0;
@@ -2238,7 +2238,7 @@ impl UltOscStream {
 
     #[inline(always)]
     fn idx_minus(&self, k: usize) -> usize {
-        // (buffer_idx + max_period - k) % max_period
+        
         let mut j = self.buffer_idx + self.max_period - k;
         if j >= self.max_period {
             j -= self.max_period;
@@ -2249,26 +2249,26 @@ impl UltOscStream {
     /// Push one bar; returns Some(ultosc) once the largest window is filled, None otherwise.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // We need a previous close to form the first pair.
+        
         let prev_close = match self.prev_close {
             Some(pc) => pc,
             None => {
                 self.prev_close = Some(close);
-                return None; // warmup: no previous close yet
+                return None; 
             }
         };
 
-        // Match scalar semantics: if any of hi/lo/ci/prev_c is NaN, this bar contributes zeros
-        // but the ring still advances and windows still evict.
+        
+        
         let valid = !(high.is_nan() | low.is_nan() | close.is_nan() | prev_close.is_nan());
 
-        // Compute today's (CMTL, TR) or zeros when invalid.
+        
         let (c_new, t_new) = if valid {
-            // CMTL = close - true_low, true_low = min(low, prev_close)
+            
             let true_low = if low < prev_close { low } else { prev_close };
 
-            // TR = max( high - low, |high - prev_close|, |low - prev_close| )
-            // (Equivalent to Wilder's true range via true-high/true-low.)
+            
+            
             let base = high - low;
             let d1 = (high - prev_close).abs();
             let d2 = (low - prev_close).abs();
@@ -2291,7 +2291,7 @@ impl UltOscStream {
             (0.0, 0.0)
         };
 
-        // Evict oldest contributions for each window (only once the window is full).
+        
         if self.count >= self.p1 {
             let j = self.idx_minus(self.p1);
             self.sum1_a -= self.cmtl_buf[j];
@@ -2308,11 +2308,11 @@ impl UltOscStream {
             self.sum3_b -= self.tr_buf[j];
         }
 
-        // Overwrite ring slot with today's values…
+        
         self.cmtl_buf[self.buffer_idx] = c_new;
         self.tr_buf[self.buffer_idx] = t_new;
 
-        // …and add them to all three rolling sums (adding zeros when invalid is a no-op).
+        
         self.sum1_a += c_new;
         self.sum1_b += t_new;
         self.sum2_a += c_new;
@@ -2320,22 +2320,22 @@ impl UltOscStream {
         self.sum3_a += c_new;
         self.sum3_b += t_new;
 
-        // Advance ring & counters
+        
         self.buffer_idx += 1;
         if self.buffer_idx == self.max_period {
             self.buffer_idx = 0;
         }
         self.count += 1;
 
-        // Update previous close after consuming the bar (even if it's NaN)
+        
         self.prev_close = Some(close);
 
-        // Not enough bars yet to output
+        
         if self.count < self.max_period {
             return None;
         }
 
-        // Ratios via reciprocal multiply + FMA chain (same as scalar path)
+        
         let t1 = if self.sum1_b != 0.0 {
             self.sum1_a * self.sum1_b.recip()
         } else {
@@ -2357,9 +2357,9 @@ impl UltOscStream {
     }
 }
 
-// ============================================================================
-// Python Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ultosc")]
@@ -2616,9 +2616,9 @@ impl UltOscStreamPy {
     }
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2648,7 +2648,7 @@ pub fn ultosc_js(
     };
     let input = UltOscInput::from_slices(high, low, close, params);
 
-    // Single allocation
+    
     let mut output = vec![0.0; len];
     ultosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2684,19 +2684,19 @@ pub fn ultosc_into(
         };
         let input = UltOscInput::from_slices(high, low, close, params);
 
-        // CRITICAL: Check for aliasing with any input array
+        
         if high_ptr == out_ptr as *const f64
             || low_ptr == out_ptr as *const f64
             || close_ptr == out_ptr as *const f64
         {
-            // Input and output overlap - use temporary buffer
+            
             let mut temp = vec![0.0; len];
             ultosc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing - write directly to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             ultosc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -34,13 +34,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// (No cudart FFI here by design.)
 
-// We intentionally avoid any dependency on the CUDA Runtime (cudart).
-// All host pinning uses `cust::memory::LockedBuffer` (driver API under the hood),
-// keeping linkage limited to the CUDA driver.
 
-// -------- Kernel selection policy (simple variants for recurrence kernels) --------
+
+
+
+
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -79,7 +79,7 @@ impl Default for CudaMamaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -150,7 +150,7 @@ impl CudaMama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/mama_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate optimization; fall back conservatively.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -342,7 +342,7 @@ impl CudaMama {
         n_items: usize,
         policy_block_x: Option<u32>,
     ) -> (GridSize, BlockSize, u32) {
-        // Both legacy batch and many-series kernels are compiled with __launch_bounds__(256,...).
+        
         let block_x = policy_block_x.unwrap_or(256).clamp(64, 256);
         let blocks = ((n_items + block_x as usize - 1) / block_x as usize).min(65_535) as u32;
         let grid: GridSize = (blocks, 1, 1).into();
@@ -442,10 +442,10 @@ impl CudaMama {
             )));
         }
 
-        // Launch to VRAM
+        
         let pair = self.run_batch_kernel(prices, &inputs)?;
 
-        // Stage Device -> pinned host, then memcpy into caller's slices.
+        
         let mut pinned_m: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         let mut pinned_f: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe {
@@ -507,8 +507,8 @@ impl CudaMama {
     ) -> Result<DeviceMamaPair, CudaMamaError> {
         let prepared =
             Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, fast_limit, slow_limit)?;
-        // Always use the optimized many-series kernel; tolerate tiny boundary
-        // rounding via slightly relaxed unit-test tolerance.
+        
+        
         self.run_many_series_kernel(prices_tm_f32, cols, rows, fast_limit, slow_limit, &prepared)
     }
 
@@ -564,7 +564,7 @@ impl CudaMama {
         let n_combos = inputs.combos.len();
         let series_len = inputs.series_len;
 
-        // checked arithmetic for sizes
+        
         let out_elems = n_combos
             .checked_mul(series_len)
             .ok_or_else(|| CudaMamaError::InvalidInput("rows*cols overflow".into()))?;
@@ -579,10 +579,10 @@ impl CudaMama {
         let out_bytes = out_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
-        // One-series-many-params uses a precomputed inv_dp buffer (series_len * f32).
+        
         let inv_dp_bytes = prices_bytes;
         let required = prices_bytes + inv_dp_bytes + fast_bytes + slow_bytes + (out_bytes * 2);
-        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
+        let headroom = 64 * 1024 * 1024; 
 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
@@ -645,7 +645,7 @@ impl CudaMama {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
         let required = prices_bytes + first_valid_bytes + (out_bytes * 2);
-        let headroom = 64 * 1024 * 1024; // ~64MB safety margin
+        let headroom = 64 * 1024 * 1024; 
 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
@@ -695,8 +695,8 @@ impl CudaMama {
         d_out_mama: &mut DeviceBuffer<f32>,
         d_out_fama: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMamaError> {
-        // Preserve the strict single-combo behavior: the kernel contains a byte-for-byte
-        // compatible path for n_combos==1 which we keep for correctness.
+        
+        
         let force_plain = matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) || n_combos == 1;
 
         if force_plain {
@@ -742,7 +742,7 @@ impl CudaMama {
             return Ok(());
         }
 
-        // Default batch path for many combos: precompute inv_dp once and use the warp-scan kernel.
+        
         let inv_dp_func = self
             .module
             .get_function("mama_inv_dp_f32")
@@ -754,7 +754,7 @@ impl CudaMama {
 
         let mut d_inv_dp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
 
-        // Use env var as a convenient tuning knob for benchmarks.
+        
         let env_block_x: u32 = env::var("MAMA_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -773,7 +773,7 @@ impl CudaMama {
         self.maybe_log_batch_debug();
 
         unsafe {
-            // (1) inv_dp precompute
+            
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut series_len_i = series_len as i32;
             let mut first_valid_i = first_valid as i32;
@@ -789,7 +789,7 @@ impl CudaMama {
             self.stream
                 .launch(&inv_dp_func, prep_grid, prep_block, 0, prep_args)?;
 
-            // (2) batch scan
+            
             let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw();
             let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw();
             let mut combos_i = n_combos as i32;
@@ -983,7 +983,7 @@ impl CudaMama {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1012,7 +1012,7 @@ pub mod benches {
             + 64 * 1024 * 1024
     }
 
-    // Preallocated, device-resident batch state to avoid per-iteration allocs/copies.
+    
     struct MamaBatchDeviceState {
         cuda: CudaMama,
         d_prices: DeviceBuffer<f32>,
@@ -1052,7 +1052,7 @@ pub mod benches {
         let n_combos = PARAM_SWEEP;
         let out_elems = series_len * n_combos;
 
-        // Fast/slow grid (250 combos): fast sweeps; slow fixed.
+        
         let mut fast_limits = Vec::with_capacity(n_combos);
         for i in 0..n_combos {
             fast_limits.push(0.5f32 + (i as f32) * 0.001f32);

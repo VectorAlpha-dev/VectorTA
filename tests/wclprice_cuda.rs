@@ -1,14 +1,14 @@
-// Integration tests for CUDA WCLPRICE kernels (batch and many-series)
 
-use my_project::indicators::wclprice::{
+
+use vector_ta::indicators::wclprice::{
     wclprice_with_kernel, WclpriceData, WclpriceInput, WclpriceParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaWclprice};
+use vector_ta::cuda::{cuda_available, CudaWclprice};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -41,7 +41,7 @@ fn wclprice_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         high[i] = close[i] + off;
         low[i] = close[i] - off;
     }
-    // CPU baseline
+    
     let input = WclpriceInput {
         data: WclpriceData::Slices {
             high: &high,
@@ -52,7 +52,7 @@ fn wclprice_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cpu = wclprice_with_kernel(&input, Kernel::Scalar)?;
 
-    // GPU
+    
     let hf: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let cf: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -62,7 +62,7 @@ fn wclprice_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             &hf,
             &lf,
             &cf,
-            &my_project::indicators::wclprice::WclpriceBatchRange,
+            &vector_ta::indicators::wclprice::WclpriceBatchRange,
         )
         .expect("wclprice_batch_dev");
     assert_eq!(dev.rows, 1);
@@ -70,7 +70,7 @@ fn wclprice_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
 
-    // Compare
+    
     let tol = 1e-4;
     for i in 0..len {
         assert!(
@@ -105,7 +105,7 @@ fn wclprice_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // CPU per-series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -131,7 +131,7 @@ fn wclprice_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    // GPU
+    
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cf: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

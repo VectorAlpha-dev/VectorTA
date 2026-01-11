@@ -1,12 +1,12 @@
-// Integration tests for CUDA ADX kernels
 
-use my_project::indicators::adx::{adx_batch_with_kernel, AdxBatchRange};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::adx::{adx_batch_with_kernel, AdxBatchRange};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaAdx};
+use vector_ta::cuda::{cuda_available, CudaAdx};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -68,7 +68,7 @@ fn adx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_host)?;
 
-    let tol = 1e-1; // FP32 tolerance (Wilder smoothing over long series)
+    let tol = 1e-1; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -90,8 +90,8 @@ fn adx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[adx_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; // series
-    let rows = 2048usize; // time
+    let cols = 16usize; 
+    let rows = 2048usize; 
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -115,7 +115,7 @@ fn adx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

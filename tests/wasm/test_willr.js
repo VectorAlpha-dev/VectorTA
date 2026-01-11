@@ -21,14 +21,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -38,7 +38,7 @@ test.before(async () => {
 });
 
 test('WILLR partial params', () => {
-    // Default period (14) — mirrors check_willr_partial_params
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
@@ -48,7 +48,7 @@ test('WILLR partial params', () => {
 });
 
 test('WILLR accuracy (last 5 match Rust refs)', () => {
-    // Mirrors check_willr_accuracy in Rust tests with same references and tolerance
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
@@ -90,11 +90,11 @@ test('WILLR all NaN input', () => {
 });
 
 test('WILLR not enough valid data', () => {
-    // Trigger WillrError::NotEnoughValidData by making period <= len but too few valid points
+    
     const high = new Float64Array([NaN, NaN, 2.0]);
     const low = new Float64Array([NaN, NaN, 1.0]);
     const close = new Float64Array([NaN, NaN, 1.5]);
-    // len = 3, period = 3, first_valid = 2 -> valid span = 1 < period -> NotEnoughValidData
+    
     assert.throws(
         () => wasm.willr_js(high, low, close, 3),
         /Not enough valid data/i
@@ -116,19 +116,19 @@ test('WILLR batch basic', () => {
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
 
-    const cfg = { period_range: [10, 20, 2] }; // 10,12,14,16,18,20
+    const cfg = { period_range: [10, 20, 2] }; 
     const out = wasm.willr_batch(high, low, close, cfg);
 
     assert.equal(out.rows, 6);
     assert.equal(out.cols, 100);
     assert.equal(out.values.length, 6 * 100);
 
-    // Verify first row matches single calc for period=10
+    
     const single = wasm.willr_js(high, low, close, 10);
     const row0 = Array.from(out.values.slice(0, 100));
     assertArrayClose(row0, Array.from(single), 1e-8, 'Batch row 0 vs single mismatch');
 });
 
 test.after(() => {
-    // no-op; kept for symmetry with other files
+    
 });

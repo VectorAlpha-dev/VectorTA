@@ -1,16 +1,16 @@
-// Integration tests for CUDA StdDev kernels
 
-use my_project::indicators::stddev::{
+
+use vector_ta::indicators::stddev::{
     stddev_batch_with_kernel, stddev_with_kernel, StdDevBatchRange, StdDevInput, StdDevParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaStddev;
+use vector_ta::cuda::CudaStddev;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -94,7 +94,7 @@ fn stddev_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         }
     }
 
-    // CPU baseline per series
+    
     let period = 15usize;
     let nbdev = 2.0f64;
     let mut cpu_tm = vec![f64::NAN; cols * rows];

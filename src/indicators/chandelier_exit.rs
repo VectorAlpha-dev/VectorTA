@@ -184,8 +184,8 @@ pub enum ChandelierExitData<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ChandelierExitOutput {
-    pub long_stop: Vec<f64>,  // Long stop values (0.0 when inactive)
-    pub short_stop: Vec<f64>, // Short stop values (0.0 when inactive)
+    pub long_stop: Vec<f64>,  
+    pub short_stop: Vec<f64>, 
 }
 
 #[derive(Debug, Clone)]
@@ -670,7 +670,7 @@ fn window_min(a: &[f64]) -> f64 {
     m
 }
 
-// Helper to find first valid index
+
 #[inline(always)]
 fn ce_first_valid(
     use_close: bool,
@@ -691,7 +691,7 @@ fn ce_first_valid(
     f.ok_or(ChandelierExitError::AllValuesNaN)
 }
 
-// Prepare and validate input
+
 #[inline(always)]
 fn ce_prepare<'a>(
     input: &'a ChandelierExitInput,
@@ -2137,7 +2137,7 @@ pub fn chandelier_exit_py<'py>(
     Ok((long_vec.into_pyarray(py), short_vec.into_pyarray(py)))
 }
 
-// Python batch binding
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "chandelier_exit_batch")]
 #[pyo3(signature = (high, low, close, period_range, mult_range, use_close=true, kernel=None))]
@@ -2162,7 +2162,7 @@ pub fn chandelier_exit_batch_py<'py>(
         use_close: (use_close, use_close, false),
     };
 
-    // Expand once; no CeBatchOutput allocation
+    
     let combos = expand_ce_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos
         .len()
@@ -2179,7 +2179,7 @@ pub fn chandelier_exit_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     py.allow_threads(|| {
-        // Map *Batch -> non-batch like alma.rs
+        
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -2220,7 +2220,7 @@ pub fn chandelier_exit_batch_py<'py>(
     Ok(d)
 }
 
-// Python streaming class
+
 #[cfg(feature = "python")]
 #[pyclass]
 pub struct ChandelierExitStreamPy {
@@ -2231,13 +2231,13 @@ pub struct ChandelierExitStreamPy {
     mult: f64,
     use_close: bool,
     kernel: Kernel,
-    // Stateful fields for incremental calculation
+    
     prev_close: Option<f64>,
-    atr_prev: Option<f64>, // Wilder ATR state
+    atr_prev: Option<f64>, 
     long_stop_prev: Option<f64>,
     short_stop_prev: Option<f64>,
-    dir_prev: i8,     // init 1
-    warm_tr_sum: f64, // sum TR for first N bars
+    dir_prev: i8,     
+    warm_tr_sum: f64, 
     count: usize,
 }
 
@@ -2265,19 +2265,19 @@ impl ChandelierExitStreamPy {
             atr_prev: None,
             long_stop_prev: None,
             short_stop_prev: None,
-            dir_prev: 1, // Pine: var int dir = 1
+            dir_prev: 1, 
             warm_tr_sum: 0.0,
             count: 0,
         })
     }
 
     fn update(&mut self, high: f64, low: f64, close: f64) -> PyResult<Option<(f64, f64)>> {
-        // 1) Push inputs and maintain buffer
+        
         self.high_buffer.push(high);
         self.low_buffer.push(low);
         self.close_buffer.push(close);
 
-        // Compute TR
+        
         let tr = if let Some(pc) = self.prev_close {
             let hl = (high - low).abs();
             let hc = (high - pc).abs();
@@ -2287,7 +2287,7 @@ impl ChandelierExitStreamPy {
             (high - low).abs()
         };
 
-        // 2) ATR calculation (Wilder's RMA)
+        
         let atr = if self.atr_prev.is_none() {
             self.warm_tr_sum += tr;
             self.count += 1;
@@ -2306,14 +2306,14 @@ impl ChandelierExitStreamPy {
             next
         };
 
-        // Keep only last N bars for window calculations
+        
         if self.high_buffer.len() > self.period {
             self.high_buffer.remove(0);
             self.low_buffer.remove(0);
             self.close_buffer.remove(0);
         }
 
-        // 3) Window highs/lows
+        
         let (highest, lowest) = if self.use_close {
             (
                 window_max(&self.close_buffer),
@@ -2323,15 +2323,15 @@ impl ChandelierExitStreamPy {
             (window_max(&self.high_buffer), window_min(&self.low_buffer))
         };
 
-        // 4) Compute candidate stops
+        
         let long_stop_val = highest - self.mult * atr;
         let short_stop_val = lowest + self.mult * atr;
 
-        // 5) Previous with nz(current) semantics
+        
         let lsp = self.long_stop_prev.unwrap_or(long_stop_val);
         let ssp = self.short_stop_prev.unwrap_or(short_stop_val);
 
-        // 6) Trail
+        
         let ls = if let Some(pc) = self.prev_close {
             if pc > lsp {
                 long_stop_val.max(lsp)
@@ -2351,7 +2351,7 @@ impl ChandelierExitStreamPy {
             short_stop_val
         };
 
-        // 7) Direction
+        
         let d = if close > ssp {
             1
         } else if close < lsp {
@@ -2360,7 +2360,7 @@ impl ChandelierExitStreamPy {
             self.dir_prev
         };
 
-        // 8) Persist state and return masked outputs
+        
         self.long_stop_prev = Some(ls);
         self.short_stop_prev = Some(ss);
         self.dir_prev = d;
@@ -2385,7 +2385,7 @@ impl ChandelierExitStreamPy {
     }
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct CeResult {
@@ -2433,7 +2433,7 @@ pub fn ce_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "chandelier_exit_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, period_range, mult_range=(3.0,3.0,0.0), use_close=true, device_id=0))]
@@ -2841,14 +2841,14 @@ impl ChandelierExitStreamWasm {
             next
         };
 
-        // Keep only last N bars
+        
         if self.high_buffer.len() > self.period {
             self.high_buffer.remove(0);
             self.low_buffer.remove(0);
             self.close_buffer.remove(0);
         }
 
-        // Window highs/lows
+        
         let (highest, lowest) = if self.use_close {
             (
                 window_max(&self.close_buffer),
@@ -2858,15 +2858,15 @@ impl ChandelierExitStreamWasm {
             (window_max(&self.high_buffer), window_min(&self.low_buffer))
         };
 
-        // Compute candidate stops
+        
         let long_stop_val = highest - self.mult * atr;
         let short_stop_val = lowest + self.mult * atr;
 
-        // Previous with nz semantics
+        
         let lsp = self.long_stop_prev.unwrap_or(long_stop_val);
         let ssp = self.short_stop_prev.unwrap_or(short_stop_val);
 
-        // Trail
+        
         let ls = if let Some(pc) = self.prev_close {
             if pc > lsp {
                 long_stop_val.max(lsp)
@@ -2886,7 +2886,7 @@ impl ChandelierExitStreamWasm {
             short_stop_val
         };
 
-        // Direction
+        
         let d = if close > ssp {
             1
         } else if close < lsp {
@@ -2895,13 +2895,13 @@ impl ChandelierExitStreamWasm {
             self.dir_prev
         };
 
-        // Persist state
+        
         self.long_stop_prev = Some(ls);
         self.short_stop_prev = Some(ss);
         self.dir_prev = d;
         self.prev_close = Some(close);
 
-        // Return masked outputs
+        
         let out_long = if d == 1 { ls } else { f64::NAN };
         let out_short = if d == -1 { ss } else { f64::NAN };
 
@@ -2973,7 +2973,7 @@ mod tests {
         let input = ChandelierExitInput::from_candles(&candles, params);
         let result = chandelier_exit_with_kernel(&input, kernel)?;
 
-        // Reference values from Pine Script at specific indices
+        
         let expected_indices = [15386, 15387, 15388, 15389, 15390];
         let expected_short_stops = [
             68719.23648167,
@@ -2983,7 +2983,7 @@ mod tests {
             66883.02246342,
         ];
 
-        // Verify reference values at specific indices (matching Python/WASM tests)
+        
         for (i, &idx) in expected_indices.iter().enumerate() {
             if idx < result.short_stop.len() {
                 let actual = result.short_stop[idx];
@@ -3002,7 +3002,7 @@ mod tests {
             }
         }
 
-        // Also check warmup period has NaN values
+        
         for i in 0..21 {
             assert!(
                 result.long_stop[i].is_nan(),
@@ -3020,7 +3020,7 @@ mod tests {
             );
         }
 
-        // Verify we have non-NaN values after warmup
+        
         let has_valid_long = result.long_stop.iter().skip(21).any(|&v| !v.is_nan());
         let has_valid_short = result.short_stop.iter().skip(21).any(|&v| !v.is_nan());
         assert!(
@@ -3137,7 +3137,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 30];
 
-        // Test with negative multiplier (should still work)
+        
         let params = ChandelierExitParams {
             period: Some(10),
             mult: Some(-2.0),
@@ -3145,14 +3145,14 @@ mod tests {
         };
         let input = ChandelierExitInput::from_slices(&data, &data, &data, params);
         let res = chandelier_exit_with_kernel(&input, kernel);
-        // Negative mult should work but produce inverted stops
+        
         assert!(
             res.is_ok(),
             "[{}] CE should handle negative multiplier",
             test_name
         );
 
-        // Test with zero multiplier
+        
         let params_zero = ChandelierExitParams {
             period: Some(10),
             mult: Some(0.0),
@@ -3177,7 +3177,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Calculate first pass
+        
         let params = ChandelierExitParams {
             period: Some(14),
             mult: Some(2.5),
@@ -3186,7 +3186,7 @@ mod tests {
         let input1 = ChandelierExitInput::from_candles(&candles, params.clone());
         let output1 = chandelier_exit_with_kernel(&input1, kernel)?;
 
-        // Use long_stop as input for second pass (should give different results)
+        
         let input2 = ChandelierExitInput::from_slices(
             &output1.long_stop,
             &output1.long_stop,
@@ -3197,7 +3197,7 @@ mod tests {
 
         assert_eq!(output1.long_stop.len(), output2.long_stop.len());
 
-        // Outputs should differ (not identical reinput behavior)
+        
         let mut has_diff = false;
         for i in 14..output1.long_stop.len() {
             if !output1.long_stop[i].is_nan() && !output2.long_stop[i].is_nan() {
@@ -3225,7 +3225,7 @@ mod tests {
         let mut low = vec![5.0; 50];
         let mut close = vec![7.5; 50];
 
-        // Insert NaN values at various positions
+        
         high[10] = f64::NAN;
         low[20] = f64::NAN;
         close[30] = f64::NAN;
@@ -3256,7 +3256,7 @@ mod tests {
         let mult = 3.0;
         let use_close = true;
 
-        // Batch calculation
+        
         let params = ChandelierExitParams {
             period: Some(period),
             mult: Some(mult),
@@ -3265,12 +3265,12 @@ mod tests {
         let input = ChandelierExitInput::from_candles(&candles, params);
         let batch_output = chandelier_exit_with_kernel(&input, kernel)?;
 
-        // Streaming calculation (Python version)
+        
         let mut stream_long: Vec<f64> = Vec::with_capacity(candles.close.len());
         let mut stream_short: Vec<f64> = Vec::with_capacity(candles.close.len());
 
-        // Note: We can't test Python streaming directly here, so we'll verify the concept
-        // by checking that batch results have the expected pattern
+        
+        
         for i in 0..candles.close.len() {
             if i < period - 1 {
                 assert!(batch_output.long_stop[i].is_nan());
@@ -3394,20 +3394,20 @@ mod tests {
             let bs_nan = batch.long_stop[i].is_nan();
 
             if ls_nan && bs_nan {
-                continue; // Both NaN, ok
+                continue; 
             }
 
             if ls_nan != bs_nan {
-                // One is NaN but not the other - skip this comparison
-                // This can happen due to slight algorithmic differences
+                
+                
                 continue;
             }
 
-            // Both are valid numbers
+            
             let diff = (ls[i] - batch.long_stop[i]).abs();
             max_diff = max_diff.max(diff);
             assert!(
-                diff < 1e-9, // Use small absolute tolerance now that algorithm is fixed
+                diff < 1e-9, 
                 "[{test}] long idx {i}: streaming={} vs batch={}, diff={}",
                 ls[i],
                 batch.long_stop[i],
@@ -3420,32 +3420,32 @@ mod tests {
             let bs_nan = batch.short_stop[i].is_nan();
 
             if ss_nan && bs_nan {
-                continue; // Both NaN, ok
+                continue; 
             }
 
             if ss_nan != bs_nan {
-                // One is NaN but not the other - skip this comparison
+                
                 continue;
             }
 
-            // Both are valid numbers
+            
             let diff = (ss[i] - batch.short_stop[i]).abs();
             max_diff = max_diff.max(diff);
             assert!(
-                diff < 1e-9, // Use small absolute tolerance now that algorithm is fixed
+                diff < 1e-9, 
                 "[{test}] short idx {i}: streaming={} vs batch={}, diff={}",
                 ss[i],
                 batch.short_stop[i],
                 diff
             );
         }
-        // Max diff tracked for informational purposes but not enforced
+        
         Ok(())
     }
 
     #[cfg(feature = "wasm")]
     fn check_ce_streaming_vs_batch(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Stub for WASM builds - streaming tests not applicable
+        
         Ok(())
     }
 
@@ -3502,7 +3502,7 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(high, low, close, period, mult, use_close)| {
-                // Ensure high >= low for each bar
+                
                 let mut high_fixed = high.clone();
                 let mut low_fixed = low.clone();
                 for i in 0..high.len().min(low.len()) {
@@ -3522,11 +3522,11 @@ mod tests {
                 let out = chandelier_exit_with_kernel(&input, kernel);
 
                 if let Ok(output) = out {
-                    // Verify output length matches input
+                    
                     prop_assert_eq!(output.long_stop.len(), close.len());
                     prop_assert_eq!(output.short_stop.len(), close.len());
 
-                    // Verify NaN masking is consistent (only one stop active at a time)
+                    
                     for i in 0..output.long_stop.len() {
                         let long_active = !output.long_stop[i].is_nan();
                         let short_active = !output.short_stop[i].is_nan();
@@ -3546,7 +3546,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate all test variants
+    
     macro_rules! generate_all_chandelier_exit_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3598,7 +3598,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_chandelier_exit_tests!(check_chandelier_exit_property);
 
-    // Additional parity tests
+    
     #[test]
     fn ce_no_poison() {
         use crate::utilities::data_loader::read_candles_from_csv;
@@ -3631,11 +3631,11 @@ mod tests {
             .apply_slices(high, low, close)
             .unwrap();
 
-        // Check basic properties
+        
         assert_eq!(batch_out.long_stop.len(), subset);
         assert_eq!(batch_out.short_stop.len(), subset);
 
-        // Verify NaN masking is consistent
+        
         for i in 0..21 {
             assert!(batch_out.long_stop[i].is_nan());
             assert!(batch_out.short_stop[i].is_nan());
@@ -3658,7 +3658,7 @@ mod tests {
 
     #[test]
     fn test_chandelier_exit_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Synthetic small-but-nontrivial dataset (length ~256)
+        
         let len = 256usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -3676,10 +3676,10 @@ mod tests {
         let params = ChandelierExitParams::default();
         let input = ChandelierExitInput::from_slices(&high, &low, &close, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = chandelier_exit(&input)?;
 
-        // Preallocate outputs and call the new into API
+        
         let mut out_long = vec![0.0; len];
         let mut out_short = vec![0.0; len];
         chandelier_exit_into(&input, &mut out_long, &mut out_short)?;

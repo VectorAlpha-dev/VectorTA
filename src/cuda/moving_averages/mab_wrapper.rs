@@ -101,7 +101,7 @@ impl CudaMab {
         })
     }
 
-    // Build an MA on host (f32) using the CPU reference implementations, then convert to f32.
+    
     fn compute_ma_host(
         ma_type: &str,
         prices_f32: &[f32],
@@ -177,7 +177,7 @@ impl CudaMab {
         }
         let mut out_tm = vec![f32::NAN; expected];
         for s in 0..cols {
-            // extract column
+            
             let mut col = vec![f64::NAN; rows];
             for r in 0..rows {
                 col[r] = data_tm_f32[r * cols + s] as f64;
@@ -246,7 +246,7 @@ impl CudaMab {
         d_middle: &mut DeviceBuffer<f32>,
         d_lower: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMabError> {
-        // Validate that the current CUDA context is on the expected device.
+        
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
@@ -315,7 +315,7 @@ impl CudaMab {
         Ok(())
     }
 
-    // --------- Batch (one-series × many params) ----------
+    
     pub fn mab_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -330,7 +330,7 @@ impl CudaMab {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaMabError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand parameter grid using the CPU batch rules (axis_usize/axis_f64, reversed ranges, etc.)
+        
         let combos =
             crate::indicators::mab::expand_grid(sweep).map_err(|e| CudaMabError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
@@ -339,7 +339,7 @@ impl CudaMab {
             ));
         }
 
-        // VRAM check for outputs
+        
         let rows = combos.len();
         let elem_count = rows
             .checked_mul(len)
@@ -369,12 +369,12 @@ impl CudaMab {
             }
         }
 
-        // Build per-row arrays for devup/devdn
+        
         let devups: Vec<f32> = combos.iter().map(|p| p.devup.unwrap() as f32).collect();
         let devdns: Vec<f32> = combos.iter().map(|p| p.devdn.unwrap() as f32).collect();
 
-        // Fast path for the common SMA×SMA case (varying periods): compute SMA means from prefix sums
-        // on device and compute the RMS deviation in a single batched launch.
+        
+        
         let all_sma = combos.iter().all(|p| {
             p.fast_ma_type
                 .as_deref()
@@ -386,7 +386,7 @@ impl CudaMab {
                     .eq_ignore_ascii_case("sma")
         });
 
-        // Detect fast-path: identical MA setup across rows
+        
         let p0 = &combos[0];
         let all_same_ma = combos.iter().all(|p| {
             p.fast_period == p0.fast_period
@@ -395,7 +395,7 @@ impl CudaMab {
                 && p.slow_ma_type == p0.slow_ma_type
         });
 
-        // Allocate outputs
+        
         let elems = elem_count;
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_middle: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
@@ -456,7 +456,7 @@ impl CudaMab {
         }
 
         if all_same_ma {
-            // Single fast/slow MA built on host for this context, then dev once, then apply per-row multipliers.
+            
             let fast_ma_host = Self::compute_ma_host(
                 p0.fast_ma_type.as_deref().unwrap_or("sma"),
                 prices_f32,
@@ -470,10 +470,10 @@ impl CudaMab {
             let d_fast = DeviceBuffer::from_slice(&fast_ma_host)?;
             let d_slow = DeviceBuffer::from_slice(&slow_ma_host)?;
 
-            // dev buffer
+            
             let mut d_dev: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-            // Launch mab_dev_from_ma_f32
+            
             let mut f_dev: Function = self
                 .module
                 .get_function("mab_dev_from_ma_f32")
@@ -504,7 +504,7 @@ impl CudaMab {
                     )?;
             }
 
-            // Upload per-row multipliers
+            
             let h_ups = LockedBuffer::from_slice(&devups)?;
             let h_dns = LockedBuffer::from_slice(&devdns)?;
             let mut d_ups =
@@ -516,7 +516,7 @@ impl CudaMab {
                 d_dns.async_copy_from(&h_dns, &self.stream)?;
             }
 
-            // Apply shared dev to outputs for all rows
+            
             let mut f_apply: Function = self
                 .module
                 .get_function("mab_apply_dev_shared_ma_batch_f32")
@@ -524,7 +524,7 @@ impl CudaMab {
                     name: "mab_apply_dev_shared_ma_batch_f32",
                 })?;
 
-            // Choose a reasonable 1D x grid for time; y=rows
+            
             let block_x: u32 = 256;
             let grid_x = ((len as u32) + block_x - 1) / block_x;
             let grid = GridSize::xyz(grid_x.max(1), rows as u32, 1);
@@ -562,7 +562,7 @@ impl CudaMab {
                 self.stream.launch(&mut f_apply, grid, block, 0, args)?;
             }
         } else {
-            // Generic path: build per-row fast/slow on host for this context and compute row independently
+            
             let mut f_row: Function = self
                 .module
                 .get_function("mab_single_row_from_ma_f32")
@@ -583,7 +583,7 @@ impl CudaMab {
                 let d_fast = DeviceBuffer::from_slice(&fast_ma_host)?;
                 let d_slow = DeviceBuffer::from_slice(&slow_ma_host)?;
 
-                // target row window
+                
                 let row_off = row * len;
                 let mut up_row =
                     unsafe { d_upper.as_device_ptr().offset(row_off as isize).as_raw() };
@@ -647,7 +647,7 @@ impl CudaMab {
         Ok((trip, combos))
     }
 
-    // --------- Many-series (time-major), one param ----------
+    
     pub fn mab_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -672,7 +672,7 @@ impl CudaMab {
             return Err(CudaMabError::InvalidInput("periods must be >=1".into()));
         }
 
-        // Compute first_valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -684,7 +684,7 @@ impl CudaMab {
             }
             let fv =
                 fv.ok_or_else(|| CudaMabError::InvalidInput(format!("series {} all-NaN", s)))?;
-            // require enough tail for both MAs and dev window
+            
             let need_total = (fast.max(slow) + fast - 1) as i32;
             if (rows as i32) - fv < need_total {
                 return Err(CudaMabError::InvalidInput(format!(
@@ -695,7 +695,7 @@ impl CudaMab {
             first_valids[s] = fv;
         }
 
-        // Build MAs using specific wrappers (covering common types sma/ema; extend as needed)
+        
         let fast_type = params.fast_ma_type.as_deref().unwrap_or("sma");
         let slow_type = params.slow_ma_type.as_deref().unwrap_or("sma");
 
@@ -714,7 +714,7 @@ impl CudaMab {
             cols,
         };
 
-        // Outputs
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaMabError::InvalidInput("cols*rows overflow".into()))?;
@@ -729,7 +729,7 @@ impl CudaMab {
                 name: "mab_many_series_one_param_time_major_f32",
             })?;
 
-        // We run 1 thread per series (sequential time), grid.y=cols
+        
         let grid = GridSize::xyz(1, cols as u32, 1);
         let block = BlockSize::xyz(1, 1, 1);
         unsafe {
@@ -935,7 +935,7 @@ pub mod benches {
                 .get_function("mab_many_series_one_param_time_major_f32")
                 .expect("mab_many_series_one_param_time_major_f32");
 
-            // One thread per series (sequential time), grid.y = cols
+            
             let grid = GridSize::xyz(1, self.cols as u32, 1);
             let block = BlockSize::xyz(1, 1, 1);
             unsafe {
@@ -996,7 +996,7 @@ pub mod benches {
         let devup = p.devup.unwrap_or(1.0) as f32;
         let devdn = p.devdn.unwrap_or(1.0) as f32;
 
-        // Compute first_valid per series (host)
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -1009,7 +1009,7 @@ pub mod benches {
             first_valids[s] = fv.unwrap_or(0);
         }
 
-        // Precompute the fast/slow MA tensors on host once, then upload once.
+        
         let fast_type = p.fast_ma_type.as_deref().unwrap_or("sma");
         let slow_type = p.slow_ma_type.as_deref().unwrap_or("sma");
         let fast_tm_host =

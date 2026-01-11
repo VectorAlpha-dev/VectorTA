@@ -275,7 +275,7 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
         ChopData::Slice { high, low, close } => (*high, *low, *close),
     };
 
-    // Validate input lengths match first, before any other checks
+    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -375,7 +375,7 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
         ChopData::Slice { high, low, close } => (*high, *low, *close),
     };
 
-    // Validate input lengths match first, before any other checks
+    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -463,7 +463,7 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
         }
     }
 
-    // Write warmup NaNs after compute, like alma_into_slice
+    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -480,7 +480,7 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn chop_into(input: &ChopInput, out: &mut [f64]) -> Result<(), ChopError> {
-    // Validate output length matches input length early to avoid UB in kernels
+    
     let len = match &input.data {
         ChopData::Candles(c) => c.close.len(),
         ChopData::Slice { close, .. } => close.len(),
@@ -508,20 +508,20 @@ pub unsafe fn chop_scalar(
         return;
     }
 
-    // Hoisted constants
+    
     let alpha = 1.0 / (drift as f64);
     let logp = (period as f64).log10();
 
-    // Rolling sum of ATR via ring buffer (no modulo in hot path)
+    
     let mut atr_ring = vec![0.0_f64; period];
     let mut atr_ring_idx: usize = 0;
     let mut rolling_sum_atr: f64 = 0.0;
 
-    // RMA(ATR) state
+    
     let mut rma_atr = f64::NAN;
     let mut sum_tr: f64 = 0.0;
 
-    // Monotonic deques (VecDeque performs well and avoids manual modulo)
+    
     let mut dq_high: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_low: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -553,7 +553,7 @@ pub unsafe fn chop_scalar(
         }
         prev_close = close[i];
 
-        // Current ATR sample
+        
         let current_atr = if rel < drift {
             if rel == drift - 1 {
                 rma_atr
@@ -564,7 +564,7 @@ pub unsafe fn chop_scalar(
             rma_atr
         };
 
-        // Rolling SUM(ATR(1), period)
+        
         let oldest = atr_ring[atr_ring_idx];
         rolling_sum_atr -= oldest;
         let new_val = if current_atr.is_nan() {
@@ -579,7 +579,7 @@ pub unsafe fn chop_scalar(
             atr_ring_idx = 0;
         }
 
-        // Sliding-window HH/LL using monotonic VecDeque
+        
         let win_start = i.saturating_sub(period - 1);
         while let Some(&front_idx) = dq_high.front() {
             if front_idx < win_start {
@@ -879,7 +879,7 @@ fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
             let mut x = start;
             while x >= end - 1e-12 {
                 v.push(x);
-                x += step; // negative
+                x += step; 
             }
         } else {
             return Err(ChopError::InvalidInput("axis_f64 step direction invalid".into()));
@@ -938,7 +938,7 @@ fn chop_batch_inner(
     parallel: bool,
 ) -> Result<ChopBatchOutput, ChopError> {
     let combos = expand_grid(sweep)?;
-    // Validate input lengths match first, before any other checks
+    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -1104,9 +1104,9 @@ pub unsafe fn chop_row_avx512_long(
     chop_avx512(high, low, close, period, drift, scalar, first, out)
 }
 
-// Streaming implementation (optimized O(1) amortized; see Decision Note below)
-// Decision Note: Streaming kernel uses monotonic deques with (idx,val) nodes and ln change-of-base
-// emission to reduce work per tick while matching scalar/batch outputs within test tolerance.
+
+
+
 #[derive(Copy, Clone, Debug)]
 struct Node {
     idx: u64,
@@ -1119,20 +1119,20 @@ pub struct ChopStream {
     drift: usize,
     scalar: f64,
 
-    // Precomputed constants
-    inv_drift: f64, // 1.0 / drift
-    scale_ln: f64,  // scalar / ln(period)
+    
+    inv_drift: f64, 
+    scale_ln: f64,  
 
-    // Rolling SUM(ATR(1), period)
+    
     atr_ring: Vec<f64>,
     ring_idx: usize,
     rolling_sum_atr: f64,
 
-    // Monotonic deques for HHV/LLV
+    
     dq_high: VecDeque<Node>,
     dq_low: VecDeque<Node>,
 
-    // RMA(ATR) bootstrap + state
+    
     rma_atr: f64,
     sum_tr: f64,
     count: u64,
@@ -1188,7 +1188,7 @@ impl ChopStream {
         self.count = self.count.saturating_add(1);
         let this_idx = self.count - 1;
 
-        // True Range (Wilder)
+        
         let tr = if self.count == 1 {
             self.prev_close = close;
             self.sum_tr = high - low;
@@ -1201,7 +1201,7 @@ impl ChopStream {
             hl.max(hc).max(lc)
         };
 
-        // ATR via RMA bootstrap then EMA-like update (alpha = 1/drift)
+        
         if (self.count as usize) <= self.drift {
             if self.count != 1 {
                 self.sum_tr += tr;
@@ -1219,7 +1219,7 @@ impl ChopStream {
             self.rma_atr
         };
 
-        // Rolling SUM(ATR(1), period)
+        
         let newest = if current_atr.is_nan() {
             0.0
         } else {
@@ -1229,7 +1229,7 @@ impl ChopStream {
         self.atr_ring[idx_ring] = newest;
         self.rolling_sum_atr += newest - oldest;
 
-        // Sliding HHV / LLV via monotonic deques
+        
         let win_start = self.count.saturating_sub(self.period as u64);
 
         while let Some(&front) = self.dq_high.front() {
@@ -1274,7 +1274,7 @@ impl ChopStream {
         if self.count >= self.period as u64 {
             let range = self.dq_high.front().unwrap().val - self.dq_low.front().unwrap().val;
             if range > 0.0 && self.rolling_sum_atr > 0.0 {
-                // CHOP = scalar * ln(SUM_ATR / range) / ln(period)
+                
                 let ratio = self.rolling_sum_atr / range;
                 let y = if (ratio - 1.0).abs() < 1e-8 {
                     self.scale_ln * (ratio - 1.0).ln_1p()
@@ -1290,7 +1290,7 @@ impl ChopStream {
         }
     }
 }
-// -- Tests --
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,7 +1300,7 @@ mod tests {
 
     #[test]
     fn test_chop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Synthetic but non-trivial OHLC data with varying spread
+        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -1321,10 +1321,10 @@ mod tests {
 
         let input = ChopInput::from_slices(&high, &low, &close, ChopParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = chop(&input)?.values;
 
-        // Into-API writes into caller-provided buffer
+        
         let mut out = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1332,7 +1332,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, fall back to the kernel-parameter version to validate parity
+            
             chop_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1503,7 +1503,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_chop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1511,20 +1511,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
+        
         let input = ChopInput::with_default_candles(&candles);
         let output = chop_with_kernel(&input, kernel)?;
 
-        // Check every value for poison patterns
+        
         for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
+            
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1532,7 +1532,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1540,7 +1540,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1549,7 +1549,7 @@ mod tests {
             }
         }
 
-        // Test with multiple parameter combinations to increase coverage
+        
         let param_combinations = vec![
             ChopParams {
                 period: Some(10),
@@ -1605,7 +1605,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_chop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1667,24 +1667,24 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic OHLC data
+        
         let strat = (50usize..400).prop_flat_map(|size| {
             (
-                10.0f64..1000.0f64, // Base price
-                0.0f64..0.1f64,     // Volatility (0-10%)
-                -0.02f64..0.02f64,  // Trend strength (-2% to +2%)
+                10.0f64..1000.0f64, 
+                0.0f64..0.1f64,     
+                -0.02f64..0.02f64,  
                 prop::collection::vec((0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0), size),
-                0u8..5, // Market type (0=trend up, 1=trend down, 2=ranging, 3=volatile, 4=flat)
+                0u8..5, 
                 Just(size),
-                5usize..50,        // Period
-                50.0f64..200.0f64, // Scalar
-                1usize..5,         // Drift
+                5usize..50,        
+                50.0f64..200.0f64, 
+                1usize..5,         
             )
         });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(base_price, volatility, trend, random_factors, market_type, size, period, scalar, drift)| {
-				// Generate realistic OHLC data based on market type
+				
 				let mut high_data = Vec::with_capacity(size);
 				let mut low_data = Vec::with_capacity(size);
 				let mut close_data = Vec::with_capacity(size);
@@ -1696,64 +1696,64 @@ mod tests {
 					let (r1, r2, r3, r4) = random_factors[i];
 					let range = current_price * volatility;
 
-					// Generate OHLC based on market type - consistently use all 4 random factors
+					
 					let (open, high, low, close) = match market_type {
 						0 => {
-							// Trending up - strong upward movement
+							
 							let open = current_price;
 							let close = current_price + range * (0.5 + r1 * 0.5) + (trend * current_price);
 							let high = close.max(open) + range * r2 * 0.3;
 							let low = close.min(open) - range * r3 * 0.2;
-							// Use r4 for intraday volatility
+							
 							let high_adjusted = high + range * r4 * 0.1;
 							current_price = close;
 							(open, high_adjusted, low, close)
 						}
 						1 => {
-							// Trending down - strong downward movement
+							
 							let open = current_price;
 							let close = current_price - range * (0.5 + r1 * 0.5) - (trend.abs() * current_price);
 							let high = close.max(open) + range * r2 * 0.2;
 							let low = close.min(open) - range * r3 * 0.3;
-							// Use r4 for intraday volatility
+							
 							let low_adjusted = low - range * r4 * 0.1;
 							current_price = close;
 							(open, high, low_adjusted, close)
 						}
 						2 => {
-							// Ranging/choppy market - oscillating around mean
+							
 							let open = current_price;
 							let direction = if r1 > 0.5 { 1.0 } else { -1.0 };
 							let close = current_price + direction * range * r2 * 0.5;
 							let high = open.max(close) + range * r3 * 0.4;
 							let low = open.min(close) - range * r4 * 0.4;
-							// Mean revert for ranging
+							
 							current_price = base_price * 0.15 + current_price * 0.85;
 							(open, high, low, close)
 						}
 						3 => {
-							// Volatile market - large swings
+							
 							let open = current_price;
 							let close = current_price + range * (r1 - 0.5) * 2.0;
 							let high = open.max(close) + range * r2 * 1.2;
 							let low = open.min(close) - range * r3 * 1.2;
-							// Use r4 for extreme wicks
+							
 							let high_wick = high + range * r4 * 0.3;
 							current_price = close;
 							(open, high_wick, low, close)
 						}
 						4 | _ => {
-							// Flat market - minimal movement
+							
 							let tiny_move = range * 0.01 * (r1 - 0.5);
 							let open = current_price;
 							let close = current_price + tiny_move;
-							// Sometimes high == low for true flat candles
+							
 							if r2 < 0.1 {
-								// 10% chance of perfectly flat candle
+								
 								let price = current_price;
 								(price, price, price, price)
 							} else {
-								// Very small wicks using all random factors
+								
 								let high = open.max(close) + range * 0.001 * r3;
 								let low = open.min(close) - range * 0.001 * r4;
 								current_price = close;
@@ -1762,11 +1762,11 @@ mod tests {
 						}
 					};
 
-					// Ensure OHLC constraints are strictly maintained
+					
 					let high_final = high.max(open).max(close);
 					let low_final = low.min(open).min(close);
 
-					// Additional validation
+					
 					debug_assert!(high_final >= low_final, "High must be >= Low");
 					debug_assert!(high_final >= open && high_final >= close, "High must be >= Open and Close");
 					debug_assert!(low_final <= open && low_final <= close, "Low must be <= Open and Close");
@@ -1777,7 +1777,7 @@ mod tests {
 					close_data.push(close);
 				}
 
-				// Create CHOP input
+				
 				let params = ChopParams {
 					period: Some(period),
 					scalar: Some(scalar),
@@ -1785,32 +1785,32 @@ mod tests {
 				};
 				let input = ChopInput::from_slices(&high_data, &low_data, &close_data, params.clone());
 
-				// Calculate CHOP with specified kernel and scalar reference
+				
 				let result = chop_with_kernel(&input, kernel)?;
 				let reference = chop_with_kernel(&input, Kernel::Scalar)?;
 
-				// Calculate warmup period
+				
 				let first_valid_idx = (0..size).find(|&i| {
 					!(high_data[i].is_nan() || low_data[i].is_nan() || close_data[i].is_nan())
 				}).unwrap_or(0);
 				let warmup_period = first_valid_idx + period - 1;
 
-				// Track CHOP statistics for market condition validation
+				
 				let mut valid_chop_values = Vec::new();
 
-				// Property validations
+				
 				for i in 0..size {
 					let y = result.values[i];
 					let r = reference.values[i];
 
-					// Property 1: All values should be finite or NaN (no infinity or undefined)
+					
 					prop_assert!(
 						y.is_nan() || y.is_finite(),
 						"[{}] CHOP at index {} is not finite or NaN: {}",
 						test_name, i, y
 					);
 
-					// Property 2: Values before warmup should be NaN
+					
 					if i < warmup_period {
 						prop_assert!(
 							y.is_nan(),
@@ -1819,46 +1819,46 @@ mod tests {
 						);
 					}
 
-					// Property 3: Values after warmup should generally be finite (unless edge case)
+					
 					if i >= warmup_period && !high_data[i].is_nan() && !low_data[i].is_nan() && !close_data[i].is_nan() {
-						// Check if we have enough valid data in the window
+						
 						let window_start = i.saturating_sub(period - 1);
 						let window_valid = (window_start..=i).all(|j| {
 							!high_data[j].is_nan() && !low_data[j].is_nan() && !close_data[j].is_nan()
 						});
 
 						if window_valid {
-							// CHOP can be NaN if range is 0 or ATR sum is 0
+							
 							let window_high_max = (window_start..=i).map(|j| high_data[j]).fold(f64::NEG_INFINITY, f64::max);
 							let window_low_min = (window_start..=i).map(|j| low_data[j]).fold(f64::INFINITY, f64::min);
 							let range = window_high_max - window_low_min;
 
 							if range > 1e-10 {
-								// If range is non-zero, CHOP should typically be finite
+								
 								if !y.is_nan() {
-									// Property 4: CHOP values should be within reasonable bounds
-									// Formula: scalar * (log10(ATR_sum) - log10(range)) / log10(period)
-									// Typical range is -100 to +100 when scalar=100
-									let normalized_bound = scalar * 1.5; // Allow up to 150% of scalar
+									
+									
+									
+									let normalized_bound = scalar * 1.5; 
 									prop_assert!(
 										y >= -normalized_bound && y <= normalized_bound,
 										"[{}] CHOP at index {} out of reasonable bounds: {} (scalar={}, bounds=±{})",
 										test_name, i, y, scalar, normalized_bound
 									);
 
-									// Collect valid CHOP values for statistics
+									
 									valid_chop_values.push(y);
 								}
 							} else if range == 0.0 {
-								// Property 8: When range is exactly 0, CHOP should be NaN
+								
 								prop_assert!(
 									y.is_nan(),
 									"[{}] CHOP at index {} should be NaN when range=0 but got: {}",
 									test_name, i, y
 								);
 							} else {
-								// Very small but non-zero range can still produce valid CHOP
-								// It might be a very large value due to log of small numbers
+								
+								
 								prop_assert!(
 									y.is_nan() || y.is_finite(),
 									"[{}] CHOP at index {} should be finite or NaN with tiny range: {}",
@@ -1868,7 +1868,7 @@ mod tests {
 						}
 					}
 
-					// Property 5: Kernel consistency - all kernels should produce identical results
+					
 					if y.is_finite() && r.is_finite() {
 						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 						prop_assert!(
@@ -1884,10 +1884,10 @@ mod tests {
 						);
 					}
 
-					// Property 6: Special case - when high == low (flat candle), CHOP should handle gracefully
+					
 					if (high_data[i] - low_data[i]).abs() < 1e-10 && i >= warmup_period {
-						// When current candle is flat but window has range, CHOP can still be calculated
-						// Just ensure it doesn't crash or produce infinity
+						
+						
 						prop_assert!(
 							y.is_nan() || y.is_finite(),
 							"[{}] CHOP at flat candle index {} is invalid: {}",
@@ -1897,7 +1897,7 @@ mod tests {
 
 				}
 
-				// Property 7: Market condition validation with meaningful checks
+				
 				if valid_chop_values.len() > 20 {
 					let avg_chop = valid_chop_values.iter().sum::<f64>() / valid_chop_values.len() as f64;
 					let median_idx = valid_chop_values.len() / 2;
@@ -1905,42 +1905,42 @@ mod tests {
 					sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 					let median_chop = sorted_values[median_idx];
 
-					// Market-specific validation with thresholds
+					
 					match market_type {
 						0 | 1 => {
-							// Trending markets typically have lower average CHOP
-							// But with random factors, this isn't guaranteed - just verify it's valid
+							
+							
 							prop_assert!(
 								avg_chop.is_finite() && median_chop.is_finite(),
 								"[{}] Trending market (type {}) has non-finite CHOP: avg={}, median={}",
 								test_name, market_type, avg_chop, median_chop
 							);
-							// Soft check - trending markets often have CHOP < 60% of scalar
+							
 							let threshold = scalar * 0.6;
 							if avg_chop > threshold && median_chop > threshold {
-								// This is unexpected but not impossible - just log it
-								// Don't fail the test as market dynamics are complex
+								
+								
 								prop_assert!(true);
 							}
 						}
 						2 => {
-							// Choppy/ranging markets typically have higher average CHOP
-							// But this isn't guaranteed - verify values are valid
+							
+							
 							prop_assert!(
 								avg_chop.is_finite() && median_chop.is_finite(),
 								"[{}] Choppy market has non-finite CHOP: avg={}, median={}",
 								test_name, avg_chop, median_chop
 							);
-							// Soft check - choppy markets often have CHOP > 30% of scalar
+							
 							let threshold = scalar * 0.3;
 							if avg_chop < threshold && median_chop < threshold {
-								// Lower than expected but not impossible
+								
 								prop_assert!(true);
 							}
 						}
 						3 => {
-							// Volatile markets can have any CHOP value
-							// Just check it's within bounds
+							
+							
 							prop_assert!(
 								avg_chop.is_finite(),
 								"[{}] Volatile market has non-finite average CHOP: {}",
@@ -1948,8 +1948,8 @@ mod tests {
 							);
 						}
 						4 => {
-							// Flat markets can have varying CHOP depending on tiny movements
-							// Just check it's finite and within bounds
+							
+							
 							if avg_chop.is_finite() {
 								prop_assert!(
 									avg_chop >= -scalar && avg_chop <= scalar,
@@ -1962,9 +1962,9 @@ mod tests {
 					}
 				}
 
-				// Property 10: Monotonicity check for extreme cases
+				
 				if size >= period * 3 {
-					// Check that identical consecutive segments produce similar CHOP
+					
 					let seg1_end = period * 2;
 					let seg2_start = period;
 					let seg2_end = period * 3;
@@ -1985,12 +1985,12 @@ mod tests {
 							let seg1_avg = seg1_values.iter().sum::<f64>() / seg1_values.len() as f64;
 							let seg2_avg = seg2_values.iter().sum::<f64>() / seg2_values.len() as f64;
 
-							// For flat markets, consecutive segments should have similar CHOP
-							// But only if both segments have meaningful values
+							
+							
 							if market_type == 4 && seg1_avg.abs() > 1e-6 && seg2_avg.abs() > 1e-6 {
 								let diff_ratio = (seg1_avg - seg2_avg).abs() / seg1_avg.abs().max(seg2_avg.abs());
 								prop_assert!(
-									diff_ratio < 0.8,  // Allow more variation
+									diff_ratio < 0.8,  
 									"[{}] Flat market segments have inconsistent CHOP: seg1_avg={}, seg2_avg={}, diff_ratio={}",
 									test_name, seg1_avg, seg2_avg, diff_ratio
 								);
@@ -2059,7 +2059,7 @@ mod tests {
 
         let out = builder.apply_slices(high, low, close)?;
 
-        // Confirm every combination exists as a retrievable row
+        
         for p in 14..=16 {
             for s in [100.0, 101.0, 102.0] {
                 for d in 1..=2 {
@@ -2095,7 +2095,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2107,7 +2107,7 @@ mod tests {
         let low = c.low.as_slice();
         let close = c.close.as_slice();
 
-        // Test batch with multiple parameter combinations
+        
         let output = ChopBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 10)
@@ -2115,9 +2115,9 @@ mod tests {
             .drift_range(1, 3, 1)
             .apply_slices(high, low, close)?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -2126,7 +2126,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2134,7 +2134,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2142,7 +2142,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2154,7 +2154,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2186,7 +2186,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Batch processing function that writes directly to output slice for Python bindings
+
 #[inline(always)]
 fn chop_batch_inner_into(
     high: &[f64],
@@ -2199,7 +2199,7 @@ fn chop_batch_inner_into(
 ) -> Result<Vec<ChopParams>, ChopError> {
     let combos = expand_grid(sweep)?;
 
-    // Validate input lengths match first, before any other checks
+    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -2211,7 +2211,7 @@ fn chop_batch_inner_into(
         return Err(ChopError::EmptyData);
     }
 
-    // first valid across H/L/C
+    
     let first = (0..len)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
         .ok_or(ChopError::AllValuesNaN)?;
@@ -2235,7 +2235,7 @@ fn chop_batch_inner_into(
         });
     }
 
-    // Work on MaybeUninit view of caller buffer and initialize warm prefixes
+    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -2249,7 +2249,7 @@ fn chop_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Choose non-batch kernel like alma.rs
+    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2258,7 +2258,7 @@ fn chop_batch_inner_into(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => actual, // already a non-batch Kernel
+        _ => actual, 
     };
 
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
@@ -2395,7 +2395,7 @@ pub fn chop_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // preallocate NumPy and fill in-place without copies
+    
     let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { arr.as_slice_mut()? };
 
@@ -2445,7 +2445,7 @@ pub fn chop_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------- Python CUDA bindings ----------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "chop_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, period_range, scalar_range, drift_range, device_id=0))]
@@ -2514,7 +2514,7 @@ pub fn chop_cuda_many_series_one_param_dev_py(
     Ok(ChopDeviceArrayF32Py { inner: Some(inner) })
 }
 
-// ----- Python device array with CAI v3 + DLPack v1.x (CHOP) -----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct ChopDeviceArrayF32Py {

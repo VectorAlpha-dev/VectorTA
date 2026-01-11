@@ -1,14 +1,14 @@
-// CUDA kernels for Schaff Trend Cycle (STC) — optimized
-//
-// Key changes vs. previous version:
-// 1) Sliding-window min/max now uses O(1) monotonic deques (no O(k) scans).
-// 2) Remove FP64: use FP32 FMA for EMA updates + compensated FP32 summation for SMA seeds.
-// 3) One-thread-per-block execution to avoid wasting resources (each row is a sequential recurrence).
-// 4) Same semantics:
-//    Pipeline: MACD(EMA fast-slow) -> Stoch(K) -> EMA(d) -> Stoch(K) -> EMA(d)
-//    Warmup prefix: NaN for indices < warm = first_valid + max(fast,slow,k,d) - 1
-//    Inputs/outputs FP32; accuracy preserved without FP64.
-// 5) Dynamic shared layout per block: rings + four index deques (min/max for MACD and d-EMA).
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,34 +18,34 @@
 #include <math.h>
 #include <stdint.h>
 
-// Default: sequential recurrence per block → 1 thread active
+
 #ifndef STC_BLOCK_X
 #define STC_BLOCK_X 1
 #endif
 
 #ifndef STC_SMALL_K
-#define STC_SMALL_K 16   // heuristic: tiny k uses trivial scan which is faster than deque
+#define STC_SMALL_K 16   
 #endif
 
-// Match CPU's `f64::EPSILON`-style "no-range" guard used by the scalar reference.
-// Note: this is intentionally much smaller than `FLT_EPSILON`.
+
+
 #define STC_RANGE_EPS 2.2204460492503131e-16f
 
-// Dynamic shared mem size helper (host-side reference; kernel uses extern __shared__)
+
 #define STC_BATCH_SMEM_BYTES(max_k) ((size_t)(max_k) * (2*sizeof(float) + 4*sizeof(int)))
 
-// FMA helper in FP32 for EMA update: prev + a*(x - prev)
+
 static __device__ __forceinline__ float ema_update_f32(float prev, float a, float x) {
-    // Use fused multiply-add for better precision and performance in FP32.
+    
     return __fmaf_rn(a, (x - prev), prev);
 }
 
-// Precise FP32 division even when compiled with --use_fast_math.
+
 static __device__ __forceinline__ float div_rn_f32(float num, float den) {
     return __fdiv_rn(num, den);
 }
 
-// Compensated FP32 adder (Neumaier variant) for accurate SMA seeds
+
 struct KahanF32 {
     float s;
     float c;
@@ -59,29 +59,29 @@ struct KahanF32 {
     __device__ __forceinline__ float result() const { return s + c; }
 };
 
-// Circular index deque storing indices only; values live in a k-sized ring.
-// Supports monotonic min or max depending on comparator.
+
+
 struct IndexDeque {
-    int*  buf;     // length = cap (<= max_k)
-    int   head;    // circular head
-    int   len;     // current size
-    int   cap;     // capacity == k (window)
-    float* ring;   // pointer to value ring (length >= cap)
-    bool  is_min;  // true=min-deque, false=max-deque
+    int*  buf;     
+    int   head;    
+    int   len;     
+    int   cap;     
+    float* ring;   
+    bool  is_min;  
 
     __device__ __forceinline__ void init(int* storage, int capacity, float* ring_ptr, bool as_min) {
         buf = storage; cap = capacity; ring = ring_ptr; is_min = as_min; head = 0; len = 0;
     }
     __device__ __forceinline__ void reset() { head = 0; len = 0; }
     __device__ __forceinline__ void push(int idx, float v) {
-        // Pop from tail while the monotonic property would be violated.
+        
         while (len > 0) {
             int last = head + len - 1; if (last >= cap) last -= cap;
             float backv = ring[ buf[last] % cap ];
             if (is_min ? (backv >= v) : (backv <= v)) { len--; }
             else break;
         }
-        // Push at tail
+        
         int tail_pos = head + len; if (tail_pos >= cap) tail_pos -= cap;
         buf[tail_pos] = idx;
         if (len < cap) len++;
@@ -95,9 +95,9 @@ struct IndexDeque {
     __device__ __forceinline__ float front_val() const { return ring[ buf[head] % cap ]; }
 };
 
-// Core sequential STC computation over a single series, EMA/EMA classic path.
-// Uses dynamic shared memory for two K-sized rings (macd, d-ema) and their validity flags.
-// Layout: [macd_ring (max_k floats) | d_ring (max_k floats) | macd_flags (max_k u8) | d_flags (max_k u8)]
+
+
+
 static __device__ __forceinline__ void stc_compute_series_f32(
     const float* __restrict__ prices,
     int len,
@@ -111,7 +111,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
 {
     if (len <= 0 || first_valid >= len) return;
 
-    // Carve shared memory
+    
     extern __shared__ unsigned char shmem[];
     float* macd_ring = reinterpret_cast<float*>(shmem);
     float* d_ring    = macd_ring + max_k;
@@ -120,18 +120,18 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     int* d_min_idx    = macd_max_idx + max_k;
     int* d_max_idx    = d_min_idx + max_k;
 
-    // Warmup boundary
+    
     const int warm = first_valid + max(max(fast, slow), max(k, d)) - 1;
-    // Fill NaN prefix
+    
     for (int i = 0; i < min(warm, len); ++i) out[i] = NAN;
     if (warm >= len) return;
 
-    // EMAs: FP32 alpha + FMA
+    
     const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
     const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
     const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
-    // SMA seeds for fast/slow EMA with compensated FP32
+    
     KahanF32 fast_acc; fast_acc.reset();
     KahanF32 slow_acc; slow_acc.reset();
     bool fast_seed_nan = false, slow_seed_nan = false;
@@ -142,28 +142,28 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     float fast_ema = (f_end == fast && !fast_seed_nan) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
     float slow_ema = (s_end == slow && !slow_seed_nan) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
-    // Deques for sliding min/max over MACD and d-EMA
+    
     IndexDeque macd_min, macd_max, d_min, d_max;
     macd_min.init(macd_min_idx, k, macd_ring, true);
     macd_max.init(macd_max_idx, k, macd_ring, false);
     d_min.init(d_min_idx, k, d_ring, true);
     d_max.init(d_max_idx, k, d_ring, false);
 
-    // Valid run lengths (require contiguous validity over last k)
+    
     int macd_run = 0, d_run = 0;
 
-    // EMA(d) states (FP32) with compensated seed
+    
     KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
     KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
 
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
     const int slow_thr = slow > 0 ? (slow - 1) : 0;
 
-    // Main sequential scan
+    
     for (int i = 0; i < len; ++i) {
         const float x = prices[i];
 
-        // EMA updates; exact SMA seed on boundary indices
+        
         if (i >= first_valid) {
             const int rel = i - first_valid;
             if (rel >= fast_thr) {
@@ -174,19 +174,19 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             }
         }
 
-        // MACD
+        
         float macd; unsigned char macd_is_valid;
         if (i >= first_valid + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) { macd = fast_ema - slow_ema; macd_is_valid = 1u; }
         else { macd = NAN; macd_is_valid = 0u; }
 
-        // Update MACD window structures
+        
         float stok = NAN;
         if (macd_is_valid) {
-            // push into ring/deques
+            
             macd_ring[i % k] = macd;
             macd_run += 1;
             if (k <= STC_SMALL_K) {
-                // small-k path: trivial O(k) scan
+                
                 float mn = macd_ring[(i - (macd_run-1)) % k];
                 float mx = mn;
                 int start = i - min(macd_run, k) + 1;
@@ -196,7 +196,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
                     stok = (fabsf(range) > STC_RANGE_EPS) ? ((macd - mn) * div_rn_f32(100.0f, range)) : 50.0f;
                 } else { stok = 50.0f; }
             } else {
-                // deque path
+                
                 macd_min.push(i, macd); macd_max.push(i, macd);
                 const int left = i - k + 1;
                 macd_min.pop_expired(left); macd_max.pop_expired(left);
@@ -211,7 +211,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             macd_run = 0; macd_min.reset(); macd_max.reset(); stok = NAN;
         }
 
-        // EMA(d) of stok (carry-forward + running-mean warmup; match CPU semantics)
+        
         float d_val = NAN;
         if (isfinite(stok)) {
             if (d_seed_cnt < d) {
@@ -230,7 +230,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             else d_val = d_ema;
         }
 
-        // Second stochastic over d-EMA
+        
         float kd = NAN;
         if (isfinite(d_val)) {
             d_ring[i % k] = d_val; d_run += 1;
@@ -250,7 +250,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             }
         } else { d_min.reset(); d_max.reset(); }
 
-        // Final EMA(d) smoothing (carry-forward + running-mean warmup; match CPU semantics)
+        
         float out_i = NAN;
         if (isfinite(kd)) {
             if (final_seed_cnt < d) {
@@ -269,11 +269,11 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             else out_i = final_ema;
         }
 
-        if (i >= warm) out[i] = out_i; // remains NaN until all pieces valid
+        if (i >= warm) out[i] = out_i; 
     }
 }
 
-// --------------------------- Batch kernel (one series × many param rows) ---------------------------
+
 extern "C" __global__ __launch_bounds__(1)
 void stc_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ fasts,
@@ -297,12 +297,12 @@ void stc_batch_f32(const float* __restrict__ prices,
 
     const int base = row * series_len;
 
-    // Do the sequential computation in a single thread (the recurrence is inherently sequential).
+    
     if (threadIdx.x != 0) return;
     stc_compute_series_f32(prices, series_len, first_valid, fast, slow, kk, dd, max_k, out + base);
 }
 
-// -------------------- Many-series × one param (time-major) ----------------------
+
 extern "C" __global__
 void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int* __restrict__ first_valids,
@@ -318,18 +318,18 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (s >= cols) return;
     const int first = first_valids[s];
 
-    // Per-column warmup
+    
     int warm = first + max(max(fast, slow), max(k, d)) - 1;
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) out_tm[t * cols + s] = NAN;
     if (warm >= rows) return;
 
-    // EMA alphas (FP32)
+    
     const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
     const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
     const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
-    // Seed EMAs (SMA) from [first..first+period) using compensated FP32
+    
     KahanF32 fast_acc; fast_acc.reset();
     KahanF32 slow_acc; slow_acc.reset();
     const int f_end = min(fast, rows - first);
@@ -339,14 +339,14 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float fast_ema = (f_end == fast) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
     float slow_ema = (s_end == slow) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
-    // Local rings (cap k to reasonable bound)
+    
     const int KMAX = 2048;
     const int kk = (k <= KMAX) ? k : KMAX;
     float macd_ring[KMAX];
     float d_ring[KMAX];
     for (int i = 0; i < kk; ++i) { macd_ring[i] = NAN; d_ring[i] = NAN; }
 
-    // EMA(d) states
+    
     KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
     KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
@@ -356,7 +356,7 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     for (int i = 0; i < rows; ++i) {
         const float x = prices_tm[i * cols + s];
 
-        // EMA updates
+        
         if (i >= first) {
             const int rel = i - first;
             if (rel >= fast_thr) {

@@ -1,16 +1,16 @@
-// Integration tests for CUDA RVI kernels
 
-use my_project::indicators::rvi::{
+
+use vector_ta::indicators::rvi::{
     rvi_batch_with_kernel, rvi_with_kernel, RviBatchRange, RviInput, RviParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaRvi;
+use vector_ta::cuda::oscillators::CudaRvi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() { return true; }
@@ -39,7 +39,7 @@ fn rvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         let x = i as f64;
         data[i] = (x * 0.0011).sin() + 0.00021 * x;
     }
-    // Keep to devtype=0 (StdDev) and matype=1 (EMA) for CUDA parity
+    
     let sweep = RviBatchRange {
         period: (10, 24, 2),
         ma_len: (14, 14, 0),
@@ -48,7 +48,7 @@ fn rvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    // Match the FP32 input domain used by the CUDA wrapper.
+    
     let data_f64_q: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
     let cpu = rvi_batch_with_kernel(&data_f64_q, &sweep, Kernel::ScalarBatch)?;
     let cuda = CudaRvi::new(0).expect("CudaRvi::new");
@@ -62,7 +62,7 @@ fn rvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu)?;
 
-    let tol = 15.0; // tolerance for FP32 vs FP64
+    let tol = 15.0; 
     for idx in 0..(cpu.rows * cpu.cols) {
         if !approx_eq(cpu.values[idx], gpu[idx] as f64, tol) {
             eprintln!("first mismatch at {}: cpu={} gpu={}", idx, cpu.values[idx], gpu[idx]);
@@ -80,8 +80,8 @@ fn rvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 16usize; // series
-    let rows = 4096usize; // time
+    let cols = 16usize; 
+    let rows = 4096usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     let params = RviParams {
         period: Some(10),
@@ -96,7 +96,7 @@ fn rvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series (scalar)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -121,7 +121,7 @@ fn rvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut gpu_tm = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_tm)?;
 
-    let tol = 6.0; // tolerance for FP32 vs FP64
+    let tol = 6.0; 
     for idx in 0..gpu_tm.len() {
         if !approx_eq(cpu_tm[idx], gpu_tm[idx] as f64, tol) {
             eprintln!("first mismatch at {}: cpu={} gpu={}", idx, cpu_tm[idx], gpu_tm[idx]);

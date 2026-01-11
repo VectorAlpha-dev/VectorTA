@@ -1,9 +1,9 @@
-// CUDA kernels for the WaveTrend indicator (optimized FP32 hot path).
-//
-// Changes vs previous version:
-// - Eliminate FP64 in hot loops; use FMA-based EMA updates in float.
-// - Kahan-style compensated rolling sum for WT2 SMA to retain precision.
-// - Minimal prefill: only [0, first_valid) prefix; warmup cleared at end.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,22 +13,22 @@
 #include <math.h>
 #include <math_constants.h>
 
-// ---------- helpers ----------
+
 namespace {
 
 __device__ __forceinline__ bool is_finite_f(float x) {
     return !(isnan(x) || isinf(x));
 }
 
-// FMA-based EMA update: state <- state + alpha * (x - state)
+
 __device__ __forceinline__ float ema_update(float state, float x, float alpha) {
     return fmaf(alpha, x - state, state);
 }
 
-// Simple Kahan-style compensated accumulator for float
+
 struct KahanSumF {
-    float s;  // running sum
-    float c;  // compensation
+    float s;  
+    float c;  
     __device__ KahanSumF() : s(0.0f), c(0.0f) {}
     __device__ void add(float x) {
         float y = x - c;
@@ -39,10 +39,10 @@ struct KahanSumF {
     __device__ void sub(float x) { add(-x); }
 };
 
-} // namespace
+} 
 
 extern "C" __global__ void wavetrend_batch_f32(
-    const float* __restrict__ prices,   // len
+    const float* __restrict__ prices,   
     int len,
     int first_valid,
     int n_combos,
@@ -50,9 +50,9 @@ extern "C" __global__ void wavetrend_batch_f32(
     const int* __restrict__ average_lengths,
     const int* __restrict__ ma_lengths,
     const float* __restrict__ factors,
-    float* __restrict__ wt1_out,        // (rows, len) row-major
-    float* __restrict__ wt2_out,        // (rows, len) row-major
-    float* __restrict__ wt_diff_out     // (rows, len) row-major
+    float* __restrict__ wt1_out,        
+    float* __restrict__ wt2_out,        
+    float* __restrict__ wt_diff_out     
 ){
     const int tid     = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride  = blockDim.x * gridDim.x;
@@ -67,7 +67,7 @@ extern "C" __global__ void wavetrend_batch_f32(
         float* __restrict__ wt2_row  = wt2_out     + (size_t)row * (size_t)len;
         float* __restrict__ diff_row = wt_diff_out + (size_t)row * (size_t)len;
 
-        // Early reject: invalid params -> write NaNs and continue
+        
         if (len <= 0 || ch <= 0 || avg <= 0 || ma <= 0) {
             for (int i = 0; i < len; ++i) {
                 wt1_row[i]  = CUDART_NAN_F;
@@ -81,12 +81,12 @@ extern "C" __global__ void wavetrend_batch_f32(
         const float alpha_avg = 2.0f / (float(avg) + 1.0f);
         const float inv_ma    = 1.0f / (float)ma;
 
-        // Warmup = first_valid + (ch-1) + (avg-1) + (ma-1)
+        
         int warmup = first_valid + (ch - 1) + (avg - 1) + (ma - 1);
         if (warmup < 0)       warmup = 0;
         if (warmup > len)     warmup = len;
 
-        // Prefill only the prefix before first_valid with NaNs
+        
         int prefill = first_valid;
         if (prefill < 0) prefill = 0;
         if (prefill > len) prefill = len;
@@ -96,11 +96,11 @@ extern "C" __global__ void wavetrend_batch_f32(
             diff_row[i] = CUDART_NAN_F;
         }
 
-        // EMA states (float, initialized lazily when first finite arrives)
+        
         bool esa_init = false, de_init = false, wt1_init = false;
         float esa = 0.0f, de = 0.0f, wt1_state = 0.0f;
 
-        // Rolling SMA for WT2 (compensated)
+        
         KahanSumF acc;
         int window_count = 0;
 
@@ -109,7 +109,7 @@ extern "C" __global__ void wavetrend_batch_f32(
             const float price = prices[i];
             const bool price_ok = is_finite_f(price);
 
-            // ESA = EMA(price, ch)
+            
             if (!esa_init) {
                 if (price_ok) {
                     esa = price;
@@ -119,7 +119,7 @@ extern "C" __global__ void wavetrend_batch_f32(
                 esa = ema_update(esa, price, alpha_ch);
             }
 
-            // DE = EMA(|price - ESA|, ch)
+            
             if (esa_init && price_ok) {
                 const float absdiff = fabsf(price - esa);
                 if (!de_init) {
@@ -130,7 +130,7 @@ extern "C" __global__ void wavetrend_batch_f32(
                 }
             }
 
-            // CI and WT1 = EMA(CI, avg)
+            
             float wt1_val = CUDART_NAN_F;
             if (esa_init && de_init && price_ok) {
                 const float denom = factor * de;
@@ -148,10 +148,10 @@ extern "C" __global__ void wavetrend_batch_f32(
             }
             if (wt1_init) wt1_val = wt1_state;
 
-            // Store WT1 (always write, warmup cleared later)
+            
             wt1_row[i] = wt1_val;
 
-            // Maintain rolling WT2 window (compensated sum over valid WT1)
+            
             if (is_finite_f(wt1_val)) { acc.add(wt1_val); ++window_count; }
 
             if (i >= ma) {
@@ -159,14 +159,14 @@ extern "C" __global__ void wavetrend_batch_f32(
                 if (is_finite_f(old)) { acc.sub(old); --window_count; }
             }
 
-            // WT2 (mean of last 'ma' valid WT1 samples in window)
+            
             float wt2_val = CUDART_NAN_F;
             if (window_count >= ma) {
                 wt2_val = acc.s * inv_ma;
             }
             wt2_row[i] = wt2_val;
 
-            // DIFF (after warmup)
+            
             if (i >= warmup && is_finite_f(wt2_val) && is_finite_f(wt1_val)) {
                 diff_row[i] = wt2_val - wt1_val;
             } else {
@@ -174,7 +174,7 @@ extern "C" __global__ void wavetrend_batch_f32(
             }
         }
 
-        // Clear warmup prefix to NaNs to mirror scalar semantics
+        
         for (int i = 0; i < warmup; ++i) {
             wt1_row[i]  = CUDART_NAN_F;
             wt2_row[i]  = CUDART_NAN_F;
@@ -183,19 +183,19 @@ extern "C" __global__ void wavetrend_batch_f32(
     }
 }
 
-// Many-series × one-param (time-major layout), grid-stride over series
+
 extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm, // (rows, cols), time-major
+    const float* __restrict__ prices_tm, 
     int cols,
     int rows,
     int channel_length,
     int average_length,
     int ma_length,
     float factor,
-    const int* __restrict__ first_valids, // [cols]
-    float* __restrict__ wt1_tm,           // (rows, cols), time-major
-    float* __restrict__ wt2_tm,           // (rows, cols), time-major
-    float* __restrict__ wt_diff_tm        // (rows, cols), time-major
+    const int* __restrict__ first_valids, 
+    float* __restrict__ wt1_tm,           
+    float* __restrict__ wt2_tm,           
+    float* __restrict__ wt_diff_tm        
 ){
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -216,7 +216,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
         if (warmup < 0) warmup = 0;
         if (warmup > rows) warmup = rows;
 
-        // Prefill only prefix before first_valid
+        
         int pre = first_valid;
         if (pre < 0) pre = 0;
         if (pre > rows) pre = rows;
@@ -227,11 +227,11 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
             diff_col[idx] = CUDART_NAN_F;
         }
 
-        // EMA states in FP64 to match CPU/previous GPU semantics more closely
+        
         bool esa_init = false, de_init = false, wt1_init = false;
         double esa = 0.0, de = 0.0, wt1_state = 0.0;
 
-        // Rolling WT2 window as plain FP64 sum (close to CPU)
+        
         double sum_wt1 = 0.0;
         int window_count = 0;
 
@@ -241,7 +241,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
             const double price = static_cast<double>(prices_tm[idx + series]);
             const bool price_ok = isfinite(price);
 
-            // ESA
+            
             if (!esa_init) {
                 if (price_ok) { esa = price; esa_init = true; }
             } else if (price_ok) {
@@ -250,7 +250,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
                 esa = fma(alpha_ch_d, price, beta_ch_d * esa);
             }
 
-            // DE
+            
             if (esa_init && price_ok) {
                 const double absdiff = fabs(price - esa);
                 if (!de_init) { de = absdiff; de_init = isfinite(de); }
@@ -261,7 +261,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
                 }
             }
 
-            // CI & WT1
+            
             float wt1_val = CUDART_NAN_F;
             if (esa_init && de_init && price_ok) {
                 const double denom = static_cast<double>(factor) * de;
@@ -279,7 +279,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
             if (wt1_init) wt1_val = static_cast<float>(wt1_state);
             wt1_col[idx] = wt1_val;
 
-            // Rolling WT2 window
+            
             if (isfinite(static_cast<double>(wt1_val))) { sum_wt1 += wt1_state; ++window_count; }
             if (t >= ma_length) {
                 const float old = wt1_col[(t - ma_length) * cols];
@@ -290,7 +290,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
             if (window_count >= ma_length) wt2_val = static_cast<float>(sum_wt1 * inv_ma);
             wt2_col[idx] = wt2_val;
 
-            // DIFF
+            
             if (t >= warmup && isfinite(static_cast<double>(wt1_val)) && isfinite(static_cast<double>(wt2_val))) {
                 diff_col[idx] = wt2_val - wt1_val;
             } else {
@@ -298,7 +298,7 @@ extern "C" __global__ void wavetrend_many_series_one_param_time_major_f32(
             }
         }
 
-        // Clear warmup prefix
+        
         for (int t = 0; t < rows && t < warmup; ++t) {
             const int idx = t * cols;
             wt1_col[idx]  = CUDART_NAN_F;

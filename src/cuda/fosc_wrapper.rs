@@ -53,14 +53,14 @@ pub enum CudaFoscError {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    // In this recurrence kernel, a single thread processes each row.
+    
     OneD { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    // 1D launch with each series handled by one thread in X.
+    
     OneD { block_x: u32 },
 }
 
@@ -83,7 +83,7 @@ pub struct CudaFosc {
     policy: CudaFoscPolicy,
     last_batch_block_x: Cell<Option<u32>>,
     last_many_block_x: Cell<Option<u32>>,
-    // Debug: ensure we only print selection once per instance when BENCH_DEBUG=1
+    
     debug_batch_logged: AtomicBool,
     debug_many_logged: AtomicBool,
 }
@@ -179,7 +179,7 @@ impl CudaFosc {
         }
     }
 
-    // ---------- One-series × many-params ----------
+    
 
     pub fn fosc_batch_dev(
         &self,
@@ -193,7 +193,7 @@ impl CudaFosc {
             .checked_mul(n_combos)
             .ok_or_else(|| CudaFoscError::InvalidInput("rows*cols overflow".into()))?;
 
-        // VRAM bytes: input + periods + output; +64MB headroom
+        
         let headroom = 64 * 1024 * 1024usize;
         let required = len
             .checked_mul(std::mem::size_of::<f32>())
@@ -223,7 +223,7 @@ impl CudaFosc {
             &mut d_out,
         )?;
 
-        // Ensure producer stream completes before exposing VRAM handle to higher layers.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
@@ -279,7 +279,7 @@ impl CudaFosc {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
 
     pub fn fosc_many_series_one_param_time_major_dev(
         &self,
@@ -325,7 +325,7 @@ impl CudaFosc {
             &mut d_out,
         )?;
 
-        // Ensure producer stream completes before exposing VRAM handle.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
@@ -386,7 +386,7 @@ impl CudaFosc {
         Ok(())
     }
 
-    // ---------- Input validation and helpers ----------
+    
 
     fn expand_periods(r: &FoscBatchRange) -> Result<Vec<usize>, CudaFoscError> {
         let (start, end, step) = r.period;
@@ -598,7 +598,7 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
     YChunks { n, launched: 0 }
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;
@@ -606,7 +606,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // vary periods only
+    const PARAM_SWEEP: usize = 250; 
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_ROWS: usize = 1_000_000;
 

@@ -5,7 +5,7 @@ use cust::module::Module;
 use cust::prelude::*;
 use std::ffi::c_void;
 
-// Import the ALMA CUDA wrapper from the parent library crate
+
 use my_project::cuda::moving_averages::CudaAlma;
 
 #[derive(Debug, Clone, Parser)]
@@ -107,7 +107,7 @@ fn gen_synthetic_prices(n: usize) -> Vec<f64> {
     let mut v = Vec::with_capacity(n);
     let mut price = 100.0;
     for i in 0..n {
-        // simple random walk-ish deterministic pattern
+        
         let drift = 0.00002;
         let seasonal = (i as f64 * 0.0005).sin() * 0.001;
         price *= 1.0 + drift + seasonal;
@@ -140,13 +140,13 @@ fn expand_periods((s, e, st): (usize, usize, usize)) -> Vec<usize> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Load price series
+    
     let mut prices: Vec<f64> = if let Some(p) = &cli.csv { load_prices_from_csv(p, &cli.column)? } else { gen_synthetic_prices(cli.synth_len) };
     if prices.is_empty() { return Err(anyhow!("no price data")); }
     let first_valid = prices.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let t_len = prices.len();
 
-    // Parameter grids
+    
     let fast_periods = expand_periods(parse_range(&cli.fast_period)?);
     let slow_periods = expand_periods(parse_range(&cli.slow_period)?);
     if fast_periods.is_empty() || slow_periods.is_empty() { return Err(anyhow!("empty parameter ranges")); }
@@ -155,21 +155,21 @@ fn main() -> Result<()> {
     let max_pf = *fast_periods.iter().max().unwrap();
     let max_ps = *slow_periods.iter().max().unwrap();
 
-    // Create ALMA CUDA context and module
+    
     let alma = CudaAlma::new(0).map_err(|e| anyhow!("{:?}", e))?;
-    // The Context created in CudaAlma::new() is now current on this thread.
+    
 
-    // Device buffers that persist across tiles
+    
     let prices_f32: Vec<f32> = prices.iter().map(|&x| x as f32).collect();
     let d_prices = DeviceBuffer::from_slice(&prices_f32)?;
     let d_fast_periods = DeviceBuffer::from_slice(&fast_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
     let d_slow_periods = DeviceBuffer::from_slice(&slow_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
 
-    // Prepare backtest kernel module (compiled by this demo crate)
+    
     let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/double_crossover.ptx"));
     let bt_module = Module::from_ptx(ptx, &[])?;
 
-    // Precompute log returns once on device (lr[0]=0, lr[t]=log(p[t])-log(p[t-1]))
+    
     let mut d_lr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(t_len)? };
     {
         let kernel = bt_module.get_function("compute_log_returns_f32")?;
@@ -190,10 +190,10 @@ fn main() -> Result<()> {
         }
     }
 
-    // Simple tile planner
+    
     let (pf_tile, ps_tile) = choose_tiles(cli.fast_tile, cli.slow_tile, t_len, max_pf, max_ps, cli.metrics)?;
 
-    // Allocate output metrics on device if it fits; else collect on host per tile
+    
     let total_pairs = f_total * s_total;
     let metrics = cli.metrics;
     let metrics_bytes = total_pairs * metrics * std::mem::size_of::<f32>();
@@ -201,21 +201,21 @@ fn main() -> Result<()> {
     let d_metrics_global = if will_fit(metrics_bytes, headroom) { Some(unsafe { DeviceBuffer::<f32>::uninitialized(total_pairs * metrics)? }) } else { None };
     let mut host_metrics: Vec<f32> = if d_metrics_global.is_some() { Vec::new() } else { vec![0.0; total_pairs * metrics] };
 
-    // Temporary buffers reused per tile
-    // These per-tile buffers will be allocated to the actual tile size inside the loops
-    // to avoid partial copies.
-    // Host-side workspace for weights (flattened per tile)
-    // We'll resize these on each tile iteration as needed.
+    
+    
+    
+    
+    
     let mut fast_w_flat: Vec<f32> = Vec::new();
     let mut slow_w_flat: Vec<f32> = Vec::new();
     let mut fast_inv: Vec<f32> = Vec::new();
     let mut slow_inv: Vec<f32> = Vec::new();
 
-    // Device buffers declared here to be reused across tiles when size matches; otherwise reallocated
-    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;      // [Pf, T] row-major
-    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;      // [Ps, T] row-major
-    let mut d_fast_ma_tm: Option<DeviceBuffer<f32>> = None;   // [T, Pf] time-major
-    let mut d_slow_ma_tm: Option<DeviceBuffer<f32>> = None;   // [T, Ps] time-major
+    
+    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;      
+    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;      
+    let mut d_fast_ma_tm: Option<DeviceBuffer<f32>> = None;   
+    let mut d_slow_ma_tm: Option<DeviceBuffer<f32>> = None;   
     let mut d_fast_w: Option<DeviceBuffer<f32>> = None;
     let mut d_slow_w: Option<DeviceBuffer<f32>> = None;
     let mut d_fast_inv: Option<DeviceBuffer<f32>> = None;
@@ -223,14 +223,14 @@ fn main() -> Result<()> {
     let mut d_fast_p: Option<DeviceBuffer<i32>> = None;
     let mut d_slow_p: Option<DeviceBuffer<i32>> = None;
 
-    // Stream for backtest launches
+    
     let bt_stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-    // Iterate tiles
+    
     let mut f_start = 0;
     while f_start < f_total {
         let pf = pf_tile.min(f_total - f_start);
-        // Build fast tile weights and periods
+        
         fast_w_flat.resize(pf * max_pf, 0.0);
         fast_inv.resize(pf, 0.0);
         for i in 0..pf {
@@ -240,7 +240,7 @@ fn main() -> Result<()> {
             let base = i * max_pf;
             fast_w_flat[base..base + per].copy_from_slice(&w);
         }
-        // Allocate/reuse device buffers sized to the current tile
+        
         if d_fast_w.as_ref().map(|b| b.len()) != Some(pf * max_pf) {
             d_fast_w = Some(unsafe { DeviceBuffer::<f32>::uninitialized(pf * max_pf)? });
         }
@@ -257,7 +257,7 @@ fn main() -> Result<()> {
         d_fast_inv.as_mut().unwrap().copy_from(&fast_inv)?;
         let host_p: Vec<i32> = fast_periods[f_start..f_start + pf].iter().map(|&x| x as i32).collect();
         d_fast_p.as_mut().unwrap().copy_from(&host_p)?;
-        // Compute fast ALMA tile
+        
         alma.alma_batch_device(
             &d_prices,
             d_fast_w.as_ref().unwrap(),
@@ -273,7 +273,7 @@ fn main() -> Result<()> {
         let mut s_start = 0;
         while s_start < s_total {
             let ps = ps_tile.min(s_total - s_start);
-            // Build slow tile weights and periods
+            
             slow_w_flat.resize(ps * max_ps, 0.0);
             slow_inv.resize(ps, 0.0);
             for j in 0..ps {
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
             d_slow_inv.as_mut().unwrap().copy_from(&slow_inv)?;
             let host_p: Vec<i32> = slow_periods[s_start..s_start + ps].iter().map(|&x| x as i32).collect();
             d_slow_p.as_mut().unwrap().copy_from(&host_p)?;
-            // Compute slow ALMA tile
+            
             alma.alma_batch_device(
                 &d_prices,
                 d_slow_w.as_ref().unwrap(),
@@ -312,9 +312,9 @@ fn main() -> Result<()> {
                 d_slow_ma.as_mut().unwrap(),
             ).map_err(|e| anyhow!("{:?}", e))?;
 
-            // Transpose MAs to time-major for coalesced reads: [Pf, T] -> [T, Pf]; [Ps, T] -> [T, Ps]
+            
             let tr = bt_module.get_function("transpose_row_to_tm")?;
-            // Fast
+            
             if d_fast_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * pf) {
                 d_fast_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * pf)? });
             }
@@ -335,7 +335,7 @@ fn main() -> Result<()> {
                 stream.launch(&tr, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
                 stream.synchronize()?;
             }
-            // Slow
+            
             if d_slow_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * ps) {
                 d_slow_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * ps)? });
             }
@@ -357,7 +357,7 @@ fn main() -> Result<()> {
                 stream.synchronize()?;
             }
 
-            // Launch backtest (grid-stride inside kernel)
+            
             let kernel = bt_module.get_function("double_cross_backtest_tm_flex_f32")?;
             let pairs = pf * ps;
             let block_x: u32 = 256;
@@ -371,7 +371,7 @@ fn main() -> Result<()> {
 
             let mut tile_host_buf: Vec<f32> = Vec::new();
             if let Some(ref d_global) = d_metrics_global {
-                // d_metrics_global exists; launch kernel to write directly there.
+                
                 unsafe {
                     let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
                     let mut s_ma_tm = d_slow_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
@@ -417,7 +417,7 @@ fn main() -> Result<()> {
                 bt_stream.synchronize()?;
             } else {
                 tile_host_buf.resize(pairs * metrics, 0.0);
-                // We'll allocate a scratch device buffer for the tile metrics
+                
                 let mut d_tile: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(pairs * metrics)? };
                 unsafe {
                     let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
@@ -426,8 +426,8 @@ fn main() -> Result<()> {
                     let mut T = t_len as i32;
                     let mut pf_tile_i = pf as i32;
                     let mut ps_tile_i = ps as i32;
-                    let mut pf_total_i = pf as i32; // local dims
-                    let mut ps_total_i = ps as i32; // local dims
+                    let mut pf_total_i = pf as i32; 
+                    let mut ps_total_i = ps as i32; 
                     let mut f_off = 0i32;
                     let mut s_off = 0i32;
                     let mut f_per = d_fast_p.as_ref().unwrap().as_device_ptr().as_raw();
@@ -463,7 +463,7 @@ fn main() -> Result<()> {
                 }
                 bt_stream.synchronize()?;
                 d_tile.copy_to(&mut tile_host_buf)?;
-                // Scatter tile into host_metrics
+                
                 for i in 0..pf {
                     for j in 0..ps {
                         let f_idx = f_start + i;
@@ -483,7 +483,7 @@ fn main() -> Result<()> {
         f_start += pf;
     }
 
-    // If using device buffer, copy back to host now
+    
     let mut metrics_host: Vec<f32> = if let Some(d) = d_metrics_global {
         let mut out = vec![0.0f32; total_pairs * metrics];
         d.copy_to(&mut out)?;
@@ -492,7 +492,7 @@ fn main() -> Result<()> {
         host_metrics
     };
 
-    // Print a tiny summary
+    
     println!("Computed {} pairs ({} x {}), metrics per pair = {}", total_pairs, f_total, s_total, metrics);
     println!("Example first 5 pairs (total_return, trades, max_dd, mean, std):");
     for k in 0..total_pairs.min(5) {
@@ -519,12 +519,12 @@ fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
 
 fn choose_tiles(fast_tile: usize, slow_tile: usize, t_len: usize, max_pf: usize, max_ps: usize, metrics: usize) -> Result<(usize, usize)> {
     if fast_tile > 0 && slow_tile > 0 { return Ok((fast_tile, slow_tile)); }
-    // Conservative auto-tile: aim for ~256MB budget for ALMA tiles + 128MB for other
+    
     let budget = 256usize * 1024 * 1024;
     let bytes_per_fast = t_len * std::mem::size_of::<f32>() + max_pf * std::mem::size_of::<f32>();
     let bytes_per_slow = t_len * std::mem::size_of::<f32>() + max_ps * std::mem::size_of::<f32>();
-    // Small base to avoid division by zero
-    let mut pf = (budget / (bytes_per_fast.max(1))) / 2; // split budget roughly in half
+    
+    let mut pf = (budget / (bytes_per_fast.max(1))) / 2; 
     let mut ps = (budget / (bytes_per_slow.max(1))) / 2;
     pf = pf.clamp(1, 4096);
     ps = ps.clamp(1, 4096);

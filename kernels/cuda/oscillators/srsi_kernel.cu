@@ -1,6 +1,6 @@
-// CUDA kernels for SRSI (Stochastic RSI) — optimized FP32-only, cache-friendly
-// Drop-in replacement focusing on fewer global writes, cheaper inner-loop math,
-// and compensated summation for SMA stability without FP64.
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -10,26 +10,26 @@
 #include <float.h>
 #include <math.h>
 
-// Read-only cache hint wrapper
+
 #if __CUDA_ARCH__ >= 350
   #define LDG(ptr) __ldg(ptr)
 #else
   #define LDG(ptr) (*(ptr))
 #endif
 
-// Explicit flush-to-zero for subnormals (match common CUDA FTZ behavior and
-// avoid denom underflow -> 0/0 NaNs when ranges are extremely tiny).
+
+
 __device__ __forceinline__ float ftz_f32(float x) {
     return (fabsf(x) < FLT_MIN) ? 0.0f : x;
 }
 
-// --------- helpers ---------
+
 struct Deque {
-    int*   idx;   // capacity elements
-    float* val;   // capacity elements
-    int    cap;   // window length
-    int    head;  // points to first valid element
-    int    tail;  // points to next write position
+    int*   idx;   
+    float* val;   
+    int    cap;   
+    int    head;  
+    int    tail;  
 };
 
 __device__ __forceinline__ void dq_init(Deque* d, int* idx_buf, float* val_buf, int cap) {
@@ -39,12 +39,12 @@ __device__ __forceinline__ bool dq_empty(const Deque* d) { return d->head == d->
 __device__ __forceinline__ int dq_dec(const Deque* d, int x) { return (x == 0 ? d->cap - 1 : x - 1); }
 __device__ __forceinline__ int dq_inc(const Deque* d, int x) { return (x + 1 == d->cap ? 0 : x + 1); }
 
-// expire at most 1 element (window slides by 1)
+
 __device__ __forceinline__ void dq_expire(Deque* d, int start_idx) {
     if (!dq_empty(d) && d->idx[d->head] < start_idx) { d->head = dq_inc(d, d->head); }
 }
 
-// push for max-deque: keep values non-increasing
+
 __device__ __forceinline__ void dq_push_max(Deque* d, int idx, float v) {
     int t = d->tail;
     if (!dq_empty(d)) {
@@ -55,7 +55,7 @@ __device__ __forceinline__ void dq_push_max(Deque* d, int idx, float v) {
     d->idx[t] = idx; d->val[t] = v; d->tail = dq_inc(d, t);
 }
 
-// push for min-deque: keep values non-decreasing
+
 __device__ __forceinline__ void dq_push_min(Deque* d, int idx, float v) {
     int t = d->tail;
     if (!dq_empty(d)) {
@@ -66,7 +66,7 @@ __device__ __forceinline__ void dq_push_min(Deque* d, int idx, float v) {
     d->idx[t] = idx; d->val[t] = v; d->tail = dq_inc(d, t);
 }
 
-// Simple Kahan compensated sum for FP32
+
 struct Kahan {
     float s, c;
     __device__ __forceinline__ void reset() { s = 0.0f; c = 0.0f; }
@@ -79,30 +79,30 @@ struct Kahan {
     __device__ __forceinline__ float value() const { return s; }
 };
 
-// ------------------- Batch: one series × many params -----------------------
-//
-// Performance note:
-// The original batch kernel executed a single-thread scan per combo (one active
-// lane per warp), which is catastrophically slow at large `series_len` even for
-// small (14,3,3) windows. We split batch into 3 fully-parallel passes:
-//   1) Stoch over RSI -> FK (written into out_d as scratch)
-//   2) SMA(FK, k_period) -> Slow K (written into out_k)
-//   3) SMA(SlowK, d_period) -> Slow D (written into out_d final)
-//
-// This keeps memory overhead at 0 additional buffers (reuses outputs) and
-// matches the f32 reference math used in `tests/srsi_cuda.rs`.
+
+
+
+
+
+
+
+
+
+
+
+
 
 extern "C" __global__
 void srsi_fk_batch_f32(const float* __restrict__ rsi,
                        const int*   __restrict__ stoch_periods,
-                       const int*   __restrict__ k_periods, // unused
-                       const int*   __restrict__ d_periods, // unused
+                       const int*   __restrict__ k_periods, 
+                       const int*   __restrict__ d_periods, 
                        int series_len,
                        int first_valid,
                        int rsi_period,
                        int n_combos,
-                       float* __restrict__ out_k, // unused
-                       float* __restrict__ out_d) // scratch: FK
+                       float* __restrict__ out_k, 
+                       float* __restrict__ out_d) 
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -147,16 +147,16 @@ void srsi_fk_batch_f32(const float* __restrict__ rsi,
 }
 
 extern "C" __global__
-void srsi_sma_k_batch_f32(const float* __restrict__ rsi, // unused
+void srsi_sma_k_batch_f32(const float* __restrict__ rsi, 
                           const int*   __restrict__ stoch_periods,
                           const int*   __restrict__ k_periods,
-                          const int*   __restrict__ d_periods, // unused
+                          const int*   __restrict__ d_periods, 
                           int series_len,
                           int first_valid,
                           int rsi_period,
                           int n_combos,
-                          float* __restrict__ out_k, // Slow K
-                          float* __restrict__ out_d) // FK input
+                          float* __restrict__ out_k, 
+                          float* __restrict__ out_d) 
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -198,7 +198,7 @@ void srsi_sma_k_batch_f32(const float* __restrict__ rsi, // unused
 }
 
 extern "C" __global__
-void srsi_sma_d_batch_f32(const float* __restrict__ rsi, // unused
+void srsi_sma_d_batch_f32(const float* __restrict__ rsi, 
                           const int*   __restrict__ stoch_periods,
                           const int*   __restrict__ k_periods,
                           const int*   __restrict__ d_periods,
@@ -206,8 +206,8 @@ void srsi_sma_d_batch_f32(const float* __restrict__ rsi, // unused
                           int first_valid,
                           int rsi_period,
                           int n_combos,
-                          float* __restrict__ out_k, // Slow K input
-                          float* __restrict__ out_d) // Slow D output
+                          float* __restrict__ out_k, 
+                          float* __restrict__ out_d) 
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -251,7 +251,7 @@ void srsi_sma_d_batch_f32(const float* __restrict__ rsi, // unused
     }
 }
 
-// --------------- Many-series: one param (time-major inputs) ----------------
+
 extern "C" __global__
 void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     int cols,
@@ -263,7 +263,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     const int* __restrict__ first_valids,
                                     float* __restrict__ k_out_tm,
                                     float* __restrict__ d_out_tm) {
-    const int s = blockIdx.x; // series index
+    const int s = blockIdx.x; 
     if (s >= cols) return;
     if (rsi_period <= 0 || stoch_period <= 0 || k_period <= 0 || d_period <= 0) return;
 
@@ -274,7 +274,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int k_warmup     = stoch_warmup + k_period - 1;
     const int d_warmup     = k_warmup + d_period - 1;
 
-    // Initialize only up to warmups
+    
     for (int t = threadIdx.x; t < rows; t += blockDim.x) {
         if (t < k_warmup) k_out_tm[t * stride + s] = NAN;
         if (t < d_warmup) d_out_tm[t * stride + s] = NAN;
@@ -282,7 +282,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    // Wilder RSI seed
+    
     float avg_gain = 0.0f, avg_loss = 0.0f;
     float prev = LDG(&prices_tm[first * stride + s]);
     for (int i = first + 1; i <= first + rsi_period && i < rows; ++i) {
@@ -293,18 +293,18 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     avg_gain /= (float)rsi_period; avg_loss /= (float)rsi_period;
     const float alpha = 1.0f / (float)rsi_period;
 
-    // Shared memory buffers; reuse max_val as RSI ring of length stoch_period
+    
     extern __shared__ unsigned char smem2[];
-    int*   max_idx = (int*)smem2;                     // unused
+    int*   max_idx = (int*)smem2;                     
     float* rsi_ring = (float*)(max_idx + stoch_period);
-    int*   min_idx = (int*)(rsi_ring + stoch_period); // unused
-    float* min_val = (float*)(min_idx + stoch_period);// unused
+    int*   min_idx = (int*)(rsi_ring + stoch_period); 
+    float* min_val = (float*)(min_idx + stoch_period);
     float* ring_k  = (float*)(min_val + stoch_period);
     float* ring_d  = (float*)(ring_k + k_period);
 
-    // Prime RSI ring with RSI[t] for t in [rsi_warmup, stoch_warmup)
-    // (stoch_period-1 values). Important: do NOT apply Wilder update at t=rsi_warmup;
-    // the seed already includes the last delta up to rsi_warmup.
+    
+    
+    
     int rpos = 0; int rcnt = 0;
     float rsi = 50.0f;
     if (rsi_warmup < rows) {
@@ -346,7 +346,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         avg_loss = fmaf(loss - avg_loss, alpha, avg_loss);
         rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
         rsi = ftz_f32(rsi);
-        // Update RSI ring and compute hi/lo by scanning ring + current
+        
         rsi_ring[rpos] = rsi; rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1); if (rcnt < stoch_period) ++rcnt;
         float hi = rsi, lo = rsi;
         int cnt = rcnt < stoch_period ? rcnt : stoch_period;
@@ -357,7 +357,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
 
         const float denom = hi - lo;
-        // Guard against FTZ: if denom underflows to 0/subnormal, treat as no-range.
+        
         float fk = (isfinite(hi) && isfinite(lo) && denom >= FLT_MIN) ? ((rsi - lo) * 100.0f) / denom : 50.0f;
 
         if (cnt_k < k_period) { sum_k += fk; ring_k[head_k] = fk; ++cnt_k; if (++head_k == k_period) head_k = 0; }

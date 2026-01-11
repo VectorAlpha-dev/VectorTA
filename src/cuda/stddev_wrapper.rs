@@ -87,7 +87,7 @@ pub struct CudaStddev {
     debug_many_logged: bool,
 }
 
-// CUDA vector equivalent for float2 (hi, lo) compensated prefix sums
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Float2 { pub x: f32, pub y: f32 }
@@ -380,7 +380,7 @@ impl CudaStddev {
         Float2 { x: hi, y: lo }
     }
 
-    // Build DS (hi, lo) prefix sums directly into page-locked host buffers.
+    
     fn build_prefixes_ds_locked(
         data: &[f32],
     ) -> cust::error::CudaResult<(LockedBuffer<Float2>, LockedBuffer<Float2>, LockedBuffer<i32>)> {
@@ -448,7 +448,7 @@ impl CudaStddev {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        // The kernel tiles a small group of combos per block in grid.y (4 per group).
+        
         const TILE: u32 = 4;
         let mut launched = 0usize;
         while launched < combos {
@@ -502,11 +502,11 @@ impl CudaStddev {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.0 as i32).collect();
         let nbdevs: Vec<f32> = combos.iter().map(|c| c.1).collect();
-        // Build DS prefixes in pinned memory
+        
         let (h_ps1, h_ps2, h_psn) = Self::build_prefixes_ds_locked(data_f32)
             .map_err(CudaStddevError::Cuda)?;
 
-        // VRAM estimate with checked arithmetic
+        
         let item_f2 = std::mem::size_of::<Float2>();
         let item_i32 = std::mem::size_of::<i32>();
         let item_f32 = std::mem::size_of::<f32>();
@@ -544,7 +544,7 @@ impl CudaStddev {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        // Device allocations + async H->D from pinned
+        
         let mut d_ps1: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::uninitialized_async(h_ps1.len(), &self.stream) }?;
         let mut d_ps2: DeviceBuffer<Float2> =
@@ -648,7 +648,7 @@ impl CudaStddev {
                 "nbdev must be non-negative and finite".into(),
             ));
         }
-        // Per-series first_valid
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -673,7 +673,7 @@ impl CudaStddev {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_in = elems
@@ -746,7 +746,7 @@ impl CudaStddev {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

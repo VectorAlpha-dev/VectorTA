@@ -8,10 +8,10 @@ use crate::json_export::BenchmarkJsonExport;
 /// Type of library being benchmarked
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LibraryType {
-    RustNative,  // Direct Rust function call
-    RustFFI,     // Rust through C FFI wrapper
-    TulipFFI,    // Tulip C library through FFI
-    TalibFFI,    // TA-LIB C library through FFI
+    RustNative,  
+    RustFFI,     
+    TulipFFI,    
+    TalibFFI,    
 }
 
 impl LibraryType {
@@ -102,7 +102,7 @@ impl UnifiedBenchmarkRunner {
     /// Add a measurement from a benchmark run
     pub fn add_measurement(&mut self, measurement: UnifiedMeasurement) {
         self.measurements.push(measurement);
-        // Clear cache when new measurements are added
+        
         self.cached_results.clear();
     }
 
@@ -117,12 +117,12 @@ impl UnifiedBenchmarkRunner {
     ) where
         F: FnMut(),
     {
-        // Warmup
+        
         for _ in 0..10 {
             bench_fn();
         }
 
-        // Actual measurement
+        
         let start = Instant::now();
         for _ in 0..iterations {
             bench_fn();
@@ -144,7 +144,7 @@ impl UnifiedBenchmarkRunner {
         measurement: &UnifiedMeasurement,
         mode: ComparisonMode,
     ) -> BenchmarkResult {
-        // Check cache first
+        
         let cache_key = (
             measurement.indicator.clone(),
             measurement.library.clone(),
@@ -155,16 +155,16 @@ impl UnifiedBenchmarkRunner {
             return cached.clone();
         }
 
-        // Calculate result based on mode
+        
         let avg_duration = measurement.average_duration();
 
         let (final_duration, ffi_compensated) = match mode {
             ComparisonMode::RawPerformance => {
-                // Raw performance - no adjustments
+                
                 (avg_duration, None)
             }
             ComparisonMode::AlgorithmEfficiency => {
-                // Subtract FFI overhead for fair algorithm comparison
+                
                 if measurement.library.uses_ffi() {
                     if let Some(ref profile) = self.ffi_profile {
                         let overhead = profile.estimate_overhead(measurement.data_size * 8);
@@ -178,11 +178,11 @@ impl UnifiedBenchmarkRunner {
                 }
             }
             ComparisonMode::EqualFooting => {
-                // Only include FFI versions for equal comparison
+                
                 if measurement.library.uses_ffi() || measurement.library == LibraryType::RustFFI {
                     (avg_duration, None)
                 } else {
-                    // For native Rust, use the FFI version's timing if available
+                    
                     if let Some(ffi_measurement) = self.find_ffi_equivalent(measurement) {
                         (ffi_measurement.average_duration(), None)
                     } else {
@@ -201,7 +201,7 @@ impl UnifiedBenchmarkRunner {
             throughput_mops: (measurement.data_size as f64 / final_duration.as_secs_f64()) / 1_000_000.0,
         };
 
-        // Cache the result
+        
         self.cached_results.insert(cache_key, result.clone());
 
         result
@@ -221,7 +221,7 @@ impl UnifiedBenchmarkRunner {
         let filtered: Vec<_> = self.measurements
             .iter()
             .filter(|m| {
-                // For equal footing, only include FFI libraries
+                
                 if matches!(mode, ComparisonMode::EqualFooting) {
                     m.library.uses_ffi()
                 } else {
@@ -245,7 +245,7 @@ impl UnifiedBenchmarkRunner {
         report.push_str("=" .repeat(80).as_str());
         report.push_str("\n\n");
 
-        // FFI Overhead Profile
+        
         if let Some(ref profile) = self.ffi_profile {
             report.push_str("📈 FFI Overhead Profile:\n");
             report.push_str(&format!("  • Call overhead: {:.2} ns\n", profile.call_overhead_ns));
@@ -253,7 +253,7 @@ impl UnifiedBenchmarkRunner {
             report.push_str(&format!("  • Validation: {:.2} ns\n\n", profile.validation_overhead_ns));
         }
 
-        // Generate reports for each mode
+        
         for mode in [
             ComparisonMode::RawPerformance,
             ComparisonMode::AlgorithmEfficiency,
@@ -280,7 +280,7 @@ impl UnifiedBenchmarkRunner {
         output.push_str(&"=".repeat(mode_name.len()));
         output.push_str("\n\n");
 
-        // Group by indicator
+        
         let mut indicators: HashMap<String, Vec<BenchmarkResult>> = HashMap::new();
         for result in self.generate_comparison(mode.clone()) {
             indicators
@@ -296,7 +296,7 @@ impl UnifiedBenchmarkRunner {
             output.push_str(&"-".repeat(55));
             output.push_str("\n");
 
-            // Sort by performance
+            
             results.sort_by_key(|r| r.raw_duration);
             let best_time = results[0].raw_duration;
 
@@ -374,10 +374,10 @@ mod tests {
     fn test_unified_runner() {
         let mut runner = UnifiedBenchmarkRunner::new();
 
-        // Profile FFI overhead
+        
         runner.profile_ffi_overhead(1000, 100);
 
-        // Add some measurements
+        
         runner.add_measurement(UnifiedMeasurement::new(
             "SMA".to_string(),
             LibraryType::RustNative,
@@ -402,14 +402,14 @@ mod tests {
             100,
         ));
 
-        // Test analysis
+        
         let raw_results = runner.generate_comparison(ComparisonMode::RawPerformance);
         assert_eq!(raw_results.len(), 3);
 
         let equal_results = runner.generate_comparison(ComparisonMode::EqualFooting);
-        assert_eq!(equal_results.len(), 2); // Only FFI versions
+        assert_eq!(equal_results.len(), 2); 
 
-        // Test report generation
+        
         let report = runner.generate_full_report();
         assert!(report.contains("Raw Performance"));
         assert!(report.contains("Algorithm Efficiency"));

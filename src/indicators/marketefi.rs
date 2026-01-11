@@ -236,7 +236,7 @@ fn marketefi_prepare<'a>(
         .ok_or(MarketefiError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -350,7 +350,7 @@ pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), Mar
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
+    
     for x in &mut out[..first] {
         *x = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -390,7 +390,7 @@ fn marketefi_scalar_any_valid(
 
         let mut i = first_valid;
         while i + 4 <= n {
-            // 0
+            
             let v0 = *vp.add(i);
             if v0 == 0.0 {
                 *op.add(i) = qnan;
@@ -404,7 +404,7 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            // 1
+            
             let v1 = *vp.add(i + 1);
             if v1 == 0.0 {
                 *op.add(i + 1) = qnan;
@@ -418,7 +418,7 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            // 2
+            
             let v2 = *vp.add(i + 2);
             if v2 == 0.0 {
                 *op.add(i + 2) = qnan;
@@ -432,7 +432,7 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            // 3
+            
             let v3 = *vp.add(i + 3);
             if v3 == 0.0 {
                 *op.add(i + 3) = qnan;
@@ -520,14 +520,14 @@ pub fn marketefi_avx512(
 
             let diff = _mm512_sub_pd(h, l);
 
-            // Experimental fast division: reciprocal approximation + 2x NR refinement
+            
             let mut y = _mm512_rcp14_pd(v);
-            // y = y * (2 - v*y)
+            
             let two = _mm512_set1_pd(2.0);
             let t1 = _mm512_mul_pd(v, y);
             let t2 = _mm512_sub_pd(two, t1);
             y = _mm512_mul_pd(y, t2);
-            // second refinement
+            
             let t1b = _mm512_mul_pd(v, y);
             let t2b = _mm512_sub_pd(two, t1b);
             y = _mm512_mul_pd(y, t2b);
@@ -599,7 +599,7 @@ fn marketefi_avx512_any_valid(
 
             let diff = _mm512_sub_pd(h, l);
 
-            // Match the existing AVX-512 implementation: reciprocal approximation + 2x NR refinement.
+            
             let mut y = _mm512_rcp14_pd(v);
             let two = _mm512_set1_pd(2.0);
             let t1 = _mm512_mul_pd(v, y);
@@ -784,7 +784,7 @@ pub fn marketefi_avx512_long(
     marketefi_avx512(high, low, volume, first_valid, out)
 }
 
-// Row/batch interface
+
 
 #[inline(always)]
 pub fn marketefi_row_scalar(
@@ -846,7 +846,7 @@ pub fn marketefi_row_avx512_long(
 }
 
 #[derive(Clone, Debug)]
-pub struct MarketefiBatchRange; // No params, just 1 row.
+pub struct MarketefiBatchRange; 
 
 impl Default for MarketefiBatchRange {
     fn default() -> Self {
@@ -933,7 +933,7 @@ fn marketefi_batch_inner_into(
     low: &[f64],
     volume: &[f64],
     kernel: Kernel,
-    _parallel: bool, // one row only
+    _parallel: bool, 
     out: &mut [f64],
 ) -> Result<(), MarketefiError> {
     if high.is_empty() || low.is_empty() || volume.is_empty() {
@@ -948,17 +948,17 @@ fn marketefi_batch_inner_into(
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .ok_or(MarketefiError::AllValuesNaN)?;
 
-    // treat `out` as MaybeUninit to match ALMA's pattern
+    
     let out_mu = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-    init_matrix_prefixes(out_mu, cols, &[first]); // rows=1
+    init_matrix_prefixes(out_mu, cols, &[first]); 
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
-    // write into the single row
+    
     let row = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f64, cols) };
     marketefi_compute_into(
         high,
@@ -987,11 +987,11 @@ fn marketefi_batch_inner(
 ) -> Result<MarketefiBatchOutput, MarketefiError> {
     let cols = high.len();
 
-    // one configuration (no params)
+    
     let combos = expand_grid(&MarketefiBatchRange::default());
-    let rows = combos.len(); // == 1
+    let rows = combos.len(); 
 
-    // Guard against overflow in rows * cols even though rows == 1 today.
+    
     rows.checked_mul(cols).ok_or_else(|| MarketefiError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
@@ -1030,8 +1030,8 @@ pub fn expand_grid(_: &MarketefiBatchRange) -> Vec<MarketefiParams> {
     vec![MarketefiParams]
 }
 
-// Streaming (single-point rolling)
-// Decision: Exact update() preserved; optional update_fast() uses reciprocal + 2× NR.
+
+
 #[derive(Debug, Clone, Default)]
 pub struct MarketefiStream;
 
@@ -1082,24 +1082,24 @@ impl MarketefiStream {
 /// - Uses `mul_add` to take advantage of hardware FMA when available.
 #[inline(always)]
 fn approx_recip_nr2_f64(x: f64) -> f64 {
-    // Smallest positive normal f32 (as f64)
+    
     const F32_MIN_NORM: f64 = f32::MIN_POSITIVE as f64;
     if x.abs() < F32_MIN_NORM {
-        // Extremely rare for volumes; fall back to precise divide to avoid f32 underflow to 0.
+        
         return 1.0 / x;
     }
 
-    // ~24-bit initial seed from single-precision reciprocal
+    
     let mut y = (1.0f32 / (x as f32)) as f64;
 
-    // Newton–Raphson refinement in f64: y <- y * (2 - x*y)
-    // Use mul_add to fuse when hardware FMA is present.
+    
+    
     y *= (-x).mul_add(y, 2.0);
     y *= (-x).mul_add(y, 2.0);
     y
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "marketefi")]
 #[pyo3(signature = (high, low, volume, kernel=None))]
@@ -1152,7 +1152,7 @@ impl MarketefiStreamPy {
     }
 }
 
-// ====== PYTHON CUDA VRAM HANDLE (CAI v3 + DLPack v1.x) ======
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "MarketefiDeviceArrayF32", unsendable)]
 pub struct MarketefiDeviceArrayF32Py {

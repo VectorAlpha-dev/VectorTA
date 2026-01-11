@@ -326,7 +326,7 @@ pub fn chande_with_kernel(
         other => other,
     };
 
-    // Safe fallback when AVX isn't available
+    
     let chosen = match (
         chosen,
         cfg!(all(feature = "nightly-avx", target_arch = "x86_64")),
@@ -427,7 +427,7 @@ pub fn chande_compute_into(
         k => k,
     };
 
-    // Safe fallback when AVX isn't available
+    
     let chosen = match (
         chosen,
         cfg!(all(feature = "nightly-avx", target_arch = "x86_64")),
@@ -490,19 +490,19 @@ pub fn chande_scalar(
     let alpha = 1.0 / period as f64;
     let warmup = first + period - 1;
 
-    // Wilder's ATR via RMA over True Range, single pass
+    
     let mut sum_tr = 0.0f64;
     let mut rma = 0.0f64;
     let mut prev_close = close[first];
 
-    // Monotonic deques: store indices, access values from slices
+    
     use std::collections::VecDeque;
 
     if dir == "long" {
-        // Max-deque over highs
+        
         let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
         for i in first..len {
-            // True Range
+            
             let hi = high[i];
             let lo = low[i];
             let tr = if i == first {
@@ -514,7 +514,7 @@ pub fn chande_scalar(
                 hl.max(hc).max(lc)
             };
 
-            // Maintain deque window (remove out-of-window indices once full)
+            
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
@@ -525,7 +525,7 @@ pub fn chande_scalar(
                     }
                 }
             }
-            // Push current index, maintain decreasing values
+            
             while let Some(&j) = dq.back() {
                 if high[j] <= hi {
                     dq.pop_back();
@@ -535,17 +535,17 @@ pub fn chande_scalar(
             }
             dq.push_back(i);
 
-            // ATR update
+            
             if i < warmup {
                 sum_tr += tr;
             } else if i == warmup {
                 sum_tr += tr;
                 rma = sum_tr / period as f64;
-                // Output: HighestHigh - ATR * mult using FMA
+                
                 let max_h = high[*dq.front().expect("deque nonempty at warmup")];
                 out[i] = (-rma).mul_add(mult, max_h);
             } else {
-                // Steady-state RMA update with FMA
+                
                 rma = alpha.mul_add(tr - rma, rma);
                 let max_h = high[*dq.front().expect("deque nonempty in steady state")];
                 out[i] = (-rma).mul_add(mult, max_h);
@@ -554,10 +554,10 @@ pub fn chande_scalar(
             prev_close = close[i];
         }
     } else {
-        // dir == "short": Min-deque over lows
+        
         let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
         for i in first..len {
-            // True Range
+            
             let hi = high[i];
             let lo = low[i];
             let tr = if i == first {
@@ -569,7 +569,7 @@ pub fn chande_scalar(
                 hl.max(hc).max(lc)
             };
 
-            // Maintain deque window (remove out-of-window indices once full)
+            
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
@@ -580,7 +580,7 @@ pub fn chande_scalar(
                     }
                 }
             }
-            // Push current index, maintain increasing values
+            
             while let Some(&j) = dq.back() {
                 if low[j] >= lo {
                     dq.pop_back();
@@ -590,17 +590,17 @@ pub fn chande_scalar(
             }
             dq.push_back(i);
 
-            // ATR update
+            
             if i < warmup {
                 sum_tr += tr;
             } else if i == warmup {
                 sum_tr += tr;
                 rma = sum_tr / period as f64;
-                // Output: LowestLow + ATR * mult using FMA
+                
                 let min_l = low[*dq.front().expect("deque nonempty at warmup")];
                 out[i] = rma.mul_add(mult, min_l);
             } else {
-                // Steady-state RMA update with FMA
+                
                 rma = alpha.mul_add(tr - rma, rma);
                 let min_l = low[*dq.front().expect("deque nonempty in steady state")];
                 out[i] = rma.mul_add(mult, min_l);
@@ -638,7 +638,7 @@ pub fn chande_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    // Reuse the same fast scalar-optimized kernel; AVX512 not beneficial end-to-end.
+    
     unsafe { chande_fast_unchecked(high, low, close, period, mult, dir, first, out) }
 }
 
@@ -808,26 +808,26 @@ unsafe fn chande_fast_unchecked(
     }
 }
 
-// Decision note: Streaming kernel uses O(1) monotonic deque + Wilder ATR with TR identity; FMA used for tail.
+
 #[derive(Debug, Clone)]
 pub struct ChandeStream {
-    // Parameters
+    
     period: usize,
     mult: f64,
     direction: String,
     is_long: bool,
 
-    // Precomputed constant
-    alpha: f64, // 1.0 / period
+    
+    alpha: f64, 
 
-    // State
+    
     atr: f64,
     close_prev: f64,
-    t: usize,     // logical time (0-based)
-    warm: usize,  // number of samples accumulated (<= period)
-    filled: bool, // window is “full” -> outputs are valid
+    t: usize,     
+    warm: usize,  
+    filled: bool, 
 
-    // Monotonic queues (store (value, time))
+    
     max_deque: std::collections::VecDeque<(f64, usize)>,
     min_deque: std::collections::VecDeque<(f64, usize)>,
 }
@@ -870,7 +870,7 @@ impl ChandeStream {
 
     #[inline(always)]
     fn evict_old(&mut self) {
-        // keep window [t - (period - 1), t]
+        
         let window_start = self.t.saturating_sub(self.period - 1);
         if self.is_long {
             while let Some(&(_, idx)) = self.max_deque.front() {
@@ -893,7 +893,7 @@ impl ChandeStream {
 
     #[inline(always)]
     fn push_max(&mut self, v: f64) {
-        // maintain non-increasing deque for highs
+        
         while let Some(&(back, _)) = self.max_deque.back() {
             if back <= v {
                 self.max_deque.pop_back();
@@ -906,7 +906,7 @@ impl ChandeStream {
 
     #[inline(always)]
     fn push_min(&mut self, v: f64) {
-        // maintain non-decreasing deque for lows
+        
         while let Some(&(back, _)) = self.min_deque.back() {
             if back >= v {
                 self.min_deque.pop_back();
@@ -919,9 +919,9 @@ impl ChandeStream {
 
     #[inline(always)]
     fn tr(&self, high: f64, low: f64) -> f64 {
-        // Wilder’s TR identity:
-        // TR = max(high, prev_close) - min(low, prev_close)
-        // First observation falls back to high - low
+        
+        
+        
         if self.warm == 0 {
             high - low
         } else {
@@ -941,11 +941,11 @@ impl ChandeStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // --- compute TR
+        
         let tr = self.tr(high, low);
 
         if !self.filled {
-            // Warmup: build initial window + accumulate TR
+            
             if self.is_long {
                 self.push_max(high);
             } else {
@@ -956,7 +956,7 @@ impl ChandeStream {
 
             let now_ready = self.warm == self.period;
             if now_ready {
-                self.atr *= self.alpha; // initial ATR = mean(TR[0..period-1])
+                self.atr *= self.alpha; 
                 self.filled = true;
             }
 
@@ -966,23 +966,23 @@ impl ChandeStream {
             if !now_ready {
                 return None;
             }
-            // Emit the first value at the instant the window fills
+            
             if self.is_long {
                 let m = self.max_deque.front().unwrap().0;
-                Some((-self.atr).mul_add(self.mult, m)) // m - ATR*mult with FMA
+                Some((-self.atr).mul_add(self.mult, m)) 
             } else {
                 let m = self.min_deque.front().unwrap().0;
-                Some(self.atr.mul_add(self.mult, m)) // m + ATR*mult with FMA
+                Some(self.atr.mul_add(self.mult, m)) 
             }
         } else {
-            // Steady-state: O(1) maintenance
+            
             self.evict_old();
             if self.is_long {
                 self.push_max(high);
             } else {
                 self.push_min(low);
             }
-            // Wilder RMA: atr += alpha * (tr - atr)
+            
             self.atr = self.alpha.mul_add(tr - self.atr, self.atr);
 
             self.close_prev = close;
@@ -1126,12 +1126,12 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Result<Vec<ChandeParams>, Cha
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        // support reversed bounds
+        
         if start < end {
             if step == 0 { return Ok(vec![start]); }
             Ok((start..=end).step_by(step).collect())
         } else {
-            // reversed: start >= end
+            
             let step_i = step as isize;
             if step_i == 0 { return Ok(vec![start]); }
             let mut vals = Vec::new();
@@ -1174,7 +1174,7 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Result<Vec<ChandeParams>, Cha
     }
     let periods = axis_usize(r.period)?;
     let mults = axis_f64(r.mult)?;
-    // checked capacity to avoid overflow
+    
     let cap = periods
         .len()
         .checked_mul(mults.len())
@@ -1251,22 +1251,22 @@ fn chande_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
-    // Guard rows * cols overflow
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(ChandeError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Calculate warmup periods for each row
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Allocate uninitialized matrix and set NaN prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1312,7 +1312,7 @@ fn chande_batch_inner(
         }
     }
 
-    // Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1369,7 +1369,7 @@ fn chande_batch_inner_into(
 
     let cols = high.len();
 
-    // Validate output slice length
+    
     let expected = combos
         .len()
         .checked_mul(cols)
@@ -1378,13 +1378,13 @@ fn chande_batch_inner_into(
         return Err(ChandeError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Resolve Auto kernel to concrete kernel
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    // Initialize NaN prefixes for each row based on warmup period
+    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
         let row_start = row * cols;
@@ -1521,16 +1521,16 @@ mod tests {
 
     #[test]
     fn test_chande_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prepare input from candles (non-trivial series)
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = ChandeInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = chande(&input)?;
 
-        // Preallocate output and compute via into-API
+        
         let mut out = vec![0.0f64; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1538,7 +1538,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, call the internal slice variant directly
+            
             chande_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1781,7 +1781,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_chande_no_poison(
         test_name: &str,
@@ -1791,7 +1791,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let param_combinations = vec![
             ChandeParams {
                 period: Some(10),
@@ -1814,16 +1814,16 @@ mod tests {
             let input = ChandeInput::from_candles(&candles, params.clone());
             let output = chande_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1832,7 +1832,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1841,7 +1841,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1855,7 +1855,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_chande_no_poison(
         _test_name: &str,
@@ -1891,28 +1891,28 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Note: This test validates Chande Exits invariants including ATR calculation,
-        // rolling max/min windows, and directional consistency.
+        
+        
 
-        // Generate test strategy: period, data length, mult, direction
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
-                // Generate high/low/close data with realistic relationships
+                
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     period..400,
                 )
                 .prop_flat_map(move |close| {
-                    // Generate high/low based on close with realistic constraints
+                    
                     let len = close.len();
                     (
                         Just(close.clone()),
                         prop::collection::vec(
-                            0.0f64..1000.0f64, // spread above close
+                            0.0f64..1000.0f64, 
                             len,
                         ),
                         prop::collection::vec(
-                            0.0f64..1000.0f64, // spread below close
+                            0.0f64..1000.0f64, 
                             len,
                         ),
                     )
@@ -1931,8 +1931,8 @@ mod tests {
                         })
                 }),
                 Just(period),
-                0.1f64..10.0f64, // mult range
-                prop::bool::ANY, // direction (true = long, false = short)
+                0.1f64..10.0f64, 
+                prop::bool::ANY, 
             )
         });
 
@@ -1940,7 +1940,7 @@ mod tests {
             .run(&strat, |((high, low, close), period, mult, is_long)| {
                 let direction = if is_long { "long" } else { "short" };
 
-                // Build candles structure
+                
                 let candles = Candles {
                     high: high.clone(),
                     low: low.clone(),
@@ -1962,25 +1962,25 @@ mod tests {
 
                 let input = ChandeInput::from_candles(&candles, params);
 
-                // Test with specified kernel
+                
                 let result = chande_with_kernel(&input, kernel);
 
-                // Property 1: Should succeed for valid inputs
+                
                 prop_assert!(result.is_ok(), "Chande should succeed for valid inputs");
                 let output = result.unwrap();
 
-                // Property 2: Output length matches input length
+                
                 prop_assert_eq!(
                     output.values.len(),
                     high.len(),
                     "Output length should match input"
                 );
 
-                // Find first non-NaN index
+                
                 let first_valid = close.iter().position(|&x| !x.is_nan()).unwrap_or(0);
                 let warmup_period = first_valid + period - 1;
 
-                // Property 3: Warmup period correctness - NaN values until warmup complete
+                
                 for i in 0..warmup_period.min(output.values.len()) {
                     prop_assert!(
                         output.values[i].is_nan(),
@@ -1989,7 +1989,7 @@ mod tests {
                     );
                 }
 
-                // Property 4: Values after warmup should be finite (if input is finite)
+                
                 if warmup_period < output.values.len() {
                     for i in warmup_period..output.values.len() {
                         let val = output.values[i];
@@ -2002,8 +2002,8 @@ mod tests {
                     }
                 }
 
-                // Property 5: Long exit should be below or equal to period max high
-                // Short exit should be above or equal to period min low
+                
+                
                 for i in warmup_period..output.values.len() {
                     let start_idx = i + 1 - period;
                     let period_high = high[start_idx..=i].iter().cloned().fold(f64::MIN, f64::max);
@@ -2011,7 +2011,7 @@ mod tests {
                     let val = output.values[i];
 
                     if is_long {
-                        // Long exit should be below the period high
+                        
                         prop_assert!(
                             val <= period_high + 1e-6,
                             "Long exit {} should be <= period high {} at index {}",
@@ -2020,7 +2020,7 @@ mod tests {
                             i
                         );
                     } else {
-                        // Short exit should be above the period low
+                        
                         prop_assert!(
                             val >= period_low - 1e-6,
                             "Short exit {} should be >= period low {} at index {}",
@@ -2031,13 +2031,13 @@ mod tests {
                     }
                 }
 
-                // Property 6: Cross-kernel consistency
+                
                 let ref_output = chande_with_kernel(&input, Kernel::Scalar).unwrap();
                 for i in 0..output.values.len() {
                     let val = output.values[i];
                     let ref_val = ref_output.values[i];
 
-                    // Handle NaN/infinite values
+                    
                     if !val.is_finite() || !ref_val.is_finite() {
                         prop_assert_eq!(
                             val.to_bits(),
@@ -2050,7 +2050,7 @@ mod tests {
                         continue;
                     }
 
-                    // Check ULP difference for finite values
+                    
                     let val_bits = val.to_bits();
                     let ref_bits = ref_val.to_bits();
                     let ulp_diff = val_bits.abs_diff(ref_bits);
@@ -2065,11 +2065,11 @@ mod tests {
                     );
                 }
 
-                // Property 7: Period=1 edge case
-                // With period=1, ATR calculation uses a single TR value
-                // Due to the complexity of ATR calculation with previous close values,
-                // we just verify the basic invariant that the output is finite
-                // and follows the directional constraints
+                
+                
+                
+                
+                
                 if period == 1 && warmup_period < output.values.len() {
                     for i in warmup_period..output.values.len() {
                         let val = output.values[i];
@@ -2079,9 +2079,9 @@ mod tests {
                             i
                         );
 
-                        // Basic directional check
+                        
                         if is_long {
-                            // Long exit should be <= current high
+                            
                             prop_assert!(
                                 val <= high[i] + 1e-6,
                                 "Period=1 long exit {} should be <= high {} at index {}",
@@ -2090,7 +2090,7 @@ mod tests {
                                 i
                             );
                         } else {
-                            // Short exit should be >= current low
+                            
                             prop_assert!(
                                 val >= low[i] - 1e-6,
                                 "Period=1 short exit {} should be >= low {} at index {}",
@@ -2102,7 +2102,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Constant data produces stable output (after warmup)
+                
                 let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
@@ -2112,8 +2112,8 @@ mod tests {
                     && all_same_low
                     && warmup_period + 10 < output.values.len()
                 {
-                    // After sufficient warmup, output should stabilize
-                    let stable_start = warmup_period + period; // Extra period for ATR to stabilize
+                    
+                    let stable_start = warmup_period + period; 
                     if stable_start + 2 < output.values.len() {
                         for i in stable_start..output.values.len() - 1 {
                             prop_assert!(
@@ -2145,7 +2145,7 @@ mod tests {
         check_chande_no_poison
     );
 
-    // Generate property tests only when proptest feature is enabled
+    
     #[cfg(feature = "proptest")]
     generate_all_chande_tests!(check_chande_property);
 
@@ -2179,7 +2179,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2187,17 +2187,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = ChandeBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 30, 10) // Tests periods 10, 20, 30
-            .mult_range(2.0, 5.0, 1.5) // Tests multipliers 2.0, 3.5, 5.0
+            .period_range(10, 30, 10) 
+            .mult_range(2.0, 5.0, 1.5) 
             .direction("long")
             .apply_candles(&c)?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -2207,7 +2207,7 @@ mod tests {
             let col = idx % output.cols;
             let params = &output.combos[row];
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2216,7 +2216,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2225,7 +2225,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2235,11 +2235,11 @@ mod tests {
             }
         }
 
-        // Also test with "short" direction
+        
         let output_short = ChandeBatchBuilder::new()
             .kernel(kernel)
-            .period_range(15, 45, 15) // Tests periods 15, 30, 45
-            .mult_range(1.0, 4.0, 1.5) // Tests multipliers 1.0, 2.5, 4.0
+            .period_range(15, 45, 15) 
+            .mult_range(1.0, 4.0, 1.5) 
             .direction("short")
             .apply_candles(&c)?;
 
@@ -2281,7 +2281,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2314,9 +2314,9 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ============================
-// Python Bindings
-// ============================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "chande")]
@@ -2413,7 +2413,7 @@ pub fn chande_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        // map Batch to compute kernel like alma.rs
+        
         let simd = match simd {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2452,9 +2452,9 @@ pub fn chande_batch_py<'py>(
     Ok(dict)
 }
 
-// ============================
-// Python CUDA (zero-copy device)
-// ============================
+
+
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Chande", unsendable)]

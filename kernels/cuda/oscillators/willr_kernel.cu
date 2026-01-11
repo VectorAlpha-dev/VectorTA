@@ -1,7 +1,7 @@
-// CUDA kernel for Williams' %R (WILLR) batch evaluation — optimized.
-//
-// Each block = one combo (period). Threads in the block parallelize across time.
-// Warmup semantics preserved, FP32 throughout.
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -30,7 +30,7 @@ void willr_batch_f32(const float* __restrict__ close,
     const int base = combo * series_len;
     float* __restrict__ out_row = out + base;
 
-    // Guard invalid input by writing full NaN row.
+    
     const int period = periods[combo];
     if (period <= 0 || first_valid >= series_len) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x)
@@ -40,14 +40,14 @@ void willr_batch_f32(const float* __restrict__ close,
 
     const int warm = first_valid + period - 1;
 
-    // Prefill only the warmup prefix with NaNs (no barrier needed).
+    
     const int warm_clamped = (warm < series_len) ? warm : series_len;
     for (int i = threadIdx.x; i < warm_clamped; i += blockDim.x)
         out_row[i] = NAN;
 
     if (warm >= series_len) return;
 
-    // Sparse-table constants for this combo (O(1) RMQ per query).
+    
     const int k = log2_tbl[period];
     if (k < 0 || k >= level_count) {
         for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x)
@@ -57,20 +57,20 @@ void willr_batch_f32(const float* __restrict__ close,
     const int offset     = 1 << k;
     const int level_base = level_offsets[k];
 
-    // Parallelize over time: each thread computes a strided subset of t.
+    
     for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x) {
         const float c = close[t];
         if (isnan(c)) { out_row[t] = NAN; continue; }
 
         const int start = t - period + 1;
 
-        // Any NaN in [start..t] -> NaN
+        
         if (nan_psum[t + 1] - nan_psum[start] != 0) {
             out_row[t] = NAN;
             continue;
         }
 
-        // O(1) range max/min via sparse table (two overlapping blocks).
+        
         const int idx_a  = level_base + start;
         const int idx_b  = level_base + (t + 1 - offset);
         const float hmax = fmaxf(st_max[idx_a], st_max[idx_b]);
@@ -81,8 +81,8 @@ void willr_batch_f32(const float* __restrict__ close,
     }
 }
 
-// Many-series × one-param (time-major) kernel — streamlined.
-// One thread = one series. Warmup NaNs for [0..warm), then compute in place.
+
+
 extern "C" __global__
 void willr_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -97,7 +97,7 @@ void willr_many_series_one_param_time_major_f32(
     if (series >= cols) return;
 
     if (period <= 0) {
-        // Entire column becomes NaN
+        
         for (int t = 0; t < rows; ++t) out_tm[t * cols + series] = NAN;
         return;
     }
@@ -105,7 +105,7 @@ void willr_many_series_one_param_time_major_f32(
     const int first_valid = first_valids[series];
     const int warm = first_valid + period - 1;
 
-    // Warmup NaNs for prefix only
+    
     const int wclamp = (warm < rows) ? warm : rows;
     for (int t = 0; t < wclamp; ++t)
         out_tm[t * cols + series] = NAN;
@@ -121,7 +121,7 @@ void willr_many_series_one_param_time_major_f32(
         float h = -INFINITY, l = INFINITY;
         bool any_nan = false;
 
-        // Naive scan (simple & branch-friendly). Early-out on NaN.
+        
         for (int j = start; j <= t; ++j) {
             const int jidx = j * cols + series;
             const float hj = high_tm[jidx];

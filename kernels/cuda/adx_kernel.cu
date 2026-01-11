@@ -1,19 +1,19 @@
-// CUDA kernels for Average Directional Index (ADX)
-//
-// Drop-in optimization focused on one-series → many-params and many-series → one-param.
-// Key changes:
-// - FP32 arithmetic with Kahan/Neumaier compensation during warmup; FMA-friendly recurrences.
-// - Warp-level streaming for the batch kernel: lane0 loads H/L/C and broadcasts via __shfl_sync.
-// - Only write the NaN prefix per row; avoid full-row prefill unless explicitly requested.
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// ---- Helpers ---------------------------------------------------------------
+
 
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fc00000); }
 
-// Kahan/Neumaier compensated sum in FP32
+
 struct KahanF {
     float sum, c;
     __device__ __forceinline__ void reset() { sum = 0.f; c = 0.f; }
@@ -25,7 +25,7 @@ struct KahanF {
     }
 };
 
-// Optional: global prefill of NaNs (not used by wrappers, but handy for experiments)
+
 extern "C" __global__ void fill_nan_f32(float* out, size_t n) {
     const float nanv = qnan_f32();
     for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
@@ -33,9 +33,9 @@ extern "C" __global__ void fill_nan_f32(float* out, size_t n) {
     }
 }
 
-// ---- Optimized one-series-many-params kernel -------------------------------
-// Works with any blockDim.x that is a multiple of 32. Each warp processes up to 32
-// parameter combos in parallel; lane 0 of each warp streams H/L/C and broadcasts via shfl.
+
+
+
 
 extern "C" __global__
 void adx_batch_f32(const float* __restrict__ high,
@@ -46,37 +46,37 @@ void adx_batch_f32(const float* __restrict__ high,
                    int n_combos,
                    int first_valid,
                    float* __restrict__ out) {
-    const int tid  = blockIdx.x * blockDim.x + threadIdx.x;   // unique thread id
+    const int tid  = blockIdx.x * blockDim.x + threadIdx.x;   
     if (tid >= n_combos) return;
 
-    const int lane = threadIdx.x & 31;                        // lane id in warp
+    const int lane = threadIdx.x & 31;                        
 
-    // Load this thread's parameter
+    
     const int p = periods[tid];
     float* row = out + (size_t)tid * series_len;
 
-    // Rejects and minimal NaN handling
+    
     if (p <= 0 || first_valid < 0 || first_valid + p >= series_len) {
-        // mark whole row as NaN to be conservative
+        
         const float nanv = qnan_f32();
         for (int i = 0; i < series_len; ++i) row[i] = nanv;
         return;
     }
 
-    // Fill only the invalid prefix [0 .. first_valid + 2*p - 1]
+    
     const int warm_end_excl = min(series_len, first_valid + 2 * p);
     const float nanv = qnan_f32();
     for (int i = 0; i < warm_end_excl; ++i) row[i] = nanv;
 
-    // Precompute FP32 coefficients
+    
     const float rp = 1.0f / (float)p;
     const float one_minus_rp = 1.0f - rp;
     const float pm1_over_p = ((float)p - 1.0f) * rp;
 
-    // Stream time from t0 = first_valid
+    
     const int t0 = first_valid;
 
-    // Each warp's leader loads; values are broadcast via shfl.
+    
     const unsigned mask = __activemask();
     const int leader = __ffs(mask) - 1;
 
@@ -90,7 +90,7 @@ void adx_batch_f32(const float* __restrict__ high,
     prev_l = __shfl_sync(mask, prev_l, leader);
     prev_c = __shfl_sync(mask, prev_c, leader);
 
-    // Per-thread parameter state
+    
     int warm_j = 0;
     KahanF tr_sum; tr_sum.reset();
     KahanF plus_sum; plus_sum.reset();
@@ -166,12 +166,12 @@ void adx_batch_f32(const float* __restrict__ high,
             }
         }
 
-        // advance previous for next bar
+        
         prev_h = ch; prev_l = cl; prev_c = cc;
     }
 }
 
-// ---- Many-series, one-param, time-major kernel -----------------------------
+
 extern "C" __global__
 void adx_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -187,13 +187,13 @@ void adx_many_series_one_param_time_major_f32(
         const int fv = first_valids[s];
         auto at = [&](int t) { return t * cols + s; };
 
-        // Prefill only the invalid prefix for this series
+        
         const int warm_end_excl = (period > 0 && fv >= 0) ? min(rows, fv + 2 * period) : rows;
         const float nanv = qnan_f32();
         for (int t = 0; t < warm_end_excl; ++t) out_tm[at(t)] = nanv;
         if (period <= 0 || fv < 0 || fv + period >= rows) continue;
 
-        // Warmup (j=1..period) with FP32 + Kahan
+        
         int i0 = fv;
         float prev_h = high_tm[at(i0)];
         float prev_l = low_tm[at(i0)];
@@ -227,7 +227,7 @@ void adx_many_series_one_param_time_major_f32(
         const float one_minus_rp = 1.0f - rp;
         const float pm1_over_p = ((float)period - 1.0f) * rp;
 
-        // initial DX
+        
         KahanF dx_sum; dx_sum.reset();
         {
             const float inv_atr = (atr != 0.f) ? (100.f / atr) : 0.f;

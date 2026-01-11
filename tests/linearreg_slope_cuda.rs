@@ -1,14 +1,14 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaLinearregSlope;
+use vector_ta::cuda::moving_averages::CudaLinearregSlope;
 
-use my_project::indicators::linearreg_slope::{
+use vector_ta::indicators::linearreg_slope::{
     linearreg_slope_batch_with_kernel, LinearRegSlopeBatchRange, LinearRegSlopeBuilder,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];
@@ -47,7 +47,7 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], periods: &[usize], len: usize, first_v
                 );
             } else {
                 let diff = (expected - actual).abs();
-                let tol = 3.0e-3 + expected.abs() * 8.0e-4; // slope tolerances
+                let tol = 3.0e-3 + expected.abs() * 8.0e-4; 
                 assert!(
                     diff <= tol,
                     "row {row_idx} col {col} expected {expected} got {actual} diff {diff} tol {tol}"
@@ -116,7 +116,7 @@ fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for col in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -132,7 +132,7 @@ fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     }
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
-    let params = my_project::indicators::linearreg_slope::LinearRegSlopeParams {
+    let params = vector_ta::indicators::linearreg_slope::LinearRegSlopeParams {
         period: Some(period),
     };
     let cuda = CudaLinearregSlope::new(0).expect("CudaLinearregSlope::new");

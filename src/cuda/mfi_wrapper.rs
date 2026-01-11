@@ -255,14 +255,14 @@ impl CudaMfi {
 
         let (combos, first_valid, len) = Self::prepare_batch_inputs(typical_f32, volume_f32, sweep)?;
 
-        // Block size for Stages 1 & 3
+        
         let block_x_scan: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         let nb = ((len as u32 + block_x_scan - 1) / block_x_scan) as usize;
 
-        // VRAM estimate: inputs + prefixes (float2) + block totals/offsets + periods + outputs
+        
         let rows = combos.len();
         let cols = len;
         let bytes_inputs = 2usize
@@ -301,7 +301,7 @@ impl CudaMfi {
             }
         }
 
-        // Device buffers
+        
         let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }?;
         let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
 
@@ -311,7 +311,7 @@ impl CudaMfi {
             .collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
-        // Prefix workspace (float2)
+        
         let mut d_pos_ps: DeviceBuffer<[f32; 2]> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         let mut d_neg_ps: DeviceBuffer<[f32; 2]> =
@@ -331,7 +331,7 @@ impl CudaMfi {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total_out, &self.stream)? };
 
-        // Kernel symbols
+        
         let k1 = self
             .module
             .get_function("mfi_prefix_stage1_transform_scan_ds")
@@ -359,7 +359,7 @@ impl CudaMfi {
 
         unsafe { (*(self as *const _ as *mut CudaMfi)).last_batch = Some(BatchKernelSelected::Plain { block_x: block_x_scan }); }
 
-        // Stage 1
+        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
@@ -386,7 +386,7 @@ impl CudaMfi {
             }
         }
 
-        // Stage 2
+        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (1, 1, 1).into();
@@ -407,7 +407,7 @@ impl CudaMfi {
             }
         }
 
-        // Stage 3
+        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
@@ -428,7 +428,7 @@ impl CudaMfi {
             }
         }
 
-        // Stage 4 (chunked over grid.y)
+        
         let block_x_out: u32 = 128;
         let grid_x_out: u32 = ((len as u32) + block_x_out - 1) / block_x_out;
         let mut launched = 0usize;
@@ -444,7 +444,7 @@ impl CudaMfi {
                 let mut len_i   = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut periods_ptr = d_periods.as_device_ptr().as_raw() + (periods_off as u64);
-                let mut n_chunk_i   = chunk as i32; // kernel expects n_combos but uses grid.y index
+                let mut n_chunk_i   = chunk as i32; 
                 let mut out_ptr     = d_out.as_device_ptr().as_raw() + (out_off as u64);
                 let args: &mut [*mut c_void] = &mut [
                     &mut pos_ps as *mut _ as *mut c_void,
@@ -490,7 +490,7 @@ impl CudaMfi {
             return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
         }
 
-        // First-valid per series
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -528,7 +528,7 @@ impl CudaMfi {
         };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (2 * period * std::mem::size_of::<[f32; 2]>()) as u32; // ring buffers (float2)
+        let shared_bytes = (2 * period * std::mem::size_of::<[f32; 2]>()) as u32; 
         unsafe { (*(self as *const _ as *mut CudaMfi)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
         unsafe {
             let mut tp_ptr = d_tp.as_device_ptr().as_raw();
@@ -556,7 +556,7 @@ impl CudaMfi {
     }
 }
 
-// ------------------------ Benches ------------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{
@@ -576,8 +576,8 @@ pub mod benches {
         const BS: usize = 256;
         let nb = (ONE_SERIES_LEN + BS - 1) / BS;
         let in_bytes     = 2 * ONE_SERIES_LEN * size_of::<f32>();
-        let prefix_bytes = 2 * ONE_SERIES_LEN * size_of::<[f32; 2]>(); // pos_ps + neg_ps
-        let blk_bytes    = 4 * nb * size_of::<[f32; 2]>();              // blk_tot_* + blk_off_*
+        let prefix_bytes = 2 * ONE_SERIES_LEN * size_of::<[f32; 2]>(); 
+        let blk_bytes    = 4 * nb * size_of::<[f32; 2]>();              
         let out_bytes    = ONE_SERIES_LEN * PARAM_SWEEP * size_of::<f32>();
         in_bytes + prefix_bytes + blk_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -720,7 +720,7 @@ pub mod benches {
             .expect("mfi_batch_from_prefix_ds_f32");
         let func: Function<'static> = unsafe { std::mem::transmute(func) };
 
-        // Stage 1
+        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
@@ -747,7 +747,7 @@ pub mod benches {
             }
         }
 
-        // Stage 2
+        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (1, 1, 1).into();
@@ -768,7 +768,7 @@ pub mod benches {
             }
         }
 
-        // Stage 3
+        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();

@@ -42,20 +42,20 @@
 //!   five). This suggests an issue specific to the `avsl_js` path rather than data or batch paths.
 //!   No changes were made to kernels pending investigation.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -66,31 +66,31 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// Import indicators we'll use
+
 use crate::indicators::moving_averages::vwma::{
     vwma_into_slice, vwma_with_kernel, VwmaInput, VwmaParams,
 };
 use crate::indicators::sma::{sma_into_slice, sma_with_kernel, SmaInput, SmaParams};
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
-// Note: AsRef cannot be directly implemented for AvslInput as it requires 3 slices,
-// not a single slice. This is a key difference from alma.rs which only needs one data slice.
 
-// ==================== DATA STRUCTURES ====================
+
+
+
+
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum AvslData<'a> {
@@ -185,7 +185,7 @@ impl<'a> AvslInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 /// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct AvslBuilder {
@@ -274,7 +274,7 @@ impl AvslBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum AvslError {
     #[error("avsl: Input data slice is empty.")]
@@ -314,7 +314,7 @@ pub enum AvslError {
     ComputationError(String),
 }
 
-// ==================== CORE COMPUTATION FUNCTIONS ====================
+
 /// Find the maximum first valid index across three input arrays
 #[inline(always)]
 fn first_valid_max3(a: &[f64], b: &[f64], c: &[f64]) -> Option<usize> {
@@ -334,7 +334,7 @@ pub fn avsl_with_kernel(input: &AvslInput, kernel: Kernel) -> Result<AvslOutput,
     let (close, low, volume, fast_period, slow_period, multiplier, first, chosen) =
         avsl_prepare(input, kernel)?;
 
-    // CRITICAL: Use zero-copy allocation helper
+    
     let mut out = alloc_with_nan_prefix(close.len(), first + slow_period - 1);
 
     avsl_compute_into(
@@ -377,7 +377,7 @@ pub fn avsl_into_slice(dst: &mut [f64], input: &AvslInput, kern: Kernel) -> Resu
         dst,
     )?;
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first + slow_period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2371,7 +2371,7 @@ impl DeviceArrayF32AvslPy {
             inner.buf.as_device_ptr().as_raw() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Producer stream is synchronized in wrapper before returning → omit 'stream'
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2389,7 +2389,7 @@ impl DeviceArrayF32AvslPy {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute allocation device and validate any `dl_device` hint.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2408,10 +2408,10 @@ impl DeviceArrayF32AvslPy {
                 }
             }
         }
-        // Producer stream is synchronized in wrapper before returning, so we ignore the hint.
+        
         let _ = stream;
 
-        // Move the VRAM buffer into the shared DLPack manager so the consumer owns it.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -2543,7 +2543,7 @@ pub fn avsl_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32AvslPy::new(inner, ctx, dev_id))
 }
 
-// ==================== WASM BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn avsl_js(
@@ -2554,7 +2554,7 @@ pub fn avsl_js(
     slow_period: usize,
     multiplier: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    // Validate inputs following the same rules as the scalar path
+    
     let len = close.len();
     if len == 0 {
         return Err(JsValue::from_str("empty input"));
@@ -2577,9 +2577,9 @@ pub fn avsl_js(
         return Err(JsValue::from_str("Not enough valid data"));
     }
 
-    // Route single-series JS API through the same batch kernel path used by
-    // avsl_batch() to ensure identical numerics. This avoids divergence that
-    // was observed between single-series and batch implementations.
+    
+    
+    
     let sweep = AvslBatchRange {
         fast_period: (fast_period, fast_period, 0),
         slow_period: (slow_period, slow_period, 0),
@@ -2639,7 +2639,7 @@ pub fn avsl_into(
         let vol = core::slice::from_raw_parts(vol_ptr, len);
         let out = core::slice::from_raw_parts_mut(out_ptr, len);
 
-        // Validate like avsl_js to avoid internal panics in batch helpers
+        
         let n = close.len();
         if n == 0 {
             return Err(JsValue::from_str("empty input"));
@@ -2667,7 +2667,7 @@ pub fn avsl_into(
             multiplier: Some(multiplier),
         };
 
-        // Handle in-place gracefully by computing into a temporary slice
+        
         if out_ptr as *const f64 == close_ptr as *const f64
             || out_ptr as *const f64 == low_ptr as *const f64
             || out_ptr as *const f64 == vol_ptr as *const f64
@@ -2802,7 +2802,7 @@ impl AvslContext {
 
             let first = first_valid_max3(close, low, volume).unwrap_or(0);
 
-            // Handle in-place operation
+            
             if out_ptr as *const f64 == close_ptr
                 || out_ptr as *const f64 == low_ptr
                 || out_ptr as *const f64 == vol_ptr
@@ -2873,7 +2873,7 @@ pub fn avsl_batch_into(
             slow_period: (slow_start, slow_end, slow_step),
             multiplier: (mult_start, mult_end, mult_step),
         };
-        // Expand to know rows; treat empty expansion or overflow as an error.
+        
         let combos = expand_grid_avsl(&sweep);
         if combos.is_empty() {
             return Err(JsValue::from_str(
@@ -2899,14 +2899,14 @@ pub fn avsl_batch_into(
         })?;
         let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Fill flattened out
+        
         avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }
 }
 
-// ==================== UNIT TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2914,7 +2914,7 @@ mod tests {
     use paste::paste;
     use std::error::Error;
 
-    // Skip macro for unsupported kernels
+    
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -2939,7 +2939,7 @@ mod tests {
         let input = AvslInput::from_candles(&candles, "close", "low", AvslParams::default());
         let result = avsl_with_kernel(&input, kernel)?;
 
-        // REFERENCE VALUES FROM PINESCRIPT
+        
         let expected_last_five = [
             56471.61721191,
             56267.11946706,
@@ -2951,7 +2951,7 @@ mod tests {
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            let tolerance = expected_last_five[i].abs() * 0.01; // 1% tolerance for this complex indicator
+            let tolerance = expected_last_five[i].abs() * 0.01; 
             assert!(
                 diff < tolerance,
                 "[{}] AVSL {:?} mismatch at idx {}: got {}, expected {}, diff {}",
@@ -3001,7 +3001,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         let close = [1.0, 2.0, 3.0];
-        let low = [0.9, 1.9]; // Different length
+        let low = [0.9, 1.9]; 
         let volume = [100.0, 200.0, 300.0];
         let params = AvslParams::default();
         let input = AvslInput::from_slices(&close, &low, &volume, params);
@@ -3024,7 +3024,7 @@ mod tests {
         let params = AvslParams {
             fast_period: Some(12),
             slow_period: Some(26),
-            multiplier: Some(-1.0), // Invalid negative multiplier
+            multiplier: Some(-1.0), 
         };
         let input = AvslInput::from_slices(&data, &data, &data, params);
         let res = avsl_with_kernel(&input, kernel);
@@ -3036,7 +3036,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate all test variants for each kernel
+    
     macro_rules! generate_all_avsl_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3068,7 +3068,7 @@ mod tests {
         }
     }
 
-    // Generate all single kernel tests
+    
     generate_all_avsl_tests!(
         check_avsl_accuracy,
         check_avsl_empty_input,
@@ -3077,7 +3077,7 @@ mod tests {
         check_avsl_invalid_multiplier
     );
 
-    // Batch testing functions
+    
     fn check_avsl_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -3131,7 +3131,7 @@ mod tests {
             .mult_range(1.5, 2.5, 0.5)
             .apply_candles(&candles, "close", "low")?;
 
-        let expected_combos = 2 * 2 * 3; // (10,15 step 5) * (20,30 step 10) * (1.5,2.0,2.5)
+        let expected_combos = 2 * 2 * 3; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
@@ -3139,7 +3139,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch tests
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -3173,15 +3173,15 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Calculate batch AVSL for comparison
+        
         let params = AvslParams::default();
         let input = AvslInput::from_candles(&candles, "close", "low", params.clone());
         let batch_result = avsl(&input)?;
 
-        // Create streaming calculator
+        
         let mut stream = AvslStream::try_new(params)?;
 
-        // Feed data to stream and collect results
+        
         let mut stream_results = Vec::new();
         for i in 0..candles.close.len() {
             if let Some(value) = stream.update(candles.close[i], candles.low[i], candles.volume[i])
@@ -3190,7 +3190,7 @@ mod tests {
             }
         }
 
-        // Compare last values
+        
         if !stream_results.is_empty() && !batch_result.values.is_empty() {
             let last_stream = stream_results.last().unwrap();
             let last_batch = batch_result
@@ -3201,7 +3201,7 @@ mod tests {
                 .unwrap();
 
             let diff = (last_stream - last_batch).abs();
-            let tolerance = last_batch.abs() * 0.01; // 1% tolerance
+            let tolerance = last_batch.abs() * 0.01; 
             assert!(
                 diff < tolerance,
                 "Streaming vs batch mismatch: {} vs {}, diff {}",
@@ -3219,20 +3219,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with_default_candles
+        
         let output = AvslBatchBuilder::with_default_candles(&candles).map_err(|e| {
             eprintln!("Error: {:?}", e);
             e
         })?;
         assert_eq!(output.cols, candles.close.len());
 
-        // Test row_for_params
+        
         let params = AvslParams::default();
         let row_idx = output.row_for_params(&params);
         assert!(row_idx.is_some());
-        assert_eq!(row_idx.unwrap(), 0); // Default params should be first row
+        assert_eq!(row_idx.unwrap(), 0); 
 
-        // Test explicit parallel/serial functions
+        
         let sweep = AvslBatchRange::default();
         let par_output = avsl_batch_par_slice(
             &candles.close,
@@ -3252,7 +3252,7 @@ mod tests {
         assert_eq!(par_output.rows, ser_output.rows);
         assert_eq!(par_output.cols, ser_output.cols);
 
-        // Test with_default_slices helper
+        
         let default_output = AvslBatchBuilder::with_default_slices(
             &candles.close,
             &candles.low,
@@ -3260,12 +3260,12 @@ mod tests {
             Kernel::Auto,
         )?;
         assert_eq!(default_output.cols, candles.close.len());
-        assert_eq!(default_output.rows, 250); // Default batch range yields 250 parameter combos
+        assert_eq!(default_output.rows, 250); 
 
         Ok(())
     }
 
-    // Ensure the zero-allocation API matches the Vec-returning API, including NaN warmups.
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_avsl_into_matches_api() -> Result<(), Box<dyn Error>> {
@@ -3277,10 +3277,10 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let input = AvslInput::from_candles(&candles, "close", "low", AvslParams::default());
 
-        // Baseline via existing API
+        
         let baseline = avsl(&input)?;
 
-        // Zero-allocation path
+        
         let mut out = vec![0.0f64; candles.close.len()];
         avsl_into(&input, &mut out)?;
 

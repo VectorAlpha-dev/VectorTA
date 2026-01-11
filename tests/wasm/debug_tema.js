@@ -1,11 +1,11 @@
-// Debug TEMA issue
+
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Load WASM module
+
 const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
 const importPath = process.platform === 'win32' 
     ? 'file:///' + wasmPath.replace(/\\/g, '/')
@@ -14,7 +14,7 @@ const wasm = await import(importPath);
 
 console.log('Testing TEMA edge cases...');
 
-// Test 1: Period equals data length (failing test from line 212)
+
 console.log('\nTest 1: Period 10, data length 10');
 try {
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -26,7 +26,7 @@ try {
     console.error('Stack:', error.stack);
 }
 
-// Test 2: Period 1 (failing test from line 220)
+
 console.log('\nTest 2: Period 1');
 try {
     const data2 = new Float64Array([1, 2, 3]);
@@ -37,7 +37,7 @@ try {
     console.error('Stack:', error.stack);
 }
 
-// Test 3: Very small dataset with period 1 (failing test from line 369)
+
 console.log('\nTest 3: Period 1 with data length 1');
 try {
     const data3 = new Float64Array([1]);
@@ -48,7 +48,7 @@ try {
     console.error('Stack:', error.stack);
 }
 
-// Test 4: Normal case that should work
+
 console.log('\nTest 4: Normal case (should work)');
 try {
     const data4 = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);

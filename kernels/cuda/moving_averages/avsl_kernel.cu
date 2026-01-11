@@ -1,19 +1,19 @@
-// AVSL (Anti-Volume Stop Loss) CUDA kernels (FP32)
-//
-// Math pattern: recurrence/rolling sums with small ring buffers.
-// - Batch (one series × many params): one thread per parameter row scans time sequentially.
-// - Many-series, one param (time-major): one thread per series (column) scans time sequentially.
-//
-// Warmup/NaN semantics mirror the scalar implementation:
-//   base = first_valid + slow_period - 1
-//   warmup2 = base + slow_period - 1
-//   out[0..warmup2] = NaN; outputs start at i >= warmup2.
-//
-// Notes:
-// - We keep local ring buffers for recent vpc/vpr (size 200) and for the slow-period
-//   pre_i accumulation. If slow_period exceeds MAX_PRE_RING, we fall back to a naive
-//   rolling window recompute for correctness (rare; default slow=26).
-// - Accumulators use FP32; outputs remain FP32.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -23,18 +23,18 @@
 #endif
 
 #ifndef AVSL_MAX_PRE_RING
-// Upper bound for the pre_i rolling sum ring. Large values fall back to O(slow) recompute.
+
 #define AVSL_MAX_PRE_RING 512
 #endif
 
 __device__ __forceinline__ float avsl_adj(float x) {
-    // Match scalar adjustment: (-1,0) -> -1; [0,1) -> 1; else x
+    
     if (x > -1.0f && x < 0.0f) return -1.0f;
     if (x >= 0.0f && x < 1.0f) return 1.0f;
     return x;
 }
 
-// ----- Batch kernel: one series × many params -----
+
 extern "C" __global__ void avsl_batch_f32(
     const float* __restrict__ close,
     const float* __restrict__ low,
@@ -44,7 +44,7 @@ extern "C" __global__ void avsl_batch_f32(
     const int* __restrict__ fast_periods,
     const int* __restrict__ slow_periods,
     const float* __restrict__ multipliers,
-    float* __restrict__ out,  // [rows * series_len], row-major
+    float* __restrict__ out,  
     const int rows)
 {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -59,20 +59,20 @@ extern "C" __global__ void avsl_batch_f32(
 
     float* __restrict__ dst = out + (size_t)row * (size_t)series_len;
 
-    // Early fill if base beyond series
+    
     if (base >= series_len) {
-        for (int i = 0; i < series_len; ++i) dst[i] = __int_as_float(0x7fffffff); // NaN
+        for (int i = 0; i < series_len; ++i) dst[i] = __int_as_float(0x7fffffff); 
         return;
     }
 
-    // Rolling sums for SMA/VWMA windows (FP64 for accuracy; rest of the kernel is FP32)
+    
     double sum_close_f = 0.0, sum_close_s = 0.0;
     double sum_vol_f = 0.0, sum_vol_s = 0.0;
     double sum_cxv_f = 0.0, sum_cxv_s = 0.0;
     const double inv_fast = 1.0 / (double)fast;
     const double inv_slow = 1.0 / (double)slow;
 
-    // Rings
+    
     float ring_vpc[AVSL_MAX_WIN];
     float ring_vpr[AVSL_MAX_WIN];
     #pragma unroll
@@ -90,7 +90,7 @@ extern "C" __global__ void avsl_batch_f32(
             const double cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            // Match scalar window semantics: subtract once count > period
+            
             if (i >= first_valid + fast) {
                 const int k = i - fast;
                 const float c_old = close[k];
@@ -122,9 +122,9 @@ extern "C" __global__ void avsl_batch_f32(
             const float vm = (float)vm_d;
             const float vpci = (float)vpci_d;
 
-            // Adaptive window length
+            
             float t = (vpc < 0.0f) ? fabsf(vpci - 3.0f) : (vpci + 3.0f);
-            // Round half away from zero to match Rust's f64::round
+            
             float r = (t >= 0.0f) ? floorf(t + 0.5f) : ceilf(t - 0.5f);
             int len_v = (int)r;
             if (len_v < 1) len_v = 1;
@@ -176,14 +176,14 @@ extern "C" __global__ void avsl_batch_f32(
                 }
                 if (i >= warmup2) dst[i] = pre_sum * (float)inv_slow;
             } else {
-                // Fallback: compute moving average of last `slow` pre_i values naively
-                // Only required after i >= warmup2; no need to fill during warmup
+                
+                
                 if (i >= warmup2) {
                     float s = 0.0f;
                     for (int k = i - slow + 1; k <= i; ++k) {
-                        // Recompute pre_k (matches scalar path but slower)
-                        // NOTE: This branch should be rare; slow is usually small.
-                        s += pre_i; // Approximation: use last pre_i to avoid recompute explosion
+                        
+                        
+                        s += pre_i; 
                     }
                     dst[i] = s * (float)inv_slow;
                 }
@@ -191,23 +191,23 @@ extern "C" __global__ void avsl_batch_f32(
         }
     }
 
-    // Warmup fill
+    
     const int up = (warmup2 < series_len) ? warmup2 : series_len;
     for (int i = 0; i < up; ++i) dst[i] = __int_as_float(0x7fffffff);
 }
 
-// ----- Many-series, one-param (time-major) -----
+
 extern "C" __global__ void avsl_many_series_one_param_f32(
-    const float* __restrict__ close_tm,   // [rows * cols], time-major
+    const float* __restrict__ close_tm,   
     const float* __restrict__ low_tm,
     const float* __restrict__ volume_tm,
-    const int* __restrict__ first_valids, // [cols]
+    const int* __restrict__ first_valids, 
     const int cols,
     const int rows,
     const int fast,
     const int slow,
     const float multiplier,
-    float* __restrict__ out_tm)           // [rows * cols], time-major
+    float* __restrict__ out_tm)           
 {
     const int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (col >= cols) return;
@@ -216,7 +216,7 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
     const int base = first_valid + max(1, slow) - 1;
     const int warmup2 = base + max(1, slow) - 1;
 
-    // Rolling sums (FP32)
+    
     float sum_close_f = 0.0f, sum_close_s = 0.0f;
     float sum_vol_f = 0.0f, sum_vol_s = 0.0f;
     float sum_cxv_f = 0.0f, sum_cxv_s = 0.0f;
@@ -243,7 +243,7 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
             const float cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
-            // Match scalar window semantics: subtract once count > period
+            
             if (i >= first_valid + f) {
                 const int k = (i - f) * cols + col;
                 const float c_old = close_tm[k];
@@ -323,16 +323,16 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
                 if (i >= warmup2) out_tm[idx] = pre_sum * inv_slow;
             } else {
                 if (i >= warmup2) {
-                    // Fallback naive recompute (rare)
+                    
                     float ssum = 0.0f;
-                    for (int k = i - s + 1; k <= i; ++k) ssum += pre_i; // approximate
+                    for (int k = i - s + 1; k <= i; ++k) ssum += pre_i; 
                     out_tm[idx] = ssum * inv_slow;
                 }
             }
         }
     }
 
-    // Warmup fill
+    
     const int up = (warmup2 < rows) ? warmup2 : rows;
     for (int i = 0; i < up; ++i) {
         const int idx = i * cols + col;

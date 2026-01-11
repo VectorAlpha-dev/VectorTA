@@ -43,7 +43,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-// AVec not needed for Tilson since we don't store weights like ALMA
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1828,19 +1828,19 @@ mod tests {
 
                 let output = match tilson_with_kernel(&input, kernel) {
                     Ok(o) => o,
-                    Err(_) => continue, // Skip if this combination causes an error
+                    Err(_) => continue, 
                 };
 
-                // Check every value for poison patterns
+                
                 for (i, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
+                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1848,7 +1848,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1856,7 +1856,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1870,7 +1870,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_tilson_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1885,12 +1885,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with appropriate ranges for Tilson
-        // Period: 1-30 (reasonable range for T3)
-        // Volume factor: 0.0-1.0 (valid range)
-        // Data length: Must be at least 6*(period-1)+1 for valid output
+        
+        
+        
+        
         let strat = (1usize..=30).prop_flat_map(|period| {
-            // Ensure data is long enough for the warmup period
+            
             let min_len = (6 * period.saturating_sub(1) + 1).max(period);
             (
                 prop::collection::vec(
@@ -1898,7 +1898,7 @@ mod tests {
                     min_len..400,
                 ),
                 Just(period),
-                0.0f64..=1.0f64, // Volume factor range [0, 1]
+                0.0f64..=1.0f64, 
             )
         });
 
@@ -1910,19 +1910,19 @@ mod tests {
                 };
                 let input = TilsonInput::from_slice(&data, params);
 
-                // Compute with the specified kernel
+                
                 let TilsonOutput { values: out } = tilson_with_kernel(&input, kernel).unwrap();
-                // Compute reference with scalar kernel for comparison
+                
                 let TilsonOutput { values: ref_out } =
                     tilson_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length must match input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Calculate warmup period (assuming clean input data, no NaN)
+                
                 let warmup_end = 6 * (period - 1);
 
-                // Property 2: Warmup period values must be NaN
+                
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1932,22 +1932,22 @@ mod tests {
                     );
                 }
 
-                // Check if the entire data array is constant (for Property 5)
+                
                 let is_constant_data = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
 
-                // Property 3: Values after warmup should be finite and SIMD-consistent
+                
                 for i in warmup_end..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 4: SIMD consistency check
+                    
                     if y.is_finite() && r.is_finite() {
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
 
                         prop_assert!(
-                            (y - r).abs() <= 1e-9 || ulp_diff <= 8, // Allow slightly more ULP for T3's complexity
+                            (y - r).abs() <= 1e-9 || ulp_diff <= 8, 
                             "SIMD mismatch at idx {}: {} vs {} (ULP={})",
                             i,
                             y,
@@ -1955,7 +1955,7 @@ mod tests {
                             ulp_diff
                         );
                     } else {
-                        // For non-finite values, require exact bit match
+                        
                         prop_assert_eq!(
                             y.to_bits(),
                             r.to_bits(),
@@ -1964,7 +1964,7 @@ mod tests {
                         );
                     }
 
-                    // Property 5: For constant data, output should converge to that constant
+                    
                     if is_constant_data && i >= warmup_end + period {
                         let const_val = data[0];
                         prop_assert!(
@@ -1977,13 +1977,13 @@ mod tests {
                     }
                 }
 
-                // Property 6: Special case for period=1
+                
                 if period == 1 {
-                    // With period=1, after warmup (which is 0), output should approximately equal input
-                    // Note: Even with period=1, Tilson applies 6 cascaded EMAs which can accumulate floating-point errors
+                    
+                    
                     for i in 0..data.len() {
                         if out[i].is_finite() && data[i].is_finite() {
-                            // Use relative tolerance for large values
+                            
                             let tol = (data[i].abs() * 1e-10).max(1e-9);
                             prop_assert!(
                                 (out[i] - data[i]).abs() <= tol,
@@ -1997,11 +1997,11 @@ mod tests {
                     }
                 }
 
-                // Property 7: Volume factor edge cases
+                
                 if volume_factor == 0.0 && warmup_end < data.len() {
-                    // With volume_factor=0, c1=0, c2=0, c3=0, c4=1
-                    // This means output = e3 (third EMA)
-                    // Verify output is finite and reasonable
+                    
+                    
+                    
                     for i in warmup_end..data.len() {
                         prop_assert!(
                             out[i].is_finite(),
@@ -2011,7 +2011,7 @@ mod tests {
                     }
                 }
 
-                // Note: Removed monotonicity check as it's too strict for a 6-cascaded EMA smoothing indicator
+                
 
                 Ok(())
             })
@@ -2043,12 +2043,12 @@ mod tests {
 
     #[test]
     fn test_volume_factor_validation() {
-        // Need at least 6*(period-1)+1 = 13 points for period=3
+        
         let data = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
         ];
 
-        // Test with volume_factor = 1.5 (outside typical [0,1] range) - should work
+        
         let params1 = TilsonParams {
             period: Some(3),
             volume_factor: Some(1.5),
@@ -2059,7 +2059,7 @@ mod tests {
             "volume_factor=1.5 should be accepted"
         );
 
-        // Test with volume_factor = -0.5 (negative) - should work
+        
         let params2 = TilsonParams {
             period: Some(3),
             volume_factor: Some(-0.5),
@@ -2070,7 +2070,7 @@ mod tests {
             "volume_factor=-0.5 should be accepted"
         );
 
-        // Test with NaN - should be rejected
+        
         let params3 = TilsonParams {
             period: Some(3),
             volume_factor: Some(f64::NAN),
@@ -2081,7 +2081,7 @@ mod tests {
             "volume_factor=NaN should be rejected"
         );
 
-        // Test with infinite - should be rejected
+        
         let params4 = TilsonParams {
             period: Some(3),
             volume_factor: Some(f64::INFINITY),
@@ -2145,7 +2145,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2153,15 +2153,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, v_factor_start, v_factor_end, v_factor_step)
-            (3, 10, 2, 0.0, 0.5, 0.25),  // Small periods, low v_factors
-            (5, 20, 5, 0.0, 1.0, 0.2),   // Medium periods, full v_factor range
-            (10, 50, 10, 0.3, 0.7, 0.2), // Large periods, mid v_factors
-            (20, 40, 10, 0.0, 1.0, 0.5), // Large periods, few v_factors
-            (5, 5, 1, 0.0, 1.0, 0.1),    // Single period, many v_factors
-            (15, 15, 1, 0.5, 0.5, 0.1),  // Single period, single v_factor
+            
+            (3, 10, 2, 0.0, 0.5, 0.25),  
+            (5, 20, 5, 0.0, 1.0, 0.2),   
+            (10, 50, 10, 0.3, 0.7, 0.2), 
+            (20, 40, 10, 0.0, 1.0, 0.5), 
+            (5, 5, 1, 0.0, 1.0, 0.1),    
+            (15, 15, 1, 0.5, 0.5, 0.1),  
         ];
 
         for (p_start, p_end, p_step, v_start, v_end, v_step) in test_configs {
@@ -2171,9 +2171,9 @@ mod tests {
                 .volume_factor_range(v_start, v_end, v_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2187,7 +2187,7 @@ mod tests {
                     .map(|p| p.volume_factor.unwrap_or(0.0))
                     .unwrap_or(0.0);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2195,7 +2195,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2203,7 +2203,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2216,7 +2216,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2227,7 +2227,7 @@ mod tests {
 
     #[test]
     fn test_tilson_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..252u32 {
@@ -2236,13 +2236,13 @@ mod tests {
 
         let input = TilsonInput::from_slice(&data, TilsonParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = tilson(&input)?.values;
 
-        // Preallocated output buffer
+        
         let mut out = vec![0.0; data.len()];
 
-        // Native into API; skip on wasm to avoid name clash with wasm bindgen export
+        
         #[cfg(not(feature = "wasm"))]
         {
             tilson_into(&input, &mut out)?;
@@ -2258,7 +2258,7 @@ mod tests {
     }
 }
 
-// ========== Helper Functions for Bindings ==========
+
 
 /// Centralized validation and preparation for Tilson calculation
 #[inline]
@@ -2728,14 +2728,14 @@ impl DeviceArrayF32TilsonPy {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream is synchronized before returning the handle
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
 
-    // __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None)
+    
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -2747,7 +2747,7 @@ impl DeviceArrayF32TilsonPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2768,7 +2768,7 @@ impl DeviceArrayF32TilsonPy {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = self.inner.ctx.clone();
@@ -2821,7 +2821,7 @@ pub fn tilson_into_py<'py>(
     Ok(out)
 }
 
-// ========== WASM Bindings ==========
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
@@ -2887,7 +2887,7 @@ pub fn tilson_batch_js(
         volume_factor: (v_factor_start, v_factor_end, v_factor_step),
     };
 
-    // Use ScalarBatch kernel for WASM batch operations
+    
     let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2922,12 +2922,12 @@ pub fn tilson_batch_metadata_js(
     };
     let mut result = Vec::with_capacity(combos.len() * 2);
 
-    // First, all periods
+    
     for combo in &combos {
         result.push(combo.period.unwrap() as f64);
     }
 
-    // Then, all volume factors
+    
     for combo in &combos {
         result.push(combo.volume_factor.unwrap());
     }
@@ -2946,7 +2946,7 @@ pub fn tilson_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         volume_factor: config.volume_factor_range,
     };
 
-    // Use ScalarBatch kernel for WASM batch operations
+    
     let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -3004,13 +3004,13 @@ pub fn tilson_into(
         };
         let input = TilsonInput::from_slice(data, params);
 
-        // Find first non-NaN value
+        
         let first = data
             .iter()
             .position(|&x| !x.is_nan())
             .ok_or_else(|| JsValue::from_str("All values are NaN"))?;
 
-        // Calculate warmup period
+        
         let warmup = first + 6 * (period - 1);
 
         if in_ptr == out_ptr {
@@ -3027,7 +3027,7 @@ pub fn tilson_into(
             std::ptr::copy_nonoverlapping(temp.as_ptr(), out_ptr, len);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            // Initialize warmup period with NaN
+            
             for i in 0..warmup.min(len) {
                 out[i] = f64::NAN;
             }
@@ -3097,7 +3097,7 @@ pub struct TilsonContext {
     c3: f64,
     c4: f64,
     kernel: Kernel,
-    // State for the 6 EMAs
+    
     ema1: f64,
     ema2: f64,
     ema3: f64,
@@ -3139,7 +3139,7 @@ impl TilsonContext {
             c2,
             c3,
             c4,
-            kernel: Kernel::Scalar, // Use Scalar for WASM
+            kernel: Kernel::Scalar, 
             ema1: 0.0,
             ema2: 0.0,
             ema3: 0.0,
@@ -3178,7 +3178,7 @@ impl TilsonContext {
 
         self.warmup_count += 1;
 
-        // Tilson warmup is 6 * (period - 1)
+        
         if self.warmup_count <= 6 * (self.period - 1) {
             None
         } else {

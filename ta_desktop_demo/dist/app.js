@@ -125,7 +125,7 @@ $("btnRun").addEventListener("click", async () => {
   }
 });
 
-// Default: disable device id unless GPU selected.
+
 $("backend").addEventListener("change", () => {
   $("deviceId").disabled = $("backend").value !== "GpuOnly";
 });

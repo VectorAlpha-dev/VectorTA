@@ -1,16 +1,16 @@
-// Integration tests for CUDA RSI kernels
 
-use my_project::indicators::rsi::{
+
+use vector_ta::indicators::rsi::{
     rsi_batch_with_kernel, rsi_with_kernel, RsiBatchRange, RsiInput, RsiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::rsi_wrapper::CudaRsi;
+use vector_ta::cuda::oscillators::rsi_wrapper::CudaRsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -43,7 +43,7 @@ fn rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = RsiBatchRange { period: (2, 60, 2) };
 
-    // Align CPU baseline to FP32 input used on GPU
+    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_cpu_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = rsi_batch_with_kernel(&price_cpu_f64, &sweep, Kernel::ScalarBatch)?;
@@ -93,14 +93,14 @@ fn rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
 
-    // CPU baseline per series (time-major -> column wise)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
         for t in 0..rows {
             series[t] = price_tm[t * cols + s];
         }
-        // Align CPU baseline to FP32 inputs used on GPU
+        
         let series_f32: Vec<f32> = series.iter().map(|&v| v as f32).collect();
         let series_cpu_f64: Vec<f64> = series_f32.iter().map(|&v| v as f64).collect();
         let params = RsiParams {

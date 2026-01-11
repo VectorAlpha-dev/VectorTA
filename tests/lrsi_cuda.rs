@@ -1,16 +1,16 @@
-// CUDA LRSI tests: compare GPU vs CPU for batch and many-series
 
-use my_project::indicators::lrsi::{
+
+use vector_ta::indicators::lrsi::{
     lrsi, lrsi_batch_with_kernel, LrsiBatchRange, LrsiData, LrsiInput, LrsiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaLrsi;
+use vector_ta::cuda::oscillators::CudaLrsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -58,9 +58,9 @@ fn lrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    // GPU path is FP32 vs CPU baseline f64; allow looser tolerance for high-alpha rows.
-    // This test stresses long IIR depth and pushes FP32 differences; 0.10 absolute keeps
-    // acceptance practical without changing reference values.
+    
+    
+    
     let tol = 1e-1;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
@@ -99,7 +99,7 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let alpha = 0.2;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut high = vec![f64::NAN; rows];
@@ -133,7 +133,7 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    // GPU path is FP32; allow a slightly looser tolerance
+    
     let tol = 8e-4;
     for i in 0..host.len() {
         assert!(

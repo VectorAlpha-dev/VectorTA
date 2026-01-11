@@ -61,7 +61,7 @@ pub struct CudaLrsi {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaLrsiPolicy,
-    // For launch heuristics
+    
     sm_count: u32,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -185,7 +185,7 @@ impl CudaLrsi {
         Ok(())
     }
 
-    // -------- One-series × many-params (batch) --------
+    
     pub fn lrsi_batch_dev(
         &mut self,
         high_f32: &[f32],
@@ -202,7 +202,7 @@ impl CudaLrsi {
             return Err(CudaLrsiError::InvalidInput("no alpha values".into()));
         }
 
-        // Mid-price precompute shared across rows
+        
         let len = high_f32.len();
         let mut prices = vec![f32::NAN; len];
         let mut first = None;
@@ -221,7 +221,7 @@ impl CudaLrsi {
             )));
         }
 
-        // Alphas to f32
+        
         let mut alphas = Vec::with_capacity(combos.len());
         for p in &combos {
             let a = p.alpha.unwrap_or(0.2);
@@ -231,7 +231,7 @@ impl CudaLrsi {
             alphas.push(a as f32);
         }
 
-        // VRAM estimate (inputs + params + output) + 64MB headroom
+        
         let in_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
@@ -295,12 +295,12 @@ impl CudaLrsi {
             ));
         }
 
-        // Policy: if user pinned a block size, honor it. Otherwise auto.
+        
         let policy_block = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => Some(block_x),
             _ => None,
         };
-        // Default is 256 for this kernel.
+        
         let (block_x, grid_x) = self.pick_block_grid(n_combos, policy_block, 256);
 
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -361,7 +361,7 @@ impl CudaLrsi {
         }
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
     pub fn lrsi_many_series_one_param_time_major_dev(
         &mut self,
         high_tm_f32: &[f32],
@@ -385,7 +385,7 @@ impl CudaLrsi {
             return Err(CudaLrsiError::InvalidInput("alpha out of range".into()));
         }
 
-        // Build time-major mid-price and per-series first_valids
+        
         let mut prices_tm = vec![f32::NAN; elems];
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
@@ -409,7 +409,7 @@ impl CudaLrsi {
             first_valids[s] = fv as i32;
         }
 
-        // VRAM estimate (inputs + fv + out)
+        
         let in_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("prices byte size overflow".into()))?;
@@ -563,14 +563,14 @@ fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, CudaLrsiError> {
     Ok(out)
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const LEN: usize = 1_000_000;
-    const ROWS: usize = 256; // parameter sweep size
+    const ROWS: usize = 256; 
 
     struct LrsiBatchState {
         cuda: CudaLrsi,

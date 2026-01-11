@@ -1,9 +1,9 @@
-// CUDA kernels for FVG Trailing Stop (one-series × many-params, and many-series × one-param)
-//
-// Updated (perf-focused):
-// - Replace O(W) smoothing with O(1) ring-based moving averages using compensated FP32 sums.
-// - Eliminate FP64 in hot loops (use Neumaier compensation in float).
-// - Keep many-series × one-param kernel intact (helpers reused as-is there).
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,7 +18,7 @@ __device__ __forceinline__ bool finite3(float a, float b, float c) {
     return !isnan(a) && !isnan(b) && !isnan(c) && !isinf(a) && !isinf(b) && !isinf(c);
 }
 
-// Compensated float summation (Neumaier / Kahan–Babuška)
+
 struct NeumaierAcc {
     float s, c;
     __device__ __forceinline__ void reset() { s = 0.0f; c = 0.0f; }
@@ -45,7 +45,7 @@ __device__ __forceinline__ void push_with_lookback(float* buf, int& cur_len, con
     }
 }
 
-// Compact-and-average (bull): keep entries <= close_v (FP32, compensated)
+
 template <int MAXL>
 __device__ __forceinline__ float compact_and_avg_bull_f32_comp(float* buf, int& len, float close_v, int& new_len_out) {
     NeumaierAcc acc; acc.reset();
@@ -60,7 +60,7 @@ __device__ __forceinline__ float compact_and_avg_bull_f32_comp(float* buf, int& 
     return (new_len > 0) ? acc.total() / (float)new_len : CUDART_NAN_F;
 }
 
-// Compact-and-average (bear): keep entries >= close_v (FP32, compensated)
+
 template <int MAXL>
 __device__ __forceinline__ float compact_and_avg_bear_f32_comp(float* buf, int& len, float close_v, int& new_len_out) {
     NeumaierAcc acc; acc.reset();
@@ -75,8 +75,8 @@ __device__ __forceinline__ float compact_and_avg_bear_f32_comp(float* buf, int& 
     return (new_len > 0) ? acc.total() / (float)new_len : CUDART_NAN_F;
 }
 
-// Sliding-window average ring with compensated add/sub and NaN tracking.
-// Backing store defaults to local per-thread array.
+
+
 template <int MAXW, bool USE_SHMEM>
 struct RingAvg;
 
@@ -114,8 +114,8 @@ struct RingAvg<MAXW, true> {
     __device__ __forceinline__ float avg() const { if (count < w || bad > 0) return CUDART_NAN_F; return acc.total() / (float)w; }
 };
 
-// Legacy helpers used by many-series kernel (kept to avoid churn):
-// Keep original double-precision math to preserve existing outputs for tests.
+
+
 template <int MAXL>
 __device__ inline float compact_and_avg_bull(float* buf, int& len, float close_v, int& new_len_out) {
     double acc = 0.0;
@@ -158,11 +158,11 @@ __device__ inline float disp_last_w(const float* hist, int count, int w) {
 }
 }
 
-// Conservative maxima for per-thread buffers
+
 #define FVGTS_MAX_LOOKBACK 256
 #define FVGTS_MAX_SMOOTH   256
 
-// One-series × many-params (optimized with FP32 compensation and O(1) rings)
+
 extern "C" __global__ void fvg_trailing_stop_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -170,19 +170,19 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   // 0/1 per combo
+    const int*   __restrict__ resets,   
     int n_combos,
-    float* __restrict__ upper_out,      // [n_combos * len]
-    float* __restrict__ lower_out,      // [n_combos * len]
-    float* __restrict__ upper_ts_out,   // [n_combos * len]
-    float* __restrict__ lower_ts_out,   // [n_combos * len]
-    int use_shmem_rings,                // optional (0/1)
-    int smem_stride                     // optional per-thread stride (floats)
+    float* __restrict__ upper_out,      
+    float* __restrict__ lower_out,      
+    float* __restrict__ upper_ts_out,   
+    float* __restrict__ lower_ts_out,   
+    int use_shmem_rings,                
+    int smem_stride                     
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    // Compute first_valid once per block
+    
     __shared__ int first_valid_sh;
     if (threadIdx.x == 0) {
         int fv = len;
@@ -201,7 +201,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
         return;
     }
 
-    // Optional dynamic shared memory region (unused in current path; reserved for future optimization)
+    
     extern __shared__ float shmem[];
 
     for (int row = tid0; row < n_combos; row += stride) {
@@ -219,16 +219,16 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
             continue;
         }
 
-        // Small per-thread buffers (lookback + ring state)
+        
         float bull_buf[FVGTS_MAX_LOOKBACK]; int bull_len = 0;
         float bear_buf[FVGTS_MAX_LOOKBACK]; int bear_len = 0;
 
-        // Optional per-thread shared-memory slices for the three rings
+        
         float* close_ring_buf = nullptr;
         float* xbull_ring_buf = nullptr;
         float* xbear_ring_buf = nullptr;
         if (use_shmem_rings != 0) {
-            const int stride_per_ring = smem_stride * blockDim.x; // floats per ring across block
+            const int stride_per_ring = smem_stride * blockDim.x; 
             const int t_off = threadIdx.x * smem_stride;
             close_ring_buf = shmem + 0 * stride_per_ring + t_off;
             xbull_ring_buf = shmem + 1 * stride_per_ring + t_off;
@@ -239,18 +239,18 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
         RingAvg<FVGTS_MAX_SMOOTH, false> ring_xbull_w; ring_xbull_w.init(w, xbull_ring_buf);
         RingAvg<FVGTS_MAX_SMOOTH, false> ring_xbear_w; ring_xbear_w.init(w, xbear_ring_buf);
 
-        // Progressive SMA fallback (O(1)) using compensators
+        
         NeumaierAcc bs_acc_bull; bs_acc_bull.reset(); int bs_len_bull = 0; bool bs_bad_bull = false;
         NeumaierAcc bs_acc_bear; bs_acc_bear.reset(); int bs_len_bear = 0; bool bs_bad_bear = false;
 
         int last_bull_non_na = -1;
         int last_bear_non_na = -1;
-        int os = 0; // -1, 0, 1
+        int os = 0; 
         float ts = CUDART_NAN_F;
         float ts_prev = CUDART_NAN_F;
 
         for (int i = 0; i < len; ++i) {
-            // FVG detection (needs i>=2)
+            
             if (i >= 2) {
                 float hi2 = high[i-2];
                 float lo2 = low [i-2];
@@ -265,17 +265,17 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
 
             const float c = close[i];
 
-            // Update ring of closes for progressive SMA once bs reaches w
+            
             ring_close_w.push(c);
 
-            // Mitigation compaction + averages (compensated FP32)
+            
             int dummy_len = 0;
             float bull_avg = compact_and_avg_bull_f32_comp<FVGTS_MAX_LOOKBACK>(bull_buf, bull_len, c, dummy_len);
             float bear_avg = compact_and_avg_bear_f32_comp<FVGTS_MAX_LOOKBACK>(bear_buf, bear_len, c, dummy_len);
             if (!isnan(bull_avg)) { last_bull_non_na = i; bs_len_bull = 0; bs_bad_bull = false; bs_acc_bull.reset(); }
             if (!isnan(bear_avg)) { last_bear_non_na = i; bs_len_bear = 0; bs_bad_bear = false; bs_acc_bear.reset(); }
 
-            // Progressive SMA fallback over close (O(1))
+            
             float bull_sma = CUDART_NAN_F;
             float bear_sma = CUDART_NAN_F;
 
@@ -302,7 +302,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
             const float xbull = isnan(bull_avg) ? bull_sma : bull_avg;
             const float xbear = isnan(bear_avg) ? bear_sma : bear_avg;
 
-            // O(1) w-SMA on x-series via rings
+            
             ring_xbull_w.push(xbull);
             ring_xbear_w.push(xbear);
             const float bull_disp = ring_xbull_w.avg();
@@ -344,14 +344,14 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
             ts_prev = ts;
         }
 
-        // Enforce warmup NaNs (first_valid + 2 + w - 1)
+        
         int warm = first_valid_sh + 2 + (w - 1);
         if (warm > len) warm = len;
         for (int i = 0; i < warm; ++i) { U[i]=L[i]=UT[i]=LT[i]=CUDART_NAN_F; }
     }
 }
 
-// One-series × many-params (batch, shared-memory rings; supports w <= 64)
+
 extern "C" __global__ void fvg_trailing_stop_batch_shmem_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -359,14 +359,14 @@ extern "C" __global__ void fvg_trailing_stop_batch_shmem_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   // 0/1 per combo
+    const int*   __restrict__ resets,   
     int n_combos,
-    float* __restrict__ upper_out,      // [n_combos * len]
-    float* __restrict__ lower_out,      // [n_combos * len]
-    float* __restrict__ upper_ts_out,   // [n_combos * len]
-    float* __restrict__ lower_ts_out,   // [n_combos * len]
+    float* __restrict__ upper_out,      
+    float* __restrict__ lower_out,      
+    float* __restrict__ upper_ts_out,   
+    float* __restrict__ lower_ts_out,   
     int /*use_shmem_rings*/,
-    int smem_stride                     // per-thread stride (floats), >= max(w)
+    int smem_stride                     
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -522,7 +522,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_shmem_f32(
     }
 }
 
-// One-series × many-params (batch, shared-memory rings; lookback <= 32, w <= 64)
+
 extern "C" __global__ void fvg_trailing_stop_batch_small_shmem_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -530,14 +530,14 @@ extern "C" __global__ void fvg_trailing_stop_batch_small_shmem_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   // 0/1 per combo
+    const int*   __restrict__ resets,   
     int n_combos,
-    float* __restrict__ upper_out,      // [n_combos * len]
-    float* __restrict__ lower_out,      // [n_combos * len]
-    float* __restrict__ upper_ts_out,   // [n_combos * len]
-    float* __restrict__ lower_ts_out,   // [n_combos * len]
+    float* __restrict__ upper_out,      
+    float* __restrict__ lower_out,      
+    float* __restrict__ upper_ts_out,   
+    float* __restrict__ lower_ts_out,   
     int /*use_shmem_rings*/,
-    int smem_stride                     // per-thread stride (floats), >= max(w)
+    int smem_stride                     
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -693,7 +693,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_small_shmem_f32(
     }
 }
 
-// Many-series × one-param (time-major)
+
 extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -708,10 +708,10 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
     float* __restrict__ upper_ts_tm_out,
     float* __restrict__ lower_ts_tm_out
 ) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x; // series index (column)
+    int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
-    // Prefill column with NaNs
+    
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
         upper_tm_out[idx] = CUDART_NAN_F;
@@ -722,7 +722,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     if (look <= 0 || look > FVGTS_MAX_LOOKBACK || w <= 0 || w > FVGTS_MAX_SMOOTH) return;
 
-    // Find first valid for this series
+    
     int first_valid = rows;
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
@@ -732,7 +732,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     float bull_buf[FVGTS_MAX_LOOKBACK]; int bull_len = 0;
     float bear_buf[FVGTS_MAX_LOOKBACK]; int bear_len = 0;
-    // O(1) fixed-window SMA rings over x-series (double accumulators to match CPU scalar)
+    
     double bull_ring_vals[FVGTS_MAX_SMOOTH]; bool bull_ring_nan[FVGTS_MAX_SMOOTH];
     double bear_ring_vals[FVGTS_MAX_SMOOTH]; bool bear_ring_nan[FVGTS_MAX_SMOOTH];
     int bull_ring_count = 0, bear_ring_count = 0;
@@ -746,7 +746,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
-        // detection
+        
         if (t >= 2) {
             int im2 = (t-2) * cols + s;
             int im1 = (t-1) * cols + s;
@@ -771,12 +771,12 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
         int bull_bs = (!isnan(bull_avg)) ? 1 : ((last_bull_non_na >= 0) ? min(max(t - last_bull_non_na, 1), w) : 1);
         int bear_bs = (!isnan(bear_avg)) ? 1 : ((last_bear_non_na >= 0) ? min(max(t - last_bear_non_na, 1), w) : 1);
-        float bull_sma = isnan(bull_avg) ? sma_last_bs_over_close(close_tm + s, t, bull_bs) : CUDART_NAN_F; // careful indexing below
-        // sma_last_bs_over_close for time-major: we need consecutive indices; provide view via helper below
+        float bull_sma = isnan(bull_avg) ? sma_last_bs_over_close(close_tm + s, t, bull_bs) : CUDART_NAN_F; 
+        
 
-        // Implement time-major close access for SMA
+        
         if (isnan(bull_avg)) {
-            // recompute bull_sma over last bull_bs closes in time-major layout
+            
             double ss = 0.0; bool bad=false; int start = t + 1 - bull_bs;
             if (start >= 0) {
                 for (int j = start; j <= t; ++j) { float v = close_tm[j * cols + s]; if (isnan(v) || isinf(v)) { bad=true; break; } ss += (double)v; }
@@ -796,7 +796,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
         const float xbull = isnan(bull_avg) ? bull_sma : bull_avg;
         const float xbear = isnan(bear_avg) ? bear_sma : bear_avg;
 
-        // Update bull ring
+        
         if (bull_ring_count < w) {
             const bool is_nan = isnan(xbull);
             bull_ring_nan[bull_ring_count] = is_nan;
@@ -813,7 +813,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
             bull_ring_idx = (idx + 1 == w) ? 0 : (idx + 1);
         }
 
-        // Update bear ring
+        
         if (bear_ring_count < w) {
             const bool is_nan = isnan(xbear);
             bear_ring_nan[bear_ring_count] = is_nan;
@@ -864,12 +864,12 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
         } else if (os == -1 && show) {
             upper_tm_out[idx] = bear_disp; lower_tm_out[idx] = CUDART_NAN_F; upper_ts_tm_out[idx] = ts_nz; lower_ts_tm_out[idx] = CUDART_NAN_F;
         } else {
-            // already NaN
+            
         }
         ts_prev = ts;
     }
 
-    // warmup NaNs per series
+    
     int warm = first_valid + 2 + (w - 1);
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) {

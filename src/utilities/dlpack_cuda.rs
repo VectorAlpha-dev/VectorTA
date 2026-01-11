@@ -305,11 +305,11 @@ impl DeviceArrayF32Py {
     pub fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let inner = &self.inner;
         let d = PyDict::new(py);
-        // shape: (rows, cols)
+        
         d.set_item("shape", (inner.rows, inner.cols))?;
-        // typestr: little-endian float32
+        
         d.set_item("typestr", "<f4")?;
-        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+        
         d.set_item(
             "strides",
             (
@@ -320,20 +320,20 @@ impl DeviceArrayF32Py {
         let size = inner.rows.saturating_mul(inner.cols);
         let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
         d.set_item("data", (ptr, false))?;
-        // Stream is omitted because producing kernels synchronize before returning
-        // the VRAM handle; consumers need no additional synchronization per CAI v3.
+        
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     pub fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        // Prefer the explicit device id tracked by the wrapper. This
-        // avoids relying on pointer attribute queries that have proven
-        // brittle across driver/toolkit combinations.
+        
+        
+        
         if let Some(dev) = self.device_id {
             Ok((2, dev as i32))
         } else {
-            // Fallback: query current device if no explicit id is stored.
+            
             let mut device_ordinal: i32 = 0;
             unsafe {
                 let _ = cust::sys::cuCtxGetDevice(&mut device_ordinal);
@@ -351,8 +351,8 @@ impl DeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__()?; 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -372,7 +372,7 @@ impl DeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(

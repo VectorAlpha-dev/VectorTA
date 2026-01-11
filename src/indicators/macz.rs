@@ -25,8 +25,8 @@
 //! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
 //! - CUDA: FP32 kernels with FP64 accumulators; wrapper returns VRAM handles with CAI v3 + DLPack interop; numerical outputs match scalar MAC-Z.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -36,7 +36,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use js_sys;
 #[cfg(feature = "wasm")]
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -55,25 +55,25 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-// Import existing indicators
+
 use crate::indicators::moving_averages::sma::{sma_with_kernel, SmaInput, SmaParams};
 use crate::indicators::stddev::{stddev_with_kernel, StdDevInput, StdDevParams};
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
+
 impl<'a> AsRef<[f64]> for MaczInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -87,7 +87,7 @@ impl<'a> AsRef<[f64]> for MaczInput<'a> {
     }
 }
 
-// ==================== DATA STRUCTURES ====================
+
 /// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum MaczData<'a> {
@@ -183,7 +183,7 @@ impl<'a> MaczInput<'a> {
         Self::from_candles(c, "close", MaczParams::default())
     }
 
-    // keep for back-compat with existing tests
+    
     #[inline]
     pub fn with_default_candles_auto_volume(c: &'a Candles) -> Self {
         Self::with_default_candles(c)
@@ -221,7 +221,7 @@ impl<'a> MaczInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 #[derive(Debug, Clone)]
 pub struct MaczBuilder {
     fast_length: Option<usize>,
@@ -377,7 +377,7 @@ impl MaczBuilder {
             self.kernel
         };
         let p = self.build_params();
-        // derive volume from Candles to avoid extra arg
+        
         let input = MaczInput::from_candles(c, "close", p);
         macz_with_kernel(&input, k)
     }
@@ -388,7 +388,7 @@ impl MaczBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum MaczError {
     #[error("macz: Input data slice is empty.")]
@@ -428,7 +428,7 @@ pub enum MaczError {
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-// ==================== HELPER FUNCTIONS ====================
+
 
 /// Workspace for MAC-Z computation to minimize allocations
 pub struct MaczWorkspace {
@@ -523,7 +523,7 @@ fn calculate_vwap_into(
         let sma = sma_with_kernel(&sma_input, kernel).map_err(|e| MaczError::InvalidParameter {
             msg: format!("VWAP=SMA error: {e}"),
         })?;
-        // Copy only the tail we're responsible for.
+        
         out[start..].copy_from_slice(&sma.values[start..]);
     }
     Ok(())
@@ -571,7 +571,7 @@ fn calculate_zvwap_into(
             continue;
         }
 
-        let var = sum / period as f64; // population variance
+        let var = sum / period as f64; 
         let sd = var.sqrt();
         out[i] = if sd > 0.0 {
             (close[i] - mean) / sd
@@ -1263,8 +1263,8 @@ pub unsafe fn macz_avx2(
     // The rest of the MAC-Z logic (MACD, Z-score) operates element-wise
     // and doesn't benefit as much from SIMD
 
-    // Safety: This function is marked unsafe and requires AVX2 support
-    // The actual SIMD operations happen in the SMA calculations
+    
+    
     macz_scalar(data, params, out)
 }
 
@@ -1276,16 +1276,16 @@ pub unsafe fn macz_avx512(
     params: &MaczParams,
     out: &mut [f64],
 ) -> Result<(), MaczError> {
-    // Similar to AVX2, the main optimization is in the underlying SMA calculations
-    // MAC-Z complexity comes from the combination of indicators, not from
-    // computationally intensive operations that benefit from AVX512
+    
+    
+    
 
-    // Safety: This function is marked unsafe and requires AVX512 support
-    // The actual SIMD operations happen in the SMA calculations
+    
+    
     macz_scalar(data, params, out)
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Debug, Clone)]
 pub struct MaczBatchRange {
     pub fast_length: (usize, usize, usize),
@@ -1407,7 +1407,7 @@ impl MaczBatchBuilder {
         self
     }
 
-    // Static setters for convenience
+    
     pub fn fast_static(mut self, f: usize) -> Self {
         self.range.fast_length = (f, f, 0);
         self
@@ -1595,9 +1595,9 @@ pub fn macz_batch_with_kernel_vol(
     k: Kernel,
 ) -> Result<MaczBatchOutput, MaczError> {
     let kernel = match k {
-        // Batch AVX2/AVX512 kernels currently underperform significantly for MACZ
-        // (likely due to recurrence-heavy structure and reduced opportunities for lane speedups).
-        // Keep them available for explicit selection, but default Auto to the scalar batch path.
+        
+        
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -1623,7 +1623,7 @@ pub fn macz_batch_par_slice(
     macz_batch_inner_vol(data, None, sweep, kern, true)
 }
 
-// new volume-aware variants
+
 pub fn macz_batch_slice_vol(
     data: &[f64],
     volume: Option<&[f64]>,
@@ -1664,17 +1664,17 @@ fn macz_batch_inner_vol(
         }
     }
 
-    // Guard rows*cols overflow before matrix allocation
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| MaczError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
 
-    // Allocate rows×cols with warm prefixes preset per row
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // compute warm prefixes
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1691,20 +1691,20 @@ fn macz_batch_inner_vol(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // Treat as &mut [f64]
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Map batch kernel to per-row kernel
+    
     let row_kernel = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => kern, // fallback for non-batch kernels
+        _ => kern, 
     };
 
-    // Fill each row directly
+    
     let fill_row = |row: usize, dst_row: &mut [f64]| -> Result<(), MaczError> {
         let params = combos[row].clone();
         let input = if let Some(v) = volume {
@@ -1712,7 +1712,7 @@ fn macz_batch_inner_vol(
         } else {
             MaczInput::from_slice(data, params)
         };
-        // compute directly into the provided row
+        
         macz_into_slice(dst_row, &input, row_kernel)
     };
 
@@ -1800,7 +1800,7 @@ fn macz_batch_inner_into_vol(
         }
     }
 
-    // Map batch kernel to per-row kernel
+    
     let row_kernel = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1847,55 +1847,55 @@ fn macz_batch_inner_into_vol(
     Ok(combos)
 }
 
-// ==================== STREAMING SUPPORT ====================
+
 /// Streaming calculator for real-time updates (O(1) per tick)
 #[derive(Debug, Clone)]
 pub struct MaczStream {
     params: MaczParams,
 
-    // Ring buffers (single shared ring of length = max window)
+    
     price_buffer: Vec<f64>,
     volume_buffer: Vec<f64>,
     buffer_size: usize,
 
-    // Logical stream index (number of ingested samples)
+    
     index: usize,
 
-    // NEW: ring "head" (next write position) – avoids modulo on each access
+    
     head: usize,
 
-    // Whether the ring has wrapped (kept for parity with existing state)
+    
     filled: bool,
 
-    // Rolling sums (O(1))
+    
     fast_sum: f64,
     slow_sum: f64,
 
-    // Z-VWAP: ∑x and ∑x² over lz window
+    
     sum_lz: f64,
     sum2_lz: f64,
 
-    // VWAP: ∑(price*vol) and ∑vol over lz window
+    
     vwap_pv_sum: f64,
     vwap_v_sum: f64,
 
-    // NEW: number of "bad" bars (non-finite or non-positive volume) in VWAP window
+    
     vwap_bad: usize,
 
-    // ta.stdev(source, lsd) population: ∑x and ∑x² over lsd window
+    
     stdev_sum: f64,
     stdev_sum2: f64,
 
-    // Signal SMA over MAC‑Z (strict SMA: NaN if any NaN in window)
+    
     signal_sum: f64,
     signal_buffer: Vec<f64>,
 
-    // NEW: O(1) maintenance for the signal window
+    
     sig_head: usize,
     sig_count: usize,
     sig_nan: usize,
 
-    // Laguerre filter state
+    
     l0: f64,
     l1: f64,
     l2: f64,
@@ -1903,7 +1903,7 @@ pub struct MaczStream {
     use_lag: bool,
     gamma: f64,
 
-    // Current intermediates (left for API parity / introspection)
+    
     current_vwap: f64,
     current_zvwap: f64,
     current_fast_ma: f64,
@@ -1913,30 +1913,30 @@ pub struct MaczStream {
     current_macz: f64,
     current_signal: f64,
 
-    // ===== NEW: precomputed constants / offsets to avoid work in hot loop =====
-    // Periods
+    
+    
     fast: usize,
     slow: usize,
     lz: usize,
     lsd: usize,
     sig: usize,
 
-    // Coefficients
+    
     a: f64,
     b: f64,
 
-    // Reciprocals (replace per-tick division)
+    
     inv_fast: f64,
     inv_slow: f64,
     inv_lz: f64,
     inv_lsd: f64,
     inv_sig: f64,
 
-    // Warm lengths
+    
     warm_m: usize,
     warm_hist: usize,
 
-    // Ring offsets to fetch leaving elements without modulo
+    
     off_fast: usize,
     off_slow: usize,
     off_lz: usize,
@@ -1970,14 +1970,14 @@ impl MaczStream {
             return Err(MaczError::InvalidB { b });
         }
 
-        // One shared ring large enough for all windows
+        
         let buffer_size = fast.max(slow).max(lz).max(lsd);
 
-        // Warm lengths (match batch): first MACZ at warm_m-1, first histogram at warm_hist
+        
         let warm_m = slow.max(lz).max(lsd);
         let warm_hist = warm_m + sig - 1;
 
-        // Precompute reciprocals and modulo-free offsets
+        
         let inv_fast = 1.0 / (fast as f64);
         let inv_slow = 1.0 / (slow as f64);
         let inv_lz = 1.0 / (lz as f64);
@@ -2052,7 +2052,7 @@ impl MaczStream {
         })
     }
 
-    // Keep new as a simple alias to try_new for backward compatibility
+    
     pub fn new(params: MaczParams) -> Result<Self, MaczError> {
         Self::try_new(params)
     }
@@ -2060,7 +2060,7 @@ impl MaczStream {
     #[inline(always)]
     pub fn update(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
         if !value.is_finite() {
-            return None; // strict
+            return None; 
         }
         let vol = volume.unwrap_or(1.0);
         let vol_ok = vol.is_finite() && vol > 0.0;
@@ -2068,7 +2068,7 @@ impl MaczStream {
         let bsz = self.buffer_size;
         let idx = self.head;
 
-        // Helpers: modulo-free index add
+        
         #[inline(always)]
         fn add_off(i: usize, off: usize, n: usize) -> usize {
             let j = i + off;
@@ -2079,7 +2079,7 @@ impl MaczStream {
             }
         }
 
-        // --- Identify leaving elements (before overwriting head) ---
+        
         let leaving_fast_idx = add_off(idx, self.off_fast, bsz);
         let leaving_slow_idx = add_off(idx, self.off_slow, bsz);
         let leaving_lz_idx = add_off(idx, self.off_lz, bsz);
@@ -2114,11 +2114,11 @@ impl MaczStream {
         };
         let leaving_vol_ok = exiting_vwap_vol.is_finite() && exiting_vwap_vol > 0.0;
 
-        // --- Overwrite head with new sample ---
+        
         self.price_buffer[idx] = value;
         self.volume_buffer[idx] = vol;
 
-        // --- O(1) rolling sums ---
+        
         self.fast_sum += value - exiting_fast;
         self.slow_sum += value - exiting_slow;
 
@@ -2138,10 +2138,10 @@ impl MaczStream {
         self.stdev_sum += value - exiting_lsd;
         self.stdev_sum2 += value.mul_add(value, -exiting_lsd * exiting_lsd);
 
-        // --- advance (logical) index and ring head after ingest ---
+        
         let i_next = self.index + 1;
 
-        // If we haven't yet filled all inputs required to form MAC-Z, bail early.
+        
         if i_next < self.warm_m {
             self.index = i_next;
             self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
@@ -2149,16 +2149,16 @@ impl MaczStream {
             return None;
         }
 
-        // --- Fast/Slow SMA & MACD ---
+        
         self.current_fast_ma = self.fast_sum * self.inv_fast;
         self.current_slow_ma = self.slow_sum * self.inv_slow;
         self.current_macd = self.current_fast_ma - self.current_slow_ma;
 
-        // --- VWAP (strict): NaN if any bad vol in window or volume sum <= 0 ---
+        
         if self.vwap_bad == 0 && self.vwap_v_sum > 0.0 {
             self.current_vwap = self.vwap_pv_sum / self.vwap_v_sum;
 
-            // --- ZVWAP using population variance around fixed VWAP mean ---
+            
             let e = self.sum_lz * self.inv_lz;
             let e2 = self.sum2_lz * self.inv_lz;
             let var =
@@ -2174,12 +2174,12 @@ impl MaczStream {
             self.current_zvwap = f64::NAN;
         }
 
-        // --- Population stdev on source over lsd: sqrt(E[x^2] - E[x]^2) ---
+        
         let mean_lsd = self.stdev_sum * self.inv_lsd;
         let var_lsd = self.stdev_sum2 * self.inv_lsd - mean_lsd * mean_lsd;
         self.current_stdev = var_lsd.max(0.0).sqrt();
 
-        // --- MAC-Z raw ---
+        
         let macz_raw = if self.current_stdev.is_finite()
             && self.current_stdev > 0.0
             && self.current_zvwap.is_finite()
@@ -2191,7 +2191,7 @@ impl MaczStream {
             f64::NAN
         };
 
-        // --- Optional Laguerre smoothing (finite inputs only) ---
+        
         let macz_val = if self.use_lag && macz_raw.is_finite() {
             let one_minus_g = 1.0 - self.gamma;
             let new_l0 = macz_raw.mul_add(one_minus_g, self.gamma * self.l0);
@@ -2207,7 +2207,7 @@ impl MaczStream {
             macz_raw
         };
 
-        // --- Strict signal SMA ring (O(1), starts once MAC-Z is available) ---
+        
         if i_next >= self.warm_m {
             if self.sig_count == self.sig {
                 let leaving = self.signal_buffer[self.sig_head];
@@ -2233,17 +2233,17 @@ impl MaczStream {
             }
         }
 
-        // Advance after all computations
+        
         self.index = i_next;
         self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
         self.filled |= self.index >= bsz;
 
-        // Mirror batch warmup behavior: no outputs until > warm_hist
+        
         if self.index <= self.warm_hist {
             return None;
         }
 
-        // Output histogram (NaN if signal window contains any NaN)
+        
         if self.sig_count == self.sig && self.sig_nan == 0 && macz_val.is_finite() {
             self.current_macz = macz_val;
             self.current_signal = self.signal_sum * self.inv_sig;
@@ -2254,7 +2254,7 @@ impl MaczStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "macz")]
 #[pyo3(signature = (data, volume=None, fast_length=12, slow_length=25, signal_length=9, lengthz=20, length_stdev=25, a=1.0, b=1.0, use_lag=false, gamma=0.02, kernel=None))]
@@ -3586,8 +3586,8 @@ mod tests {
 
         assert_eq!(row.len(), candles.close.len());
 
-        // Just check we got valid values
-        // warmup = first(0) + max(25,20,25) + 9 - 1 = 33
+        
+        
         let warmup = 33;
         let valid_count = row[warmup..].iter().filter(|v| !v.is_nan()).count();
         assert!(
@@ -3616,11 +3616,11 @@ mod tests {
 
         let batch = macz_batch_with_kernel(&data, &sweep, kernel)?;
 
-        // Check dimensions
+        
         assert_eq!(batch.cols, data.len());
         assert!(batch.rows > 0, "[{}] Batch should produce rows", test_name);
 
-        // Verify combinations were generated
+        
         assert!(
             !batch.combos.is_empty(),
             "[{}] Should have parameter combinations",
@@ -3630,7 +3630,7 @@ mod tests {
         Ok(())
     }
 
-    // ==================== TEST GENERATION MACROS ====================
+    
 
     macro_rules! generate_all_macz_tests {
         ($($test_fn:ident),*) => {
@@ -3812,46 +3812,46 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
     gen_batch_tests!(check_batch_with_volume);
 
-    // ==================== PROPERTY-BASED TESTS ====================
+    
 
     #[cfg(feature = "proptest")]
     fn check_macz_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test strategies for MAC-Z parameters
+        
         let strat = (
-            // Data length and values
+            
             prop::collection::vec(
                 (-1e4f64..1e4f64).prop_filter("finite", |x| x.is_finite()),
                 50..200,
             ),
-            // Volume (optional)
+            
             prop::collection::vec(
                 (100f64..10000f64).prop_filter("positive", |x| x.is_finite() && *x > 0.0),
                 50..200,
             ),
-            // Parameters
-            5usize..15,      // fast_length
-            15usize..30,     // slow_length
-            3usize..10,      // signal_length
-            10usize..25,     // lengthz
-            15usize..30,     // length_stdev
-            -1.5f64..1.5f64, // a
-            -1.5f64..1.5f64, // b
-            prop::bool::ANY, // use_lag
-            0.01f64..0.1f64, // gamma
+            
+            5usize..15,      
+            15usize..30,     
+            3usize..10,      
+            10usize..25,     
+            15usize..30,     
+            -1.5f64..1.5f64, 
+            -1.5f64..1.5f64, 
+            prop::bool::ANY, 
+            0.01f64..0.1f64, 
         );
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(data, volume, fast, slow, sig, lz, lsd, a, b, use_lag, gamma)| {
-                // Ensure data and volume have same length
+                
                 let min_len = data.len().min(volume.len());
                 let data = &data[..min_len];
                 let volume = &volume[..min_len];
 
-                // Skip if periods exceed data length
+                
                 if slow >= data.len() || lz >= data.len() || lsd >= data.len() {
                     return Ok(());
                 }
@@ -3870,7 +3870,7 @@ mod tests {
 
                 let input = MaczInput::from_slice_with_volume(data, volume, params);
 
-                // Test that MAC-Z calculation succeeds
+                
                 let result = macz_with_kernel(&input, kernel);
                 prop_assert!(
                     result.is_ok(),
@@ -3881,11 +3881,11 @@ mod tests {
                 let output = result.unwrap();
                 prop_assert_eq!(output.values.len(), data.len(), "Output length mismatch");
 
-                // Test that scalar and SIMD kernels produce similar results
+                
                 if kernel != Kernel::Scalar {
                     let scalar_result = macz_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Compare non-NaN values (after warmup)
+                    
                     for (i, (&simd_val, &scalar_val)) in output
                         .values
                         .iter()
@@ -3918,7 +3918,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_macz_tests!(check_macz_property);
 
-    // ==================== LEGACY TESTS (for backward compatibility) ====================
+    
 
     #[test]
     fn test_macz_basic() {
@@ -3936,16 +3936,16 @@ mod tests {
         let input = MaczInput::from_slice(&data, params);
         let result = macz(&input).unwrap();
 
-        // Check last 5 values
+        
         let expected = vec![0.51988421, 0.23019592, 0.08030845, 0.12276454, -0.56402159];
         let actual = &result.values[result.values.len() - 5..];
 
-        // Print actual values for debugging
+        
         println!("Last 5 actual values: {:?}", actual);
         println!("Expected values: {:?}", expected);
 
-        // For now, just check that we get some non-NaN values after warmup
-        let warmup = 33; // max(25, 20, 25) + 9 - 1
+        
+        let warmup = 33; 
         assert!(
             result.values[warmup..].iter().any(|&v| !v.is_nan()),
             "Should have non-NaN values after warmup"
@@ -4004,7 +4004,7 @@ mod tests {
 
     #[test]
     fn test_macz_into_slice() {
-        // Use varying data to avoid zero standard deviation
+        
         let data: Vec<f64> = (0..50).map(|i| i as f64).collect();
         let mut dst = vec![0.0; 50];
         let params = MaczParams::default();
@@ -4028,7 +4028,7 @@ mod tests {
             b: (1.0, 1.0, 0.1),
         };
 
-        // Test sequential
+        
         let result_seq = macz_batch_slice(&data, &sweep, Kernel::Scalar);
         assert!(result_seq.is_ok());
     }
@@ -4049,7 +4049,7 @@ mod tests {
 
         let mut stream = MaczStream::new(params).unwrap();
 
-        // Feed some values
+        
         for i in 0..20 {
             let val = i as f64;
             let _ = stream.update(val, None);
@@ -4058,23 +4058,23 @@ mod tests {
 
     #[test]
     fn test_macz_no_poison_legacy() {
-        // This test catches common API drift issues:
-        // 1. Incorrect volume handling (dangling slices)
-        // 2. Excessive memory allocations
-        // 3. Warmup miscalculations
-        // 4. NaN poisoning of valid data
+        
+        
+        
+        
+        
 
         let data: Vec<f64> = (0..100).map(|i| 50.0 + (i as f64).sin() * 5.0).collect();
         let volume: Vec<f64> = (0..100).map(|i| 1000.0 + (i as f64) * 10.0).collect();
 
-        // Test 1: Volume handling correctness
+        
         let params = MaczParams::default();
         let input_with_vol = MaczInput::from_slice_with_volume(&data, &volume, params);
         let result_vol = macz(&input_with_vol).unwrap();
 
-        // Test 2: Check warmup calculation
-        // Default params: fast=12, slow=25, signal=9, lengthz=20, length_stdev=25
-        // Find actual warmup by checking where non-NaN values start
+        
+        
+        
         let mut actual_warmup = 0;
         for (i, &val) in result_vol.values.iter().enumerate() {
             if !val.is_nan() {
@@ -4084,11 +4084,11 @@ mod tests {
         }
         println!("Actual warmup period: {}", actual_warmup);
 
-        // Verify reasonable warmup
+        
         assert!(actual_warmup >= 25, "Warmup should be at least slow period");
         assert!(actual_warmup < 50, "Warmup should be reasonable");
 
-        // Check NaN pattern
+        
         for i in 0..actual_warmup {
             assert!(
                 result_vol.values[i].is_nan(),
@@ -4105,11 +4105,11 @@ mod tests {
             );
         }
 
-        // Test 3: into_slice doesn't poison output
-        let mut dst = vec![123.456; data.len()]; // Poison value
+        
+        let mut dst = vec![123.456; data.len()]; 
         macz_into_slice(&mut dst, &input_with_vol, Kernel::Scalar).unwrap();
 
-        // Check warmup preserved
+        
         for i in 0..actual_warmup {
             assert!(
                 dst[i].is_nan(),
@@ -4117,7 +4117,7 @@ mod tests {
                 i
             );
         }
-        // Check computation matches
+        
         for i in actual_warmup..dst.len() {
             assert!(
                 (dst[i] - result_vol.values[i]).abs() < 1e-10,
@@ -4126,7 +4126,7 @@ mod tests {
             );
         }
 
-        // Test 4: Batch doesn't leak poison values
+        
         let sweep = MaczBatchRange {
             fast_length: (12, 13, 1),
             slow_length: (25, 26, 1),
@@ -4138,11 +4138,11 @@ mod tests {
         };
 
         let batch_result = macz_batch_slice(&data, &sweep, Kernel::ScalarBatch).unwrap();
-        // Check that we get the expected number of results
+        
         assert_eq!(batch_result.cols, data.len());
         assert!(batch_result.rows > 0);
 
-        // Verify no excessive NaN poisoning
+        
         let mut non_nan_count = 0;
         for val in &batch_result.values {
             if !val.is_nan() {

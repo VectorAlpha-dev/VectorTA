@@ -47,13 +47,13 @@ pub enum CudaDeviationError {
     NotImplemented,
 }
 
-// ---------------------- Host mirror for CUDA float2 ----------------------
-// 8-byte aligned to match device-side float2 alignment.
+
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 pub struct Float2 {
-    pub x: f32, // hi
-    pub y: f32, // lo
+    pub x: f32, 
+    pub y: f32, 
 }
 unsafe impl DeviceCopy for Float2 {}
 
@@ -197,11 +197,11 @@ impl CudaDeviation {
     fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaDeviationError> {
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
-        // Conservative limits (common across modern devices). Fine-tune if needed.
+        
         if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
             return Err(CudaDeviationError::InvalidInput("zero grid/block dim".into()));
         }
-        if gy as usize > 65_535 { // grid-y hard cap we chunk against
+        if gy as usize > 65_535 { 
             return Err(CudaDeviationError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
         }
         Ok(())
@@ -244,7 +244,7 @@ impl CudaDeviation {
         rows: usize,
         first_valids: &[i32],
     ) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
-        // Same layout as BBW: prefix at (t,s) stored at index (t*cols + s) + 1
+        
         let total = data_tm_f32.len();
         let mut ps: Vec<Float2> = vec![Float2::default(); total + 1];
         let mut ps2: Vec<Float2> = vec![Float2::default(); total + 1];
@@ -275,7 +275,7 @@ impl CudaDeviation {
         (ps, ps2, pn)
     }
 
-    // -------------------------- Batch entry point --------------------------
+    
     pub fn deviation_batch_dev(
         &self,
         data_f32: &[f32],
@@ -286,7 +286,7 @@ impl CudaDeviation {
         }
         let (ps, ps2, pn, first_valid, len) = Self::build_prefixes_1d(data_f32);
 
-        // Expand and filter to supported devtype (=0)
+        
         let mut combos = deviation_expand_grid(sweep)
             .into_iter()
             .filter(|p| p.devtype.unwrap_or(0) == 0)
@@ -309,7 +309,7 @@ impl CudaDeviation {
             }
         }
 
-        // VRAM estimate + chunking (grid.y and memory)
+        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let rows = combos.len();
         let out_elems = rows
@@ -369,14 +369,14 @@ impl CudaDeviation {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Upload static inputs
+        
         let d_ps = DeviceBuffer::from_slice(&ps)?;
         let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
         let d_pn = DeviceBuffer::from_slice(&pn)?;
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        // Launch in chunks across parameter rows
+        
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
@@ -478,7 +478,7 @@ impl CudaDeviation {
         Ok(())
     }
 
-    // Copy into host buffer variant
+    
     pub fn deviation_batch_into_host_f32(
         &self,
         data_f32: &[f32],
@@ -501,7 +501,7 @@ impl CudaDeviation {
         Ok((dev.rows, dev.cols, combos))
     }
 
-    // ----------------------- Many-series: one param -----------------------
+    
     pub fn deviation_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -535,7 +535,7 @@ impl CudaDeviation {
             ));
         }
 
-        // First-valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -645,7 +645,7 @@ impl CudaDeviation {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x; // iterate over time
+        let grid_x = ((rows as u32) + block_x - 1) / block_x; 
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         Self::validate_launch(grid, block)?;
@@ -675,7 +675,7 @@ impl CudaDeviation {
     }
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;

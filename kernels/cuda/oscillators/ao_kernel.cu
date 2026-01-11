@@ -1,13 +1,13 @@
-// CUDA kernels for Awesome Oscillator (AO)
-//
-// Math: AO = SMA_short(hl2) - SMA_long(hl2)
-//
-// Optimized for Ada+ (RTX 40xx): device code is FP64-free. We use double-single (DS)
-// arithmetic built from FP32 + FMA to retain near-double precision without incurring
-// the FP64 throughput penalty on GeForce parts.
-//
-// Batch kernel (one series × many params): prefix-sum based — O(1) per output.
-// Many-series × one-param (time-major): per-series rolling sums with strided loads.
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -26,22 +26,22 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// DS helpers (float2) — include from parent dir
+
 #include "../ds_float2.cuh"
 
-// Local loader from float2 arrays into dsf
+
 __device__ __forceinline__ dsf load_dsf(const float2* __restrict__ p, int idx) {
     float2 v = p[idx];
     return ds_make(v.x, v.y);
 }
 
-// Batch kernel using DS prefix sums (host builds prefix; device stays FP64-free).
-// Arguments:
-//  - prefix_ds: exclusive prefix sum of hl2 packed as float2 {hi,lo}, length=len+1 (prefix[0]={0,0})
-//  - len: series length
-//  - first_valid: index of first non-NaN element in hl2
-//  - shorts, longs: arrays (n_combos) with short/long periods per row
-//  - out: row-major [n_combos][len]
+
+
+
+
+
+
+
 extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
                                          int len,
                                          int first_valid,
@@ -56,16 +56,16 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
     const int s = shorts[combo];
     const int l = longs[combo];
     if (UNLIKELY(s <= 0 || l <= 0 || s >= l)) {
-        // Invalid params: fill row with NaN to mirror CPU safeguards
+        
         const int base = combo * len;
         for (int t = 0; t < len; ++t) out[base + t] = AO_NAN_F;
         return;
     }
 
-    const int warm = first_valid + l - 1; // first valid AO index
+    const int warm = first_valid + l - 1; 
     const int row_off = combo * len;
 
-    // Parallelize across time (grid.x * blockDim.x)
+    
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
@@ -79,7 +79,7 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
             int start_l = t + 1 - l;
             if (start_s < 0) start_s = 0;
             if (start_l < 0) start_l = 0;
-            // DS differences via prefix
+            
             dsf head   = load_dsf(prefix_ds, t + 1);
             dsf tail_s = load_dsf(prefix_ds, start_s);
             dsf tail_l = load_dsf(prefix_ds, start_l);
@@ -94,7 +94,7 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
 }
 
 extern "C" __global__ void ao_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, // time-major: [t][series]
+    const float* __restrict__ prices_tm, 
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
@@ -105,7 +105,7 @@ extern "C" __global__ void ao_many_series_one_param_f32(
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    // Invalid: write NaNs for this series and return
+    
     if (UNLIKELY(short_p <= 0 || long_p <= 0 || short_p >= long_p)) {
         float* o = out_tm + series;
         for (int row = 0; row < series_len; ++row, o += num_series) *o = AO_NAN_F;
@@ -121,20 +121,20 @@ extern "C" __global__ void ao_many_series_one_param_f32(
 
     const int warm = first_valid + long_p - 1;
 
-    // If warm exceeds series_len-1, there are no valid outputs; fill NaNs and exit.
+    
     if (UNLIKELY(warm >= series_len)) {
         float* o = out_tm + series;
         for (int row = 0; row < series_len; ++row, o += num_series) *o = AO_NAN_F;
         return;
     }
 
-    // Prefill NaNs up to warm-1
+    
     {
         float* o = out_tm + series;
         for (int row = 0; row < warm; ++row, o += num_series) *o = AO_NAN_F;
     }
 
-    // Build initial window sums for short and long (strided by num_series) using DS
+    
     dsf sum_s = ds_set(0.0f);
     dsf sum_l = ds_set(0.0f);
 
@@ -149,11 +149,11 @@ extern "C" __global__ void ao_many_series_one_param_f32(
     const float inv_s = 1.0f / (float)short_p;
     const float inv_l = 1.0f / (float)long_p;
 
-    // First AO value at warm
+    
     *(out_tm + (size_t)warm * (size_t)num_series + series) =
         ds_to_f(ds_sub(ds_scale(sum_s, inv_s), ds_scale(sum_l, inv_l)));
 
-    // Rolling updates
+    
     const float* cur   = prices_tm + ((size_t)warm + 1) * (size_t)num_series + series;
     const float* old_s = prices_tm + ((size_t)first_valid + (long_p - short_p)) * (size_t)num_series + series;
     const float* old_l = prices_tm + ((size_t)first_valid) * (size_t)num_series + series;

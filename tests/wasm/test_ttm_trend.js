@@ -24,7 +24,7 @@ let testData;
 let high, low, close, hl2;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -37,13 +37,13 @@ test.before(async () => {
         throw error;
     }
     
-    // Load test data
+    
     testData = loadTestData();
     high = testData.high;
     low = testData.low;
     close = testData.close;
     
-    // Calculate HL2 (high + low) / 2
+    
     hl2 = high.map((h, i) => (h + low[i]) / 2);
 });
 
@@ -54,13 +54,13 @@ test('TTM Trend - safe API basic test', () => {
     assert.strictEqual(result.length, close.length, 'Output length should match input length');
     assert.ok(result instanceof Float64Array, 'Result should be Float64Array');
     
-    // Check that values are only 0.0, 1.0, or NaN
+    
     for (let i = 0; i < result.length; i++) {
         assert.ok(result[i] === 0.0 || result[i] === 1.0 || isNaN(result[i]), 
                   `Value at index ${i} should be 0.0, 1.0, or NaN, got ${result[i]}`);
     }
     
-    // Check warmup period should be NaN
+    
     for (let i = 0; i < period - 1; i++) {
         assert.ok(isNaN(result[i]), `Warmup period at index ${i} should be NaN`);
     }
@@ -73,7 +73,7 @@ test('TTM Trend - safe API with different periods', () => {
         const result = wasm.ttm_trend_js(hl2, close, period);
         assert.strictEqual(result.length, close.length, `Output length for period ${period} should match input`);
         
-        // Check warmup
+        
         for (let i = 0; i < period - 1; i++) {
             assert.ok(isNaN(result[i]), `Warmup for period ${period} at index ${i} should be NaN`);
         }
@@ -84,74 +84,74 @@ test('TTM Trend - fast API in-place operations', () => {
     const period = 5;
     const len = close.length;
     
-    // Allocate memory (now all f64)
+    
     const sourcePtr = wasm.ttm_trend_alloc(len);
     const closePtr = wasm.ttm_trend_alloc(len);
-    const outPtr = wasm.ttm_trend_alloc(len);  // Now uses f64
+    const outPtr = wasm.ttm_trend_alloc(len);  
     
     try {
-        // Copy data to WASM memory
+        
         const sourceHeap = new Float64Array(wasm.__wasm.memory.buffer, sourcePtr, len);
         const closeHeap = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         sourceHeap.set(hl2);
         closeHeap.set(close);
         
-        // Call fast API
+        
         wasm.ttm_trend_into(sourcePtr, closePtr, outPtr, len, period);
         
-        // Read results
+        
         const resultHeap = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(resultHeap);
         
-        // Compare with safe API
+        
         const safeResult = wasm.ttm_trend_js(hl2, close, period);
         
         for (let i = 0; i < len; i++) {
-            // Both NaN or both equal
+            
             if (isNaN(result[i]) && isNaN(safeResult[i])) {
                 continue;
             }
             assert.strictEqual(result[i], safeResult[i], `Fast API mismatch at index ${i}`);
         }
     } finally {
-        // Clean up
+        
         wasm.ttm_trend_free(sourcePtr, len);
         wasm.ttm_trend_free(closePtr, len);
-        wasm.ttm_trend_free(outPtr, len);  // Now uses f64
+        wasm.ttm_trend_free(outPtr, len);  
     }
 });
 
 test('TTM Trend - fast API with aliasing detection', () => {
     const period = 5;
-    const len = 100; // Use smaller dataset for aliasing test
+    const len = 100; 
     const hl2Small = hl2.slice(0, len);
     const closeSmall = close.slice(0, len);
     
-    // Test aliasing with source pointer
+    
     const sourcePtr = wasm.ttm_trend_alloc(len);
     const closePtr = wasm.ttm_trend_alloc(len);
     
     try {
-        // Copy data to WASM memory
+        
         const sourceHeap = new Float64Array(wasm.__wasm.memory.buffer, sourcePtr, len);
         const closeHeap = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         sourceHeap.set(hl2Small);
         closeHeap.set(closeSmall);
         
-        // Use source pointer as output (aliasing) - this should still work
-        const outPtr = sourcePtr; // Intentional aliasing
+        
+        const outPtr = sourcePtr; 
         wasm.ttm_trend_into(sourcePtr, closePtr, outPtr, len, period);
         
-        // Result should be valid (handled internally with temp buffer)
+        
         const resultHeap = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(resultHeap);
         
-        // Verify some values are 0.0 and some are 1.0
+        
         const hasZeros = result.some(v => v === 0.0);
         const hasOnes = result.some(v => v === 1.0);
         assert.ok(hasZeros || hasOnes, 'Result should contain valid values (0.0 or 1.0)');
     } finally {
-        // Only free closePtr since sourcePtr was reused as output
+        
         wasm.ttm_trend_free(closePtr, len);
         wasm.ttm_trend_free(sourcePtr, len);
     }
@@ -159,7 +159,7 @@ test('TTM Trend - fast API with aliasing detection', () => {
 
 test('TTM Trend - batch API', () => {
     const config = {
-        period_range: [5, 15, 5]  // periods: 5, 10, 15
+        period_range: [5, 15, 5]  
     };
     
     const result = wasm.ttm_trend_batch(hl2, close, config);
@@ -170,16 +170,16 @@ test('TTM Trend - batch API', () => {
     assert.deepStrictEqual(result.periods, [5, 10, 15], 'Periods should match');
     assert.strictEqual(result.values.length, 3 * close.length, 'Values array should be flattened');
     
-    // Check that all values are 0.0, 1.0, or NaN
+    
     for (let i = 0; i < result.values.length; i++) {
         assert.ok(result.values[i] === 0.0 || result.values[i] === 1.0 || isNaN(result.values[i]), 
                   `Batch value at index ${i} should be 0.0, 1.0, or NaN`);
     }
     
-    // Verify first row matches single calculation
+    
     const singleResult = wasm.ttm_trend_js(hl2, close, 5);
     for (let i = 0; i < close.length; i++) {
-        // Both NaN or both equal
+        
         if (isNaN(result.values[i]) && isNaN(singleResult[i])) {
             continue;
         }
@@ -189,7 +189,7 @@ test('TTM Trend - batch API', () => {
 });
 
 test('TTM Trend - error handling', () => {
-    // Test with invalid period
+    
     assert.throws(() => {
         wasm.ttm_trend_js(hl2, close, 0);
     }, /Invalid period/, 'Should throw on zero period');
@@ -198,7 +198,7 @@ test('TTM Trend - error handling', () => {
         wasm.ttm_trend_js(hl2, close, close.length + 1);
     }, /Invalid period/, 'Should throw when period exceeds data length');
     
-    // Test with empty arrays
+    
     assert.throws(() => {
         wasm.ttm_trend_js([], [], 5);
     }, /empty/i, 'Should throw on empty input');
@@ -208,8 +208,8 @@ test('TTM Trend - accuracy check', () => {
     const period = 5;
     const result = wasm.ttm_trend_js(hl2, close, period);
     
-    // TTM Trend logic: result[i] = close[i] > average(source[i-period+1..i])
-    // Manual calculation for a few points after warmup
+    
+    
     for (let i = period + 10; i < period + 15; i++) {
         let sum = 0;
         for (let j = i - period + 1; j <= i; j++) {
@@ -224,11 +224,11 @@ test('TTM Trend - accuracy check', () => {
 });
 
 test('TTM Trend - matches Rust expected last five values', () => {
-    // Mirrors Rust check_ttm_accuracy expected values
+    
     const period = 5;
     const result = wasm.ttm_trend_js(hl2, close, period);
 
-    // Convert f64 (0.0/1.0) to boolean for comparison
+    
     const last5Bools = Array.from(result.slice(-5)).map(v => v === 1.0);
     const expectedLastFive = [true, false, false, false, false];
     assert.deepStrictEqual(
@@ -241,40 +241,40 @@ test('TTM Trend - matches Rust expected last five values', () => {
 test('TTM Trend - memory allocation and deallocation', () => {
     const len = 1000;
     
-    // Test f64 allocation
+    
     const ptr1 = wasm.ttm_trend_alloc(len);
     assert.ok(ptr1 !== 0, 'Allocated pointer should not be null');
     wasm.ttm_trend_free(ptr1, len);
     
-    // Test multiple allocations
+    
     const ptrs = [];
     for (let i = 0; i < 10; i++) {
         ptrs.push(wasm.ttm_trend_alloc(len));
     }
     
-    // All pointers should be different
+    
     const uniquePtrs = new Set(ptrs);
     assert.strictEqual(uniquePtrs.size, ptrs.length, 'All allocated pointers should be unique');
     
-    // Free all
+    
     for (const ptr of ptrs) {
         wasm.ttm_trend_free(ptr, len);
     }
 });
 
 test('TTM Trend - warmup period calculation', () => {
-    // TTM Trend warmup is period - 1
+    
     const periods = [5, 10, 20, 50];
     
     for (const period of periods) {
         const result = wasm.ttm_trend_js(hl2, close, period);
         
-        // Check warmup values are NaN
+        
         for (let i = 0; i < period - 1; i++) {
             assert.ok(isNaN(result[i]), `Warmup at index ${i} for period ${period} should be NaN`);
         }
         
-        // First non-NaN should be at index period - 1
+        
         assert.ok(!isNaN(result[period - 1]), `First valid value should be at index ${period - 1}`);
     }
 });
@@ -282,16 +282,16 @@ test('TTM Trend - warmup period calculation', () => {
 test('TTM Trend - reinput test', () => {
     const period = 5;
     
-    // First pass
+    
     const firstResult = wasm.ttm_trend_js(hl2, close, period);
     
-    // Convert result to use as input (already Float64Array with 0.0/1.0 values)
-    // Second pass - apply TTM Trend to TTM Trend output
+    
+    
     const secondResult = wasm.ttm_trend_js(firstResult, close, period);
     
     assert.strictEqual(secondResult.length, firstResult.length, 'Reinput length should match');
     
-    // Verify some values changed (TTM on binary values should produce different results)
+    
     let hasChanges = false;
     for (let i = period; i < secondResult.length; i++) {
         if (!isNaN(firstResult[i]) && !isNaN(secondResult[i]) && secondResult[i] !== firstResult[i]) {
@@ -317,33 +317,33 @@ test('TTM Trend - batch metadata verification', () => {
     
     const result = wasm.ttm_trend_batch(hl2, close, config);
     
-    // Verify metadata
+    
     assert.strictEqual(result.rows, 3, 'Should have correct number of rows');
     assert.strictEqual(result.cols, close.length, 'Should have correct number of columns');
     assert.deepStrictEqual(result.periods, [5, 10, 15], 'Should have correct periods');
     
-    // Verify values array size
+    
     assert.strictEqual(result.values.length, result.rows * result.cols, 
                       'Values array should match rows * cols');
 });
 
 test('TTM Trend - batch edge cases', () => {
-    // Test with minimum data
+    
     const smallData = hl2.slice(0, 20);
     const smallClose = close.slice(0, 20);
     
-    // Single period batch
+    
     const singleConfig = {
-        period_range: [5, 5, 0]  // Only period 5
+        period_range: [5, 5, 0]  
     };
     
     const singleResult = wasm.ttm_trend_batch(smallData, smallClose, singleConfig);
     assert.strictEqual(singleResult.rows, 1, 'Single period should have 1 row');
     assert.strictEqual(singleResult.periods.length, 1, 'Should have 1 period');
     
-    // Test with step size larger than range
+    
     const largeStepConfig = {
-        period_range: [5, 10, 10]  // Step larger than range
+        period_range: [5, 10, 10]  
     };
     
     const largeStepResult = wasm.ttm_trend_batch(smallData, smallClose, largeStepConfig);
@@ -357,31 +357,31 @@ test('TTM Trend - zero-copy consistency', () => {
     const smallHl2 = hl2.slice(0, len);
     const smallClose = close.slice(0, len);
     
-    // Safe API result
+    
     const safeResult = wasm.ttm_trend_js(smallHl2, smallClose, period);
     
-    // Fast API result
+    
     const sourcePtr = wasm.ttm_trend_alloc(len);
     const closePtr = wasm.ttm_trend_alloc(len);
-    const outPtr = wasm.ttm_trend_alloc(len);  // Now f64
+    const outPtr = wasm.ttm_trend_alloc(len);  
     
     try {
-        // Copy data to WASM memory
+        
         const sourceHeap = new Float64Array(wasm.__wasm.memory.buffer, sourcePtr, len);
         const closeHeap = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
         sourceHeap.set(smallHl2);
         closeHeap.set(smallClose);
         
-        // Call fast API
+        
         wasm.ttm_trend_into(sourcePtr, closePtr, outPtr, len, period);
         
-        // Read results
+        
         const resultHeap = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const fastResult = Array.from(resultHeap);
         
-        // Compare results
+        
         for (let i = 0; i < len; i++) {
-            // Both NaN or both equal
+            
             if (isNaN(fastResult[i]) && isNaN(safeResult[i])) {
                 continue;
             }
@@ -396,13 +396,13 @@ test('TTM Trend - zero-copy consistency', () => {
 });
 
 test('TTM Trend - streaming edge cases', () => {
-    // Test streaming with NaN values
+    
     const nanData = [...hl2.slice(0, 10)];
     const nanClose = [...close.slice(0, 10)];
     nanData[5] = NaN;
     nanClose[6] = NaN;
     
-    // This should still work as long as not all values are NaN
+    
     const result = wasm.ttm_trend_js(
         new Float64Array(nanData), 
         new Float64Array(nanClose), 
@@ -411,52 +411,52 @@ test('TTM Trend - streaming edge cases', () => {
     
     assert.strictEqual(result.length, 10, 'Should handle some NaN values');
     
-    // First few values should be NaN (warmup)
+    
     assert.ok(isNaN(result[0]), 'Warmup should be NaN');
     assert.ok(isNaN(result[1]), 'Warmup should be NaN');
 });
 
 test('TTM Trend - partial parameters', () => {
-    // TTM Trend only has one parameter (period), test with default
+    
     const result = wasm.ttm_trend_js(hl2, close, 5);
     assert.strictEqual(result.length, close.length, 'Output length should match input');
     assert.ok(result instanceof Float64Array, 'Result should be Float64Array');
 });
 
 test('TTM Trend - batch with invalid parameters', () => {
-    // Test batch with invalid period range
+    
     assert.throws(() => {
         wasm.ttm_trend_batch(hl2, close, {
-            period_range: [0, 10, 5]  // Invalid start period
+            period_range: [0, 10, 5]  
         });
     }, /Invalid period/, 'Should throw on invalid start period');
     
     assert.throws(() => {
         wasm.ttm_trend_batch(hl2, close, {
-            period_range: [10, 5, 1]  // End < start
+            period_range: [10, 5, 1]  
         });
     }, /Invalid.*range/, 'Should throw on invalid range');
 });
 
 test('TTM Trend - large dataset performance', () => {
-    // Test with full dataset to ensure no performance issues
+    
     const startTime = performance.now();
     const result = wasm.ttm_trend_js(hl2, close, 20);
     const endTime = performance.now();
     
     assert.strictEqual(result.length, close.length, 'Should handle large dataset');
     
-    // Check it completes in reasonable time (< 100ms)
+    
     const duration = endTime - startTime;
     assert.ok(duration < 100, `Should complete quickly (took ${duration.toFixed(2)}ms)`);
 });
 
 test('TTM Trend - NaN propagation', () => {
-    // Create data with NaN in middle
+    
     const testData = [...hl2.slice(0, 50)];
     const testClose = [...close.slice(0, 50)];
     
-    // Insert NaN values
+    
     testData[25] = NaN;
     testClose[30] = NaN;
     
@@ -466,7 +466,7 @@ test('TTM Trend - NaN propagation', () => {
         5
     );
     
-    // Result should still have valid values before and after NaN
+    
     let hasValidBefore = false;
     let hasValidAfter = false;
     

@@ -1,16 +1,16 @@
-// Integration tests for CUDA CCI kernels
 
-use my_project::indicators::cci::{
+
+use vector_ta::indicators::cci::{
     CciBatchBuilder, CciBatchRange, CciInput, CciParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaCci;
+use vector_ta::cuda::oscillators::CudaCci;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -91,7 +91,7 @@ fn cci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-1; // FP32 device vs FP64 CPU (CCI is denominator-sensitive; allow ~0.7 abs)
+    let tol = 7e-1; 
     let mut max_diff = 0.0f64;
     let mut max_idx = 0usize;
     let mut max_cpu = 0.0f64;
@@ -147,8 +147,8 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // series count
-    let rows = 2048usize; // series length
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
@@ -158,7 +158,7 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
 
-    // CPU per-series baseline (quantize inputs to match GPU FP32 path)
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let tm_quant: Vec<f64> = tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_tm = vec![f64::NAN; cols * rows];
@@ -173,13 +173,13 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
                 period: Some(period),
             },
         );
-        let out = my_project::indicators::cci::cci_with_kernel(&input, Kernel::Scalar)?.values;
+        let out = vector_ta::indicators::cci::cci_with_kernel(&input, Kernel::Scalar)?.values;
         for r in 0..rows {
             cpu_tm[r * cols + s] = out[r];
         }
     }
 
-    // GPU
+    
     let cuda = CudaCci::new(0).expect("CudaCci::new");
     let dev = cuda
         .cci_many_series_one_param_time_major_dev(&tm_f32, cols, rows, period)
@@ -189,7 +189,7 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-1; // FP32 device vs FP64 CPU (CCI is denominator-sensitive; allow ~0.7 abs)
+    let tol = 7e-1; 
     let mut max_diff = 0.0f64;
     let mut max_idx = 0usize;
     let mut max_cpu = 0.0f64;

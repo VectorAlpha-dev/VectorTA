@@ -11,7 +11,7 @@
 
 #![cfg(feature = "cuda")]
 
-// Reuse shared policy enums exported by CWMA for ALMA‑parity API shape.
+
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::sama::{SamaBatchRange, SamaParams};
 use cust::context::Context;
@@ -53,7 +53,7 @@ pub struct CudaSama {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    // Policy + introspection for parity with ALMA/CWMA wrappers
+    
     policy: CudaSamaPolicy,
     last_batch: Option<SamaBatchKernelSelected>,
     last_many: Option<SamaManySeriesKernelSelected>,
@@ -76,7 +76,7 @@ impl DeviceArrayF32Sama {
     pub fn len(&self) -> usize { self.rows * self.cols }
 }
 
-// -------- Kernel selection policy (explicit for tests; Auto for production) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaSamaPolicy {
@@ -93,7 +93,7 @@ impl Default for CudaSamaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum SamaBatchKernelSelected {
@@ -129,7 +129,7 @@ impl CudaSama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sama_kernel.ptx"));
-        // Match ALMA/CWMA JIT policy for broad driver support and perf
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -188,7 +188,7 @@ impl CudaSama {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM estimate (prices + params + output). Note: first_valids filled on device.
+        
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -205,7 +205,7 @@ impl CudaSama {
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSamaError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
             return Err(CudaSamaError::OutOfMemory { required, free, headroom });
@@ -216,13 +216,13 @@ impl CudaSama {
         let d_min = DeviceBuffer::from_slice(&prepared.min_alphas)?;
         let d_maj = DeviceBuffer::from_slice(&prepared.maj_alphas)?;
 
-        // Allocate device first_valids and fill it on-device (avoid H->D copy)
+        
         let mut d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n_combos)? };
         memset_i32_async(&self.stream, &mut d_first, prepared.first_valid as i32)?;
 
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos)? };
 
-        // Compute max_window for this run; we will still compute per-slice values.
+        
         let max_window_total: i32 = *prepared.lengths_i32.iter().max().unwrap_or(&0);
 
         self.launch_batch_kernel_sliced_opt(
@@ -238,7 +238,7 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        // Synchronize producing stream so Python CAI may omit 'stream'
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Sama {
@@ -288,7 +288,7 @@ impl CudaSama {
             ));
         }
 
-        // Derive max_window with one small D->H copy to enable per-slice smem sizing
+        
         let mut h_lengths = vec![0i32; n_combos];
         d_lengths.copy_to(&mut h_lengths)?;
         let max_window_total: i32 = *h_lengths.iter().max().unwrap_or(&0);
@@ -330,7 +330,7 @@ impl CudaSama {
     ) -> Result<DeviceArrayF32Sama, CudaSamaError> {
         let prepared = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate (prices + first_valids + out)
+        
         let prices_bytes = num_series
             .checked_mul(series_len)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -367,7 +367,7 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        // Synchronize producing stream so Python CAI may omit 'stream'
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Sama {
@@ -437,8 +437,8 @@ impl CudaSama {
         handle.buf.copy_to(out_tm).map_err(CudaSamaError::from)
     }
 
-    // Launch helper that chunks across parameter combos to respect grid limits
-    // and supports large sweeps. Each chunk updates param/output pointers.
+    
+    
     fn launch_batch_kernel_sliced_opt(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -464,15 +464,15 @@ impl CudaSama {
             .get_function("sama_batch_f32_opt")
             .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_batch_f32_opt" })?;
 
-        // Select kernel once for introspection/debugging
+        
         unsafe {
             (*(self as *const _ as *mut CudaSama)).last_batch =
                 Some(SamaBatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk across combos; modern gridDim.x permits very large x
-        const MAX_SLICE: usize = 2_147_483_647; // modern x-dim limit
+        
+        const MAX_SLICE: usize = 2_147_483_647; 
         let mut start = 0usize;
         while start < n_combos {
             let len = (n_combos - start).min(MAX_SLICE);
@@ -484,7 +484,7 @@ impl CudaSama {
                 let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
-                // Choose per-slice max_window when host lengths present, else total
+                
                 let slice_max_window: i32 = if let Some(host_lengths) = host_lengths_opt {
                     *host_lengths[start..start + len].iter().max().unwrap_or(&0)
                 } else {
@@ -504,7 +504,7 @@ impl CudaSama {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
                 let grid: GridSize = (len as u32, 1, 1).into();
-                // Dynamic shared memory for two deques of indices
+                
                 let shmem_bytes: u32 =
                     (2 * ((slice_max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
                 self.stream
@@ -541,14 +541,14 @@ impl CudaSama {
             .get_function("sama_many_series_one_param_f32_opt")
             .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_many_series_one_param_f32_opt" })?;
 
-        // Introspection for benches/debug
+        
         unsafe {
             (*(self as *const _ as *mut CudaSama)).last_many =
                 Some(SamaManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
 
-        // Dynamic shared memory for deques (cap = length + 1)
+        
         let max_window = length.max(0);
         let shmem_bytes: u32 =
             (2 * ((max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
@@ -782,7 +782,7 @@ impl CudaSama {
     }
 }
 
-// --- utility: async memset to fill i32 buffers on device ---
+
 #[inline]
 fn memset_i32_async(
     stream: &Stream,
@@ -801,7 +801,7 @@ fn memset_i32_async(
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1002,16 +1002,16 @@ fn expand_grid(range: &SamaBatchRange) -> Result<Vec<SamaParams>, CudaSamaError>
             }
             Ok(v)
         } else {
-            // reversed bounds supported
+            
             let mut v = Vec::new();
             let mut x = start;
             loop {
                 v.push(x);
                 if x <= end { break; }
-                // saturating sub is fine; we stop when we cross end
+                
                 x = x.saturating_sub(step);
                 if x <= end { break; }
-                // guard infinite loops on step==0 handled above
+                
             }
             if v.is_empty() {
                 return Err(CudaSamaError::InvalidInput(

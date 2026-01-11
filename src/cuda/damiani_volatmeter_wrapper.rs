@@ -23,7 +23,7 @@ use thiserror::Error;
 
 use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
 
-// CUDA vector equivalent for float2 (hi, lo) compensated prefix sums
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Float2 { pub x: f32, pub y: f32 }
@@ -206,7 +206,7 @@ impl CudaDamianiVolatmeter {
     pub fn batch_policy(&self) -> BatchKernelPolicy { self.policy_batch }
     pub fn many_series_policy(&self) -> ManySeriesKernelPolicy { self.policy_many }
 
-    // ---------- Helpers (host precomputes) ----------
+    
     fn first_valid_close(data: &[f32]) -> Result<usize, CudaDamianiError> {
         if data.is_empty() { return Err(CudaDamianiError::InvalidInput("empty series".into())); }
         if data.is_empty() {
@@ -398,9 +398,9 @@ impl CudaDamianiVolatmeter {
             .get_function("damiani_volatmeter_batch_f32")
             .map_err(|_| CudaDamianiError::MissingKernelSymbol { name: "damiani_volatmeter_batch_f32" })?;
         let block_x_env = std::env::var("DAMIANI_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok());
-        // Default to 1 thread per block (sequential scan per combo); overrideable via policy/env.
-        // Note: larger blocks increase parallelism but can severely degrade memory coalescing
-        // for the row-major output layout.
+        
+        
+        
         let block_x = block_x_env
             .or_else(|| match self.policy_batch { BatchKernelPolicy::Plain { block_x } => Some(block_x), _ => None })
             .unwrap_or(1).max(1);
@@ -408,7 +408,7 @@ impl CudaDamianiVolatmeter {
         let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
-            let mut p: u64 = 0; // kernel ignores prices; pass null device ptr
+            let mut p: u64 = 0; 
             let mut n = series_len as i32;
             let mut fv = first_valid as i32;
             let mut va = d_vis_atr.as_device_ptr().as_raw();
@@ -464,7 +464,7 @@ impl CudaDamianiVolatmeter {
         }
         let first_valid = Self::first_valid_close(prices)?;
 
-        // Validate feasibility
+        
         for prm in &combos {
             let needed = *[
                 prm.vis_atr.unwrap(),
@@ -485,13 +485,13 @@ impl CudaDamianiVolatmeter {
             }
         }
 
-        // Precomputes (host)
+        
         let tr = Self::compute_tr_close_only(prices, first_valid);
         let (s_prefix_f64, ss_prefix_f64) = Self::compute_prefix_sums(prices, first_valid);
         let s_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&s_prefix_f64);
         let ss_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&ss_prefix_f64);
 
-        // VRAM: params + prefixes (Float2) + TR + outputs (2 rows per combo)
+        
         let rows = combos.len();
         let param_bytes = rows
             .checked_mul(4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
@@ -520,7 +520,7 @@ impl CudaDamianiVolatmeter {
             return Err(CudaDamianiError::OutOfMemory { required: req, free, headroom });
         }
 
-        // Device buffers (prices not uploaded for batch kernel)
+        
         let vis_atr: Vec<i32> = combos.iter().map(|p| p.vis_atr.unwrap() as i32).collect();
         let vis_std: Vec<i32> = combos.iter().map(|p| p.vis_std.unwrap() as i32).collect();
         let sed_atr: Vec<i32> = combos.iter().map(|p| p.sed_atr.unwrap() as i32).collect();
@@ -531,7 +531,7 @@ impl CudaDamianiVolatmeter {
         let d_sa = DeviceBuffer::from_slice(&sed_atr)?;
         let d_ss_ = DeviceBuffer::from_slice(&sed_std)?;
         let d_th = DeviceBuffer::from_slice(&thresh)?;
-        // Use pinned upload if available
+        
         let (d_s, d_ss) = match (
             Self::pack_double_prefix_to_float2_pinned(&s_prefix_f64),
             Self::pack_double_prefix_to_float2_pinned(&ss_prefix_f64),
@@ -682,7 +682,7 @@ impl CudaDamianiVolatmeter {
         let sed_std = params.sed_std.unwrap_or(100);
         let threshold = params.threshold.unwrap_or(1.4) as f32;
 
-        // Per-series first_valid based on close only
+        
         let mut first_valids = vec![0i32; cols];
         for series in 0..cols {
             let mut fv = None;
@@ -711,9 +711,9 @@ impl CudaDamianiVolatmeter {
             first_valids[series] = val;
         }
 
-        // Precompute stddev prefix (close only) time-major
+        
         let (s_tm_f64, ss_tm_f64) = Self::compute_prefix_sums_time_major(close_tm, cols, rows, &first_valids);
-        // Try to build pinned Float2 buffers for faster async H2D; fall back to Vec
+        
         let (s_tm_opt, ss_tm_opt) = (
             Self::pack_double_prefix_to_float2_pinned(&s_tm_f64),
             Self::pack_double_prefix_to_float2_pinned(&ss_tm_f64),
@@ -729,7 +729,7 @@ impl CudaDamianiVolatmeter {
             }
         }
 
-        // VRAM estimate: 3 inputs + first_valids + prefixes (Float2) + outputs (2 mats)
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaDamianiError::InvalidInput("matrix size overflow".into()))?;
@@ -759,7 +759,7 @@ impl CudaDamianiVolatmeter {
             return Err(CudaDamianiError::OutOfMemory { required: req, free, headroom });
         }
 
-        // Device copies
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
         let d_low  = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream)  }?;
         let d_close= unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream)}?;
@@ -812,15 +812,15 @@ impl CudaDamianiVolatmeter {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const COLS_256: usize = 256; // number of series
-    const ROWS_8K: usize = 8 * 1024; // timesteps
+    const COLS_256: usize = 256; 
+    const ROWS_8K: usize = 8 * 1024; 
 
     fn synth_close(len: usize) -> Vec<f32> { gen_series(len) }
 
@@ -929,7 +929,7 @@ pub mod benches {
         let combos = CudaDamianiVolatmeter::expand_grid(&sweep).expect("damiani expand grid");
         let first_valid = CudaDamianiVolatmeter::first_valid_close(&close).expect("damiani first_valid");
 
-        // Precomputes (host) once for kernel-only timing.
+        
         let tr = CudaDamianiVolatmeter::compute_tr_close_only(&close, first_valid);
         let (s_prefix_f64, ss_prefix_f64) = CudaDamianiVolatmeter::compute_prefix_sums(&close, first_valid);
         let s_prefix: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_prefix_f64);
@@ -1038,7 +1038,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        let combos = 154usize; // vis_atr: 13..40 step2 (14) x vis_std: 20..40 step2 (11)
+        let combos = 154usize; 
         let param_bytes = combos * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let prefix_bytes = ONE_SERIES_LEN * (2 * std::mem::size_of::<Float2>());
         let tr_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1046,10 +1046,10 @@ pub mod benches {
         param_bytes + prefix_bytes + tr_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many() -> usize {
-        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()     // H,L,C
+        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()     
             + COLS_256 * std::mem::size_of::<i32>()
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<Float2>() // prefixes as Float2
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()    // outputs
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<Float2>() 
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()    
             + 64 * 1024 * 1024)
     }
 

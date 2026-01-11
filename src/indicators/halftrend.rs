@@ -31,8 +31,8 @@
 //! - Batch: precomputes ATR/SMA per unique period and rolling extrema per amplitude; rows reuse shared series.
 //! - Streaming: O(1) ring buffers with monotonic deques; correct flip gating aligned to scalar.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaHalftrend};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -46,13 +46,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -62,29 +62,29 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// Import other indicators
+
 use crate::indicators::atr::{atr, AtrInput, AtrOutput, AtrParams};
 use crate::indicators::moving_averages::sma::{sma, SmaInput, SmaOutput, SmaParams};
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::collections::{BTreeSet, HashMap};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
-// Note: AsRef<Candles> trait removed as input can now be slices or candles
 
-// ==================== DATA STRUCTURES ====================
+
+
+
 /// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct HalfTrendOutput {
@@ -183,7 +183,7 @@ impl<'a> HalfTrendInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 /// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct HalfTrendBuilder {
@@ -299,7 +299,7 @@ impl HalfTrendBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 /// Custom error type for HalfTrend operations
 #[derive(Debug, Error)]
 pub enum HalfTrendError {
@@ -334,7 +334,7 @@ pub enum HalfTrendError {
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-// ==================== CALCULATION FUNCTIONS ====================
+
 
 /// Helper to find first valid index in OHLC data
 #[inline(always)]
@@ -355,7 +355,7 @@ pub fn halftrend_with_kernel(
     input: &HalfTrendInput,
     kernel: Kernel,
 ) -> Result<HalfTrendOutput, HalfTrendError> {
-    // Choose kernel - use best available if Auto
+    
     let mut chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -363,7 +363,7 @@ pub fn halftrend_with_kernel(
 
     let (high, low, close) = input.as_slices();
 
-    // Validate input
+    
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(HalfTrendError::EmptyInputData);
     }
@@ -398,8 +398,8 @@ pub fn halftrend_with_kernel(
         });
     }
 
-    // Classic kernel is specifically optimized for the default parameter set. Even if a SIMD
-    // kernel is available, prefer the classic scalar implementation when Auto is requested.
+    
+    
     if matches!(kernel, Kernel::Auto)
         && amplitude == 2
         && channel_deviation == 2.0
@@ -408,13 +408,13 @@ pub fn halftrend_with_kernel(
         chosen = Kernel::Scalar;
     }
 
-    // Find first valid index
+    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(HalfTrendError::AllValuesNaN);
     }
 
-    // Calculate warmup period correctly
+    
     let warmup_span = amplitude.max(atr_period);
     if len - first < warmup_span {
         return Err(HalfTrendError::NotEnoughValidData {
@@ -424,9 +424,9 @@ pub fn halftrend_with_kernel(
     }
     let warm = first + warmup_span - 1;
 
-    // Check for classic kernel conditions (default parameters)
+    
     if chosen == Kernel::Scalar && amplitude == 2 && channel_deviation == 2.0 && atr_period == 100 {
-        // Use optimized classic kernel for default parameters
+        
         let mut halftrend = alloc_with_nan_prefix(len, warm);
         let mut trend = alloc_with_nan_prefix(len, warm);
         let mut atr_high = alloc_with_nan_prefix(len, warm);
@@ -463,7 +463,7 @@ pub fn halftrend_with_kernel(
         });
     }
 
-    // Allocate output buffers with correct NaN prefix
+    
     let mut halftrend = alloc_with_nan_prefix(len, warm);
     let mut trend = alloc_with_nan_prefix(len, warm);
     let mut atr_high = alloc_with_nan_prefix(len, warm);
@@ -471,7 +471,7 @@ pub fn halftrend_with_kernel(
     let mut buy_signal = alloc_with_nan_prefix(len, warm);
     let mut sell_signal = alloc_with_nan_prefix(len, warm);
 
-    // Calculate ATR
+    
     let atr_input = AtrInput::from_slices(
         high,
         low,
@@ -483,7 +483,7 @@ pub fn halftrend_with_kernel(
     let AtrOutput { values: atr_values } =
         atr(&atr_input).map_err(|e| HalfTrendError::AtrError(e.to_string()))?;
 
-    // Calculate SMA of high and low
+    
     let sma_high_input = SmaInput::from_slice(
         high,
         SmaParams {
@@ -502,7 +502,7 @@ pub fn halftrend_with_kernel(
     let SmaOutput { values: lowma } =
         sma(&sma_low_input).map_err(|e| HalfTrendError::SmaError(e.to_string()))?;
 
-    // Core HalfTrend calculation with kernel dispatch
+    
     halftrend_compute_into(
         high,
         low,
@@ -615,7 +615,7 @@ fn halftrend_compute_into(
 
 /// Scalar implementation of HalfTrend computation
 #[inline]
-// ==================== CLASSIC KERNEL ====================
+
 /// Optimized classic kernel for HalfTrend with default parameters
 /// Inlines ATR (with Wilder's smoothing) and SMA calculations for maximum performance
 #[inline(always)]
@@ -1817,7 +1817,7 @@ mod tests {
         check_halftrend_invalid_chdev
     );
 
-    // Batch tests
+    
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -1848,7 +1848,7 @@ mod tests {
             .atr_period_range(50, 150, 50)
             .apply_candles(&c)?;
 
-        let expected_combos = 3 * 3 * 3; // (2,3,4) × (1.5,2.0,2.5) × (50,100,150)
+        let expected_combos = 3 * 3 * 3; 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -1881,21 +1881,21 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
 }
 
-// ==================== STREAMING IMPLEMENTATION (DROP-IN) ====================
+
 
 #[derive(Debug, Clone)]
 pub struct HalfTrendStream {
-    // Params
+    
     amplitude: usize,
     atr_period: usize,
-    ch_half: f64, // precompute: channel_deviation * 0.5
-    inv_amp: f64, // precompute: 1.0 / amplitude
+    ch_half: f64, 
+    inv_amp: f64, 
 
-    // ATR stream (Wilder/RMA seeded as in batch)
+    
     atr_stream: crate::indicators::atr::AtrStream,
 
-    // --- Monotonic deques for rolling extrema over 'amplitude' window ---
-    // We store indices+values in fixed-size ring buffers to avoid VecDeque overhead.
+    
+    
     max_idx: Vec<usize>,
     max_val: Vec<f64>,
     min_idx: Vec<usize>,
@@ -1907,28 +1907,28 @@ pub struct HalfTrendStream {
     min_tail: usize,
     min_cnt: usize,
 
-    // --- SMA(high) / SMA(low) via fixed ring buffers ---
+    
     ring_high: Vec<f64>,
     ring_low: Vec<f64>,
-    ring_pos: usize, // current write cursor in rings
-    filled: usize,   // how many elements currently valid in rings (<= amplitude)
-    high_sum: f64,   // rolling sum for SMA(high)
-    low_sum: f64,    // rolling sum for SMA(low)
+    ring_pos: usize, 
+    filled: usize,   
+    high_sum: f64,   
+    low_sum: f64,    
 
-    // Stream index & warmup
-    i: usize,           // 0-based bar counter (updated after each call)
-    warmup_need: usize, // amplitude.max(atr_period)
+    
+    i: usize,           
+    warmup_need: usize, 
 
-    // State carried between updates (mirrors scalar kernel)
-    current_trend: i32, // 0 = uptrend, 1 = downtrend
-    next_trend: i32,    // flip detector state machine
-    last_trend: i8,     // -1 unknown, 0 up, 1 down (used to gate signals)
+    
+    current_trend: i32, 
+    next_trend: i32,    
+    last_trend: i8,     
     max_low_price: f64,
     min_high_price: f64,
     up: f64,
     down: f64,
 
-    // Prev raw bar values for "prev_high/prev_low" in the flip tests
+    
     prev_high: f64,
     prev_low: f64,
     have_prev: bool,
@@ -2064,7 +2064,7 @@ impl HalfTrendStream {
 
     #[inline(always)]
     fn q_evict(&mut self, idx: usize) {
-        // Remove items with index < (idx + 1 - amplitude)
+        
         let cap = self.amplitude;
         let limit = idx.saturating_sub(self.amplitude - 1);
         while self.max_cnt > 0 && self.max_idx[self.max_head] < limit {
@@ -2079,19 +2079,19 @@ impl HalfTrendStream {
 
     /// O(1) amortized update. Returns `None` during warmup (needs max(amplitude, atr_period) bars).
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<HalfTrendStreamOutput> {
-        // Skip invalid bars without mutating state
+        
         if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             return None;
         }
 
         let idx = self.i;
 
-        // --- update monotonic deques for rolling max(high) / min(low) ---
+        
         self.q_evict(idx);
         self.q_push_max(idx, high);
         self.q_push_min(idx, low);
 
-        // --- update SMA(high/low) rings & sums ---
+        
         if self.filled == self.amplitude {
             let old_h = self.ring_high[self.ring_pos];
             let old_l = self.ring_low[self.ring_pos];
@@ -2106,15 +2106,15 @@ impl HalfTrendStream {
         self.low_sum += low;
         self.ring_pos = Self::inc(self.ring_pos, self.amplitude);
 
-        // --- ATR (Wilder's RMA) stream ---
+        
         let atr_opt = self.atr_stream.update(high, low, close);
 
-        // Warmup gate: need both SMA window filled and ATR ready
+        
         let warmed =
             self.filled == self.amplitude && (idx + 1) >= self.warmup_need && atr_opt.is_some();
 
         if !warmed {
-            // carry prev bar raw values for next step
+            
             self.prev_high = high;
             self.prev_low = low;
             self.have_prev = true;
@@ -2122,7 +2122,7 @@ impl HalfTrendStream {
             return None;
         }
 
-        // --- compute derived inputs for this bar ---
+        
         debug_assert!(self.max_cnt > 0 && self.min_cnt > 0);
         let high_price = self.max_val[self.max_head];
         let low_price = self.min_val[self.min_head];
@@ -2130,7 +2130,7 @@ impl HalfTrendStream {
         let atr2 = 0.5 * atr;
         let dev = atr * self.ch_half;
 
-        // seed prev high/low for first emit
+        
         let prev_low = if self.have_prev { self.prev_low } else { low };
         let prev_high = if self.have_prev { self.prev_high } else { high };
         if self.max_low_price.is_nan() {
@@ -2140,13 +2140,13 @@ impl HalfTrendStream {
             self.min_high_price = prev_high;
         }
 
-        // SMAs (rolling)
+        
         let highma = self.high_sum * self.inv_amp;
         let lowma = self.low_sum * self.inv_amp;
 
-        // --- state machine (matches scalar kernel) ---
+        
         if self.next_trend == 1 {
-            // look for confirmation to switch into downtrend
+            
             if low_price > self.max_low_price {
                 self.max_low_price = low_price;
             }
@@ -2156,7 +2156,7 @@ impl HalfTrendStream {
                 self.min_high_price = high_price;
             }
         } else {
-            // look for confirmation to switch into uptrend
+            
             if high_price < self.min_high_price {
                 self.min_high_price = high_price;
             }
@@ -2167,19 +2167,19 @@ impl HalfTrendStream {
             }
         }
 
-        // --- trend->signal gating (fixes previous always-true gating) ---
-        let prev_trend = self.last_trend; // -1 unknown, 0 up, 1 down
+        
+        let prev_trend = self.last_trend; 
         let mut buy_sig: Option<f64> = None;
         let mut sell_sig: Option<f64> = None;
 
         let (ht, atr_hi, atr_lo, tr_val) = if self.current_trend == 0 {
-            // entering/continuing uptrend
+            
             if prev_trend == 1 {
-                // flip: reuse previous baseline ("down") then place buy signal
+                
                 self.up = self.down;
                 buy_sig = Some(self.up - atr2);
             } else {
-                // continue: pull up to new max of lows
+                
                 self.up = if self.up == 0.0 {
                     self.max_low_price
                 } else if self.max_low_price > self.up {
@@ -2191,13 +2191,13 @@ impl HalfTrendStream {
             let h = self.up;
             (h, h + dev, h - dev, 0.0)
         } else {
-            // entering/continuing downtrend
+            
             if prev_trend == 0 {
-                // flip: reuse previous baseline ("up") then place sell signal
+                
                 self.down = self.up;
                 sell_sig = Some(self.down + atr2);
             } else {
-                // continue: pull down to new min of highs
+                
                 self.down = if self.down == 0.0 {
                     self.min_high_price
                 } else if self.min_high_price < self.down {
@@ -2210,7 +2210,7 @@ impl HalfTrendStream {
             (d, d + dev, d - dev, 1.0)
         };
 
-        // commit for next step
+        
         self.last_trend = self.current_trend as i8;
         self.prev_high = high;
         self.prev_low = low;
@@ -2238,7 +2238,7 @@ pub struct HalfTrendStreamOutput {
     pub sell_signal: Option<f64>,
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct HalfTrendBatchRange {
     pub amplitude: (usize, usize, usize),
@@ -2397,7 +2397,7 @@ impl HalfTrendBatchOutput {
     }
 }
 
-// keep existing Candles entrypoint, forward to slices:
+
 fn halftrend_batch_with_kernel(
     candles: &Candles,
     sweep: &HalfTrendBatchRange,
@@ -2430,15 +2430,15 @@ fn halftrend_batch_with_kernel_slices(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // fallback
+        _ => Kernel::Scalar, 
     };
 
-    // Checked arithmetic for rows*cols
+    
     let _cap = rows
         .checked_mul(cols)
         .ok_or_else(|| HalfTrendError::InvalidRange { start: "rows".into(), end: "cols".into(), step: "mul".into() })?;
 
-    // Allocate 6 matrices with zero extra init in release
+    
     let mut mu_ht = make_uninit_matrix(rows, cols);
     let mut mu_tr = make_uninit_matrix(rows, cols);
     let mut mu_ah = make_uninit_matrix(rows, cols);
@@ -2446,7 +2446,7 @@ fn halftrend_batch_with_kernel_slices(
     let mut mu_bs = make_uninit_matrix(rows, cols);
     let mut mu_ss = make_uninit_matrix(rows, cols);
 
-    // Warm prefixes
+    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(HalfTrendError::AllValuesNaN);
@@ -2463,7 +2463,7 @@ fn halftrend_batch_with_kernel_slices(
     init_matrix_prefixes(&mut mu_bs, cols, &warms);
     init_matrix_prefixes(&mut mu_ss, cols, &warms);
 
-    // Cast to f64 for compute
+    
     let dst_ht =
         unsafe { core::slice::from_raw_parts_mut(mu_ht.as_mut_ptr() as *mut f64, mu_ht.len()) };
     let dst_tr =
@@ -2477,12 +2477,12 @@ fn halftrend_batch_with_kernel_slices(
     let dst_ss =
         unsafe { core::slice::from_raw_parts_mut(mu_ss.as_mut_ptr() as *mut f64, mu_ss.len()) };
 
-    // Compute rows into already-prefixed outputs
+    
     halftrend_batch_rows_into(
         high, low, close, sweep, simd, dst_ht, dst_tr, dst_ah, dst_al, dst_bs, dst_ss,
     )?;
 
-    // Take ownership without copy
+    
     let take = |v: Vec<MaybeUninit<f64>>| unsafe {
         let ptr = v.as_ptr() as *mut f64;
         let len = v.len();
@@ -2510,7 +2510,7 @@ fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>
         if start < end {
             return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -2559,7 +2559,7 @@ fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>
     Ok(out)
 }
 
-// ==================== BATCH PROCESSING HELPERS ====================
+
 #[inline(always)]
 fn warmup_from(first: usize, amplitude: usize, atr_period: usize) -> usize {
     first + amplitude.max(atr_period) - 1
@@ -2834,7 +2834,7 @@ pub fn halftrend_batch_rows_into(
     let rows = combos.len();
     let cols = len;
 
-    // Precompute shared SMA/ATR by unique periods
+    
     use std::collections::BTreeSet;
     let uniq_amp: BTreeSet<usize> = combos.iter().map(|p| p.amplitude.unwrap()).collect();
     let uniq_atr: BTreeSet<usize> = combos.iter().map(|p| p.atr_period.unwrap()).collect();
@@ -2856,7 +2856,7 @@ pub fn halftrend_batch_rows_into(
                 .values,
         );
     }
-    // Precompute rolling extrema per unique amplitude (shared across rows)
+    
     let mut roll_high_map: HashMap<usize, Vec<f64>> = HashMap::new();
     let mut roll_low_map: HashMap<usize, Vec<f64>> = HashMap::new();
     for &a in &uniq_amp {
@@ -2878,7 +2878,7 @@ pub fn halftrend_batch_rows_into(
         );
     }
 
-    // Compute rows (sequential for now to avoid complex unsafe pointer handling)
+    
     for row in 0..rows {
         let prm = &combos[row];
         let amp = prm.amplitude.unwrap();
@@ -2910,7 +2910,7 @@ pub fn halftrend_batch_rows_into(
     Ok(combos)
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "halftrend", signature = (
@@ -2947,7 +2947,7 @@ pub fn halftrend_py<'py>(
         .allow_threads(|| halftrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Create output dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("halftrend", out.halftrend.into_pyarray(py))?;
     dict.set_item("trend", out.trend.into_pyarray(py))?;
@@ -2959,7 +2959,7 @@ pub fn halftrend_py<'py>(
     Ok(dict)
 }
 
-// Compatibility wrapper for old tuple-based API
+
 #[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "halftrend_tuple", signature = (

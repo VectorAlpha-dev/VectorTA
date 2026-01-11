@@ -1,17 +1,17 @@
-// CUDA integration tests for the MEDIUM_AD indicator.
 
-use my_project::indicators::medium_ad::{
+
+use vector_ta::indicators::medium_ad::{
     medium_ad_batch_with_kernel, MediumAdBatchBuilder, MediumAdBatchRange, MediumAdBuilder,
     MediumAdParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaMediumAd;
+use vector_ta::cuda::CudaMediumAd;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -87,8 +87,8 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 5usize; // number of series
-    let rows = 1024usize; // series length
+    let cols = 5usize; 
+    let rows = 1024usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -97,7 +97,7 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    // CPU reference (apply per-series)
+    
     let period = 9usize;
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

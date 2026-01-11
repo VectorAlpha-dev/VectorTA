@@ -1,11 +1,11 @@
-// CUDA integration tests for Pivot indicator
 
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -15,7 +15,7 @@ fn pivot_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Synthesize OHLC with initial NaNs to exercise warmup
+    
     let len = 16384usize;
     let mut h = vec![f64::NAN; len];
     let mut l = vec![f64::NAN; len];
@@ -31,9 +31,9 @@ fn pivot_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         h[i] = base + range;
     }
 
-    let sweep = my_project::indicators::pivot::PivotBatchRange { mode: (0, 4, 1) };
+    let sweep = vector_ta::indicators::pivot::PivotBatchRange { mode: (0, 4, 1) };
 
-    let cpu = my_project::indicators::pivot::pivot_batch_flat_with_kernel(
+    let cpu = vector_ta::indicators::pivot::pivot_batch_flat_with_kernel(
         &h,
         &l,
         &c,
@@ -47,7 +47,7 @@ fn pivot_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cf: Vec<f32> = c.iter().map(|&v| v as f32).collect();
     let of: Vec<f32> = o.iter().map(|&v| v as f32).collect();
 
-    let cuda = my_project::cuda::pivot_wrapper::CudaPivot::new(0).expect("CudaPivot::new");
+    let cuda = vector_ta::cuda::pivot_wrapper::CudaPivot::new(0).expect("CudaPivot::new");
     let (dev, combos) = cuda
         .pivot_batch_dev(&hf, &lf, &cf, &of, &sweep)
         .expect("pivot batch dev");
@@ -105,7 +105,7 @@ fn pivot_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    // CPU baseline for mode 3 (Camarilla)
+    
     let mode = 3usize;
     let mut expected = vec![f64::NAN; 9 * cols * rows];
     for s in 0..cols {
@@ -120,9 +120,9 @@ fn pivot_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             c[t] = c_tm[idx];
             o[t] = o_tm[idx];
         }
-        let params = my_project::indicators::pivot::PivotParams { mode: Some(mode) };
-        let input = my_project::indicators::pivot::PivotInput::from_slices(&h, &l, &c, &o, params);
-        let out = my_project::indicators::pivot::pivot_with_kernel(&input, Kernel::Scalar)?;
+        let params = vector_ta::indicators::pivot::PivotParams { mode: Some(mode) };
+        let input = vector_ta::indicators::pivot::PivotInput::from_slices(&h, &l, &c, &o, params);
+        let out = vector_ta::indicators::pivot::pivot_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             expected[(0 * rows + t) * cols + s] = out.r4[t];
             expected[(1 * rows + t) * cols + s] = out.r3[t];
@@ -141,7 +141,7 @@ fn pivot_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let cf: Vec<f32> = c_tm.iter().map(|&v| v as f32).collect();
     let of: Vec<f32> = o_tm.iter().map(|&v| v as f32).collect();
 
-    let cuda = my_project::cuda::pivot_wrapper::CudaPivot::new(0).expect("CudaPivot::new");
+    let cuda = vector_ta::cuda::pivot_wrapper::CudaPivot::new(0).expect("CudaPivot::new");
     let dev = cuda
         .pivot_many_series_one_param_time_major_dev(&hf, &lf, &cf, &of, cols, rows, mode)
         .expect("pivot many-series dev");

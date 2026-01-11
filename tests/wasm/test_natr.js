@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -40,11 +40,11 @@ test.before(async () => {
 });
 
 test('NATR partial params', () => {
-    // Test with default period
+    
     const result1 = wasm.natr_js(testData.high, testData.low, testData.close, 14);
     assert.strictEqual(result1.length, testData.close.length);
     
-    // Test with custom period
+    
     const result2 = wasm.natr_js(testData.high, testData.low, testData.close, 7);
     assert.strictEqual(result2.length, testData.close.length);
 });
@@ -53,16 +53,16 @@ test('NATR accuracy', () => {
     const period = EXPECTED_OUTPUTS['natr']['default_params']['period'];
     const expected = EXPECTED_OUTPUTS['natr']['last_5_values'];
     
-    // Run NATR with default parameters
+    
     const result = wasm.natr_js(testData.high, testData.low, testData.close, period);
     
     assert.strictEqual(result.length, testData.close.length, 'Output length should match input length');
     
-    // Check last 5 values
+    
     const actual = result.slice(-5);
     assertArrayClose(actual, expected, 1e-8, 'NATR last 5 values should match expected');
     
-    // Check warmup period
+    
     for (let i = 0; i < period - 1; i++) {
         assert(isNaN(result[i]), `Value at index ${i} should be NaN during warmup`);
     }
@@ -119,12 +119,12 @@ test('NATR all NaN input', () => {
 
 
 test('NATR NaN handling', () => {
-    // Create data with some NaN values
+    
     const high = testData.high.slice(0, 100);
     const low = testData.low.slice(0, 100);
     const close = testData.close.slice(0, 100);
     
-    // Insert some NaNs in the middle
+    
     for (let i = 10; i < 15; i++) {
         high[i] = NaN;
         low[i] = NaN;
@@ -134,25 +134,25 @@ test('NATR NaN handling', () => {
     const result = wasm.natr_js(high, low, close, 14);
     assert.strictEqual(result.length, 100, 'Output length should match input length');
     
-    // First 13 values should be NaN due to warmup
+    
     for (let i = 0; i < 13; i++) {
         assert(isNaN(result[i]), `Index ${i} should be NaN during warmup`);
     }
     
-    // Values at index 13 and beyond will be NaN due to NaN in the window
+    
     assert(isNaN(result[13]), 'Index 13 should be NaN due to NaN values in window');
 });
 
 test('NATR reinput', () => {
-    // First calculation
+    
     const result1 = wasm.natr_js(testData.high, testData.low, testData.close, 14);
     assert.strictEqual(result1.length, testData.close.length);
     
-    // Use output as input (won't make sense for NATR but tests the API)
+    
     const result2 = wasm.natr_js(result1, result1, result1, 14);
     assert.strictEqual(result2.length, result1.length);
     
-    // Check that after warmup, we have some non-NaN values
+    
     const validCount = result2.slice(28).filter(v => !isNaN(v)).length;
     assert(validCount > 0, 'Should have valid values after double warmup');
 });
@@ -161,14 +161,14 @@ test('NATR fast API', () => {
     const period = 14;
     const len = testData.close.length;
     
-    // Allocate memory for all inputs and output
+    
     const highPtr = wasm.natr_alloc(len);
     const lowPtr = wasm.natr_alloc(len);
     const closePtr = wasm.natr_alloc(len);
     const outPtr = wasm.natr_alloc(len);
     
     try {
-        // Copy data into WASM memory
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
@@ -177,7 +177,7 @@ test('NATR fast API', () => {
         lowMem.set(testData.low);
         closeMem.set(testData.close);
         
-        // Compute NATR
+        
         wasm.natr_into(
             highPtr,
             lowPtr,
@@ -187,16 +187,16 @@ test('NATR fast API', () => {
             period
         );
         
-        // Read results
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(memory);
         
-        // Compare with safe API
+        
         const expected = wasm.natr_js(testData.high, testData.low, testData.close, period);
         assertArrayClose(result, expected, 1e-10, 'Fast API should match safe API');
         
     } finally {
-        // Free all memory
+        
         wasm.natr_free(highPtr, len);
         wasm.natr_free(lowPtr, len);
         wasm.natr_free(closePtr, len);
@@ -206,7 +206,7 @@ test('NATR fast API', () => {
 
 test('NATR batch API', () => {
     const config = {
-        period_range: [10, 20, 5]  // periods: 10, 15, 20
+        period_range: [10, 20, 5]  
     };
     
     const result = wasm.natr_batch(testData.high, testData.low, testData.close, config);
@@ -220,7 +220,7 @@ test('NATR batch API', () => {
     assert.strictEqual(result.cols, testData.close.length, 'Columns should match input length');
     assert.strictEqual(result.combos.length, 3, 'Should have 3 parameter combinations');
     
-    // Verify each row matches single calculation
+    
     for (let i = 0; i < result.rows; i++) {
         const period = result.combos[i].period;
         const rowStart = i * result.cols;
@@ -245,14 +245,14 @@ test('NATR batch single parameter set', () => {
     assert.strictEqual(batch_result.rows, 1, 'Should have 1 row');
     assert.strictEqual(batch_result.cols, testData.close.length, 'Columns should match input length');
     
-    // Compare batch vs single
+    
     const batchRow = batch_result.values.slice(0, batch_result.cols);
     assertArrayClose(batchRow, single_result, 1e-9, 'Batch should match single calculation');
 });
 
 test('NATR batch metadata from result', () => {
     const config = {
-        period_range: [7, 21, 7]  // 7, 14, 21
+        period_range: [7, 21, 7]  
     };
     
     const batch_result = wasm.natr_batch(testData.high, testData.low, testData.close, config);
@@ -264,14 +264,14 @@ test('NATR batch metadata from result', () => {
 });
 
 test('NATR batch edge cases', () => {
-    // Single period (step = 0)
+    
     const config1 = {
         period_range: [14, 14, 0]
     };
     const result1 = wasm.natr_batch(testData.high, testData.low, testData.close, config1);
     assert.strictEqual(result1.rows, 1, 'Step=0 should produce single row');
     
-    // Wide range
+    
     const config2 = {
         period_range: [5, 50, 5]
     };
@@ -297,13 +297,13 @@ test('NATR fast API in-place (aliasing)', () => {
     const period = 14;
     const len = testData.close.length;
     
-    // Test aliasing with high array
+    
     const highPtr = wasm.natr_alloc(len);
     const lowPtr = wasm.natr_alloc(len);
     const closePtr = wasm.natr_alloc(len);
     
     try {
-        // Copy data into WASM memory
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
@@ -312,26 +312,26 @@ test('NATR fast API in-place (aliasing)', () => {
         lowMem.set(testData.low);
         closeMem.set(testData.close);
         
-        // Compute NATR in-place (output overwrites high)
+        
         wasm.natr_into(
             highPtr,
             lowPtr,
             closePtr,
-            highPtr,  // Output to same location as high input
+            highPtr,  
             len,
             period
         );
         
-        // Read results
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const result = Array.from(memory);
         
-        // Compare with safe API
+        
         const expected = wasm.natr_js(testData.high, testData.low, testData.close, period);
         assertArrayClose(result, expected, 1e-10, 'In-place operation should match safe API');
         
     } finally {
-        // Free all memory
+        
         wasm.natr_free(highPtr, len);
         wasm.natr_free(lowPtr, len);
         wasm.natr_free(closePtr, len);
@@ -341,7 +341,7 @@ test('NATR fast API in-place (aliasing)', () => {
 test('NATR zero-copy API', () => {
     const len = testData.close.length;
     
-    // Allocate memory for all inputs and output
+    
     const highPtr = wasm.natr_alloc(len);
     const lowPtr = wasm.natr_alloc(len);
     const closePtr = wasm.natr_alloc(len);
@@ -353,7 +353,7 @@ test('NATR zero-copy API', () => {
     assert(outPtr !== 0, 'Should allocate output memory');
     
     try {
-        // Copy data into WASM memory
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
@@ -362,7 +362,7 @@ test('NATR zero-copy API', () => {
         lowMem.set(testData.low);
         closeMem.set(testData.close);
         
-        // Use the zero-copy API
+        
         wasm.natr_into(
             highPtr,
             lowPtr,
@@ -372,15 +372,15 @@ test('NATR zero-copy API', () => {
             14
         );
         
-        // Read result back
+        
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         
-        // Compare with regular API
+        
         const expected = wasm.natr_js(testData.high, testData.low, testData.close, 14);
         assertArrayClose(Array.from(result), expected, 1e-10, 'Zero-copy should match regular API');
         
     } finally {
-        // Free all memory
+        
         wasm.natr_free(highPtr, len);
         wasm.natr_free(lowPtr, len);
         wasm.natr_free(closePtr, len);
@@ -389,13 +389,13 @@ test('NATR zero-copy API', () => {
 });
 
 test('NATR zero-copy with large dataset', () => {
-    // Create larger dataset
+    
     const largeLen = 10000;
     const high = new Float64Array(largeLen);
     const low = new Float64Array(largeLen);
     const close = new Float64Array(largeLen);
     
-    // Fill with synthetic data
+    
     for (let i = 0; i < largeLen; i++) {
         const base = 100 + Math.sin(i * 0.1) * 10;
         high[i] = base + 2;
@@ -403,7 +403,7 @@ test('NATR zero-copy with large dataset', () => {
         close[i] = base;
     }
     
-    // Allocate memory for all inputs and output
+    
     const highPtr = wasm.natr_alloc(largeLen);
     const lowPtr = wasm.natr_alloc(largeLen);
     const closePtr = wasm.natr_alloc(largeLen);
@@ -415,7 +415,7 @@ test('NATR zero-copy with large dataset', () => {
     assert(outPtr !== 0, 'Should allocate output memory');
     
     try {
-        // Copy data into WASM memory
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, largeLen);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, largeLen);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, largeLen);
@@ -428,12 +428,12 @@ test('NATR zero-copy with large dataset', () => {
         
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, largeLen);
         
-        // Check warmup period
+        
         for (let i = 0; i < 13; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN during warmup`);
         }
         
-        // Check we have valid values after warmup
+        
         let validCount = 0;
         for (let i = 13; i < largeLen; i++) {
             if (!isNaN(result[i])) validCount++;
@@ -449,20 +449,20 @@ test('NATR zero-copy with large dataset', () => {
 });
 
 test('NATR zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.natr_into(0, 0, 0, 0, 10, 14);
     }, /Null pointer|null pointer/i);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.natr_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.natr_into(ptr, ptr, ptr, ptr, 10, 0);
         }, /Invalid period/);
         
-        // Period exceeds data length
+        
         assert.throws(() => {
             wasm.natr_into(ptr, ptr, ptr, ptr, 10, 20);
         }, /Invalid period/);
@@ -472,25 +472,25 @@ test('NATR zero-copy error handling', () => {
 });
 
 test('NATR zero-copy memory management', () => {
-    // Test multiple allocations and frees
+    
     const ptrs = [];
     const sizes = [100, 500, 1000, 5000];
     
-    // Allocate multiple buffers
+    
     for (const size of sizes) {
         const ptr = wasm.natr_alloc(size);
         assert(ptr !== 0, `Should allocate ${size} elements`);
         ptrs.push({ ptr, size });
     }
     
-    // Use and free them
+    
     for (const { ptr, size } of ptrs) {
-        // Allocate memory for inputs
+        
         const highPtr = wasm.natr_alloc(size);
         const lowPtr = wasm.natr_alloc(size);
         const closePtr = wasm.natr_alloc(size);
         
-        // Create and copy test data
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, size);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, size);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
@@ -499,14 +499,14 @@ test('NATR zero-copy memory management', () => {
         lowMem.fill(90);
         closeMem.fill(95);
         
-        // Process
+        
         wasm.natr_into(highPtr, lowPtr, closePtr, ptr, size, 14);
         
-        // Verify we can read the memory
+        
         const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         assert.strictEqual(result.length, size);
         
-        // Free all memory
+        
         wasm.natr_free(highPtr, size);
         wasm.natr_free(lowPtr, size);
         wasm.natr_free(closePtr, size);
@@ -515,26 +515,26 @@ test('NATR zero-copy memory management', () => {
 });
 
 test('NATR handles zero close price', () => {
-    // Create data with zero close price
+    
     const high = [100, 110, 105, 108];
     const low = [95, 100, 98, 102];
-    const close = [98, 105, 0, 106];  // Zero at index 2
+    const close = [98, 105, 0, 106];  
     
     const result = wasm.natr_js(high, low, close, 2);
     
-    // Check that result at index with zero close is NaN
+    
     assert(isNaN(result[2]), 'Result should be NaN when close price is zero');
 });
 
 test('NATR handles infinite values', () => {
-    // Create data with infinite values
+    
     const high = [100, 110, Infinity, 108];
     const low = [95, 100, 98, 102];
     const close = [98, 105, 100, 106];
     
     const result = wasm.natr_js(high, low, close, 2);
     
-    // After encountering infinity, subsequent values should be affected
+    
     assert(result.some(v => !isNaN(v) && isFinite(v)), 'Should have some valid finite values');
 });
 
@@ -543,23 +543,23 @@ test('NATR batch API with zero-copy', () => {
         period_range: [10, 20, 5]
     };
     
-    // Test batch calculation
+    
     const batch_result = wasm.natr_batch(testData.high, testData.low, testData.close, config);
     
-    // Also test the batch_into if available
+    
     if (wasm.natr_batch_into) {
-        const rows = 3; // 10, 15, 20
+        const rows = 3; 
         const cols = testData.close.length;
         const totalSize = rows * cols;
         
-        // Allocate memory for inputs and output
+        
         const highPtr = wasm.natr_alloc(cols);
         const lowPtr = wasm.natr_alloc(cols);
         const closePtr = wasm.natr_alloc(cols);
         const outPtr = wasm.natr_alloc(totalSize);
         
         try {
-            // Copy data into WASM memory
+            
             const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, cols);
             const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, cols);
             const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, cols);
@@ -579,7 +579,7 @@ test('NATR batch API with zero-copy', () => {
             
             assert.strictEqual(resultRows, rows, 'Should return correct number of rows');
             
-            // Read and verify results
+            
             const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
             assertArrayClose(
                 Array.from(result),

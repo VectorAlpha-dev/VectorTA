@@ -1,42 +1,42 @@
-// Keltner band combiners (optimized, FP32)
-// - Vectorized float4 path when sizes permit
-// - FMA for accuracy/perf
-// - Grid-stride loops
-// - Shared-memory broadcast of per-row scalars in the 1-series-many-params kernel
+
+
+
+
+
 
 #include <cuda_runtime.h>
 
 #ifndef __CUDACC_RTC__
-// local fast NaN to avoid headers; identical bit pattern to CUDART_NAN_F
+
 static __device__ __forceinline__ float fast_nan() {
     return __int_as_float(0x7fffffff);
 }
 #else
-// NVRTC: fallback
+
 static __device__ __forceinline__ float fast_nan() { return nanf(""); }
 #endif
 
-// -----------------------------------------------
-// 1) One price series, many parameter rows (main focus)
-// ma_rows, atr_rows : [Prows x len] row-major
-// -----------------------------------------------
+
+
+
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void keltner_batch_f32(
-    const float* __restrict__ ma_rows,           // [Prows x len]
-    const float* __restrict__ atr_rows,          // [Prows x len]
-    const int*   __restrict__ row_period_idx,    // [R]
-    const float* __restrict__ row_multipliers,   // [R]
-    const int*   __restrict__ row_warms,         // [R] absolute warm index per row
+    const float* __restrict__ ma_rows,           
+    const float* __restrict__ atr_rows,          
+    const int*   __restrict__ row_period_idx,    
+    const float* __restrict__ row_multipliers,   
+    const int*   __restrict__ row_warms,         
     int len,
-    int rows,                                    // R
-    float* __restrict__ out_upper,               // [R x len]
-    float* __restrict__ out_middle,              // [R x len]
-    float* __restrict__ out_lower                // [R x len]
+    int rows,                                    
+    float* __restrict__ out_upper,               
+    float* __restrict__ out_middle,              
+    float* __restrict__ out_lower                
 ) {
     const int r = blockIdx.y;
     if (r >= rows) return;
 
-    // Broadcast the row's scalar parameters once per block
+    
     __shared__ int   s_pidx;
     __shared__ int   s_warm;
     __shared__ float s_mult;
@@ -50,7 +50,7 @@ void keltner_batch_f32(
     const float neg_mult = -s_mult;
     const float nanv     = fast_nan();
 
-    // Base pointers for this row/period row
+    
     const size_t base_p = static_cast<size_t>(s_pidx) * static_cast<size_t>(len);
     const size_t base_r = static_cast<size_t>(r)      * static_cast<size_t>(len);
 
@@ -63,12 +63,12 @@ void keltner_batch_f32(
     const int t0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    // Vectorized path if len is multiple of 4 (cudaMalloc gives >=256B alignment)
+    
     if ((len & 3) == 0) {
         const int len4 = len >> 2;
         for (int i4 = t0; i4 < len4; i4 += stride) {
-            const int t = (i4 << 2);          // starting lane time index
-            // If the whole 4-lane pack is before warm, write 4x NaN without reading inputs
+            const int t = (i4 << 2);          
+            
             if (t + 3 < s_warm) {
                 const float4 n4 = make_float4(nanv, nanv, nanv, nanv);
                 reinterpret_cast<float4*>(outM)[i4] = n4;
@@ -107,7 +107,7 @@ void keltner_batch_f32(
         return;
     }
 
-    // Scalar fallback
+    
     for (int t = t0; t < len; t += stride) {
         if (t < s_warm) {
             outM[t] = nanv; outU[t] = nanv; outL[t] = nanv;
@@ -122,31 +122,31 @@ void keltner_batch_f32(
 }
 
 
-// -----------------------------------------------
-// 2) Many series, one param (time-major layout)
-// ma_tm, atr_tm : [rows*cols] time-major (idx = t*cols + s)
-// Includes both:
-//   - fast 2-D launch path (grid.y = rows, x covers cols)
-//   - 1-D fallback compatible with the original launch
-// -----------------------------------------------
+
+
+
+
+
+
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void keltner_many_series_one_param_f32(
-    const float* __restrict__ ma_tm,        // [rows*cols] time-major
-    const float* __restrict__ atr_tm,       // [rows*cols] time-major
-    const int*   __restrict__ first_valids, // [cols]
+    const float* __restrict__ ma_tm,        
+    const float* __restrict__ atr_tm,       
+    const int*   __restrict__ first_valids, 
     int period,
     int cols,
     int rows,
-    int elems,                               // rows * cols (may be unused in 2-D path)
+    int elems,                               
     float multiplier,
-    float* __restrict__ out_upper_tm,       // [rows*cols] time-major
-    float* __restrict__ out_middle_tm,      // [rows*cols] time-major
-    float* __restrict__ out_lower_tm        // [rows*cols] time-major
+    float* __restrict__ out_upper_tm,       
+    float* __restrict__ out_middle_tm,      
+    float* __restrict__ out_lower_tm        
 ) {
     const float nanv      = fast_nan();
     const float neg_mult  = -multiplier;
 
-    // Fast 2-D path (recommended): grid.y == rows, grid.x covers columns
+    
     if (gridDim.y > 1) {
         const int t = blockIdx.y;
         if (t >= rows) return;
@@ -166,7 +166,7 @@ void keltner_many_series_one_param_f32(
             for (int i4 = s0; i4 < cols4; i4 += stride) {
                 const int s = (i4 << 2);
 
-                // Load 4 first_valids; compute warms once
+                
                 const int4 fv4 = reinterpret_cast<const int4*>(first_valids)[i4];
                 const int w0 = fv4.x + period - 1;
                 const int w1 = fv4.y + period - 1;
@@ -178,7 +178,7 @@ void keltner_many_series_one_param_f32(
                 const bool v2 = t >= w2;
                 const bool v3 = t >= w3;
 
-                // If all invalid for this time t, write NaNs without touching MA/ATR
+                
                 if (!(v0 | v1 | v2 | v3)) {
                     const float4 n4 = make_float4(nanv, nanv, nanv, nanv);
                     reinterpret_cast<float4*>(outM_row)[i4] = n4;
@@ -212,7 +212,7 @@ void keltner_many_series_one_param_f32(
             return;
         }
 
-        // Scalar fallback across columns
+        
         for (int s = s0; s < cols; s += stride) {
             const int warm = first_valids[s] + period - 1;
             if (t < warm) {
@@ -228,7 +228,7 @@ void keltner_many_series_one_param_f32(
         return;
     }
 
-    // 1-D fallback path (compatible with original launch model)
+    
     {
         const int i0 = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = blockDim.x * gridDim.x;
@@ -246,7 +246,7 @@ void keltner_many_series_one_param_f32(
             const float a   = atr_tm[idx];
             out_middle_tm[idx] = mid;
             out_upper_tm [idx] = fmaf(multiplier, a, mid);
-            out_lower_tm [idx] = fmaf(-multiplier, a, mid); // local negate
+            out_lower_tm [idx] = fmaf(-multiplier, a, mid); 
         }
     }
 }

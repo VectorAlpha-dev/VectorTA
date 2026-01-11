@@ -1,14 +1,14 @@
-use my_project::indicators::ttm_trend::{
+use vector_ta::indicators::ttm_trend::{
     ttm_trend_batch_with_kernel, ttm_trend_with_kernel, TtmTrendBatchBuilder, TtmTrendBatchRange,
     TtmTrendInput, TtmTrendParams,
 };
-use my_project::utilities::data_loader::Candles;
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::data_loader::Candles;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaTtmTrend};
+use vector_ta::cuda::{cuda_available, CudaTtmTrend};
 
 fn make_series(len: usize) -> (Vec<f64>, Vec<f64>) {
     let mut src = vec![f64::NAN; len];
@@ -40,7 +40,7 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let (src, cls) = make_series(len);
     let sweep = TtmTrendBatchRange { period: (5, 64, 7) };
 
-    // CPU baseline (bool -> f32 mapping)
+    
     let cpu = ttm_trend_batch_with_kernel(&src, &cls, &sweep, Kernel::ScalarBatch)?;
     let cpu_f32: Vec<f32> = cpu
         .values
@@ -48,7 +48,7 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         .map(|&b| if b { 1.0 } else { 0.0 })
         .collect();
 
-    // GPU
+    
     let src_f32: Vec<f32> = src.iter().map(|&v| v as f32).collect();
     let cls_f32: Vec<f32> = cls.iter().map(|&v| v as f32).collect();
     let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");
@@ -82,8 +82,8 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 8usize; // number of series
-    let rows = 2048usize; // length per series
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut src_tm = vec![f64::NAN; cols * rows];
     let mut cls_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -97,7 +97,7 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let period = 13usize;
 
-    // CPU per-series
+    
     let mut cpu_bool_tm = vec![false; cols * rows];
     for s in 0..cols {
         let mut src = vec![f64::NAN; rows];
@@ -123,7 +123,7 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         .map(|&b| if b { 1.0 } else { 0.0 })
         .collect();
 
-    // GPU
+    
     let src_tm_f32: Vec<f32> = src_tm.iter().map(|&v| v as f32).collect();
     let cls_tm_f32: Vec<f32> = cls_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");

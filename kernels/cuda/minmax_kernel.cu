@@ -1,17 +1,17 @@
-// CUDA kernels for MinMax (Local Extrema)
-//
-// Semantics mirror the scalar Rust implementation in src/indicators/minmax.rs:
-// - Inputs: high, low (f32)
-// - Parameter: order (window radius). A point i is a local min if:
-//     - low[i] is finite
-//     - all k neighbors on both sides are finite (low)
-//     - low[i] < min(low[i-1..i-k]) and low[i] < min(low[i+1..i+k])
-//   Similarly for local max using high and strict > with max over neighbors.
-// - Warmup/NaN rules:
-//     - Write NaN for indices < first_valid
-//     - is_min/is_max remain NaN unless the strict inequalities are satisfied
-//     - last_min/last_max forward-fill the most recent extrema, starting from NaN
-// - Many-series kernel expects time-major layout: index = t * num_series + s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -38,7 +38,7 @@ void minmax_batch_f32(const float* __restrict__ high,
     if (row >= n_combos) return;
 
     const int base = row * series_len;
-    // Initialize this row's outputs to NaN in parallel
+    
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < series_len; i += blockDim.x * gridDim.x) {
         out_is_min[base + i] = CUDART_NAN_F;
         out_is_max[base + i] = CUDART_NAN_F;
@@ -47,7 +47,7 @@ void minmax_batch_f32(const float* __restrict__ high,
     }
     __syncthreads();
 
-    // Single thread per row does the sequential scan to maintain forward-fill state
+    
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     int order = orders[row];
@@ -65,7 +65,7 @@ void minmax_batch_f32(const float* __restrict__ high,
         const float ch = high[i];
         const float cl = low[i];
         if (in_bounds && isfinite(ch) && isfinite(cl)) {
-            // Check LOW neighbors on both sides are finite and strictly greater than center
+            
             bool left_ok_low = true, right_ok_low = true;
             float lmin = CUDART_INF_F, rmin = CUDART_INF_F;
             for (int o = 1; o <= order; ++o) {
@@ -80,7 +80,7 @@ void minmax_batch_f32(const float* __restrict__ high,
                 min_here = cl;
             }
 
-            // Check HIGH neighbors on both sides are finite and strictly less than center
+            
             bool left_ok_high = true, right_ok_high = true;
             float lmax = -CUDART_INF_F, rmax = -CUDART_INF_F;
             for (int o = 1; o <= order; ++o) {
@@ -105,7 +105,7 @@ void minmax_batch_f32(const float* __restrict__ high,
     }
 }
 
-// Many-series × one-param (time-major): [t][series]
+
 extern "C" __global__
 void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_tm,
                                                  const float* __restrict__ low_tm,
@@ -117,12 +117,12 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
                                                  float* __restrict__ out_is_max_tm,
                                                  float* __restrict__ out_last_min_tm,
                                                  float* __restrict__ out_last_max_tm) {
-    const int s = blockIdx.x; // one block per series
+    const int s = blockIdx.x; 
     if (s >= num_series || series_len <= 0 || order <= 0) return;
     const int stride = num_series;
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
 
-    // init outputs to NaN for this series
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         const int idx = t * stride + s;
         out_is_min_tm[idx] = CUDART_NAN_F;
@@ -185,18 +185,18 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
 }
 
 
-// -----------------------------------------------------------------------------
-// Optimized "one series – many params" path via Sparse Tables (RMQ) + parallel
-// forward-fill. These are additive kernels and keep original ones intact.
-// -----------------------------------------------------------------------------
+
+
+
+
 
 #ifndef WARP_SIZE
 #define WARP_SIZE 32
 #endif
 
-// ------------------------ Utilities ------------------------
+
 static __device__ __forceinline__ int ilog2_floor_u32(unsigned int x) {
-    // precondition: x > 0
+    
     return 31 - __clz(x);
 }
 
@@ -204,7 +204,7 @@ static __device__ __forceinline__ float fminf2(float a, float b) { return fminf(
 static __device__ __forceinline__ float fmaxf2(float a, float b) { return fmaxf(a, b); }
 static __device__ __forceinline__ uint8_t min_u8(uint8_t a, uint8_t b) { return a < b ? a : b; }
 
-// RMQ query helpers over Sparse Tables laid out as [level][idx], with level stride = series_len.
+
 static __device__ __forceinline__
 float rmq_min_f32(const float* __restrict__ st, int series_len, int l, int r) {
     unsigned int span = (unsigned int)(r - l + 1);
@@ -238,8 +238,8 @@ uint8_t rmq_min_u8(const uint8_t* __restrict__ st, int series_len, int l, int r)
     return min_u8(a, b);
 }
 
-// ------------------------ Sparse-table build ------------------------
-// Level 0 init for both min/max and validity (low/high separately)
+
+
 extern "C" __global__
 void st_init_level0_minmax_valid_f32(const float* __restrict__ low,
                                      const float* __restrict__ high,
@@ -256,17 +256,17 @@ void st_init_level0_minmax_valid_f32(const float* __restrict__ low,
     const bool fl = isfinite(cl);
     const bool fh = isfinite(ch);
 
-    // Level 0 at offset 0
+    
     low_min_st[i]  = fl ? cl : CUDART_INF_F;
     high_max_st[i] = fh ? ch : -CUDART_INF_F;
     valid_low_st[i]  = fl ? 1u : 0u;
     valid_high_st[i] = fh ? 1u : 0u;
 }
 
-// Build level k >= 1 from k-1 for all arrays in one pass
+
 extern "C" __global__
 void st_build_level_k_minmax_valid_f32(int series_len,
-                                       int k, // >=1
+                                       int k, 
                                        float* __restrict__ low_min_st,
                                        float* __restrict__ high_max_st,
                                        uint8_t* __restrict__ valid_low_st,
@@ -274,7 +274,7 @@ void st_build_level_k_minmax_valid_f32(int series_len,
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int half = 1 << (k - 1);
     const int span = 1 << k;
-    if (i > series_len - span) return; // only compute valid starting positions
+    if (i > series_len - span) return; 
 
     const int prev = (k - 1) * series_len;
 
@@ -295,7 +295,7 @@ void st_build_level_k_minmax_valid_f32(int series_len,
     valid_high_st[k * series_len + i] = min_u8(avH, bvH);
 }
 
-// ------------------------ O(1) query compute (many params) ------------------------
+
 extern "C" __global__
 void minmax_batch_rmq_f32(const float* __restrict__ high,
                           const float* __restrict__ low,
@@ -310,14 +310,14 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
                           float* __restrict__ out_is_min,
                           float* __restrict__ out_is_max) {
     if (series_len <= 0) return;
-    const int row = blockIdx.y; // one row per param
+    const int row = blockIdx.y; 
     if (row >= n_combos) return;
 
     const int k = orders[row];
     const int base = row * series_len;
 
     if (k <= 0) {
-        // still ensure outputs are NaN deterministically
+        
         for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
             out_is_min[base + t] = CUDART_NAN_F;
             out_is_max[base + t] = CUDART_NAN_F;
@@ -325,9 +325,9 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         return;
     }
 
-    // For this kernel, all RMQ query spans are exactly `k`, so the sparse-table
-    // level and offsets are constant per row. Hoist them once to reduce per-t
-    // instruction count and redundant __clz().
+    
+    
+    
     const unsigned ku = (unsigned)k;
     const int klog = ilog2_floor_u32(ku);
     const int step = 1 << klog;
@@ -335,7 +335,7 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
 
     const int fv = (first_valid < 0 ? 0 : first_valid);
     for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
-        // Default outputs to NaN; overwrite if an extrema is found
+        
         out_is_min[base + t] = CUDART_NAN_F;
         out_is_max[base + t] = CUDART_NAN_F;
         if (t < fv) continue;
@@ -346,13 +346,13 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         const float ch = high[t];
         if (!(isfinite(cl) && isfinite(ch))) continue;
 
-        // LOW min
+        
         const int l0 = t - k;
         const int r0 = t - 1;
-        const int r0b = t - step; // r0 - step + 1
+        const int r0b = t - step; 
         const int l1 = t + 1;
         const int r1 = t + k;
-        const int r1b = t + k - step + 1; // r1 - step + 1
+        const int r1b = t + k - step + 1; 
         uint8_t left_ok_low  = min_u8(valid_low_st[off + l0], valid_low_st[off + r0b]);
         uint8_t right_ok_low = min_u8(valid_low_st[off + l1], valid_low_st[off + r1b]);
         if (left_ok_low && right_ok_low) {
@@ -363,7 +363,7 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
             }
         }
 
-        // HIGH max
+        
         uint8_t left_ok_high  = min_u8(valid_high_st[off + l0], valid_high_st[off + r0b]);
         uint8_t right_ok_high = min_u8(valid_high_st[off + l1], valid_high_st[off + r1b]);
         if (left_ok_high && right_ok_high) {
@@ -376,7 +376,7 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
     }
 }
 
-// ------------------------ Parallel forward-fill (two streams) ------------------------
+
 static __device__ __forceinline__ float combine_last_finite(float a, float b) {
     return isfinite(b) ? b : a;
 }
@@ -404,7 +404,7 @@ void forward_fill_two_streams_f32(const float* __restrict__ in_is_min,
 
     const int base = row * series_len;
     const unsigned full_mask = 0xffffffffu;
-    __shared__ float warp_totals_min[WARP_SIZE]; // up to 32 warps
+    __shared__ float warp_totals_min[WARP_SIZE]; 
     __shared__ float warp_totals_max[WARP_SIZE];
 
     float carry_min = CUDART_NAN_F;

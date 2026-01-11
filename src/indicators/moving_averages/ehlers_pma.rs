@@ -163,8 +163,8 @@ impl<'a> EhlersPmaInput<'a> {
     }
 }
 
-// ---------------- Python CUDA handle (CAI v3 + DLPack) -----------------
-// Only compiled when python + cuda are enabled together.
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyo3::pyclass(module = "ta_indicators.cuda", name = "EhlersPmaDeviceArrayF32", unsendable)]
 pub struct EhlersPmaDeviceArrayF32Py {
@@ -213,7 +213,7 @@ impl EhlersPmaDeviceArrayF32Py {
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Interpret __dlpack__ arguments per Array API and validate device.
+        
         let (kdl, alloc_dev) = slf.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -235,11 +235,11 @@ impl EhlersPmaDeviceArrayF32Py {
             }
         }
 
-        // Stream semantics: producing kernels have completed before __dlpack__ is
-        // called, so `stream` is accepted but not used.
+        
+        
         let _ = stream;
 
-        // Move the device array out of this wrapper; the DLPack capsule owns it.
+        
         let dummy = cust::memory::DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(&mut slf.inner, DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 });
@@ -378,9 +378,9 @@ pub fn ehlers_pma_with_kernel(
         .position(|x| !x.is_nan())
         .ok_or(EhlersPmaError::AllValuesNaN)?;
 
-    // TradingView parity: src is effectively data[1] on historical bars.
-    // With a 1-bar lag, first WMA7 needs indices [i-1..i-7] ⇒ i ≥ first_valid + 7
-    // Then WMA7(WMA7) ⇒ i ≥ first_valid + 13
+    
+    
+    
     const MIN_REQUIRED: usize = 14;
     if len - first_valid < MIN_REQUIRED {
         return Err(EhlersPmaError::NotEnoughValidData {
@@ -389,23 +389,23 @@ pub fn ehlers_pma_with_kernel(
         });
     }
 
-    // warmups with 1-bar lag
+    
     let warm_wma1 = first_valid + 7;
     let warm_wma2 = first_valid + 13;
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    // allocate with minimal writes
+    
     let mut predict = alloc_with_nan_prefix(len, warm_predict);
     let mut trigger = alloc_with_nan_prefix(len, warm_trigger);
 
-    // Determine which kernel to use
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    // Compute using appropriate kernel
+    
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
@@ -423,8 +423,8 @@ pub fn ehlers_pma_with_kernel(
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            // Accept ScalarBatch explicitly in no-AVX builds too
-            let _ = chosen; // keep var used
+            
+            let _ = chosen; 
             ehlers_pma_scalar_direct(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger);
         }
     }
@@ -452,12 +452,12 @@ fn ehlers_pma_scalar_direct(
     let inv28 = 1.0 / 28.0;
     let inv10 = 1.0 / 10.0;
 
-    // Keep the last 7 WMA1 values to compute WMA2 without allocating O(n) temporaries.
+    
     let mut w_ring = [0.0f64; 7];
     let mut w_head = 0usize;
 
     for i in warm_wma1..len {
-        // WMA1 on src lag (TradingView parity: src is data[i-1] on historical bars).
+        
         let w1 = (7.0 * data[i - 1]
             + 6.0 * data[i - 2]
             + 5.0 * data[i - 3]
@@ -473,12 +473,12 @@ fn ehlers_pma_scalar_direct(
             w_head = 0;
         }
 
-        // WMA2 becomes available once we have 7 WMA1 samples (i >= warm_wma2).
+        
         if i < warm_wma2 {
             continue;
         }
 
-        // 7*newest + ... + 1*oldest (same newest-first order as the scalar/batch reference).
+        
         let k0 = if w_head == 0 { 6 } else { w_head - 1 };
         let k1 = if k0 == 0 { 6 } else { k0 - 1 };
         let k2 = if k1 == 0 { 6 } else { k1 - 1 };
@@ -496,11 +496,11 @@ fn ehlers_pma_scalar_direct(
             + 1.0 * w_ring[k6])
             * inv28;
 
-        // Predict = 2*WMA1 - WMA2
+        
         let p = 2.0 * w1 - w2;
         predict[i] = p;
 
-        // Trigger WMA4(predict) after warmup
+        
         if i >= warm_trigger {
             trigger[i] =
                 (4.0 * p + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
@@ -509,7 +509,7 @@ fn ehlers_pma_scalar_direct(
     }
 }
 
-// Scalar kernel implementation
+
 #[inline]
 pub fn ehlers_pma_scalar(
     data: &[f64],
@@ -530,7 +530,7 @@ pub fn ehlers_pma_scalar(
     let inv28 = 1.0 / 28.0;
     let inv10 = 1.0 / 10.0;
 
-    // Loop 1: compute WMA1 on src lag
+    
     for i in warm_wma1..len {
         wma1[i] = (7.0 * data[i - 1]
             + 6.0 * data[i - 2]
@@ -542,7 +542,7 @@ pub fn ehlers_pma_scalar(
             * inv28;
     }
 
-    // Loop 2: compute WMA2 on WMA1
+    
     for i in warm_wma2..len {
         wma2[i] = (7.0 * wma1[i]
             + 6.0 * wma1[i - 1]
@@ -554,12 +554,12 @@ pub fn ehlers_pma_scalar(
             * inv28;
     }
 
-    // Predict = 2*WMA1 - WMA2
+    
     for i in warm_predict..len {
         predict[i] = 2.0 * wma1[i] - wma2[i];
     }
 
-    // Trigger WMA4(predict)
+    
     for i in warm_trigger..len {
         trigger[i] =
             (4.0 * predict[i] + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
@@ -567,7 +567,7 @@ pub fn ehlers_pma_scalar(
     }
 }
 
-// AVX2 kernel stub - falls back to scalar for now
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn ehlers_pma_avx2(
@@ -578,12 +578,12 @@ unsafe fn ehlers_pma_avx2(
     warm_wma2: usize,
     warm_trigger: usize,
 ) {
-    // TODO: Implement AVX2 optimized version
-    // For now, fall back to scalar
+    
+    
     ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
 
-// AVX512 kernel stub - falls back to scalar for now
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn ehlers_pma_avx512(
@@ -594,12 +594,12 @@ unsafe fn ehlers_pma_avx512(
     warm_wma2: usize,
     warm_trigger: usize,
 ) {
-    // TODO: Implement AVX512 optimized version
-    // For now, fall back to scalar
+    
+    
     ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
 
-// Kernel-aware zero-copy flat output
+
 #[inline]
 pub fn ehlers_pma_into_flat_with_kernel(
     out: &mut [f64],
@@ -642,7 +642,7 @@ pub fn ehlers_pma_into_flat_with_kernel(
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    // init warm prefixes once, but ensure we don't exceed array bounds
+    
     for v in &mut predict_flat[..warm_predict.min(len)] {
         *v = f64::NAN;
     }
@@ -672,7 +672,7 @@ pub fn ehlers_pma_into_flat_with_kernel(
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            let _ = chosen; // keep var used
+            let _ = chosen; 
             ehlers_pma_scalar_direct(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger);
         }
     }
@@ -680,7 +680,7 @@ pub fn ehlers_pma_into_flat_with_kernel(
     Ok((rows, cols))
 }
 
-// Flat "into" API for multi-output (rows=2)
+
 #[inline]
 pub fn ehlers_pma_into_flat(
     out: &mut [f64],
@@ -689,7 +689,7 @@ pub fn ehlers_pma_into_flat(
     ehlers_pma_into_flat_with_kernel(out, input, Kernel::Auto)
 }
 
-// Kernel-aware zero-copy "into_slices"
+
 #[inline]
 pub fn ehlers_pma_into_slices_with_kernel(
     predict: &mut [f64],
@@ -726,7 +726,7 @@ pub fn ehlers_pma_into_slices_with_kernel(
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    // warm prefixes
+    
     for v in &mut predict[..warm_predict.min(len)] {
         *v = f64::NAN;
     }
@@ -756,14 +756,14 @@ pub fn ehlers_pma_into_slices_with_kernel(
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            let _ = chosen; // keep var used
+            let _ = chosen; 
             ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger);
         }
     }
     Ok(())
 }
 
-// Zero-copy "into_slices"
+
 #[inline]
 pub fn ehlers_pma_into_slices(
     predict: &mut [f64],
@@ -787,35 +787,35 @@ pub fn ehlers_pma_into(
     ehlers_pma_into_slices_with_kernel(predict, trigger, input, Kernel::Auto)
 }
 
-// Streaming implementation (recurrences + rings; TradingView 1-bar lag)
+
 #[derive(Debug, Clone)]
 pub struct EhlersPmaStream {
-    // TradingView parity: feed WMA7 with previous tick (1-bar lag)
+    
     prev: Option<f64>,
 
-    // Rings for values needed to retire oldest in O(1) recurrences
-    x_ring: [f64; 7], // raw (lagged) prices
-    w_ring: [f64; 7], // WMA1 values
-    p_ring: [f64; 4], // last 4 predicts (for trigger)
+    
+    x_ring: [f64; 7], 
+    w_ring: [f64; 7], 
+    p_ring: [f64; 4], 
 
-    // Heads
+    
     x_head: usize,
     w_head: usize,
     p_head: usize,
 
-    // Fill counts
-    filled_x: usize, // 0..=7 (price window)
-    filled_w: usize, // 0..=7 (wma1 window)
-    filled_p: usize, // 0..=4 (trigger window)
+    
+    filled_x: usize, 
+    filled_w: usize, 
+    filled_p: usize, 
 
-    // Rolling accumulators
-    // Prices: A = sum, S = weighted sum (1..7)
+    
+    
     A: f64,
     S: f64,
-    // WMA1: A1 = sum, S1 = weighted sum (1..7)
+    
     A1: f64,
     S1: f64,
-    // Trigger: A2 = sum of last 4 predicts, T = weighted sum (4,3,2,1)
+    
     A2: f64,
     T: f64,
 }
@@ -845,16 +845,16 @@ impl EhlersPmaStream {
 
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // Ignore NaNs to mirror batch behavior (batch waits until first_valid)
+        
         if value.is_nan() {
             return None;
         }
 
-        // Establish 1-bar lag source
+        
         let src_lag = match self.prev {
             None => {
                 self.prev = Some(value);
-                return None; // need one finite tick to establish lag
+                return None; 
             }
             Some(p) => {
                 self.prev = Some(value);
@@ -862,10 +862,10 @@ impl EhlersPmaStream {
             }
         };
 
-        const INV_28: f64 = 1.0 / 28.0; // sum 1..7
-        const INV_10: f64 = 1.0 / 10.0; // 4+3+2+1
+        const INV_28: f64 = 1.0 / 28.0; 
+        const INV_10: f64 = 1.0 / 10.0; 
 
-        // Push lagged price into 7-ring and update A,S once full
+        
         if self.filled_x < 7 {
             self.x_ring[self.x_head] = src_lag;
             self.x_head += 1;
@@ -878,12 +878,12 @@ impl EhlersPmaStream {
                 return None;
             }
 
-            // One-time O(7) seed of A,S over x_ring
+            
             let x = &self.x_ring;
             self.A = ((x[0] + x[1]) + (x[2] + x[3])) + ((x[4] + x[5]) + x[6]);
 
-            // Compute weighted sum in the same newest-first order as batch/scalar
-            // 7*newest + 6*... + ... + 1*oldest
+            
+            
             self.S = 7.0 * x[6]
                 + 6.0 * x[5]
                 + 5.0 * x[4]
@@ -892,11 +892,11 @@ impl EhlersPmaStream {
                 + 2.0 * x[1]
                 + 1.0 * x[0];
 
-            // Derive first w1 via explicit 7-term weighted sum (parity with batch)
+            
             let w1 = self.S * INV_28;
 
-            let old_A1 = self.A1; // 0 initially
-            let w_old = self.w_ring[self.w_head]; // 0 initially
+            let old_A1 = self.A1; 
+            let w_old = self.w_ring[self.w_head]; 
             self.S1 = self.S1 + 7.0 * w1 - old_A1;
             self.A1 = self.A1 + w1 - w_old;
 
@@ -905,13 +905,13 @@ impl EhlersPmaStream {
             if self.w_head == 7 {
                 self.w_head = 0;
             }
-            self.filled_w = 1; // we now have one WMA1 sample in the 7-ring
+            self.filled_w = 1; 
 
-            // Not enough WMA1 samples to form WMA2 yet
+            
             return None;
         }
 
-        // Rolling update for price LWMA accumulators
+        
         let x_old = self.x_ring[self.x_head];
         let old_A = self.A;
         self.A = self.A + src_lag - x_old;
@@ -921,8 +921,8 @@ impl EhlersPmaStream {
         if self.x_head == 7 {
             self.x_head = 0;
         }
-        // Compute WMA1 via explicit 7-term weighted sum from price ring (parity)
-        let i0 = if self.x_head == 0 { 6 } else { self.x_head - 1 }; // newest
+        
+        let i0 = if self.x_head == 0 { 6 } else { self.x_head - 1 }; 
         let i1 = if i0 == 0 { 6 } else { i0 - 1 };
         let i2 = if i1 == 0 { 6 } else { i1 - 1 };
         let i3 = if i2 == 0 { 6 } else { i2 - 1 };
@@ -938,7 +938,7 @@ impl EhlersPmaStream {
             + 1.0 * self.x_ring[i6];
         let w1 = w1_num * INV_28;
 
-        // Rolling update for WMA1 LWMA accumulators
+        
         let old_A1 = self.A1;
         let w_old = self.w_ring[self.w_head];
         self.S1 = self.S1 + 7.0 * w1 - old_A1;
@@ -952,12 +952,12 @@ impl EhlersPmaStream {
             self.filled_w += 1;
         }
         if self.filled_w < 7 {
-            // Still seeding WMA2 window; no predict yet
+            
             return None;
         }
 
-        // Compute WMA2 via explicit 7-term weighted sum from WMA1 ring (parity)
-        let k0 = if self.w_head == 0 { 6 } else { self.w_head - 1 }; // newest
+        
+        let k0 = if self.w_head == 0 { 6 } else { self.w_head - 1 }; 
         let k1 = if k0 == 0 { 6 } else { k0 - 1 };
         let k2 = if k1 == 0 { 6 } else { k1 - 1 };
         let k3 = if k2 == 0 { 6 } else { k2 - 1 };
@@ -974,7 +974,7 @@ impl EhlersPmaStream {
         let w2 = w2_num * INV_28;
         let predict = 2.0 * w1 - w2;
 
-        // Rolling trigger accumulators over last 4 predicts
+        
         let old_A2 = self.A2;
         let p_old = self.p_ring[self.p_head];
         self.T = self.T + 4.0 * predict - old_A2;
@@ -992,8 +992,8 @@ impl EhlersPmaStream {
             return Some((predict, f64::NAN));
         }
 
-        // Compute trigger via explicit 4-term weighted sum for parity
-        let j0 = if self.p_head == 0 { 3 } else { self.p_head - 1 }; // newest
+        
+        let j0 = if self.p_head == 0 { 3 } else { self.p_head - 1 }; 
         let j1 = if j0 == 0 { 3 } else { j0 - 1 };
         let j2 = if j1 == 0 { 3 } else { j1 - 1 };
         let j3 = if j2 == 0 { 3 } else { j2 - 1 };
@@ -1026,15 +1026,15 @@ impl EhlersPmaStream {
     }
 }
 
-// Optional FastMath helper (not used by default). Keep private and parity-safe off.
+
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct RollingLwma<const N: usize> {
     buf: [f64; N],
     head: usize,
     filled: usize,
-    total: f64, // sum of window
-    num: f64,   // weighted numerator: N*newest + ... + 1*oldest
+    total: f64, 
+    num: f64,   
 }
 
 #[allow(dead_code)]
@@ -1065,11 +1065,11 @@ impl<const N: usize> RollingLwma<N> {
             self.head = (self.head + 1) % N;
             self.filled += 1;
             if self.filled == N {
-                // One-time O(N) init for exact numerator
+                
                 let mut w = 1.0;
                 let mut acc = 0.0;
                 let mut sum = 0.0;
-                let mut i = self.head; // oldest is at head
+                let mut i = self.head; 
                 for _ in 0..N {
                     let v = self.buf[i];
                     acc += w * v;
@@ -1087,7 +1087,7 @@ impl<const N: usize> RollingLwma<N> {
             }
             return None;
         }
-        // Constant-time recurrence (Wikipedia LWMA)
+        
         let x_old = self.buf[self.head];
         let total_old = self.total;
         self.buf[self.head] = x;
@@ -1101,7 +1101,7 @@ impl<const N: usize> RollingLwma<N> {
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_pma")]
 #[pyo3(signature = (data, kernel=None))]
@@ -1290,13 +1290,13 @@ impl EhlersPmaStreamPy {
     }
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersPmaJsOutput {
-    pub values: Vec<f64>, // [predict..., trigger...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -1342,7 +1342,7 @@ pub fn ehlers_pma_into_js(
         let data = core::slice::from_raw_parts(in_ptr, len);
         let out = core::slice::from_raw_parts_mut(out_ptr, 2 * len);
 
-        // In-place guard like alma_into
+        
         if core::ptr::eq(in_ptr, out_ptr as *const f64) {
             let mut tmp = vec![0.0f64; 2 * len];
             let input = EhlersPmaInput::from_slice(data, EhlersPmaParams::default());
@@ -1367,7 +1367,7 @@ mod tests {
     use proptest::prelude::*;
     use std::error::Error;
 
-    // Comprehensive test functions following ALMA pattern
+    
     fn check_ehlers_pma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1376,7 +1376,7 @@ mod tests {
 
         let out = ehlers_pma_with_kernel(&input, kernel)?;
 
-        // Reference values from PineScript using close source:
+        
         let expected_predict_last_five = [
             59161.97066327,
             59240.51785714,
@@ -1392,7 +1392,7 @@ mod tests {
             59220.78227041,
         ];
 
-        // Check last 5 predict values
+        
         let start = out.predict.len().saturating_sub(5);
         for (i, &val) in out.predict[start..].iter().enumerate() {
             let diff = (val - expected_predict_last_five[i]).abs();
@@ -1407,7 +1407,7 @@ mod tests {
             );
         }
 
-        // Check last 5 trigger values
+        
         for (i, &val) in out.trigger[start..].iter().enumerate() {
             let diff = (val - expected_trigger_last_five[i]).abs();
             assert!(
@@ -1525,7 +1525,7 @@ mod tests {
         assert_eq!(res.predict.len(), candles.close.len());
         assert_eq!(res.trigger.len(), candles.close.len());
 
-        // Check that values after warmup are valid
+        
         if res.predict.len() > 20 {
             for (i, &val) in res.predict[20..].iter().enumerate() {
                 assert!(
@@ -1554,7 +1554,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Use HL2 as input
+        
         let hl2: Vec<f64> = candles
             .high
             .iter()
@@ -1562,11 +1562,11 @@ mod tests {
             .map(|(h, l)| (h + l) / 2.0)
             .collect();
 
-        // Batch calculation
+        
         let input = EhlersPmaInput::from_slice(&hl2, EhlersPmaParams::default());
         let batch_output = ehlers_pma_with_kernel(&input, kernel)?;
 
-        // Streaming calculation
+        
         let mut stream = EhlersPmaStream::try_new(EhlersPmaParams::default())?;
         let mut stream_predict = Vec::with_capacity(hl2.len());
         let mut stream_trigger = Vec::with_capacity(hl2.len());
@@ -1584,7 +1584,7 @@ mod tests {
             }
         }
 
-        // Compare results
+        
         assert_eq!(batch_output.predict.len(), stream_predict.len());
         assert_eq!(batch_output.trigger.len(), stream_trigger.len());
 
@@ -1632,7 +1632,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // First pass with HL2
+        
         let hl2: Vec<f64> = candles
             .high
             .iter()
@@ -1643,7 +1643,7 @@ mod tests {
         let first_input = EhlersPmaInput::from_slice(&hl2, EhlersPmaParams::default());
         let first_result = ehlers_pma_with_kernel(&first_input, kernel)?;
 
-        // Second pass using predict as input
+        
         let second_input =
             EhlersPmaInput::from_slice(&first_result.predict, EhlersPmaParams::default());
         let second_result = ehlers_pma_with_kernel(&second_input, kernel)?;
@@ -1708,7 +1708,7 @@ mod tests {
 
         let strat = prop::collection::vec(
             (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-            14..400, // Minimum 14 values required with 1-bar lag
+            14..400, 
         );
 
         proptest::test_runner::TestRunner::default()
@@ -1718,11 +1718,11 @@ mod tests {
                 let result = ehlers_pma_with_kernel(&input, kernel).unwrap();
                 let ref_result = ehlers_pma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Check that lengths match
+                
                 prop_assert_eq!(result.predict.len(), data.len());
                 prop_assert_eq!(result.trigger.len(), data.len());
 
-                // Compare with reference scalar implementation
+                
                 for i in 0..data.len() {
                     let p = result.predict[i];
                     let t = result.trigger[i];
@@ -1779,7 +1779,7 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macro
+    
     macro_rules! generate_all_ehlers_pma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1828,7 +1828,7 @@ mod tests {
         Ok(())
     }
 
-    // Generate all kernel-specific tests
+    
     generate_all_ehlers_pma_tests!(
         check_ehlers_pma_accuracy,
         check_ehlers_pma_default_candles,
@@ -1846,7 +1846,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_ehlers_pma_tests!(check_ehlers_pma_property);
 
-    // Additional targeted tests for specific edge cases not covered above
+    
     #[test]
     fn test_ehlers_pma_basic() {
         let data = vec![
@@ -1866,27 +1866,27 @@ mod tests {
             59280.0,
             59270.0,
             59250.0,
-            59300.0, // Added 17th value for trigger test
+            59300.0, 
         ];
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
         let result = ehlers_pma(&input).unwrap();
 
-        // Check that we have output
+        
         assert_eq!(result.predict.len(), data.len());
         assert_eq!(result.trigger.len(), data.len());
 
-        // First 13 values should be NaN for predict (with 1-bar lag)
+        
         for i in 0..13 {
             assert!(result.predict[i].is_nan());
         }
 
-        // First 16 values should be NaN for trigger
+        
         for i in 0..16 {
             assert!(result.trigger[i].is_nan());
         }
 
-        // Values after warmup should be valid
+        
         assert!(!result.predict[13].is_nan());
         assert!(!result.trigger[16].is_nan());
     }
@@ -1910,7 +1910,7 @@ mod tests {
             59280.0,
             59270.0,
             59250.0,
-            59300.0, // Added 17th value for trigger test
+            59300.0, 
         ];
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
@@ -1920,15 +1920,15 @@ mod tests {
         assert_eq!(rows, 2);
         assert_eq!(cols, data.len());
 
-        // Check first half is predict, second half is trigger
+        
         let (predict_flat, trigger_flat) = output.split_at(data.len());
 
-        // First 13 values should be NaN for predict (with 1-bar lag)
+        
         for i in 0..13 {
             assert!(predict_flat[i].is_nan());
         }
 
-        // First 16 values should be NaN for trigger
+        
         for i in 0..16 {
             assert!(trigger_flat[i].is_nan());
         }
@@ -1968,21 +1968,21 @@ mod tests {
 
     #[test]
     fn test_ehlers_pma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input slice
+        
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
-            // Mild trend + periodic wiggle
+            
             let v = 1000.0 + (i as f64) * 0.25 + ((i % 7) as f64 - 3.0) * 0.75;
             data.push(v);
         }
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = ehlers_pma(&input)?;
 
-        // No-alloc into API
+        
         let mut predict = vec![0.0; len];
         let mut trigger = vec![0.0; len];
         ehlers_pma_into(&input, &mut predict, &mut trigger)?;
@@ -1990,7 +1990,7 @@ mod tests {
         assert_eq!(predict.len(), baseline.predict.len());
         assert_eq!(trigger.len(), baseline.trigger.len());
 
-        // Equality helper: NaN == NaN, finite equal exactly
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

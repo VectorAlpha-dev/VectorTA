@@ -1,9 +1,9 @@
-// Chaikin Accumulation/Distribution (AD) — optimized for Ada+
-//
-// Build-time controls (override via -D<MACRO>=value):
-//   AD_ACCUM_MODE: 0=naive f32, 1=Kahan f32 (default), 2=TwoSum float2, 3=fp64
-//   AD_USE_FAST_DIV: 0=precise '/', 1=__fdividef  (default 0)
-//   AD_BLOCK_SIZE_TM: threads per block for time-major kernel (default 256)
+
+
+
+
+
+
 
 #ifndef AD_ACCUM_MODE
 #define AD_ACCUM_MODE 2
@@ -27,22 +27,22 @@
   #define AD_DIV(x,y) ((x)/(y))
 #endif
 
-// ----------------- helpers -----------------
 
-// Compute money-flow volume for one bar in f32.
-// Preserves "skip when hl==0" behavior.
+
+
+
 __device__ __forceinline__ float ad_mfv_f32(float h, float l, float c, float v)
 {
     float hl  = h - l;
     if (hl == 0.0f) return 0.0f;
 
-    // num = (c - l) - (h - c) = 2c - h - l
+    
     float num = fmaf(2.0f, c, -(h + l));
     float m   = AD_DIV(num, hl);
     return m * v;
 }
 
-// Kahan compensated update (f32)
+
 struct Kahan32 {
     float s, c;
     __device__ __forceinline__ Kahan32() : s(0.f), c(0.f) {}
@@ -55,7 +55,7 @@ struct Kahan32 {
     }
 };
 
-// TwoSum-based dual-float accumulator (near ~48-bit)
+
 struct TwoSum32 {
     float hi, lo;
     __device__ __forceinline__ TwoSum32() : hi(0.f), lo(0.f) {}
@@ -73,8 +73,8 @@ struct TwoSum32 {
     __device__ __forceinline__ float value() const { return hi + lo; }
 };
 
-// ----------------- row-major kernel -----------------
-// N independent series; each thread scans one series (contiguous per thread).
+
+
 extern "C" __global__ void ad_series_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -94,8 +94,8 @@ extern "C" __global__ void ad_series_f32(
     const float* __restrict__ v = volume + offset;
     float* __restrict__ o       = out    + offset;
 
-    // Use FP64 accumulation for single-series row-major to maximize parity.
-    // This path is not the performance-critical one; the time-major kernel is.
+    
+    
     double sum = 0.0;
     for (int i = 0; i < len; ++i) {
         double hl = (double)h[i] - (double)l[i];
@@ -108,18 +108,18 @@ extern "C" __global__ void ad_series_f32(
     }
 }
 
-// ----------------- time-major kernel (fast path) -----------------
-// Many series share no parameters. Each *thread* scans one entire series.
-// Layout is [time][series]. At time t, threads in a warp read consecutive series
-// -> hardware coalesces global loads.
+
+
+
+
 extern "C" __global__ void ad_many_series_one_param_time_major_f32(
-    const float* __restrict__ high_tm,   // [time][series]
-    const float* __restrict__ low_tm,    // [time][series]
-    const float* __restrict__ close_tm,  // [time][series]
-    const float* __restrict__ volume_tm, // [time][series]
+    const float* __restrict__ high_tm,   
+    const float* __restrict__ low_tm,    
+    const float* __restrict__ close_tm,  
+    const float* __restrict__ volume_tm, 
     int num_series,
     int series_len,
-    float* __restrict__ out_tm)          // [time][series]
+    float* __restrict__ out_tm)          
 {
     int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series || series_len <= 0) return;

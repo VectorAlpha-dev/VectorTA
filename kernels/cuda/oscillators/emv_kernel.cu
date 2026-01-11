@@ -1,25 +1,25 @@
-// CUDA kernels for Ease of Movement (EMV)
-//
-// Semantics mirror the scalar Rust implementation in src/indicators/emv.rs:
-// - EMV = ( (mid_t - mid_{t-1}) ) / ( volume_t / 10000 / range_t )
-//       = (mid delta) * range_t * 10000 / volume_t
-//   where mid_t = 0.5 * (high_t + low_t) and range_t = high_t - low_t
-// - Warmup: outputs [0 .. first_valid] are NaN, first defined output is at
-//   index warm = first_valid + 1.
-// - NaN handling: if any of high/low/volume at t is NaN, output NaN and do not
-//   update the carried state (last_mid). On zero range, output NaN and advance
-//   last_mid = mid_t (matches scalar behavior).
-//
-// This version removes FP64, improves numerical robustness with an error‑free
-// transform (TwoDiff) plus FMA, and reduces global memory traffic in the
-// one‑series×many‑params path by warp‑broadcasting shared inputs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
 #include <cuda_runtime.h>
-#include <math.h> // isnan, fmaf
+#include <math.h> 
 
 #ifndef EMV_NAN
 #define EMV_NAN (__int_as_float(0x7fffffff))
@@ -32,23 +32,23 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// Error‑free transform for subtraction (TwoDiff): a - b = s + e (exact)
-// Ref: Dekker/Knuth EFT.
+
+
 static __device__ __forceinline__ void two_diff_f32(float a, float b, float &s, float &e) {
     s = a - b;
-    float bb = s - a;                  // = -(b rounded into s's frame)
-    e = (a - (s - bb)) - (b + bb);     // exact low part
+    float bb = s - a;                  
+    e = (a - (s - bb)) - (b + bb);     
 }
 
-// One-series × many-params (EMV has no params; n_combos will be 1)
+
 extern "C" __global__ void emv_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ volume,
     int series_len,
-    int n_combos,      // unused for EMV (no parameters); kept for parity
+    int n_combos,      
     int first_valid,
-    float* __restrict__ out // length = n_combos * series_len
+    float* __restrict__ out 
 ) {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -60,16 +60,16 @@ extern "C" __global__ void emv_batch_f32(
         return;
     }
 
-    const int warm = first_valid + 1; // first defined output index
+    const int warm = first_valid + 1; 
 
-    // Prefill warmup region with NaNs
+    
     for (int i = 0; i < warm && i < series_len; ++i) row[i] = EMV_NAN;
 
-    // Warp‑local mask and source lane for broadcast of shared loads
+    
     const unsigned mask = __activemask();
-    const int src_lane = __ffs(mask) - 1; // first active lane in the warp
+    const int src_lane = __ffs(mask) - 1; 
 
-    // Seed last_mid from first_valid (broadcast once per warp)
+    
     float h0 = 0.0f, l0 = 0.0f;
     if ((threadIdx.x & 31) == src_lane) {
         h0 = high[first_valid];
@@ -80,7 +80,7 @@ extern "C" __global__ void emv_batch_f32(
     float last_mid = 0.5f * (h0 + l0);
 
     for (int i = warm; i < series_len; ++i) {
-        // Load shared inputs once per warp and broadcast
+        
         float hf = 0.0f, lf = 0.0f, vf = 0.0f;
         if ((threadIdx.x & 31) == src_lane) {
             hf = high[i];
@@ -93,7 +93,7 @@ extern "C" __global__ void emv_batch_f32(
 
         if (UNLIKELY(isnan(hf) || isnan(lf) || isnan(vf))) {
             row[i] = EMV_NAN;
-            continue; // do not update last_mid
+            continue; 
         }
 
         const float range = hf - lf;
@@ -101,31 +101,31 @@ extern "C" __global__ void emv_batch_f32(
 
         if (UNLIKELY(range == 0.0f)) {
             row[i] = EMV_NAN;
-            last_mid = current_mid; // advance state on zero-range
+            last_mid = current_mid; 
             continue;
         }
 
-        // Exact mid delta via TwoDiff: current_mid - last_mid = s + e
+        
         float s, e;
         two_diff_f32(current_mid, last_mid, s, e);
 
-        // Multiply by range first, divide by volume last (avoid huge intermediates)
+        
         const float k = range * (10000.0f / vf);
 
-        // Fold in low part with FMA: emv = s*k + e*k
+        
         row[i] = fmaf(s, k, e * k);
 
         last_mid = current_mid;
     }
 }
 
-// Many-series × one-param (time-major): EMV has no params; compute per series.
-// Layout: input and output are time-major: buf[t * num_series + s]
+
+
 extern "C" __global__ void emv_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ volume_tm,
-    const int*   __restrict__ first_valids, // per-series
+    const int*   __restrict__ first_valids, 
     int num_series,
     int series_len,
     float* __restrict__ out_tm
@@ -141,13 +141,13 @@ extern "C" __global__ void emv_many_series_one_param_f32(
     }
 
     const int warm = fv + 1;
-    // Prefill [0 .. warm-1] with NaN
+    
     {
         float* o = out_tm + s;
         for (int r = 0; r < warm && r < series_len; ++r, o += num_series) *o = EMV_NAN;
     }
 
-    // Seed last_mid from row=fv
+    
     const size_t idx0 = (size_t)fv * num_series + s;
     float last_mid = 0.5f * (high_tm[idx0] + low_tm[idx0]);
 
@@ -160,7 +160,7 @@ extern "C" __global__ void emv_many_series_one_param_f32(
 
         if (UNLIKELY(isnan(hf) || isnan(lf) || isnan(vf))) {
             *out_elem = EMV_NAN;
-            continue; // keep last_mid
+            continue; 
         }
         const float current_mid = 0.5f * (hf + lf);
         const float range = hf - lf;
@@ -169,7 +169,7 @@ extern "C" __global__ void emv_many_series_one_param_f32(
             last_mid = current_mid;
             continue;
         }
-        // Exact mid delta via TwoDiff
+        
         float s_hi, s_lo;
         two_diff_f32(current_mid, last_mid, s_hi, s_lo);
 

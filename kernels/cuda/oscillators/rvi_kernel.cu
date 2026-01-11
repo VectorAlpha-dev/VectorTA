@@ -1,14 +1,14 @@
-// CUDA kernels for Relative Volatility Index (RVI)
-//
-// Semantics mirror src/indicators/rvi.rs (scalar path):
-// - Output length equals input length (row-major for batch).
-// - Warmup prefix: NaN for indices < warm = first_valid + (period-1) + (ma_len-1).
-// - Two smoothing modes: SMA (matype=0) and EMA with SMA seed (matype=1).
-// - Deviation types supported: 0=StdDev (rolling O(1) with valid-flag ring),
-//   1=MeanAbsDev (MAD; ring + full abs-sum each step). Devtype=2 (median-abs-dev)
-//   is not implemented in this initial GPU kernel and will behave like MAD if
-//   passed inadvertently (wrapper prevents such launches).
-// - FP32 outputs; internal accumulations use double where beneficial.
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -21,7 +21,7 @@
 #define RVI_BLOCK_X 256
 #endif
 
-// Helpers for SMA/EMA smoothing (NaN-aware), matching scalar semantics closely.
+
 static __device__ __forceinline__ float smooth_sma_push(
     float x,
     float* __restrict__ ring,
@@ -31,7 +31,7 @@ static __device__ __forceinline__ float smooth_sma_push(
     double* __restrict__ sum,
     double inv_m)
 {
-    if (!isfinite(x)) { // reset on NaN input
+    if (!isfinite(x)) { 
         *sum = 0.0;
         *count = 0;
         *head = 0;
@@ -68,7 +68,7 @@ static __device__ __forceinline__ float smooth_ema_push(
     double* __restrict__ prev)
 {
     if (!isfinite(x)) {
-        // Reset EMA state on gaps
+        
         *started = false;
         *seed_sum = 0.0;
         *seed_cnt = 0;
@@ -89,7 +89,7 @@ static __device__ __forceinline__ float smooth_ema_push(
     }
 }
 
-// Double-precision EMA push that returns double (avoids FP32 flush-to-zero)
+
 static __device__ __forceinline__ double smooth_ema_push_d(
     double x,
     bool* __restrict__ started,
@@ -119,7 +119,7 @@ static __device__ __forceinline__ double smooth_ema_push_d(
     }
 }
 
-// ---------- New: FP32 compensated summation helpers ----------
+
 static __device__ __forceinline__ void kahan_add(float x, float &sum, float &comp) {
     float t = sum + x;
     if (fabsf(sum) >= fabsf(x)) comp += (sum - t) + x;
@@ -131,13 +131,13 @@ static __device__ __forceinline__ void kahan_add_diff(float x_add_minus_y, float
     kahan_add(x_add_minus_y, sum, comp);
 }
 
-// ---------- New: segmented prefix sums & run-length ----------
+
 extern "C" __global__
 void rvi_segprefix_f32(const float* __restrict__ prices,
                        int len,
-                       float* __restrict__ pref,   // S
-                       float* __restrict__ pref2,  // Q
-                       int*   __restrict__ runlen) // R
+                       float* __restrict__ pref,   
+                       float* __restrict__ pref2,  
+                       int*   __restrict__ runlen) 
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     float s = 0.0f, q = 0.0f, cs = 0.0f, cq = 0.0f;
@@ -167,7 +167,7 @@ void rvi_segprefix_f32(const float* __restrict__ prices,
     }
 }
 
-// ---------- New: SMA / EMA push (FP32 with compensation) ----------
+
 static __device__ __forceinline__ float smooth_sma_push_f32(
     float x,
     float* __restrict__ ring,
@@ -178,7 +178,7 @@ static __device__ __forceinline__ float smooth_sma_push_f32(
     float* __restrict__ comp,
     float inv_m)
 {
-    if (!isfinite(x)) { // reset on gap
+    if (!isfinite(x)) { 
         *sum = 0.0f; *comp = 0.0f; *count = 0; *head = 0; return NAN;
     }
     if (*count < ma_len) {
@@ -215,7 +215,7 @@ static __device__ __forceinline__ float smooth_ema_push_f32(
         kahan_add(x, *seed_sum, *seed_comp);
         (*seed_cnt)++;
         if (*seed_cnt == ma_len) {
-            *prev = (*seed_sum) * inv_m;   // SMA seed
+            *prev = (*seed_sum) * inv_m;   
             *started = true;
             return *prev;
         }
@@ -226,12 +226,12 @@ static __device__ __forceinline__ float smooth_ema_push_f32(
     }
 }
 
-// ---------- New: one series × many params (StdDev via prefix) ----------
+
 extern "C" __global__
 void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
-                                      const float* __restrict__ pref,    // S
-                                      const float* __restrict__ pref2,   // Q
-                                      const int*   __restrict__ runlen,  // R
+                                      const float* __restrict__ pref,    
+                                      const float* __restrict__ pref2,   
+                                      const int*   __restrict__ runlen,  
                                       const int* __restrict__ periods,
                                       const int* __restrict__ ma_lens,
                                       const int* __restrict__ matypes,
@@ -239,32 +239,32 @@ void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
                                       int first_valid,
                                       int n_combos,
                                       int max_ma_len,
-                                      const int* __restrict__ row_ids,   // maps local row -> global row id
+                                      const int* __restrict__ row_ids,   
                                       float* __restrict__ out)
 {
-    const int row = blockIdx.x;              // one block per combo
+    const int row = blockIdx.x;              
     if (row >= n_combos) return;
-    if (threadIdx.x != 0) return;            // single-thread scan per row
+    if (threadIdx.x != 0) return;            
 
     const int period = periods[row];
     const int ma_len = ma_lens[row];
     const int matype = matypes[row];
     if (period <= 0 || ma_len <= 0) return;
 
-    // Shared memory layout: [ up_ring | dn_ring ]
+    
     extern __shared__ unsigned char shraw[];
     float* up_ring = reinterpret_cast<float*>(shraw);
     float* dn_ring = up_ring + max_ma_len;
 
-    const int global_row = row_ids ? row_ids[row] : row; // default to contiguous if null
+    const int global_row = row_ids ? row_ids[row] : row; 
     const int base = global_row * series_len;
     const int warm = first_valid + (period - 1) + (ma_len - 1);
 
-    // Warmup NaNs
+    
     for (int i = 0; i < ((warm < series_len) ? warm : series_len); ++i) out[base + i] = NAN;
     if (warm >= series_len) return;
 
-    // Smoothing state (FP64 to improve parity with CPU)
+    
     const double inv_m_d = 1.0 / (double)ma_len;
     const double alpha_d  = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha_d = 1.0 - alpha_d;
@@ -292,7 +292,7 @@ void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
         } else if (runlen[i] < period) {
             dev = NAN;
         } else {
-            // Compose variance in FP64 for improved stability/parity
+            
             double s = (double)(pref[i]  - ((i == period - 1) ? 0.f : pref[i - period]));
             double q = (double)(pref2[i] - ((i == period - 1) ? 0.f : pref2[i - period]));
             const double invP = 1.0 / (double)period;
@@ -327,7 +327,7 @@ void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
     }
 }
 
-// ---------- New: scatter helper to place contiguous rows into scattered slots ----------
+
 extern "C" __global__
 void scatter_rows_f32(const float* __restrict__ src,
                       int src_rows,
@@ -344,8 +344,8 @@ void scatter_rows_f32(const float* __restrict__ src,
     }
 }
 
-// Compute one RVI row (single series) sequentially. Uses dynamic shared memory layout:
-// [ up_ring (max_ma_len floats) | dn_ring (max_ma_len floats) | dev_ring (max_period floats) | vflag (max_period bytes) ]
+
+
 static __device__ __forceinline__ void rvi_compute_series(
     const float* __restrict__ prices,
     int len,
@@ -363,17 +363,17 @@ static __device__ __forceinline__ void rvi_compute_series(
     extern __shared__ unsigned char shraw[];
     float* up_ring = reinterpret_cast<float*>(shraw);
     float* dn_ring = up_ring + max_ma_len;
-    float* dev_ring = dn_ring + max_ma_len;        // used for MAD
-    unsigned char* vflag = reinterpret_cast<unsigned char*>(dev_ring + max_period); // for StdDev
+    float* dev_ring = dn_ring + max_ma_len;        
+    unsigned char* vflag = reinterpret_cast<unsigned char*>(dev_ring + max_period); 
 
     const int warm = first_valid + (period - 1) + (ma_len - 1);
 
-    // Deviation state
-    double sum = 0.0, sumsq = 0.0; // for stddev
-    int head = 0, filled = 0;      // for MAD ring / stddev flags
-    double ring_sum = 0.0;         // for MAD mean
+    
+    double sum = 0.0, sumsq = 0.0; 
+    int head = 0, filled = 0;      
+    double ring_sum = 0.0;         
 
-    // Smoothing state
+    
     const double inv_m = 1.0 / (double)ma_len;
     const double alpha = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha = 1.0 - alpha;
@@ -381,14 +381,14 @@ static __device__ __forceinline__ void rvi_compute_series(
     double up_seed_sum = 0.0, dn_seed_sum = 0.0;
     int up_seed_cnt = 0, dn_seed_cnt = 0;
     int up_h = 0, dn_h = 0, up_cnt = 0, dn_cnt = 0;
-    double up_sum = 0.0, dn_sum = 0.0; // for SMA smoothing
-    double up_prev = 0.0, dn_prev = 0.0; // EMA prevs
+    double up_sum = 0.0, dn_sum = 0.0; 
+    double up_prev = 0.0, dn_prev = 0.0; 
 
     float prev = prices[0];
 
-    // Initialize MAD path bookkeeping
+    
     if (devtype != 0) {
-        // MAD: ring initializes empty
+        
         filled = 0;
         head = 0;
         ring_sum = 0.0;
@@ -404,7 +404,7 @@ static __device__ __forceinline__ void rvi_compute_series(
         if (i + 1 < period) {
             dev = NAN;
         } else if (devtype == 0) {
-            // StdDev with rebuild-on-NaN (matches scalar general path)
+            
             if (i == period - 1) {
                 sum = 0.0; sumsq = 0.0;
                 bool ok = true;
@@ -447,9 +447,9 @@ static __device__ __forceinline__ void rvi_compute_series(
                     dev = (float)sqrt(fmax(0.0, mean_sq - mean * mean));
                 }
             }
-        } else { // MAD (devtype==1) or fallback for unsupported
+        } else { 
             if (!isfinite(x)) {
-                // reset ring on gap
+                
                 filled = 0;
                 head = 0;
                 ring_sum = 0.0;
@@ -459,9 +459,9 @@ static __device__ __forceinline__ void rvi_compute_series(
                 ring_sum += (double)x;
                 head = (head + 1 == period) ? 0 : head + 1;
                 filled += 1;
-                dev = (filled == period) ? 0.0f : NAN; // first valid will recompute below
+                dev = (filled == period) ? 0.0f : NAN; 
                 if (filled == period) {
-                    // compute mean and MAD for the first time
+                    
                     const double mean = ring_sum / (double)period;
                     double abs_sum = 0.0;
                     for (int k = 0; k < period; ++k) {
@@ -470,7 +470,7 @@ static __device__ __forceinline__ void rvi_compute_series(
                     dev = (float)(abs_sum / (double)period);
                 }
             } else {
-                // steady-state: ring full
+                
                 const float old = dev_ring[head];
                 dev_ring[head] = x;
                 head = (head + 1 == period) ? 0 : head + 1;
@@ -515,7 +515,7 @@ static __device__ __forceinline__ void rvi_compute_series(
     }
 }
 
-// --------------------------- Batch kernel ---------------------------
+
 extern "C" __global__
 void rvi_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ periods,
@@ -539,7 +539,7 @@ void rvi_batch_f32(const float* __restrict__ prices,
 
     const int base = row * series_len;
 
-    // Warmup NaNs
+    
     int warm = first_valid + (period - 1) + (ma_len - 1);
     if (warm > series_len) warm = series_len;
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
@@ -547,11 +547,11 @@ void rvi_batch_f32(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single thread scans sequentially
+    if (threadIdx.x != 0) return; 
     rvi_compute_series(prices, series_len, first_valid, period, ma_len, matype, devtype, max_period, max_ma_len, out + base);
 }
 
-// -------------------- Many-series × one param ----------------------
+
 extern "C" __global__
 void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int* __restrict__ first_valids,
@@ -567,7 +567,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (period <= 0 || ma_len <= 0) return;
     const int first = first_valids[s];
 
-    // Warmup prefix per column
+    
     int warm = first + (period - 1) + (ma_len - 1);
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) {
@@ -575,22 +575,22 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     if (warm >= rows) return;
 
-    // Build contiguous view of this series (sequential walk)
-    // We avoid extra shared memory by indexing time-major arrays directly.
-    // Use the same sequential engine but mapping indices.
-    // Local smoothing and deviation states are allocated on the stack via rvi_compute_series
+    
+    
+    
+    
 
-    // To reuse rvi_compute_series, we expose a small wrapper that reads prices from time-major layout.
-    // Copy the column into a temporary ring buffer would cost O(rows) memory; instead, call the same
-    // logic inline below for clarity.
+    
+    
+    
 
-    // Re-implement minimal sequential loop for time-major layout (mirrors rvi_compute_series but without smem):
-    // Since period and ma_len are identical for all series in this kernel, we can place small fixed-size rings
-    // on the stack for smoothing (reasonable as ma_len defaults are small). For safety with large ma_len, we
-    // degrade to EMA-only when ma_len exceeds 1024 to avoid large stack usage.
+    
+    
+    
+    
 
     const bool use_sma = (matype == 0) && (ma_len <= 1024);
-    // Smoothing state
+    
     const double inv_m = 1.0 / (double)ma_len;
     const double alpha = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha = 1.0 - alpha;
@@ -598,26 +598,26 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     double up_seed_sum = 0.0, dn_seed_sum = 0.0;
     int up_seed_cnt = 0, dn_seed_cnt = 0;
     int up_h = 0, dn_h = 0, up_cnt = 0, dn_cnt = 0;
-    double up_sum = 0.0, dn_sum = 0.0; // for SMA
-    double up_prev = 0.0, dn_prev = 0.0; // EMA prevs
+    double up_sum = 0.0, dn_sum = 0.0; 
+    double up_prev = 0.0, dn_prev = 0.0; 
 
-    // Deviation state
+    
     double sum = 0.0, sumsq = 0.0;
     int valid = 0, head = 0, filled = 0;
     double ring_sum = 0.0;
 
     float prev = prices_tm[0 * cols + s];
 
-    // Local rings (bounded). If ma_len > 1024 we will use EMA only and ignore SMA path.
+    
     float up_ring_local[ (1024) ];
     float dn_ring_local[ (1024) ];
     float* up_ring = up_ring_local;
     float* dn_ring = dn_ring_local;
-    // MAD ring allocated in local memory up to a sane bound; else recompute by scanning directly from TM buffer
+    
     const bool mad_local_ok = (period <= 2048);
     float dev_ring_local[ (2048) ];
 
-    // MAD bookkeeping init
+    
     if (devtype != 0) {
         filled = 0; head = 0; ring_sum = 0.0;
     }
@@ -632,7 +632,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (i + 1 < period) {
             dev = NAN;
         } else if (devtype == 0) {
-            // StdDev with rebuild-on-NaN
+            
             if (i == period - 1) {
                 sum = 0.0; sumsq = 0.0; bool ok = true;
                 for (int k = 0; k < period; ++k) {
@@ -667,7 +667,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     dev = (float)sqrt(fmax(0.0, mean_sq - mean * mean));
                 }
             }
-        } else { // MAD
+        } else { 
             if (!isfinite(x)) { filled = 0; head = 0; ring_sum = 0.0; dev = NAN; }
             else if (filled < period) {
                 if (mad_local_ok) dev_ring_local[head] = x;

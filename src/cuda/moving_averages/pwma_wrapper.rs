@@ -23,8 +23,8 @@ use std::fmt;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const PWMA_MAX_PERIOD_CONST: usize = 4096; // must match kernel constant
-const BATCH_TX: u32 = 128; // must match async tiled kernel
+const PWMA_MAX_PERIOD_CONST: usize = 4096; 
+const BATCH_TX: u32 = 128; 
 
 #[derive(Debug, Error)]
 pub enum CudaPwmaError {
@@ -74,7 +74,7 @@ pub struct CudaPwma {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 
-    // Optional constant memory weights availability and host scratch buffer
+    
     cmem_available: bool,
     cmem_scratch: [f32; PWMA_MAX_PERIOD_CONST],
 }
@@ -102,7 +102,7 @@ impl CudaPwma {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Resolve optional __constant__ symbol availability for weights
+        
         let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
         let cmem_available = module
             .get_global::<[f32; PWMA_MAX_PERIOD_CONST]>(name)
@@ -238,7 +238,7 @@ impl CudaPwma {
             ));
         }
 
-        // Prefer async tiled when available (unless user forces Plain)
+        
         let mut use_tiled = true;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
@@ -248,7 +248,7 @@ impl CudaPwma {
 
         if use_tiled {
             if let Ok(mut func) = self.module.get_function("pwma_batch_tiled_async_f32") {
-                let tile_x: usize = BATCH_TX as usize; // must equal PWMA_TILE_TX
+                let tile_x: usize = BATCH_TX as usize; 
                 let align16 = |x: usize| (x + 15) & !15usize;
                 let shared_bytes = (align16(max_period * std::mem::size_of::<f32>())
                     + 2 * (tile_x + max_period - 1) * std::mem::size_of::<f32>())
@@ -302,7 +302,7 @@ impl CudaPwma {
             }
         }
 
-        // Plain 1D fallback
+        
         let func = self
             .module
             .get_function("pwma_batch_f32")
@@ -382,7 +382,7 @@ impl CudaPwma {
             .map(|p| (first_valid + p.period.unwrap() - 1) as i32)
             .collect();
 
-        // VRAM estimate and guard (prices + weights + periods + warms + out)
+        
         let szf = std::mem::size_of::<f32>();
         let szi = std::mem::size_of::<i32>();
         let prices_bytes = series_len.checked_mul(szf)
@@ -512,7 +512,7 @@ impl CudaPwma {
             ));
         }
 
-        // Try 2D tiled variants first
+        
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let fname = match (tx, ty) {
                 (128, 4) => "pwma_ms1p_tiled_f32_tx128_ty4",
@@ -523,10 +523,10 @@ impl CudaPwma {
                 Ok(f) => f,
                 Err(_) => return None,
             };
-            let wlen = period; // full-period weights
+            let wlen = period; 
             let align16 = |x: usize| (x + 15) & !15usize;
             let total = tx as usize + wlen - 1;
-            // Bank-conflict padding: stride = TY+1 when TY divides 32
+            
             let ty_pad = if (32 % (ty as usize)) == 0 {
                 (ty + 1) as usize
             } else {
@@ -580,12 +580,12 @@ impl CudaPwma {
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {}
-            // The 2D tiled kernels are performance-oriented; keep them opt-in via policy
-            // until their correctness is validated across a wider set of GPUs/drivers.
+            
+            
             ManySeriesKernelPolicy::Auto => {}
         }
 
-        // Fallback 1D: prefer constant-memory path when available and requested
+        
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
             if let (Ok(_sym), Ok(func)) = (
@@ -603,7 +603,7 @@ impl CudaPwma {
                     let shared_bytes = 0u32;
 
                     unsafe {
-                        // Constant memory expected to be populated by caller when use_const=true
+                        
                         let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
                         let mut period_i = period as i32;
                         let mut num_series_i = num_series as i32;
@@ -630,7 +630,7 @@ impl CudaPwma {
             }
         }
 
-        // Non-constant 1D fallback
+        
         let func = self
             .module
             .get_function("pwma_multi_series_one_param_f32")
@@ -711,7 +711,7 @@ impl CudaPwma {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate: prices + (weights if not const) + first_valids + out
+        
         let prices_bytes = cols.checked_mul(rows)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
@@ -738,14 +738,14 @@ impl CudaPwma {
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
         let d_weights = if use_const {
-            // no device weights needed when using constant memory
+            
             unsafe { DeviceBuffer::uninitialized(0) }?
         } else {
             DeviceBuffer::from_slice(&weights)?
         };
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
-        // Populate constant memory when used
+        
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
             if let Ok(mut sym) = self.module.get_global::<[f32; PWMA_MAX_PERIOD_CONST]>(name) {
@@ -831,7 +831,7 @@ impl CudaPwma {
             use_const,
         )?;
         self.stream.synchronize()?;
-        // Use pinned host memory for the device->host copy to avoid extra staging
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }?;
         unsafe {
         d_out_tm.async_copy_to(&mut pinned, &self.stream)?;
@@ -842,7 +842,7 @@ impl CudaPwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1036,7 +1036,7 @@ pub mod benches {
     }
 }
 
-// -------- Policies, introspection and helpers (mirrors ALMA/CWMA) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaPwmaPolicy {

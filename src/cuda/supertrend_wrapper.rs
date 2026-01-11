@@ -66,7 +66,7 @@ pub enum BatchKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    OneD { block_x: u32 }, // threads across series (time-major)
+    OneD { block_x: u32 }, 
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +99,7 @@ impl CudaSupertrend {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supertrend_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            ModuleJitOption::OptLevel(OptLevel::O4), // most optimized JIT level
+            ModuleJitOption::OptLevel(OptLevel::O4), 
         ];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -177,7 +177,7 @@ impl CudaSupertrend {
         Err(CudaSupertrendError::InvalidInput("all values are NaN".into()))
     }
 
-    // ---- Batch: one series × many params ----
+    
     pub fn supertrend_batch_dev(
         &self,
         high: &[f32],
@@ -195,13 +195,13 @@ impl CudaSupertrend {
             return Err(CudaSupertrendError::InvalidInput("empty series".into()));
         }
 
-        // Expand combos
+        
         let combos = expand_grid_local(sweep)?;
         if combos.is_empty() {
             return Err(CudaSupertrendError::InvalidInput("empty sweep".into()));
         }
 
-        // Period coverage for ATR rows
+        
         let min_p = combos.iter().map(|c| c.period.unwrap()).min().unwrap();
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
         if min_p == 0 || max_p > len {
@@ -210,7 +210,7 @@ impl CudaSupertrend {
             ));
         }
 
-        // First valid index for warm computations
+        
         let first_valid = Self::first_valid_hlc(high, low, close)?;
         if len - first_valid < min_p {
             return Err(CudaSupertrendError::InvalidInput(
@@ -218,7 +218,7 @@ impl CudaSupertrend {
             ));
         }
 
-        // Precompute HL2 on host (shared across rows)
+        
         let mut hl2 = vec![f32::NAN; len];
         for i in 0..len {
             let h = high[i];
@@ -228,7 +228,7 @@ impl CudaSupertrend {
         let d_hl2 = DeviceBuffer::from_slice(&hl2)?;
         let d_close = DeviceBuffer::from_slice(close)?;
 
-        // ATR rows for continuous [min..max]
+        
         let cuda_atr =
             CudaAtr::new(self.device_id as usize).map_err(|e| CudaSupertrendError::InvalidInput(e.to_string()))?;
         let atr_rows = cuda_atr
@@ -242,7 +242,7 @@ impl CudaSupertrend {
             )
             .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e.to_string())))?;
 
-        // Params per row
+        
         let row_period_idx: Vec<i32> = combos
             .iter()
             .map(|c| (c.period.unwrap() as i32) - (min_p as i32))
@@ -256,7 +256,7 @@ impl CudaSupertrend {
         let d_row_fac = DeviceBuffer::from_slice(&row_factors)?;
         let d_row_warm = DeviceBuffer::from_slice(&row_warms)?;
 
-        // VRAM check: only account for future allocations (outputs). ATR/inputs already on device.
+        
         let combos_len = combos.len();
         let total_elems = combos_len
             .checked_mul(len)
@@ -267,12 +267,12 @@ impl CudaSupertrend {
             .ok_or_else(|| CudaSupertrendError::InvalidInput("byte size overflow".into()))?;
         Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
-        // Outputs
+        
         let mut d_trend: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_changed: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
-        // Kernel and launch: single 1-D grid (no 65k chunking)
+        
         let func = self
             .module
             .get_function("supertrend_batch_f32")
@@ -280,7 +280,7 @@ impl CudaSupertrend {
 
         match self.policy.batch {
             BatchKernelPolicy::OneThreadPerRow => {
-                // Legacy: one thread per block, grid covers rows
+                
                 let grid: GridSize = ((combos_len as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
                 unsafe {
@@ -346,7 +346,7 @@ impl CudaSupertrend {
         ))
     }
 
-    // ---- Many-series × one-param (time-major) ----
+    
     pub fn supertrend_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -369,7 +369,7 @@ impl CudaSupertrend {
             return Err(CudaSupertrendError::InvalidInput("invalid period".into()));
         }
 
-        // HL2 time-major
+        
         let mut hl2_tm = vec![f32::NAN; n];
         for idx in 0..n {
             hl2_tm[idx] = 0.5f32 * (high_tm[idx] + low_tm[idx]);
@@ -377,14 +377,14 @@ impl CudaSupertrend {
         let d_hl2 = DeviceBuffer::from_slice(&hl2_tm)?;
         let d_close = DeviceBuffer::from_slice(close_tm)?;
 
-        // ATR time-major for given period
+        
         let cuda_atr =
             CudaAtr::new(self.device_id as usize).map_err(|e| CudaSupertrendError::InvalidInput(e.to_string()))?;
         let atr_tm = cuda_atr
             .atr_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, cols, rows, period)
             .map_err(|e| CudaSupertrendError::InvalidInput(format!("atr: {}", e.to_string())))?;
 
-        // first-valid per series (time-major)
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -401,7 +401,7 @@ impl CudaSupertrend {
         }
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
 
-        // Outputs
+        
         let bytes = n
             .checked_mul(2)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -410,7 +410,7 @@ impl CudaSupertrend {
         let mut d_trend_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
         let mut d_changed_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
 
-        // Kernel
+        
         let func = self
             .module
             .get_function("supertrend_many_series_one_param_f32")
@@ -466,7 +466,7 @@ impl CudaSupertrend {
     }
 }
 
-// Local expand_grid clone
+
 fn expand_grid_local(r: &SuperTrendBatchRange) -> Result<Vec<SuperTrendParams>, CudaSupertrendError> {
     fn axis_usize(
         (start, end, step): (usize, usize, usize),
@@ -554,7 +554,7 @@ fn expand_grid_local(r: &SuperTrendBatchRange) -> Result<Vec<SuperTrendParams>, 
     Ok(out)
 }
 
-// ---------------- Bench profiles ----------------
+
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
@@ -710,7 +710,7 @@ pub mod benches {
         let first_valid = CudaSupertrend::first_valid_hlc(&high, &low, &close)
             .expect("supertrend first_valid");
 
-        // Precompute HL2 on host once (shared across rows)
+        
         let mut hl2 = vec![f32::NAN; len];
         for i in 0..len {
             hl2[i] = 0.5f32 * (high[i] + low[i]);
@@ -720,7 +720,7 @@ pub mod benches {
         let d_hl2 = DeviceBuffer::from_slice(&hl2).expect("d_hl2");
         let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
 
-        // ATR rows for contiguous [min..max] computed once via ATR wrapper
+        
         let cuda_atr = CudaAtr::new(0).expect("cuda atr");
         let atr_rows = cuda_atr
             .atr_batch_dev(
@@ -808,7 +808,7 @@ pub mod benches {
             }
         }
 
-        // HL2 time-major
+        
         let mut hl2_tm = vec![f32::NAN; cols * rows];
         for idx in 0..(cols * rows) {
             hl2_tm[idx] = 0.5f32 * (high_tm[idx] + low_tm[idx]);
@@ -818,13 +818,13 @@ pub mod benches {
         let d_hl2 = DeviceBuffer::from_slice(&hl2_tm).expect("d_hl2_tm");
         let d_close = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
 
-        // ATR time-major for this param (computed once via ATR wrapper)
+        
         let cuda_atr = CudaAtr::new(0).expect("cuda atr");
         let atr_tm = cuda_atr
             .atr_many_series_one_param_time_major_dev(&high_tm, &low_tm, &close_tm, cols, rows, period)
             .expect("atr many-series");
 
-        // first-valid per series (time-major)
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -879,7 +879,7 @@ pub mod benches {
             prep_batch,
         )
         .with_mem_required({
-            // HL2 + close + ATR rows + row params + 2 outputs + headroom
+            
             let combos = expand_grid_local(&SuperTrendBatchRange {
                 period: (10, 64, 2),
                 factor: (2.0, 4.0, 0.5),
@@ -906,7 +906,7 @@ pub mod benches {
             prep_many,
         )
         .with_mem_required(
-            // HL2 + close + ATR + first_valids + 2 outputs + headroom
+            
             (4 * cols * rows) * std::mem::size_of::<f32>()
                 + (cols * std::mem::size_of::<i32>())
                 + 64 * 1024 * 1024,

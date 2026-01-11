@@ -21,7 +21,7 @@ use thiserror::Error;
 
 use crate::indicators::pma::PmaBatchRange;
 
-// Kernel policy (parity with ALMA/CWMA wrappers)
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -116,7 +116,7 @@ pub struct CudaPma {
     debug_many_logged: bool,
 }
 
-// Helper container for batch preparation
+
 struct BatchInputs {
     combos: usize,
     first_valid: usize,
@@ -298,7 +298,7 @@ impl CudaPma {
         }
     }
 
-    // ---------------- Batch (one series × many params) ----------------
+    
     fn prepare_batch_inputs(
         prices: &[f32],
         _sweep: &PmaBatchRange,
@@ -310,14 +310,14 @@ impl CudaPma {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaPmaError::InvalidInput("all values are NaN".into()))?;
-        const MIN_REQUIRED: usize = 7; // 7 samples for first predict
+        const MIN_REQUIRED: usize = 7; 
         if prices.len() - first_valid < MIN_REQUIRED {
             return Err(CudaPmaError::InvalidInput(format!(
                 "not enough valid data (needed >= {MIN_REQUIRED}, valid = {})",
                 prices.len() - first_valid
             )));
         }
-        // PMA has no tunable params; keep one synthetic combo for API parity.
+        
         Ok(BatchInputs {
             combos: 1,
             first_valid,
@@ -352,7 +352,7 @@ impl CudaPma {
             .ok_or_else(|| {
                 CudaPmaError::InvalidInput("prices_bytes + 2*out_bytes overflow".into())
             })?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(required, headroom)?;
 
         let mut d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(prices)?;
@@ -436,7 +436,7 @@ impl CudaPma {
                 )
             }
             BatchKernelPolicy::Auto => {
-                // Default to simple 1D launch; computation is strictly sequential per combo.
+                
                 let gx = n_combos as u32;
                 (
                     "pma_batch_f32",
@@ -518,7 +518,7 @@ impl CudaPma {
         Ok((pair.rows(), pair.cols()))
     }
 
-    // ---------------- Many series × one param (time-major) ----------------
+    
     fn prepare_many_series_inputs(
         prices_tm: &[f32],
         cols: usize,
@@ -786,7 +786,7 @@ impl CudaPma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -798,7 +798,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * core::mem::size_of::<f32>();
-        // combos fixed = 1; two outputs
+        
         let out_bytes = 2 * ONE_SERIES_LEN * core::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

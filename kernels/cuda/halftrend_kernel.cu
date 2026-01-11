@@ -1,8 +1,8 @@
-// halftrend_kernel.cu
-// Optimized CUDA kernels for the HalfTrend indicator
-// - Batch path: keep existing row-major ABI for tests, but optimize internals
-// - Many-series path (time-major): optimized internals
-// Additionally provide a time-major batch variant for future wrapper use.
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -10,54 +10,54 @@
 #include <stdint.h>
 #endif
 
-// Read-only load helper: safe on cc>=3.5; falls back otherwise
+
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 350)
   #define LDG(ptr) __ldg(ptr)
 #else
   #define LDG(ptr) (*(ptr))
 #endif
 
-// Quiet NaN
+
 __device__ __forceinline__ float qnan_f() { return __int_as_float(0x7fc00000); }
 
-// Small helpers for ring/deque indexing
+
 __device__ __forceinline__ int ht_inc(int i, int cap) { int j = i + 1; return (j == cap) ? 0 : j; }
 __device__ __forceinline__ int ht_dec(int i, int cap) { return (i == 0) ? (cap - 1) : (i - 1); }
 
-// Indexer for time-major [n, rows]
+
 #define AT_TM(t, rows, row) ((t) * (rows) + (row))
 
-// Tuned threads per block and launch bounds hint
+
 #define HT_THREADS_PER_BLOCK 256
-// Fused batch kernel: max supported amplitude for in-kernel rolling extrema
+
 #define HT_FUSED_MAX_AMP 64
 
 extern "C" {
 
-// ----------------------------------------------------------------------------
-// One price series × many params (ROW-MAJOR ABI kept for compatibility)
-// Each thread processes one param row. Precompute buffers are [rows, n].
-// ----------------------------------------------------------------------------
+
+
+
+
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_f32(
-    const float* __restrict__ high,          // [n]
-    const float* __restrict__ low,           // [n]
-    const float* __restrict__ close,         // [n]
-    const float* __restrict__ atr_rows,      // [rows*n]
-    const float* __restrict__ highma_rows,   // [rows*n]
-    const float* __restrict__ lowma_rows,    // [rows*n]
-    const float* __restrict__ roll_high_rows,// [rows*n]
-    const float* __restrict__ roll_low_rows, // [rows*n]
-    const int*   __restrict__ warms,         // [rows]
-    const float* __restrict__ chdevs,        // [rows]
+    const float* __restrict__ high,          
+    const float* __restrict__ low,           
+    const float* __restrict__ close,         
+    const float* __restrict__ atr_rows,      
+    const float* __restrict__ highma_rows,   
+    const float* __restrict__ lowma_rows,    
+    const float* __restrict__ roll_high_rows,
+    const float* __restrict__ roll_low_rows, 
+    const int*   __restrict__ warms,         
+    const float* __restrict__ chdevs,        
     int n,
     int rows,
-    float* __restrict__ out_halftrend,       // [rows*n]
-    float* __restrict__ out_trend,           // [rows*n]
-    float* __restrict__ out_atr_high,        // [rows*n]
-    float* __restrict__ out_atr_low,         // [rows*n]
-    float* __restrict__ out_buy,             // [rows*n]
-    float* __restrict__ out_sell)            // [rows*n]
+    float* __restrict__ out_halftrend,       
+    float* __restrict__ out_trend,           
+    float* __restrict__ out_atr_high,        
+    float* __restrict__ out_atr_low,         
+    float* __restrict__ out_buy,             
+    float* __restrict__ out_sell)            
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -81,14 +81,14 @@ void halftrend_batch_f32(
         const float ch_half = LDG(chdevs + row) * 0.5f;
         const float qnan = qnan_f();
 
-        // Fill warmup prefix with NaN
+        
         #pragma unroll 8
         for (int i = 0; i < warm; ++i) {
             o_ht[i] = qnan; o_tr[i] = qnan; o_ah[i] = qnan; o_al[i] = qnan; o_bs[i] = qnan; o_ss[i] = qnan;
         }
         if (warm >= n) continue;
 
-        int   current_trend = 0; // 0 up, 1 down
+        int   current_trend = 0; 
         int   next_trend    = 0;
         int   prev_trend    = 0;
         float up   = 0.0f;
@@ -100,7 +100,7 @@ void halftrend_batch_f32(
         float min_high_price = prev_high;
 
         for (int i = warm; i < n; ++i) {
-            // reset buy/sell to NaN each step
+            
             o_bs[i] = qnan; o_ss[i] = qnan;
 
             const float high_price = LDG(rhi + i);
@@ -129,7 +129,7 @@ void halftrend_batch_f32(
             const bool flipped = (i > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        // flip to up
+                if (flipped) {        
                     up = down;
                     o_bs[i] = up - atr2;
                 } else {
@@ -141,7 +141,7 @@ void halftrend_batch_f32(
                 o_al[i] = up - dev;
                 o_tr[i] = 0.0f;
             } else {
-                if (flipped) {        // flip to down
+                if (flipped) {        
                     down = up;
                     o_ss[i] = down + atr2;
                 } else {
@@ -161,29 +161,29 @@ void halftrend_batch_f32(
     }
 }
 
-// ----------------------------------------------------------------------------
-// One price series × many params (FUSED: compute ATR/SMA/rolling extrema on device)
-// - Removes large host-side helper precompute + H2D copies.
-// - Each thread processes one param row (sequential scan over time).
-// - Supports amplitudes up to HT_FUSED_MAX_AMP; wrapper should fall back otherwise.
-// ----------------------------------------------------------------------------
+
+
+
+
+
+
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_fused_f32(
-    const float* __restrict__ high,          // [n]
-    const float* __restrict__ low,           // [n]
-    const float* __restrict__ close,         // [n]
-    const int*   __restrict__ amps,          // [rows]
-    const int*   __restrict__ atr_periods,   // [rows]
-    const float* __restrict__ chdevs,        // [rows]
-    int first,                                // first valid index
+    const float* __restrict__ high,          
+    const float* __restrict__ low,           
+    const float* __restrict__ close,         
+    const int*   __restrict__ amps,          
+    const int*   __restrict__ atr_periods,   
+    const float* __restrict__ chdevs,        
+    int first,                                
     int n,
     int rows,
-    float* __restrict__ out_halftrend,       // [rows*n]
-    float* __restrict__ out_trend,           // [rows*n]
-    float* __restrict__ out_atr_high,        // [rows*n]
-    float* __restrict__ out_atr_low,         // [rows*n]
-    float* __restrict__ out_buy,             // [rows*n]
-    float* __restrict__ out_sell)            // [rows*n]
+    float* __restrict__ out_halftrend,       
+    float* __restrict__ out_trend,           
+    float* __restrict__ out_atr_high,        
+    float* __restrict__ out_atr_low,         
+    float* __restrict__ out_buy,             
+    float* __restrict__ out_sell)            
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -194,7 +194,7 @@ void halftrend_batch_fused_f32(
         const int atr_p = LDG(atr_periods + row);
         const float ch_half = LDG(chdevs + row) * 0.5f;
 
-        // Guard unsupported params (wrapper should avoid this path).
+        
         if (amp <= 0 || atr_p <= 0 || amp > HT_FUSED_MAX_AMP) {
             const int base = row * n;
             float* __restrict__ o_ht = out_halftrend + base;
@@ -209,7 +209,7 @@ void halftrend_batch_fused_f32(
             continue;
         }
 
-        // Warmup: first + max(amp, atr_p) - 1
+        
         int warm = first + (amp > atr_p ? amp : atr_p) - 1;
         warm = (warm < n ? warm : n);
 
@@ -221,14 +221,14 @@ void halftrend_batch_fused_f32(
         float* __restrict__ o_bs = out_buy + base;
         float* __restrict__ o_ss = out_sell + base;
 
-        // Fill warmup prefix with NaN
+        
         #pragma unroll 8
         for (int i = 0; i < warm; ++i) {
             o_ht[i] = qnan; o_tr[i] = qnan; o_ah[i] = qnan; o_al[i] = qnan; o_bs[i] = qnan; o_ss[i] = qnan;
         }
         if (warm >= n) continue;
 
-        // ---- SMA(high/low) state at warm ----
+        
         float sum_high = 0.0f;
         float sum_low  = 0.0f;
         #pragma unroll 1
@@ -243,7 +243,7 @@ void halftrend_batch_fused_f32(
             sum_low  = sum_low  + LDG(low  + i) - LDG(low  + (i - amp));
         }
 
-        // ---- ATR (Wilder RMA) state at warm ----
+        
         const float alpha = 1.0f / (float)atr_p;
         const int atr_warm = first + atr_p - 1;
         float sum_tr = LDG(high + first) - LDG(low + first);
@@ -272,7 +272,7 @@ void halftrend_batch_fused_f32(
             prev_c = LDG(close + i);
         }
 
-        // ---- Rolling extrema state (monotonic deques), seeded for window ending at warm ----
+        
         int max_idx[HT_FUSED_MAX_AMP];
         int min_idx[HT_FUSED_MAX_AMP];
         int max_head = 0, max_tail = 0, max_cnt = 0;
@@ -312,8 +312,8 @@ void halftrend_batch_fused_f32(
             min_cnt += 1;
         }
 
-        // ---- HalfTrend core state ----
-        int   current_trend = 0; // 0 up, 1 down
+        
+        int   current_trend = 0; 
         int   next_trend    = 0;
         int   prev_trend    = 0;
         float up   = 0.0f;
@@ -325,10 +325,10 @@ void halftrend_batch_fused_f32(
         float min_high_price = prev_high;
 
         for (int t = warm; t < n; ++t) {
-            // reset buy/sell to NaN each step
+            
             o_bs[t] = qnan; o_ss[t] = qnan;
 
-            // Update rolling extrema state for t>warm
+            
             if (t > warm) {
                 const int wstart = t + 1 - cap;
                 while (max_cnt > 0 && max_idx[max_head] < wstart) {
@@ -402,7 +402,7 @@ void halftrend_batch_fused_f32(
             const bool flipped = (t > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        // flip to up
+                if (flipped) {        
                     up = down;
                     o_bs[t] = up - atr2;
                 } else {
@@ -414,7 +414,7 @@ void halftrend_batch_fused_f32(
                 o_al[t] = up - dev;
                 o_tr[t] = 0.0f;
             } else {
-                if (flipped) {        // flip to down
+                if (flipped) {        
                     down = up;
                     o_ss[t] = down + atr2;
                 } else {
@@ -427,7 +427,7 @@ void halftrend_batch_fused_f32(
                 o_tr[t] = 1.0f;
             }
 
-            // Advance SMA + ATR to t+1
+            
             const int ni = t + 1;
             if (ni < n) {
                 sum_high = sum_high + LDG(high + ni) - LDG(high + (ni - amp));
@@ -450,30 +450,30 @@ void halftrend_batch_fused_f32(
     }
 }
 
-// ----------------------------------------------------------------------------
-// One price series × many params (TIME-MAJOR variant for future use)
-// Function name differs to avoid breaking existing wrappers/tests.
-// ----------------------------------------------------------------------------
+
+
+
+
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
-void halftrend_batch_time_major_f32( // expects TIME-MAJOR [n, rows]
-    const float* __restrict__ high,          // [n]
-    const float* __restrict__ low,           // [n]
-    const float* __restrict__ close,         // [n]
-    const float* __restrict__ atr_tm,        // [n*rows]
-    const float* __restrict__ highma_tm,     // [n*rows]
-    const float* __restrict__ lowma_tm,      // [n*rows]
-    const float* __restrict__ roll_high_tm,  // [n*rows]
-    const float* __restrict__ roll_low_tm,   // [n*rows]
-    const int*   __restrict__ warms,         // [rows]
-    const float* __restrict__ chdevs,        // [rows]
+void halftrend_batch_time_major_f32( 
+    const float* __restrict__ high,          
+    const float* __restrict__ low,           
+    const float* __restrict__ close,         
+    const float* __restrict__ atr_tm,        
+    const float* __restrict__ highma_tm,     
+    const float* __restrict__ lowma_tm,      
+    const float* __restrict__ roll_high_tm,  
+    const float* __restrict__ roll_low_tm,   
+    const int*   __restrict__ warms,         
+    const float* __restrict__ chdevs,        
     int n,
     int rows,
-    float* __restrict__ out_halftrend_tm,    // [n*rows]
-    float* __restrict__ out_trend_tm,        // [n*rows]
-    float* __restrict__ out_atr_high_tm,     // [n*rows]
-    float* __restrict__ out_atr_low_tm,      // [n*rows]
-    float* __restrict__ out_buy_tm,          // [n*rows]
-    float* __restrict__ out_sell_tm)         // [n*rows]
+    float* __restrict__ out_halftrend_tm,    
+    float* __restrict__ out_trend_tm,        
+    float* __restrict__ out_atr_high_tm,     
+    float* __restrict__ out_atr_low_tm,      
+    float* __restrict__ out_buy_tm,          
+    float* __restrict__ out_sell_tm)         
 {
     const int tid   = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride= blockDim.x * gridDim.x;
@@ -496,9 +496,9 @@ void halftrend_batch_time_major_f32( // expects TIME-MAJOR [n, rows]
         }
         if (warm >= n) continue;
 
-        int   current_trend = 0;   // 0 up, 1 down
+        int   current_trend = 0;   
         int   next_trend    = 0;
-        int   prev_trend    = 0;   // track previous written trend
+        int   prev_trend    = 0;   
         float up   = 0.0f;
         float down = 0.0f;
 
@@ -538,7 +538,7 @@ void halftrend_batch_time_major_f32( // expects TIME-MAJOR [n, rows]
             const bool flipped = (t > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        // flip to up
+                if (flipped) {        
                     up = down;
                     out_buy_tm[idx] = up - atr2;
                 } else {
@@ -550,7 +550,7 @@ void halftrend_batch_time_major_f32( // expects TIME-MAJOR [n, rows]
                 out_atr_low_tm[idx]   = up - dev;
                 out_trend_tm[idx]     = 0.0f;
             } else {
-                if (flipped) {        // flip to down
+                if (flipped) {        
                     down = up;
                     out_sell_tm[idx] = down + atr2;
                 } else {
@@ -570,27 +570,27 @@ void halftrend_batch_time_major_f32( // expects TIME-MAJOR [n, rows]
     }
 }
 
-// ----------------------------------------------------------------------------
-// One price series × many params (FUSED + TIME-MAJOR outputs)
-// - Output layout is time-major [n, rows] for coalesced stores.
-// ----------------------------------------------------------------------------
+
+
+
+
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_fused_time_major_f32(
-    const float* __restrict__ high,          // [n]
-    const float* __restrict__ low,           // [n]
-    const float* __restrict__ close,         // [n]
-    const int*   __restrict__ amps,          // [rows]
-    const int*   __restrict__ atr_periods,   // [rows]
-    const float* __restrict__ chdevs,        // [rows]
-    int first,                                // first valid index
+    const float* __restrict__ high,          
+    const float* __restrict__ low,           
+    const float* __restrict__ close,         
+    const int*   __restrict__ amps,          
+    const int*   __restrict__ atr_periods,   
+    const float* __restrict__ chdevs,        
+    int first,                                
     int n,
     int rows,
-    float* __restrict__ out_halftrend_tm,    // [n*rows]
-    float* __restrict__ out_trend_tm,        // [n*rows]
-    float* __restrict__ out_atr_high_tm,     // [n*rows]
-    float* __restrict__ out_atr_low_tm,      // [n*rows]
-    float* __restrict__ out_buy_tm,          // [n*rows]
-    float* __restrict__ out_sell_tm)         // [n*rows]
+    float* __restrict__ out_halftrend_tm,    
+    float* __restrict__ out_trend_tm,        
+    float* __restrict__ out_atr_high_tm,     
+    float* __restrict__ out_atr_low_tm,      
+    float* __restrict__ out_buy_tm,          
+    float* __restrict__ out_sell_tm)         
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -629,7 +629,7 @@ void halftrend_batch_fused_time_major_f32(
         }
         if (warm >= n) continue;
 
-        // SMA state at warm
+        
         float sum_high = 0.0f;
         float sum_low  = 0.0f;
         for (int k = 0; k < amp; ++k) {
@@ -643,7 +643,7 @@ void halftrend_batch_fused_time_major_f32(
             sum_low  = sum_low  + LDG(low  + t) - LDG(low  + (t - amp));
         }
 
-        // ATR RMA state at warm
+        
         const float alpha = 1.0f / (float)atr_p;
         const int atr_warm = first + atr_p - 1;
         float sum_tr = LDG(high + first) - LDG(low + first);
@@ -672,7 +672,7 @@ void halftrend_batch_fused_time_major_f32(
             prev_c = LDG(close + t);
         }
 
-        // Rolling extrema deques at warm
+        
         int max_idx[HT_FUSED_MAX_AMP];
         int min_idx[HT_FUSED_MAX_AMP];
         int max_head = 0, max_tail = 0, max_cnt = 0;
@@ -847,21 +847,21 @@ void halftrend_batch_fused_time_major_f32(
     }
 }
 
-// ----------------------------------------------------------------------------
-// Many series × one param (time-major), optimized internals.
-// Layout unchanged: idx = t*cols + s
-// ----------------------------------------------------------------------------
+
+
+
+
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const float* __restrict__ atr_tm,        // [rows*cols]
-    const float* __restrict__ highma_tm,     // [rows*cols]
-    const float* __restrict__ lowma_tm,      // [rows*cols]
-    const float* __restrict__ roll_high_tm,  // [rows*cols]
-    const float* __restrict__ roll_low_tm,   // [rows*cols]
-    const int*   __restrict__ warms_cols,    // [cols]
+    const float* __restrict__ atr_tm,        
+    const float* __restrict__ highma_tm,     
+    const float* __restrict__ lowma_tm,      
+    const float* __restrict__ roll_high_tm,  
+    const float* __restrict__ roll_low_tm,   
+    const int*   __restrict__ warms_cols,    
     float ch_dev,
     int cols,
     int rows,
@@ -872,7 +872,7 @@ void halftrend_many_series_one_param_time_major_f32(
     float* __restrict__ out_buy_tm,
     float* __restrict__ out_sell_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
     const float ch_half = ch_dev * 0.5f;
@@ -965,7 +965,7 @@ void halftrend_many_series_one_param_time_major_f32(
     }
 }
 
-} // extern "C"
+} 
 
 #undef AT_TM
 #undef HT_THREADS_PER_BLOCK

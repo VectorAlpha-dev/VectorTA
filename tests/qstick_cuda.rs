@@ -1,17 +1,17 @@
-// Integration tests for CUDA QStick kernels
 
-use my_project::indicators::qstick::{
+
+use vector_ta::indicators::qstick::{
     qstick_batch_with_kernel, qstick_with_kernel, QstickBatchRange, QstickData, QstickInput,
     QstickParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaQstick;
+use vector_ta::cuda::CudaQstick;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -82,8 +82,8 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let cols = 16usize; // series
-    let rows = 4096usize; // time
+    let cols = 16usize; 
+    let rows = 4096usize; 
     let mut open_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -96,7 +96,7 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     }
     let period = 21usize;
 
-    // CPU reference per series (column)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut o = vec![f64::NAN; rows];

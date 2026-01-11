@@ -1,14 +1,14 @@
-// Integration tests for CUDA VAR kernels (variance with nbdev scaling)
 
-use my_project::indicators::var::{var_batch_with_kernel, VarBatchRange, VarBuilder, VarParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::var::{var_batch_with_kernel, VarBatchRange, VarBuilder, VarParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaVar;
+use vector_ta::cuda::CudaVar;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -103,7 +103,7 @@ fn var_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         nbdev: Some(nbdev),
     };
 
-    // CPU reference per column
+    
     let mut cpu = vec![f32::NAN; rows * cols];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

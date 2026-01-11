@@ -247,8 +247,8 @@ pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput,
 
     let mut out = alloc_with_nan_prefix(len, first + period);
 
-    // Disable SIMD for Auto: scalar is consistently as fast or faster for ROCP.
-    // Leave explicit AVX2/AVX512 selection available for testing/benches.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -303,7 +303,7 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
         return Err(RocpError::OutputLengthMismatch { expected: len, got: dst.len() });
     }
 
-    // Disable SIMD for Auto in the into_slice path as well
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -320,7 +320,7 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
         }
     }
 
-    // Prefix-only warmup NaNs (ROCP first output at index first + period)
+    
     for v in &mut dst[..(first + period)] {
         *v = f64::NAN;
     }
@@ -330,19 +330,19 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 
 #[inline]
 pub fn rocp_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Compute once; avoid index recomputation and bounds checks inside the loop
+    
     let start = first_val + period;
     let n = data.len();
     if start >= n {
         return;
     }
 
-    // Align previous and current slices so we can zip without index math
+    
     let curr = &data[start..];
     let prev = &data[(start - period)..(n - period)];
     let dst = &mut out[start..];
 
-    // Zip is optimized by LLVM into a tight loop; keeps scalar path fully safe
+    
     for ((&c, &p), o) in curr.iter().zip(prev.iter()).zip(dst.iter_mut()) {
         *o = (c - p) / p;
     }
@@ -463,30 +463,30 @@ impl RocpStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let idx = self.head;
 
-        // Capture values that are 'period' apart before we overwrite the slot.
+        
         let prev = self.buffer[idx];
         let inv_prev = self.inv[idx];
 
-        // Write current into the ring(s).
+        
         self.buffer[idx] = value;
-        // One division per tick, but moved off the output's critical path.
+        
         self.inv[idx] = 1.0f64 / value;
 
-        // Branchless wrap to avoid modulo on the hot path.
+        
         let next = idx + 1;
         self.head = if next == self.period { 0 } else { next };
 
-        // Warmup handling: first (period-1) updates -> None; period-th -> Some(NaN).
+        
         if self.warmup > 1 {
             self.warmup -= 1;
             return None;
         } else if self.warmup == 1 {
             self.warmup = 0;
-            // inv_prev is NaN on this tick, returning NaN (matches scalar warmup behavior).
+            
             return Some(value.mul_add(inv_prev, -1.0));
         }
 
-        // Steady state: y = value * (1/prev) - 1, via FMA when available.
+        
         Some(value.mul_add(inv_prev, -1.0))
     }
 }
@@ -555,7 +555,7 @@ pub fn rocp_batch_with_kernel(
     sweep: &RocpBatchRange,
     k: Kernel,
 ) -> Result<RocpBatchOutput, RocpError> {
-    // Disable SIMD auto-selection for batch: scalar batch is as fast or faster for ROCP
+    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -687,25 +687,25 @@ fn rocp_batch_inner(
             step: sweep.period.2,
         })?;
 
-    // Use uninitialized memory operations like alma.rs
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes based on warmup periods
+    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Use ManuallyDrop for safer ownership transfer
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Optional row-optimized variant: precompute reciprocals once and reuse across rows.
-    // Heuristic: only worth it when multiple rows (>= 4) to amortize the O(N) precompute.
+    
+    
     let use_inv = rows >= 4;
     let inv: Option<Vec<f64>> = if use_inv {
         let mut v = Vec::with_capacity(cols);
-        // SAFETY: input slice length is cols; push exactly cols elements
+        
         for &x in data.iter() {
             v.push(1.0f64 / x);
         }
@@ -717,7 +717,7 @@ fn rocp_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         if let (Some(inv), Kernel::Scalar) = (&inv, kern) {
-            // Row-optimized scalar path using shared reciprocals
+            
             rocp_row_scalar_with_inv(data, first, period, out_row, inv);
         } else {
             match kern {
@@ -751,7 +751,7 @@ fn rocp_batch_inner(
         }
     }
 
-    // SAFETY: Convert the buffer back to Vec
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -798,7 +798,7 @@ fn rocp_row_scalar_with_inv(
         return;
     }
 
-    // Use shared reciprocals: y = (current / previous) - 1
+    
     let curr = &data[start..];
     let inv_prev = &inv[(start - period)..(n - period)];
     let dst = &mut out[start..];
@@ -885,7 +885,7 @@ unsafe fn rocp_row_avx512_impl(data: &[f64], first: usize, period: usize, out: &
     }
 }
 
-// No changes to tests required; batch and scalar logic are unified.
+
 
 #[inline(always)]
 pub fn rocp_batch_inner_into(
@@ -935,17 +935,17 @@ pub fn rocp_batch_inner_into(
         });
     }
 
-    // 1) Work in uninitialized space
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // 2) Warmup NaN prefixes per row (ROCP warm = first + period)
+    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 3) Row writer: take MU row, view as f64, compute into it
-    // Optional row-optimized variant: precompute reciprocals once when multiple rows
+    
+    
     let use_inv = combos.len() >= 4;
     let inv: Option<Vec<f64>> = if use_inv {
         let mut v = Vec::with_capacity(cols);
@@ -976,7 +976,7 @@ pub fn rocp_batch_inner_into(
         }
     };
 
-    // 4) Iterate by MU rows
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {

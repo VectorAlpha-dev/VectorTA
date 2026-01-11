@@ -1,9 +1,9 @@
-// CUDA kernels for the Volume Adjusted Moving Average (VAMA).
-//
-// These kernels evaluate a single price/volume series across a grid of
-// parameter combinations. The implementation follows the VRAM-first approach
-// used throughout the project: host code prepares prefix-sum helpers and the
-// kernel keeps all computation in FP32.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,7 +12,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Shared helper: fetch prefix-sum difference in a safe manner.
+
 static __device__ __forceinline__ float prefix_window(
     const float* __restrict__ prefix,
     int end_idx,
@@ -100,8 +100,8 @@ void volume_adjusted_ma_batch_f32(
                 const float vv = volumes[t];
                 avg_volume_d = isfinite(vv) ? (double)vv : 0.0;
             } else {
-                // Avoid catastrophic cancellation from FP32 prefix differences at large `t` by
-                // summing the small window directly in FP64 (matches scalar semantics).
+                
+                
                 double window_sum = 0.0;
                 for (int k = start; k <= t; ++k) {
                     const float vv = volumes[k];
@@ -119,7 +119,7 @@ void volume_adjusted_ma_batch_f32(
         int nmb = 0;
 
         if (!strict) {
-            // Non-strict: fixed-width window with explicit accumulation (matches scalar ordering)
+            
             int cap = length;
             if (cap > t + 1) cap = t + 1;
 
@@ -212,7 +212,7 @@ void volume_adjusted_ma_multi_series_one_param_time_major_f32(
     const bool strict = (strict_flag != 0);
     const float inv_period = 1.0f / float(period);
 
-    // Grid-stride loop over time; threads iterate over series for coalesced access
+    
     for (int t = blockIdx.x; t < series_len; t += gridDim.x) {
         for (int s = threadIdx.x; s < num_series; s += blockDim.x) {
             const int warm = first_valids[s] + period - 1;
@@ -223,7 +223,7 @@ void volume_adjusted_ma_multi_series_one_param_time_major_f32(
                 continue;
             }
 
-            // Average volume for (t, s)
+            
             float avg_volume;
             if (sample_period == 0) {
                 const float pref = prefix_volumes_tm[t * num_series + s];

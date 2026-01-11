@@ -234,7 +234,7 @@ pub use wilders_wrapper::{CudaWilders, CudaWildersError};
 #[cfg(feature = "cuda")]
 pub use wma_wrapper::{CudaWma, CudaWmaError};
 pub use zlema_wrapper::{CudaZlema, CudaZlemaError};
-// (duplicate export removed)
+
 #[cfg(feature = "cuda")]
 pub use macz_wrapper::{CudaMacz, CudaMaczError};
 #[cfg(feature = "cuda")]

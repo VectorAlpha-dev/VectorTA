@@ -1,14 +1,14 @@
-// Integration tests for CUDA NATR kernels
 
-use my_project::indicators::natr::{NatrBatchBuilder, NatrBatchRange};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::natr::{NatrBatchBuilder, NatrBatchRange};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaNatr;
+use vector_ta::cuda::CudaNatr;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -107,7 +107,7 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let period = 14usize;
 
-    // CPU per-series baseline using scalar natr
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -118,12 +118,12 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             l[t] = low_tm[t * cols + s];
             c[t] = close_tm[t * cols + s];
         }
-        let out = my_project::indicators::natr::natr(
-            &my_project::indicators::natr::NatrInput::from_slices(
+        let out = vector_ta::indicators::natr::natr(
+            &vector_ta::indicators::natr::NatrInput::from_slices(
                 &h,
                 &l,
                 &c,
-                my_project::indicators::natr::NatrParams {
+                vector_ta::indicators::natr::NatrParams {
                     period: Some(period),
                 },
             ),

@@ -1,14 +1,14 @@
-// Integration tests for CUDA MarketEFI kernels
 
-use my_project::indicators::marketefi::{
+
+use vector_ta::indicators::marketefi::{
     marketefi, MarketefiData, MarketefiInput, MarketefiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaMarketefi};
+use vector_ta::cuda::{cuda_available, CudaMarketefi};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,7 +67,7 @@ fn marketefi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 1e-5; // simple arithmetic; FP32 is fine here
+    let tol = 1e-5; 
     for i in 0..len {
         assert!(
             approx_eq(cpu[i], host[i] as f64, tol),
@@ -88,8 +88,8 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 8usize; // num_series
-    let rows = 2048usize; // series_len
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut v_tm = vec![f64::NAN; cols * rows];
@@ -102,7 +102,7 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

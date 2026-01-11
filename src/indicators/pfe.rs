@@ -246,7 +246,7 @@ fn pfe_prepare<'a>(
             data_len: len,
         });
     }
-    // Earliest valid output index for PFE is first + period (note: not -1).
+    
     if len - first < period + 1 {
         return Err(PfeError::NotEnoughValidData {
             needed: period + 1,
@@ -258,7 +258,7 @@ fn pfe_prepare<'a>(
     }
 
     let chosen = match k {
-        // Single-series kernel is scalar-only; avoid runtime detection overhead for Auto.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -271,7 +271,7 @@ fn pfe_compute_into(
     period: usize,
     smoothing: usize,
     first: usize,
-    _kernel: Kernel, // single-series SIMD not beneficial; keep scalar safe path
+    _kernel: Kernel, 
     out: &mut [f64],
 ) {
     let len = data.len();
@@ -279,25 +279,25 @@ fn pfe_compute_into(
         return;
     }
 
-    // Earliest computable index for PFE
+    
     let start = first + period;
     if start >= len {
         return;
     }
 
-    // Precompute constants
+    
     let p = period as f64;
     let p2 = p * p;
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Maintain a ring buffer of the last `period` short-leg segment lengths sqrt(1 + (ΔP)^2)
+    
     let mut seg = vec![0.0f64; period];
-    let mut head = 0usize; // points at oldest element
+    let mut head = 0usize; 
     let mut denom = 0.0f64;
 
-    // Initialize denominator for t = start
-    // steps from k = start - period + 1 ..= start, each step uses data[k] - data[k-1]
+    
+    
     let base = start - period + 1;
     for j in 0..period {
         let k = base + j;
@@ -307,25 +307,25 @@ fn pfe_compute_into(
         denom += s;
     }
 
-    // EMA state
+    
     let mut ema_started = false;
     let mut ema_val = 0.0f64;
 
-    // Rolling loop: O(n), 1 sqrt per step
+    
     let last = len - 1;
     for t in start..last {
         let cur = data[t];
         let past = data[t - period];
         let diff = cur - past;
 
-        // Long leg = sqrt(diff^2 + period^2)
+        
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
 
-        // denom is a sum of sqrt(1 + d^2) terms and cannot be zero for valid inputs.
+        
         let raw = 100.0 * (long_leg / denom);
         let signed = if diff > 0.0 { raw } else { -raw };
 
-        // EMA smoothing with standard warmup seed
+        
         let val = if !ema_started {
             ema_started = true;
             ema_val = signed;
@@ -337,10 +337,10 @@ fn pfe_compute_into(
 
         out[t] = val;
 
-        // Prepare denominator for next t (t+1)
+        
         let old = seg[head];
         let next = data[t + 1];
-        let new_d = next - cur; // step between t and t+1
+        let new_d = next - cur; 
         let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
         denom += new_s - old;
         seg[head] = new_s;
@@ -350,7 +350,7 @@ fn pfe_compute_into(
         }
     }
 
-    // Final point (no denom update needed)
+    
     if start <= last {
         let cur = data[last];
         let past = data[last - period];
@@ -373,7 +373,7 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
 
 pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, kernel)?;
-    // Warmup count for PFE is first + period
+    
     let mut out = alloc_with_nan_prefix(data.len(), first + period);
     pfe_compute_into(data, period, smoothing, first, chosen, &mut out);
     Ok(PfeOutput { values: out })
@@ -1399,8 +1399,8 @@ impl PfeDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate requested `dl_device` (if any).
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1422,7 +1422,7 @@ impl PfeDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -1551,7 +1551,7 @@ pub fn pfe_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "pfe_cuda_batch_dev")]
 #[pyo3(signature = (data, period_range, smoothing_range, device_id=0))]
@@ -2066,12 +2066,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            PfeParams::default(), // period: 10, smoothing: 5
+            PfeParams::default(), 
             PfeParams {
-                period: Some(2),    // minimum viable period
-                smoothing: Some(1), // minimum smoothing
+                period: Some(2),    
+                smoothing: Some(1), 
             },
             PfeParams {
                 period: Some(5),
@@ -2094,16 +2094,16 @@ mod tests {
                 smoothing: Some(10),
             },
             PfeParams {
-                period: Some(50), // large period
+                period: Some(50), 
                 smoothing: Some(15),
             },
             PfeParams {
-                period: Some(100), // very large period
+                period: Some(100), 
                 smoothing: Some(20),
             },
             PfeParams {
                 period: Some(3),
-                smoothing: Some(30), // smoothing > period case
+                smoothing: Some(30), 
             },
         ];
 
@@ -2113,12 +2113,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2168,7 +2168,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_pfe_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2180,24 +2180,24 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // More comprehensive data generation strategy
+        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
-                // Generate varied price data - from very small to very large values
+                
                 prop::collection::vec(
                     prop::strategy::Union::new(vec![
-                        // Small values
+                        
                         (0.01f64..10.0f64).boxed(),
-                        // Medium values
+                        
                         (10.0f64..1000.0f64).boxed(),
-                        // Large values
+                        
                         (1000.0f64..100000.0f64).boxed(),
                     ])
                     .prop_filter("finite", |x| x.is_finite()),
                     period + 50..400,
                 ),
                 Just(period),
-                1usize..=20, // smoothing range
+                1usize..=20, 
             )
         });
 
@@ -2213,7 +2213,7 @@ mod tests {
                 let PfeOutput { values: ref_out } =
                     pfe_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Basic structure checks
+                
                 prop_assert_eq!(
                     out.len(),
                     data.len(),
@@ -2221,7 +2221,7 @@ mod tests {
                     test_name
                 );
 
-                // Warmup period validation
+                
                 for i in 0..period {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2232,12 +2232,12 @@ mod tests {
                     );
                 }
 
-                // Main validation loop with proper floating point tolerance
+                
                 for i in period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Both NaN or both finite
+                    
                     if y.is_nan() != r.is_nan() {
                         prop_assert!(
                             false,
@@ -2250,7 +2250,7 @@ mod tests {
                     }
 
                     if y.is_finite() {
-                        // Theoretical bounds check
+                        
                         prop_assert!(
                             y >= -100.0 && y <= 100.0,
                             "[{}] PFE value {} at index {} out of bounds [-100, 100]",
@@ -2259,12 +2259,12 @@ mod tests {
                             i
                         );
 
-                        // Kernel consistency with ULP tolerance
+                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
 
-                        // Allow small ULP difference for accumulated floating point errors
+                        
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
                             "[{}] Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
@@ -2277,16 +2277,16 @@ mod tests {
                     }
                 }
 
-                // Verify PFE calculation logic for specific patterns
-                // 1. Perfect straight line up should have high positive efficiency
+                
+                
                 let straight_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64).collect();
                 let straight_params = PfeParams {
                     period: Some(10),
-                    smoothing: Some(1), // Minimal smoothing to see raw PFE
+                    smoothing: Some(1), 
                 };
                 let straight_input = PfeInput::from_slice(&straight_up, straight_params);
                 if let Ok(straight_out) = pfe_with_kernel(&straight_input, kernel) {
-                    // After warmup, straight line should have efficiency near 100
+                    
                     for i in 15..straight_out.values.len() {
                         if straight_out.values[i].is_finite() {
                             prop_assert!(
@@ -2300,7 +2300,7 @@ mod tests {
                     }
                 }
 
-                // 2. Zigzag pattern should have lower absolute efficiency
+                
                 let zigzag: Vec<f64> = (0..100)
                     .map(|i| {
                         if i % 2 == 0 {
@@ -2321,7 +2321,7 @@ mod tests {
                     pfe_with_kernel(&zigzag_input, kernel),
                     pfe_with_kernel(&straight_input2, kernel),
                 ) {
-                    // Compare average absolute efficiency
+                    
                     let zigzag_avg: f64 = zigzag_out.values[20..50]
                         .iter()
                         .filter(|x| x.is_finite())
@@ -2344,9 +2344,9 @@ mod tests {
 					);
                 }
 
-                // 3. Test EMA smoothing effect
+                
                 if smoothing > 1 && data.len() > period + 30 {
-                    // Calculate unsmoothed version
+                    
                     let unsmoothed_params = PfeParams {
                         period: Some(period),
                         smoothing: Some(1),
@@ -2354,19 +2354,19 @@ mod tests {
                     let unsmoothed_input = PfeInput::from_slice(&data, unsmoothed_params);
 
                     if let Ok(unsmoothed_out) = pfe_with_kernel(&unsmoothed_input, kernel) {
-                        // Use a larger window for more stable variance calculation
+                        
                         let window_start = period + 10;
                         let window_end = (period + 30).min(out.len());
 
                         if window_end > window_start {
-                            // Calculate variance to compare smoothness
+                            
                             let smoothed_variance =
                                 calculate_variance(&out[window_start..window_end]);
                             let unsmoothed_variance = calculate_variance(
                                 &unsmoothed_out.values[window_start..window_end],
                             );
 
-                            // Check for extreme price jumps in the data
+                            
                             let mut has_extreme_jumps = false;
                             for i in 1..data.len() {
                                 let ratio = if data[i - 1] != 0.0 {
@@ -2374,26 +2374,26 @@ mod tests {
                                 } else {
                                     f64::INFINITY
                                 };
-                                // If any price changes by more than 100x, consider it extreme
+                                
                                 if ratio > 100.0 || ratio < 0.01 {
                                     has_extreme_jumps = true;
                                     break;
                                 }
                             }
 
-                            // Only apply smoothness check if:
-                            // 1. Both variances are finite
-                            // 2. There's meaningful variance (not near-constant)
-                            // 3. Data doesn't have extreme jumps
-                            // 4. Smoothing parameter is reasonable (not too high)
+                            
+                            
+                            
+                            
+                            
                             if smoothed_variance.is_finite()
                                 && unsmoothed_variance.is_finite()
                                 && unsmoothed_variance > 1e-6
                                 && !has_extreme_jumps
                                 && smoothing <= 10
                             {
-                                // For normal data, smoothing should reduce variance
-                                // Allow up to 50% higher variance as EMA can amplify certain patterns
+                                
+                                
                                 prop_assert!(
 									smoothed_variance <= unsmoothed_variance * 1.5,
 									"[{}] Smoothed variance ({}) should be <= 1.5x unsmoothed variance ({})",
@@ -2406,10 +2406,10 @@ mod tests {
                     }
                 }
 
-                // 4. Edge case: period = 2 (minimum viable)
+                
                 if period == 2 {
-                    // With period=2, we're only looking at 2 points
-                    // The calculation should still produce valid results
+                    
+                    
                     for i in 2..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -2423,18 +2423,18 @@ mod tests {
                     }
                 }
 
-                // 5. Constant prices verification - mathematically should be -100
+                
                 let constant: Vec<f64> = vec![500.0; 50];
                 let const_params = PfeParams {
                     period: Some(10),
-                    smoothing: Some(1), // No smoothing to see raw value
+                    smoothing: Some(1), 
                 };
                 let const_input = PfeInput::from_slice(&constant, const_params);
                 if let Ok(const_out) = pfe_with_kernel(&const_input, kernel) {
-                    // For constant prices:
-                    // diff = 0, long_leg = period, short_leg = period * 1 = period
-                    // raw_pfe = 100 * (period/period) = 100
-                    // signed_pfe = -100 (because diff <= 0)
+                    
+                    
+                    
+                    
                     for i in 15..const_out.values.len() {
                         if const_out.values[i].is_finite() {
                             prop_assert!(
@@ -2452,7 +2452,7 @@ mod tests {
             })
             .unwrap();
 
-        // Helper function for variance calculation
+        
         fn calculate_variance(values: &[f64]) -> f64 {
             let finite_values: Vec<f64> =
                 values.iter().filter(|x| x.is_finite()).copied().collect();
@@ -2552,17 +2552,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, smoothing_start, smoothing_end, smoothing_step)
-            (2, 10, 2, 1, 5, 1),       // Small periods and smoothing
-            (5, 25, 5, 2, 10, 2),      // Medium periods and smoothing
-            (30, 60, 15, 5, 20, 5),    // Large periods and smoothing
-            (2, 5, 1, 1, 3, 1),        // Dense small range
-            (10, 10, 0, 1, 20, 1),     // Static period, varying smoothing
-            (2, 100, 10, 5, 5, 0),     // Varying period, static smoothing
-            (14, 21, 7, 3, 9, 3),      // Medium focused range
-            (50, 100, 25, 10, 30, 10), // Large focused range
+            
+            (2, 10, 2, 1, 5, 1),       
+            (5, 25, 5, 2, 10, 2),      
+            (30, 60, 15, 5, 20, 5),    
+            (2, 5, 1, 1, 3, 1),        
+            (10, 10, 0, 1, 20, 1),     
+            (2, 100, 10, 5, 5, 0),     
+            (14, 21, 7, 3, 9, 3),      
+            (50, 100, 25, 10, 30, 10), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, s_start, s_end, s_step)) in
@@ -2584,7 +2584,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2640,7 +2640,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {

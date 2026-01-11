@@ -321,12 +321,12 @@ fn maaq_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), MaaqError> {
-    // Guard possible caller misuse: ensure output slice is sized correctly
+    
     if out.len() != data.len() {
         return Err(MaaqError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
     unsafe {
-        // Fallback to scalar if first > 0 since AVX implementations don't handle it properly
+        
         if first > 0 {
             maaq_scalar(data, period, fast_p, slow_p, first, out)?;
         } else {
@@ -355,7 +355,7 @@ fn maaq_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // period
         usize,
@@ -1027,17 +1027,17 @@ fn maaq_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // 1. allocate the matrix as MaybeUninit and write the NaN prefixes
+    
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // 2. closure that fills one row; gets &mut [MaybeUninit<f64>]
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let fast_p = combos[row].fast_period.unwrap();
         let slow_p = combos[row].slow_period.unwrap();
 
-        // cast this row to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1051,7 +1051,7 @@ fn maaq_batch_inner(
         }
     };
 
-    // 3. run every row, writing directly into `raw`
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1072,7 +1072,7 @@ fn maaq_batch_inner(
         }
     }
 
-    // 4. all elements are now initialised – convert to Vec<f64> safely
+    
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values: Vec<f64> = unsafe {
         Vec::from_raw_parts(
@@ -1082,7 +1082,7 @@ fn maaq_batch_inner(
         )
     };
 
-    // ---------- 5. package result ----------
+    
     Ok(MaaqBatchOutput {
         values,
         combos,
@@ -1117,7 +1117,7 @@ pub fn maaq_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Validate output slice size
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(MaaqError::InvalidRange { start: rows, end: cols, step: 0 })?;
@@ -1125,27 +1125,27 @@ pub fn maaq_batch_inner_into(
         return Err(MaaqError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Cast output slice to MaybeUninit
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Per-row warm prefix: first non-NaN + that row's period - 1
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // 1. Write the NaN prefixes
+    
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // 2. closure that fills one row
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let fast_p = combos[row].fast_period.unwrap();
         let slow_p = combos[row].slow_period.unwrap();
 
-        // cast this row to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1165,7 +1165,7 @@ pub fn maaq_batch_inner_into(
         }
     };
 
-    // 3. run every row, writing directly into output
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1228,7 +1228,7 @@ pub unsafe fn maaq_row_avx512(
     maaq_avx2(data, period, fast_p, slow_p, first, out);
 }
 
-// Row-specific batch kernels not attempted; no shared precompute to exploit
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1460,10 +1460,10 @@ mod tests {
             }
         }
         assert_eq!(batch_output.len(), stream_values.len());
-        // Compare only after warmup period
-        // Batch uses NaN for warmup (ALMA parity): indices 0 to period-2 are NaN
-        // Stream returns raw values during warmup then switches to MAAQ values
-        // Both should produce the same MAAQ values after index period-1
+        
+        
+        
+        
         for i in period..batch_output.len() {
             let b = batch_output[i];
             let s = stream_values[i];
@@ -1508,7 +1508,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_maaq_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1516,11 +1516,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_cases = vec![
-            // Default parameters
+            
             MaaqParams::default(),
-            // Small period with various fast/slow periods
+            
             MaaqParams {
                 period: Some(5),
                 fast_period: Some(2),
@@ -1531,7 +1531,7 @@ mod tests {
                 fast_period: Some(3),
                 slow_period: Some(20),
             },
-            // Medium period combinations
+            
             MaaqParams {
                 period: Some(11),
                 fast_period: Some(2),
@@ -1547,19 +1547,19 @@ mod tests {
                 fast_period: Some(5),
                 slow_period: Some(50),
             },
-            // Large period
+            
             MaaqParams {
                 period: Some(30),
                 fast_period: Some(6),
                 slow_period: Some(60),
             },
-            // Edge cases with fast_period close to period
+            
             MaaqParams {
                 period: Some(10),
                 fast_period: Some(8),
                 slow_period: Some(30),
             },
-            // Very small fast_period
+            
             MaaqParams {
                 period: Some(25),
                 fast_period: Some(1),
@@ -1571,16 +1571,16 @@ mod tests {
             let input = MaaqInput::from_candles(&candles, "close", params.clone());
             let output = maaq_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1588,7 +1588,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1596,7 +1596,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1609,7 +1609,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_maaq_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1662,7 +1662,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1670,17 +1670,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small periods with various fast/slow combinations
+            
             ((5, 10, 2), (2, 4, 1), (10, 30, 5)),
-            // Medium periods
+            
             ((10, 20, 5), (2, 6, 2), (20, 50, 10)),
-            // Large periods
+            
             ((20, 30, 5), (4, 8, 2), (40, 80, 20)),
-            // Edge case: fast_period close to period
+            
             ((10, 15, 5), (5, 10, 5), (30, 60, 30)),
-            // Dense parameter sweep
+            
             ((8, 12, 1), (2, 5, 1), (15, 25, 5)),
         ];
 
@@ -1692,9 +1692,9 @@ mod tests {
                 .slow_period_range(slow_range.0, slow_range.1, slow_range.2)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1704,7 +1704,7 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1712,7 +1712,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1720,7 +1720,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1733,7 +1733,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1751,15 +1751,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Main strategy - test general properties with realistic data
+        
         let main_strat = (
             proptest::collection::vec(
                 (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                 20..200,
             ),
-            2usize..30,  // period
-            1usize..10,  // fast_period
-            10usize..50, // slow_period
+            2usize..30,  
+            1usize..10,  
+            10usize..50, 
         )
             .prop_filter("valid params", |(data, period, fast_p, slow_p)| {
                 *period <= data.len() && *fast_p < *slow_p
@@ -1775,11 +1775,11 @@ mod tests {
                 };
                 let input = MaaqInput::from_slice(&data, params.clone());
 
-                // Run with test kernel and scalar reference
+                
                 let result = maaq_with_kernel(&input, kernel)?;
                 let reference = maaq_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(
                     result.values.len(),
                     data.len(),
@@ -1788,7 +1788,7 @@ mod tests {
                     data.len()
                 );
 
-                // Property 2: Warmup values should be NaN (ALMA parity)
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first_valid + period - 1;
                 for i in 0..warmup_end.min(data.len()) {
@@ -1800,7 +1800,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: SIMD consistency with scalar (ULP tolerance)
+                
                 for i in 0..result.values.len() {
                     let y = result.values[i];
                     let r = reference.values[i];
@@ -1828,12 +1828,12 @@ mod tests {
                     );
                 }
 
-                // Property 4: Values stay within reasonable bounds
-                // MAAQ uses adaptive smoothing bounded by EMA nature
+                
+                
                 let data_min = data.iter().copied().fold(f64::INFINITY, f64::min);
                 let data_max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let range = (data_max - data_min).abs();
-                let tolerance = range * 0.02; // Allow only 2% tolerance since MAAQ is bounded
+                let tolerance = range * 0.02; 
 
                 for (i, &val) in result.values.iter().enumerate() {
                     if val.is_finite() && i >= period {
@@ -1848,7 +1848,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Constant data produces stable output
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
                     let constant_val = data[0];
                     for (i, &val) in result.values[period..].iter().enumerate() {
@@ -1865,15 +1865,15 @@ mod tests {
             },
         )?;
 
-        // Strategy 2: MAAQ-specific efficiency ratio and adaptive behavior
+        
         let maaq_strat = (
             proptest::collection::vec(
                 (-100f64..100f64).prop_filter("finite", |x| x.is_finite()),
                 50..100,
             ),
-            5usize..15,  // period
-            1usize..5,   // fast_period
-            20usize..40, // slow_period
+            5usize..15,  
+            1usize..5,   
+            20usize..40, 
         )
             .prop_filter("valid maaq params", |(_data, period, fast_p, slow_p)| {
                 *fast_p < *slow_p
@@ -1890,19 +1890,19 @@ mod tests {
                 let input = MaaqInput::from_slice(&data, params);
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                // Calculate efficiency ratios manually to verify MAAQ behavior
+                
                 let fast_sc = 2.0 / (fast_p as f64 + 1.0);
                 let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-                // After warmup, verify adaptive smoothing behavior
+                
                 for i in (period + 1)..data.len() {
-                    // Calculate efficiency ratio components
+                    
                     let signal = (data[i] - data[i - period]).abs();
                     let noise: f64 = (1..=period)
                         .map(|j| (data[i - j + 1] - data[i - j]).abs())
                         .sum();
 
-                    // MAAQ property: efficiency ratio should be in [0, 1]
+                    
                     if noise > f64::EPSILON {
                         let er = signal / noise;
                         prop_assert!(
@@ -1912,11 +1912,11 @@ mod tests {
                             i
                         );
 
-                        // When ER is high (trending), output should follow input more closely
-                        // When ER is low (noisy), output should be smoother
+                        
+                        
                         let sc = (er * fast_sc + slow_sc).powi(2);
 
-                        // Smoothing constant should be bounded
+                        
                         let min_sc = slow_sc.powi(2);
                         let max_sc = (fast_sc + slow_sc).powi(2);
                         prop_assert!(
@@ -1930,13 +1930,13 @@ mod tests {
                     }
                 }
 
-                // Test adaptive behavior: create trending vs noisy sections
+                
                 if data.len() >= period * 3 {
-                    // For trending sections (large signal), should track closely
+                    
                     let trending_indices: Vec<usize> = (period..data.len())
                         .filter(|&i| {
                             let signal = (data[i] - data[i.saturating_sub(period)]).abs();
-                            signal > 10.0 // Strong trend
+                            signal > 10.0 
                         })
                         .collect();
 
@@ -1949,7 +1949,7 @@ mod tests {
                             });
                         let local_range = (price_range.1 - price_range.0).abs();
 
-                        // In trending markets, MAAQ should track within 20% of local range
+                        
                         prop_assert!(
                             tracking_error <= local_range * 0.2 + 1.0,
                             "Poor tracking in trend at {}: error {} > 20% of range {}",
@@ -1964,13 +1964,13 @@ mod tests {
             },
         )?;
 
-        // Strategy 3: Step response - test convergence to new levels
+        
         let step_strat = (
-            10usize..30,     // period
-            2usize..5,       // fast_period
-            20usize..40,     // slow_period
-            -100f64..100f64, // initial level
-            -100f64..100f64, // final level
+            10usize..30,     
+            2usize..5,       
+            20usize..40,     
+            -100f64..100f64, 
+            -100f64..100f64, 
         )
             .prop_filter("different levels", |(_p, _f, _s, init, final_level)| {
                 (init - final_level).abs() > 1.0
@@ -1979,7 +1979,7 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &step_strat,
             |(period, fast_p, slow_p, initial, final_level)| {
-                // Create step function data
+                
                 let mut data = vec![initial; 50];
                 data.extend(vec![final_level; 50]);
 
@@ -1991,7 +1991,7 @@ mod tests {
                 let input = MaaqInput::from_slice(&data, params);
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                // Check that output eventually converges toward the new level
+                
                 let last_values = &result.values[90..];
                 let convergence_target = final_level;
 
@@ -1999,7 +1999,7 @@ mod tests {
                     let distance_to_target = (val - convergence_target).abs();
                     let initial_distance = (initial - final_level).abs();
 
-                    // Should be much closer to final than initial (stricter convergence)
+                    
                     prop_assert!(
                         distance_to_target < initial_distance * 0.3,
                         "Failed to converge: value {} too far from target {}",
@@ -2012,15 +2012,15 @@ mod tests {
             },
         )?;
 
-        // Strategy 4: Small data edge cases
+        
         let small_strat = (
             proptest::collection::vec(
                 (-100f64..100f64).prop_filter("finite", |x| x.is_finite()),
                 1..5,
             ),
-            1usize..3, // period
-            1usize..3, // fast_period
-            3usize..6, // slow_period
+            1usize..3, 
+            1usize..3, 
+            3usize..6, 
         )
             .prop_filter("valid small params", |(data, period, _fast_p, _slow_p)| {
                 *period <= data.len()
@@ -2036,13 +2036,13 @@ mod tests {
                 };
                 let input = MaaqInput::from_slice(&data, params);
 
-                // Should not panic with small data
+                
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                // Basic sanity checks
+                
                 prop_assert_eq!(result.values.len(), data.len());
 
-                // First values should match input during warmup
+                
                 for i in 0..period.min(data.len()) {
                     if data[i].is_finite() {
                         prop_assert!(
@@ -2063,11 +2063,11 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_maaq_tests!(check_maaq_property);
 
-    // Parity test for native into API vs Vec API
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_maaq_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a series with a small NaN prefix and varying values
+        
         let mut data: Vec<f64> = vec![f64::NAN, f64::NAN, f64::NAN];
         for i in 0..256u32 {
             let x = (i as f64).sin() * 0.5 + (i as f64) * 0.1 + ((i % 7) as f64) * 0.01;
@@ -2076,16 +2076,16 @@ mod tests {
 
         let input = MaaqInput::from_slice(&data, MaaqParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = maaq(&input)?.values;
 
-        // Zero-allocation path into preallocated buffer
+        
         let mut out = vec![0.0; data.len()];
         super::maaq_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // Equality: NaN == NaN, otherwise exact or tight epsilon
+        
         for (idx, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || ((a - b).abs() <= 1e-12);
             assert!(equal, "Mismatch at {}: {} vs {}", idx, a, b);
@@ -2095,7 +2095,7 @@ mod tests {
     }
 }
 
-// --- Python bindings ---
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2105,7 +2105,7 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-// ---- CUDA Python interop helpers (primary-context guard) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct PrimaryCtxGuard {
     dev: i32,
@@ -2138,7 +2138,7 @@ impl Drop for PrimaryCtxGuard {
     }
 }
 
-// --- Python CUDA interop (MAAQ-specific device handle) ---
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Maaq", unsendable)]
 pub struct DeviceArrayF32MaaqPy {

@@ -1,16 +1,16 @@
-// Integration tests for CUDA AlphaTrend kernels
 
-use my_project::indicators::alphatrend::{
+
+use vector_ta::indicators::alphatrend::{
     alphatrend_batch_slice, AlphaTrendBatchRange, AlphaTrendParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::alphatrend_wrapper::CudaAlphaTrend;
+use vector_ta::cuda::alphatrend_wrapper::CudaAlphaTrend;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -111,21 +111,21 @@ fn alphatrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>>
 #[cfg(feature = "cuda")]
 #[test]
 fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    use my_project::indicators::alphatrend::{alphatrend_into_slices, AlphaTrendInput};
+    use vector_ta::indicators::alphatrend::{alphatrend_into_slices, AlphaTrendInput};
     if !cuda_available() {
         eprintln!("[alphatrend_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 2048usize; // time
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 3)..rows {
-            // stagger valid starts
+            
             let idx = t * cols + s;
             let x = (t as f64) + (s as f64) * 0.3;
             high_tm[idx] = (x * 0.0009).sin() + 0.03;
@@ -138,7 +138,7 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     let period = 14usize;
     let no_volume = true;
 
-    // CPU baseline per series
+    
     let mut k1_cpu_tm = vec![f64::NAN; cols * rows];
     let mut k2_cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -176,7 +176,7 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
         }
     }
 
-    // GPU
+    
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cf: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
@@ -196,7 +196,7 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     k1_dev.buf.copy_to(&mut k1_gpu_tm)?;
     k2_dev.buf.copy_to(&mut k2_gpu_tm)?;
 
-    // Compare
+    
     let tol = 2e-3;
     for idx in 0..(cols * rows) {
         let c1 = k1_cpu_tm[idx];

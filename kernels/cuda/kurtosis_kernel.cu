@@ -1,8 +1,8 @@
-// CUDA kernels for Kurtosis (excess kurtosis) indicator.
-//
-// DS rewrite: remove FP64 from device code and use double‑single (2×FP32)
-// accumulators for improved precision on GeForce/Ada GPUs. Preserves the
-// original semantics: NaN handling, warmup indexing, and output format.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,10 +12,10 @@
 #include <math.h>
 #include <stdint.h>
 
-// =================== DS (double-single) arithmetic on FP32 ===================
-// hi+lo with ~48-50 bits of precision. Implemented via TwoSum/TwoProd + FMA.
-// Based on Shewchuk (TwoSum) and Thall (double-float). No special flags needed.
-// References: Shewchuk 1997; Thall 2006.
+
+
+
+
 
 struct __align__(8) dsf { float hi, lo; };
 
@@ -23,14 +23,14 @@ __device__ __forceinline__ dsf ds_from_float(float a) {
     return {a, 0.0f};
 }
 
-// General TwoSum for floats
+
 __device__ __forceinline__ void two_sum(float a, float b, float& s, float& e) {
     s = a + b;
     float bb = s - a;
     e = (a - (s - bb)) + (b - bb);
 }
 
-// a.hi + b.hi plus low parts
+
 __device__ __forceinline__ dsf ds_add(dsf a, dsf b) {
     float s, e;
     two_sum(a.hi, b.hi, s, e);
@@ -43,11 +43,11 @@ __device__ __forceinline__ dsf ds_add(dsf a, dsf b) {
 __device__ __forceinline__ dsf ds_neg(dsf a) { return {-a.hi, -a.lo}; }
 __device__ __forceinline__ dsf ds_sub(dsf a, dsf b) { return ds_add(a, ds_neg(b)); }
 
-// TwoProd using FMA for exact error of hi*hi
+
 __device__ __forceinline__ dsf ds_mul(dsf a, dsf b) {
     float p  = a.hi * b.hi;
-    float e  = fmaf(a.hi, b.hi, -p);                 // error of hi*hi
-    e += a.hi * b.lo + a.lo * b.hi;                  // cross terms
+    float e  = fmaf(a.hi, b.hi, -p);                 
+    e += a.hi * b.lo + a.lo * b.hi;                  
     e += a.lo * b.lo;
     float hi = p + e;
     float lo = e - (hi - p);
@@ -66,30 +66,30 @@ __device__ __forceinline__ dsf ds_scale(dsf a, float s) {
 __device__ __forceinline__ dsf ds_square(dsf a) { return ds_mul(a, a); }
 __device__ __forceinline__ float ds_to_f32(dsf a) { return a.hi + a.lo; }
 
-// Helpers to load DS from float2 prefix arrays
+
 __device__ __forceinline__ dsf ld_ds(const float2* __restrict__ p, int idx) {
     float2 v = p[idx];
     return {v.x, v.y};
 }
 
-// Canonical quiet NaN
+
 __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fffffff); }
 
-// ================= One-series × many-params (prefix-sum based, DS) =================
-// Inputs: DS prefix sums for x, x^2, x^3, x^4 and int prefix of NaN counts.
-// Output: excess kurtosis (float). Semantics identical to scalar path.
-// NOTE: signature changed: double* ps_* -> float2* ps_* (DS).
+
+
+
+
 extern "C" __global__ void kurtosis_batch_f32(
-    const float2* __restrict__ ps_x,    // [len+1] DS
-    const float2* __restrict__ ps_x2,   // [len+1] DS
-    const float2* __restrict__ ps_x3,   // [len+1] DS
-    const float2* __restrict__ ps_x4,   // [len+1] DS
-    const int*    __restrict__ ps_nan,  // [len+1]
+    const float2* __restrict__ ps_x,    
+    const float2* __restrict__ ps_x2,   
+    const float2* __restrict__ ps_x3,   
+    const float2* __restrict__ ps_x4,   
+    const int*    __restrict__ ps_nan,  
     int len,
     int first_valid,
-    const int* __restrict__ periods,    // [n_combos]
+    const int* __restrict__ periods,    
     int n_combos,
-    float* __restrict__ out             // [n_combos * len]
+    float* __restrict__ out             
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -113,7 +113,7 @@ extern "C" __global__ void kurtosis_batch_f32(
 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
-                // Window raw sums via DS prefix differences (fast path: hi/lo diffs -> float)
+                
                 const float2 px_e  = ps_x[end];
                 const float2 px_s  = ps_x[start];
                 const float2 px2_e = ps_x2[end];
@@ -137,7 +137,7 @@ extern "C" __global__ void kurtosis_batch_f32(
                 const float m2 = Ex2 - mean2;
 
                 if (m2 > 0.0f) {
-                    // m4 = E[x^4] - 4*mean*E[x^3] + 6*mean^2*E[x^2] - 3*mean^4
+                    
                     const float term1 = fmaf(-4.0f * mean, Ex3, Ex4);
                     const float term2 = fmaf(6.0f * mean2, Ex2, term1);
                     const float mean4 = mean2 * mean2;
@@ -155,22 +155,22 @@ extern "C" __global__ void kurtosis_batch_f32(
     }
 }
 
-// ============= Many-series × one-param (time-major), DS accumulators =============
-// Time-major [t][series]. One block per series; thread 0 runs the sliding scan.
-// Rebuild-on-NaN path retained; accumulators are DS with FMA-based products.
+
+
+
 extern "C" __global__ void kurtosis_many_series_one_param_f32(
-    const float* __restrict__ data_tm,    // [series_len * num_series], time-major
-    const int*   __restrict__ first_valids,// [num_series]
+    const float* __restrict__ data_tm,    
+    const int*   __restrict__ first_valids,
     int period,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm            // [series_len * num_series], time-major
+    float* __restrict__ out_tm            
 ) {
     const int series = blockIdx.x;
     if (series >= num_series || period <= 0) return;
     const int stride = num_series;
 
-    // Fill column with NaNs cooperatively
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = qnan_f32();
     }
@@ -184,7 +184,7 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
     const int warm = first_valid + period - 1;
     const float inv_n = 1.0f / (float)period;
 
-    // Bootstrap raw sums over initial window [first_valid .. warm]
+    
     dsf s1 = ds_from_float(0.0f), s2 = ds_from_float(0.0f),
         s3 = ds_from_float(0.0f), s4 = ds_from_float(0.0f);
     int nan_in_win = 0;
@@ -229,14 +229,14 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
         out_tm[warm * stride + series] = out0;
     }
 
-    // Slide window forward
+    
     for (int t = warm + 1; t < series_len; ++t) {
         const int old_idx = t - period;
         const float old_v = data_tm[old_idx * stride + series];
         const float new_v = data_tm[t * stride + series];
 
         if (isnan(old_v) || isnan(new_v)) {
-            // Rebuild raw sums over the window
+            
             s1 = ds_from_float(0.0f); s2 = ds_from_float(0.0f);
             s3 = ds_from_float(0.0f); s4 = ds_from_float(0.0f);
             nan_in_win = 0;
@@ -256,7 +256,7 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
                 }
             }
         } else {
-            // O(1) updates of raw sums with DS
+            
             const float od  = old_v;
             const float nd  = new_v;
             const float od2 = fmaf(od, od, 0.0f);
@@ -295,5 +295,5 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
     }
 }
 
-// Optional: DS prefix builder kept out per guide to leave host/Rust generation.
+
 

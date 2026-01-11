@@ -1,17 +1,17 @@
-// CUDA integration tests for DevStop
 
-use my_project::indicators::devstop::{
+
+use vector_ta::indicators::devstop::{
     devstop_batch_with_kernel, devstop_with_kernel, DevStopBatchRange, DevStopData, DevStopInput,
     DevStopParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaDevStop;
+use vector_ta::cuda::CudaDevStop;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,8 +67,8 @@ fn devstop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host_out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host_out)?;
 
-    // Compare row × col with modest tolerance
-    let tol = 5e-2; // FP32 path
+    
+    let tol = 5e-2; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host_out[idx] as f64;
@@ -106,7 +106,7 @@ fn devstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let period = 20usize;
     let mult = 1.5f64;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

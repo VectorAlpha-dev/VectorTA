@@ -1,13 +1,13 @@
 #![cfg(feature = "cuda")]
 
-use my_project::indicators::dvdiqqe::{
+use vector_ta::indicators::dvdiqqe::{
     dvdiqqe_batch_with_kernel, dvdiqqe_with_kernel, DvdiqqeBatchRange, DvdiqqeInput, DvdiqqeParams,
 };
-use my_project::utilities::data_loader::Candles;
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::data_loader::Candles;
+use vector_ta::utilities::enums::Kernel;
 
 use cust::memory::CopyDestination;
-use my_project::cuda::{cuda_available, CudaDvdiqqe};
+use vector_ta::cuda::{cuda_available, CudaDvdiqqe};
 
 fn approx(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -96,14 +96,14 @@ fn dvdiqqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     gpu.slow.buf.copy_to(&mut g_slow)?;
     gpu.center.buf.copy_to(&mut g_cent)?;
 
-    let tol = 2e-2; // chained EMAs in fp32
-                    // Compare only after warmup per row
+    let tol = 2e-2; 
+                    
     for r in 0..cpu.rows {
         let period = cpu.combos[r].period.unwrap();
         let warm = close.iter().position(|x| x.is_finite()).unwrap() + (2 * period - 1);
         for c in (warm + 1)..cpu.cols {
             let idx = r * cpu.cols + c;
-            // dvdi is sensitive to chained EMA FP32; allow larger tolerance
+            
             assert!(
                 approx(cpu.dvdi_values[idx], g_dvdi[idx] as f64, 1e-1),
                 "dvdi mismatch at r={}, c={}",
@@ -153,7 +153,7 @@ fn dvdiqqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         }
     }
 
-    // CPU per series baseline
+    
     let (period, smoothing, fast, slow) = (13usize, 6usize, 2.618f64, 4.236f64);
     let mut dvdi_tm = vec![f64::NAN; cols * rows];
     let mut fast_tm = vec![f64::NAN; cols * rows];
@@ -212,7 +212,7 @@ fn dvdiqqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     gpu.slow.buf.copy_to(&mut gs)?;
     gpu.center.buf.copy_to(&mut gc)?;
     let tol = 2.5e-2;
-    // Skip per-series warmup
+    
     let first = c_f32.iter().position(|x| x.is_finite()).unwrap_or(0);
     let warm = first + (2 * period - 1);
     for s in 0..cols {

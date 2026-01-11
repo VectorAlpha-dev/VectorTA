@@ -43,7 +43,7 @@ pub enum CudaSmmaError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (mirrors ALMA/CWMA shape) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -71,7 +71,7 @@ impl Default for CudaSmmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -118,7 +118,7 @@ impl CudaSmma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/smma_kernel.ptx"));
-        // Prefer context-targeted JIT with highest optimization, fallback progressively
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -390,7 +390,7 @@ impl CudaSmma {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // Basic VRAM check (prices + periods + warms + output) with ~64MB headroom, overflow-safe
+        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
@@ -613,7 +613,7 @@ impl CudaSmma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Basic VRAM check (input + first_valids + output) with ~64MB headroom (overflow-safe)
+        
         let input_bytes = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -718,7 +718,7 @@ impl CudaSmma {
             &mut d_out_tm,
         )?;
 
-        // Allocate pinned host buffer and perform async D2H
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
             .map_err(CudaSmmaError::Cuda)?;
         unsafe {
@@ -742,7 +742,7 @@ impl CudaSmma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_locked.as_slice(), cols, rows, params)?;
 
-        // H2D from pinned host memory (async)
+        
         let d_prices_tm = unsafe {
             DeviceBuffer::from_slice_async(data_tm_locked.as_slice(), &self.stream)
         }
@@ -772,7 +772,7 @@ impl CudaSmma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

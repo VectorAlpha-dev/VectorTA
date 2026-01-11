@@ -69,7 +69,7 @@ pub struct CudaTsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Device scratch reused across invocations (fast path)
+    
     scratch: Option<TsiScratch>,
 }
 
@@ -190,7 +190,7 @@ impl CudaTsi {
         Ok(())
     }
 
-    // ---------------- One-series × many-params (batch) ----------------
+    
     pub fn tsi_batch_dev(
         &mut self,
         prices_f32: &[f32],
@@ -206,7 +206,7 @@ impl CudaTsi {
             .ok_or_else(|| CudaTsiError::InvalidInput("all values are NaN/inf".into()))?;
 
         let combos = expand_grid(sweep)?;
-        // Validate and marshal params
+        
         let mut longs_i32 = Vec::<i32>::with_capacity(combos.len());
         let mut shorts_i32 = Vec::<i32>::with_capacity(combos.len());
         for p in &combos {
@@ -227,7 +227,7 @@ impl CudaTsi {
             shorts_i32.push(s as i32);
         }
 
-        // VRAM estimates: choose between plain row-major path and fast path (TM + transpose)
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let in_bytes = len
@@ -284,7 +284,7 @@ impl CudaTsi {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
-        // Heuristic: prefer fast param-parallel path on larger sweeps if VRAM allows
+        
         let prefer_fast = combos.len() >= 32 && len >= 4_096 && free_ok_fast;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
@@ -294,9 +294,9 @@ impl CudaTsi {
         if prefer_fast {
             self.ensure_scratch(len, combos.len())?;
             if self.scratch.is_some() {
-                // Temporarily take scratch to avoid simultaneous &mut borrows of self
+                
                 let mut s = self.scratch.take().unwrap();
-                // 1) momentum precompute
+                
                 self.launch_prepare_momentum(
                     &d_prices,
                     len,
@@ -304,7 +304,7 @@ impl CudaTsi {
                     &mut s.mom,
                     &mut s.amom,
                 )?;
-                // 2) param-parallel time-major compute
+                
                 self.launch_param_parallel_tm(
                     &s.mom,
                     &s.amom,
@@ -316,16 +316,16 @@ impl CudaTsi {
                     &mut s.out_tm,
                     block_x,
                 )?;
-                // 3) transpose into row-major layout expected by callers
+                
             self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
-                // Put scratch back
+                
                 self.scratch = Some(s);
             }
             self.last_batch = Some(BatchKernelSelected::Plain { block_x });
             self.maybe_log_batch_debug();
             self.synchronize()?;
         } else {
-            // Fallback: legacy row-major kernel
+            
             self.launch_batch_kernel(
                 &d_prices,
                 &d_longs,
@@ -424,7 +424,7 @@ impl CudaTsi {
         }
     }
 
-    // ------------- Many-series × one-param (time-major) -------------
+    
     pub fn tsi_many_series_one_param_time_major_dev(
         &mut self,
         prices_tm_f32: &[f32],
@@ -446,7 +446,7 @@ impl CudaTsi {
             return Err(CudaTsiError::InvalidInput("periods must be > 0".into()));
         }
 
-        // Per-series first_valids
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -468,7 +468,7 @@ impl CudaTsi {
             first_valids[s] = fv;
         }
 
-        // VRAM: inputs + first_valids + output
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
@@ -583,7 +583,7 @@ impl CudaTsi {
     }
 }
 
-// -------- Scratch arena and new kernel launchers --------
+
 
 struct TsiScratch {
     mom: DeviceBuffer<f32>,
@@ -795,21 +795,21 @@ fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, CudaTsiError> {
     Ok(out)
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const LEN: usize = 1_000_000; // 1M samples
-    const ROWS: usize = 128; // number of parameter pairs
+    const LEN: usize = 1_000_000; 
+    const ROWS: usize = 128; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = LEN * std::mem::size_of::<f32>();
         let params_bytes = ROWS * 2 * std::mem::size_of::<i32>();
-        let scratch_bytes = 2 * LEN * std::mem::size_of::<f32>(); // mom + amom
-        let tm_bytes = ROWS * LEN * std::mem::size_of::<f32>(); // out_tm
-        let out_bytes = ROWS * LEN * std::mem::size_of::<f32>(); // out_rm
+        let scratch_bytes = 2 * LEN * std::mem::size_of::<f32>(); 
+        let tm_bytes = ROWS * LEN * std::mem::size_of::<f32>(); 
+        let out_bytes = ROWS * LEN * std::mem::size_of::<f32>(); 
         in_bytes + params_bytes + scratch_bytes + tm_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -873,7 +873,7 @@ pub mod benches {
         let price = gen_series(LEN);
         let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
 
-        // Keep combos == ROWS to control the output surface (ROWS x LEN).
+        
         let sweep = TsiBatchRange {
             long_period: (25, 25 + ROWS - 1, 1),
             short_period: (13, 13, 0),

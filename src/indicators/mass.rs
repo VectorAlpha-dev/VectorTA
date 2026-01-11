@@ -255,7 +255,7 @@ fn mass_prepare<'a>(
         .find(|&i| !high[i].is_nan() && !low[i].is_nan())
         .ok_or(MassError::AllValuesNaN)?;
 
-    // Two nested EMA(9)s -> need 16 warm bars before summing, then (period-1) for the sum window.
+    
     let needed_bars = 16 + period - 1;
     if high.len() - first < needed_bars {
         return Err(MassError::NotEnoughValidData {
@@ -264,7 +264,7 @@ fn mass_prepare<'a>(
         });
     }
 
-    // SIMD prefetch variant shows mixed results; default Auto short-circuits to Scalar for stability.
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -325,7 +325,7 @@ pub fn mass_into_slice(
     }
     mass_compute_into(high, low, period, first, chosen, dst);
     let warmup_end = first + 16 + period - 1;
-    // Match alloc_with_nan_prefix quiet-NaN pattern for warmup prefix
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
         *v = qnan;
@@ -352,25 +352,25 @@ pub fn mass_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // Constants for EMA(9)
-    const ALPHA: f64 = 2.0 / 10.0; // 0.2
-    const INV_ALPHA: f64 = 1.0 - ALPHA; // 0.8
+    
+    const ALPHA: f64 = 2.0 / 10.0; 
+    const INV_ALPHA: f64 = 1.0 - ALPHA; 
 
     let n = high.len();
     if n == 0 {
         return;
     }
 
-    // Warmup boundaries
+    
     let start_ema2 = first_valid_idx + 8;
     let start_ratio = first_valid_idx + 16;
     let start_out = start_ratio + (period - 1);
 
-    // Initial EMA seeds
+    
     let mut ema1 = high[first_valid_idx] - low[first_valid_idx];
     let mut ema2 = ema1;
 
-    // Cacheline-aligned ring buffer
+    
     let mut ring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period);
     ring.resize(period, 0.0);
 
@@ -385,14 +385,14 @@ pub fn mass_scalar(
 
         let mut i = first_valid_idx;
 
-        // Phase 0: EMA1 warmup only (no EMA2 yet)
+        
         while i < start_ema2 {
             let hl = *hp.add(i) - *lp.add(i);
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
             i += 1;
         }
 
-        // i == start_ema2: seed EMA2 from EMA1, then update EMA2 once (matches legacy ordering)
+        
         {
             let hl = *hp.add(i) - *lp.add(i);
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
@@ -401,7 +401,7 @@ pub fn mass_scalar(
             i += 1;
         }
 
-        // Phase 1: EMA1 + EMA2 warmup (no ratios yet)
+        
         while i < start_ratio {
             let hl = *hp.add(i) - *lp.add(i);
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
@@ -409,7 +409,7 @@ pub fn mass_scalar(
             i += 1;
         }
 
-        // Phase 2: Build sliding ratio sum (no output until the window is full)
+        
         while i < start_out {
             let hl = *hp.add(i) - *lp.add(i);
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
@@ -428,7 +428,7 @@ pub fn mass_scalar(
             i += 1;
         }
 
-        // Phase 3: Full window – write outputs
+        
         while i < n {
             let hl = *hp.add(i) - *lp.add(i);
             ema1 = ema1.mul_add(INV_ALPHA, hl * ALPHA);
@@ -556,8 +556,8 @@ pub unsafe fn mass_avx512_short(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // For single recursive EMA chain, heavy SIMD gives no lane-parallelism.
-    // Use the AVX2 prefetch variant for potential small wins.
+    
+    
     mass_avx2(high, low, period, first_valid_idx, out);
 }
 
@@ -575,26 +575,26 @@ pub unsafe fn mass_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct MassStream {
-    // config
+    
     period: usize,
 
-    // ring buffer for O(1) rolling-sum
+    
     ring: Box<[f64]>,
     idx: usize,
-    mask: usize, // power-of-two mask or usize::MAX when not power-of-two
+    mask: usize, 
     sum_ratio: f64,
 
-    // EMA state
+    
     alpha: f64,
     inv_alpha: f64,
     ema1: f64,
     ema2: f64,
 
-    // progress counters / warmup thresholds
-    t: usize,          // bars seen since first valid
-    warm_ema2: usize,  // == 8
-    warm_ratio: usize, // == 16
-    warm_out: usize,   // == 16 + period - 1
+    
+    t: usize,          
+    warm_ema2: usize,  
+    warm_ratio: usize, 
+    warm_out: usize,   
 }
 
 impl MassStream {
@@ -609,7 +609,7 @@ impl MassStream {
         }
 
         let ring = vec![0.0; period].into_boxed_slice();
-        // If period is a power of two, (i+1)&mask wraps branchlessly; else fall back to compare/reset.
+        
         let mask = if period.is_power_of_two() {
             period - 1
         } else {
@@ -623,7 +623,7 @@ impl MassStream {
             mask,
             sum_ratio: 0.0,
 
-            alpha: 2.0 / 10.0, // EMA(9) => α = 2/(9+1)
+            alpha: 2.0 / 10.0, 
             inv_alpha: 1.0 - (2.0 / 10.0),
 
             ema1: f64::NAN,
@@ -642,7 +642,7 @@ impl MassStream {
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         let hl = high - low;
 
-        // seed both EMAs on the first bar
+        
         if self.t == 0 {
             self.ema1 = hl;
             self.ema2 = hl;
@@ -650,10 +650,10 @@ impl MassStream {
             return None;
         }
 
-        // ema1 = ema1*(1-α) + hl*α   (mul_add encourages FMA on CPUs that support it)
+        
         self.ema1 = self.ema1.mul_add(self.inv_alpha, hl * self.alpha);
 
-        // seed ema2 on the 9th bar (t == 8), then keep updating thereafter
+        
         if self.t == self.warm_ema2 {
             self.ema2 = self.ema1;
         }
@@ -664,15 +664,15 @@ impl MassStream {
         let mut out = None;
 
         if self.t >= self.warm_ratio {
-            // exact division (matches offline kernels)
+            
             let ratio = self.ema1 / self.ema2;
 
-            // slide O(1) rolling sum via ring buffer (safe indexing)
+            
             let old = self.ring[self.idx];
             self.sum_ratio = (self.sum_ratio - old) + ratio;
             self.ring[self.idx] = ratio;
 
-            // advance ring index (branchless for power-of-two periods)
+            
             if self.mask != usize::MAX {
                 self.idx = (self.idx + 1) & self.mask;
             } else {
@@ -755,7 +755,7 @@ pub fn mass_batch_with_kernel(
     sweep: &MassBatchRange,
     k: Kernel,
 ) -> Result<MassBatchOutput, MassError> {
-    // Batch Auto defaults to ScalarBatch to avoid mixed SIMD results; callers may request SIMD explicitly.
+    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -823,7 +823,7 @@ fn expand_grid_mass(r: &MassBatchRange) -> Result<Vec<MassParams>, MassError> {
             }
             Ok(v)
         } else {
-            // Reversed bounds: walk downward including both ends.
+            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
@@ -915,23 +915,23 @@ fn mass_batch_inner(
         step: sweep.period.2,
     })?;
 
-    // Use uninitialized memory with proper warmup calculation
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + 16 + c.period.unwrap() - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Resolve Auto: default to Scalar for stability (explicit SIMD is still available)
+    
     let actual_kern = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -947,7 +947,7 @@ fn mass_batch_inner(
             Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => mass_row_scalar(high, low, period, first, out_row),
-            _ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
+            _ => mass_row_scalar(high, low, period, first, out_row), 
         }
     };
 
@@ -972,7 +972,7 @@ fn mass_batch_inner(
         }
     }
 
-    // Convert ManuallyDrop buffer to Vec
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1034,7 +1034,7 @@ unsafe fn mass_row_avx512_long(
     mass_avx2(high, low, period, first, out);
 }
 
-// Tests
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,7 +1043,7 @@ mod tests {
 
     #[test]
     fn test_mass_into_matches_api() {
-        // Construct a small but non-trivial OHLC set (uses only high/low)
+        
         let len = 256usize;
         let mut ts = Vec::with_capacity(len);
         let mut open = Vec::with_capacity(len);
@@ -1054,9 +1054,9 @@ mod tests {
 
         for i in 0..len {
             let x = i as f64;
-            // Base price oscillates mildly
+            
             let base = (x * 0.01).mul_add(100.0, (x * 0.07).sin() * 2.0);
-            // Range varies to exercise EMA of range
+            
             let range = 1.0 + (x * 0.005).sin().abs() * 3.0;
             let h = base + range * 0.5;
             let l = base - range * 0.5;
@@ -1075,16 +1075,16 @@ mod tests {
 
         let input = MassInput::from_candles(&candles, "high", "low", MassParams::default());
 
-        // Baseline via Vec-returning API
+        
         let base = mass(&input).expect("mass() should succeed");
 
-        // Into-API into preallocated buffer
+        
         let mut out = vec![0.0f64; len];
         mass_into(&input, &mut out).expect("mass_into() should succeed");
 
         assert_eq!(base.values.len(), out.len());
 
-        // Helper: treat NaN == NaN as equal
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1287,20 +1287,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Comprehensive parameter combinations for mass
+        
         let test_params = vec![
-            MassParams::default(),            // period: 5
-            MassParams { period: Some(2) },   // minimum period
-            MassParams { period: Some(3) },   // small
-            MassParams { period: Some(4) },   // small
-            MassParams { period: Some(5) },   // default
-            MassParams { period: Some(10) },  // medium
-            MassParams { period: Some(20) },  // medium-large
-            MassParams { period: Some(30) },  // large
-            MassParams { period: Some(50) },  // large
-            MassParams { period: Some(100) }, // very large
-            MassParams { period: Some(200) }, // very large
-            MassParams { period: Some(255) }, // edge case
+            MassParams::default(),            
+            MassParams { period: Some(2) },   
+            MassParams { period: Some(3) },   
+            MassParams { period: Some(4) },   
+            MassParams { period: Some(5) },   
+            MassParams { period: Some(10) },  
+            MassParams { period: Some(20) },  
+            MassParams { period: Some(30) },  
+            MassParams { period: Some(50) },  
+            MassParams { period: Some(100) }, 
+            MassParams { period: Some(200) }, 
+            MassParams { period: Some(255) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1309,12 +1309,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1364,7 +1364,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(test)]
@@ -1375,43 +1375,43 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic test parameters for Mass Index
+        
         let strat = (2usize..=100)
             .prop_flat_map(|period| {
                 (
-                    // Generate high/low data with proper relationship
+                    
                     prop::collection::vec(
                         (0f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                        (16 + period)..=500, // Need at least 16 + period for warmup
+                        (16 + period)..=500, 
                     ),
                     Just(period),
-                    // Add a scenario selector for different data patterns
+                    
                     0usize..=6,
                 )
             })
             .prop_map(|(mut base_data, period, scenario)| {
-                // Generate high and low arrays based on scenario
+                
                 let mut high = Vec::with_capacity(base_data.len());
                 let mut low = Vec::with_capacity(base_data.len());
 
                 match scenario {
                     0 => {
-                        // Random data with realistic high/low relationship
+                        
                         for val in base_data {
-                            let range = val * 0.1; // 10% range
+                            let range = val * 0.1; 
                             high.push(val + range / 2.0);
                             low.push(val - range / 2.0);
                         }
                     }
                     1 => {
-                        // Zero range (high == low)
+                        
                         for val in base_data {
                             high.push(val);
                             low.push(val);
                         }
                     }
                     2 => {
-                        // Constant range
+                        
                         let constant_range = 10.0;
                         for val in base_data {
                             high.push(val + constant_range / 2.0);
@@ -1419,33 +1419,33 @@ mod tests {
                         }
                     }
                     3 => {
-                        // Increasing volatility (but keep it reasonable)
+                        
                         for (i, val) in base_data.iter().enumerate() {
-                            let range = 1.0 + (i as f64 * 0.1).min(20.0); // Cap at 20
+                            let range = 1.0 + (i as f64 * 0.1).min(20.0); 
                             high.push(val + range);
                             low.push(val - range);
                         }
                     }
                     4 => {
-                        // Decreasing volatility
+                        
                         for (i, val) in base_data.iter().enumerate() {
-                            let range = (20.0 - (i as f64 * 0.1)).max(0.5); // Min at 0.5
+                            let range = (20.0 - (i as f64 * 0.1)).max(0.5); 
                             high.push(val + range);
                             low.push(val - range);
                         }
                     }
                     5 => {
-                        // Data with realistic volatility spikes (10x normal volatility)
+                        
                         for (i, val) in base_data.iter().enumerate() {
-                            let range = if i % 20 == 0 { 50.0 } else { 5.0 }; // 10x spike, not 100x
+                            let range = if i % 20 == 0 { 50.0 } else { 5.0 }; 
                             high.push(val + range);
                             low.push(val - range);
                         }
                     }
                     6 => {
-                        // Gradually approaching zero range (edge case)
+                        
                         for (i, val) in base_data.iter().enumerate() {
-                            // Range decreases exponentially toward zero
+                            
                             let range = 10.0 * (0.95_f64).powi(i as i32);
                             high.push(val + range);
                             low.push(val - range);
@@ -1462,16 +1462,16 @@ mod tests {
 				let params = MassParams { period: Some(period) };
 				let input = MassInput::from_slices(&high, &low, params);
 
-				// Calculate output with the test kernel
+				
 				let MassOutput { values: out } =
 					mass_with_kernel(&input, kernel).unwrap();
 
-				// Calculate reference output with scalar kernel
+				
 				let MassOutput { values: ref_out } =
 					mass_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Warmup period validation
-				// First 16 + period - 1 values should be NaN
+				
+				
 				let warmup_end = 16 + period - 1;
 				for i in 0..warmup_end.min(high.len()) {
 					prop_assert!(
@@ -1480,13 +1480,13 @@ mod tests {
 					);
 				}
 
-				// Test properties for each valid output value
+				
 				for i in warmup_end..high.len() {
 					let y = out[i];
 					let r = ref_out[i];
 
-					// Property 2: Kernel consistency
-					// Different kernels should produce identical or near-identical results
+					
+					
 					if y.is_finite() && r.is_finite() {
 						let y_bits = y.to_bits();
 						let r_bits = r.to_bits();
@@ -1498,56 +1498,56 @@ mod tests {
 							i, y, r, ulp_diff
 						);
 					} else {
-						// Both should be NaN or both should be finite
+						
 						prop_assert_eq!(
 							y.is_nan(), r.is_nan(),
 							"NaN mismatch at idx {}: {} vs {}", i, y, r
 						);
 					}
 
-					// Property 3: Bounded output
-					// Mass Index should be positive and typically between 0 and 2.5*period
+					
+					
 					if y.is_finite() {
 						prop_assert!(
 							y > 0.0,
 							"Mass Index should be positive at idx {}, got {}", i, y
 						);
 
-						// Mass Index rarely exceeds 2.5*period in realistic conditions
+						
 						prop_assert!(
 							y <= (period as f64) * 2.5,
 							"Mass Index unusually high at idx {}: {} (period={})", i, y, period
 						);
 					}
 
-					// Property 4: Stable range property (combines zero and constant range)
-					// When range is stable (constant or zero), Mass Index approaches period
+					
+					
 					let window_start = i.saturating_sub(period - 1);
 					let window_end = i + 1;
 					let ranges: Vec<f64> = (window_start..window_end)
 						.map(|j| high[j] - low[j])
 						.collect();
 
-					// Check if range is constant across the window
+					
 					let is_constant_range = ranges.windows(2)
 						.all(|w| (w[0] - w[1]).abs() < 1e-9);
 
-					// Only check convergence if we're well past the warmup and range has been stable
-					// Need at least 2*period bars after range becomes stable for convergence
+					
+					
 					if is_constant_range && y.is_finite() && i >= warmup_end + 2 * period {
 						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
 
-						// For zero or near-zero range
+						
 						if avg_range < f64::EPSILON {
 							prop_assert!(
 								(y - period as f64).abs() <= 1e-6,
 								"Zero range Mass Index should be ~{} at idx {}, got {}", period, i, y
 							);
 						}
-						// For constant non-zero range with reasonable size
+						
 						else if avg_range > 0.01 && avg_range < 100.0 {
-							// Only check when range is in a reasonable band
-							// Realistic tolerance: Mass Index converges gradually to period
+							
+							
 							let tolerance = (period as f64) * 0.2 + 2.0;
 							prop_assert!(
 								(y - period as f64).abs() <= tolerance,
@@ -1557,8 +1557,8 @@ mod tests {
 						}
 					}
 
-					// Property 5: High >= Low constraint
-					// Verify the indicator respects high >= low relationship
+					
+					
 					for j in window_start..window_end {
 						prop_assert!(
 							high[j] >= low[j] - f64::EPSILON,
@@ -1566,27 +1566,27 @@ mod tests {
 						);
 					}
 
-					// Property 6: No infinite values
-					// All non-warmup outputs should be finite (not infinite)
+					
+					
 					prop_assert!(
 						!y.is_infinite(),
 						"Found infinite value at idx {}: {}", i, y
 					);
 
-					// Property 7: Volatility response pattern
-					// Mass Index responds to volatility changes with a predictable pattern
+					
+					
 					if i >= warmup_end + period && y.is_finite() {
-						// Calculate average range in current window
+						
 						let avg_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
 
-						// For very low volatility (near zero range), Mass Index converges toward period
-						// Note: convergence is gradual and depends on the EMA smoothing
+						
+						
 						if avg_range < 0.001 {
-							// More realistic tolerance based on how far from zero the range is
+							
 							let tolerance = if avg_range < 1e-10 {
 								1.0
 							} else {
-								// Scale tolerance with period for very small but non-zero ranges
+								
 								(period as f64) * 0.25 + 2.0
 							};
 							prop_assert!(
@@ -1596,9 +1596,9 @@ mod tests {
 							);
 						}
 
-						// For significant volatility changes, verify response
+						
 						if i > warmup_end + period + 5 {
-							// Compare current and previous window volatility
+							
 							let prev_window_start = (i - 5).saturating_sub(period - 1);
 							let prev_window_end = i - 4;
 							let prev_ranges: Vec<f64> = (prev_window_start..prev_window_end)
@@ -1606,12 +1606,12 @@ mod tests {
 								.collect();
 							let prev_avg_range = prev_ranges.iter().sum::<f64>() / prev_ranges.len() as f64;
 
-							// If volatility doubled, Mass Index should show some increase
+							
 							if avg_range > prev_avg_range * 2.0 && prev_avg_range > 0.1 {
 								let prev_mass = out[i - 5];
 								if prev_mass.is_finite() {
 									prop_assert!(
-										y >= prev_mass - 0.5, // Allow some lag but expect general increase
+										y >= prev_mass - 0.5, 
 										"Mass Index should respond to doubling volatility: {} at idx {} vs {} at idx {}",
 										y, i, prev_mass, i - 5
 									);
@@ -1619,7 +1619,7 @@ mod tests {
 							}
 						}
 
-						// General bounds check
+						
 						prop_assert!(
 							y >= (period as f64) * 0.3 && y <= (period as f64) * 2.5,
 							"Mass Index out of reasonable bounds at idx {}: {} (period={})",
@@ -1711,16 +1711,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods with step 2
-            (5, 25, 5),    // Medium periods with step 5
-            (30, 60, 15),  // Large periods with step 15
-            (2, 5, 1),     // Dense small range
-            (10, 10, 0),   // Static period
-            (50, 100, 25), // Very large periods
-            (3, 15, 3),    // Another small/medium range
-            (20, 40, 10),  // Medium range
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (30, 60, 15),  
+            (2, 5, 1),     
+            (10, 10, 0),   
+            (50, 100, 25), 
+            (3, 15, 3),    
+            (20, 40, 10),  
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1739,7 +1739,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1798,7 +1798,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch testing like alma.rs
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1823,7 +1823,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "mass")]
 #[pyo3(signature = (high, low, period, kernel=None))]
@@ -1940,7 +1940,7 @@ pub fn mass_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mass_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
@@ -2073,8 +2073,8 @@ fn mass_batch_inner_into(
         });
     }
 
-    // Initialize NaN prefixes for each row based on warmup period
-    // This is necessary because the buffer comes from Python/WASM and wasn't created by our helpers
+    
+    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warmup_end = first + 16 + period - 1;
@@ -2084,7 +2084,7 @@ fn mass_batch_inner_into(
         }
     }
 
-    // Resolve Auto to Scalar for stability (explicit SIMD still allowed)
+    
     let actual_kern = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -2100,7 +2100,7 @@ fn mass_batch_inner_into(
             Kernel::Avx512 => mass_row_avx512(high, low, period, first, out_row),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => mass_row_scalar(high, low, period, first, out_row),
-            _ => mass_row_scalar(high, low, period, first, out_row), // Fallback to scalar
+            _ => mass_row_scalar(high, low, period, first, out_row), 
         }
     };
 
@@ -2127,7 +2127,7 @@ fn mass_batch_inner_into(
     Ok(combos)
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn mass_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
@@ -2170,7 +2170,7 @@ pub fn mass_into(
         };
         let input = MassInput::from_slices(high, low, params);
 
-        // Check for aliasing with either input
+        
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             mass_into_slice(&mut temp, &input, Kernel::Auto)

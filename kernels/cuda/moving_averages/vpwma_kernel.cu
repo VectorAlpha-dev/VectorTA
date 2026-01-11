@@ -1,12 +1,12 @@
-// ============================================================
-// VPWMA optimized kernels (CUDA 13) – Ada/Ampere friendly
-//
-// Drop-in refactor with two execution paths:
-//  - Optimized CTA-per-combo tiled path (when launched with grid.x == n_combos
-//    and dynamic shared memory provided by the host).
-//  - Backward-compatible thread-per-combo path (matches previous behavior)
-//    to preserve existing launch configs used by wrappers/benchmarks.
-// ============================================================
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -15,7 +15,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Optional async copy path (SM >= 80). Auto-disables if not available.
+
 #ifndef VPWMA_USE_ASYNC
 #define VPWMA_USE_ASYNC 0
 #endif
@@ -33,30 +33,30 @@
 #define VPWMA_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// Tuneable tile size for the optimized path
+
 #ifndef VPWMA_TILE_T
 #define VPWMA_TILE_T 256
 #endif
 
-// ---------------------------------------------------------------------------
-// 1) Many parameter combinations, one price series
-//    - Optimized: one CTA per combo, shared-memory tiling
-//    - Fallback: one thread per combo (original path, preserves API/launch)
-// ---------------------------------------------------------------------------
+
+
+
+
+
 extern "C" __global__
-void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
-                     const int*   __restrict__ periods,  // [n_combos]
-                     const int*   __restrict__ win_lengths, // [n_combos]
-                     const float* __restrict__ weights,  // [n_combos][stride]
-                     const float* __restrict__ inv_norms,// [n_combos]
+void vpwma_batch_f32(const float* __restrict__ prices,   
+                     const int*   __restrict__ periods,  
+                     const int*   __restrict__ win_lengths, 
+                     const float* __restrict__ weights,  
+                     const float* __restrict__ inv_norms,
                      int series_len,
                      int stride,
                      int first_valid,
                      int n_combos,
-                     float* __restrict__ out) {          // [n_combos][series_len]
+                     float* __restrict__ out) {          
 
-    // Heuristic: if launched with one CTA per combo, use the tiled path.
-    // Otherwise, fall back to the legacy thread-per-combo behavior.
+    
+    
     const bool cta_per_combo = (gridDim.x == (unsigned)n_combos);
 
     if (cta_per_combo) {
@@ -74,34 +74,34 @@ void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
         const int warm = first_valid + win_len;
         const int warm_clamped = warm < series_len ? warm : series_len;
 
-        // Shared memory layout: [weights | price_tile]
+        
         extern __shared__ float smem[];
-        float* __restrict__ s_w = smem;                     // [win_len]
-        float* __restrict__ s_x = smem + win_len;           // [VPWMA_TILE_T + win_len - 1]
+        float* __restrict__ s_w = smem;                     
+        float* __restrict__ s_x = smem + win_len;           
 
-        // Cache weights once per block
+        
         for (int k = threadIdx.x; k < win_len; k += blockDim.x) {
             s_w[k] = weights[weight_offset + k];
         }
         __syncthreads();
 
-        // Parallel warmup prefix
+        
         for (int i = threadIdx.x; i < warm_clamped; i += blockDim.x) {
             out[row_offset + i] = VPWMA_NAN;
         }
         __syncthreads();
         if (warm >= series_len) return;
 
-        // Process time in tiles
+        
         for (int t0 = warm; t0 < series_len; t0 += VPWMA_TILE_T) {
             const int tile_w   = min(VPWMA_TILE_T, series_len - t0);
             const int g_start  = t0 - (win_len - 1);
             const int load_len = tile_w + win_len - 1;
 
-            // Load contiguous price slice into shared memory
+            
             #if VPWMA_USE_ASYNC
-                // Async copy path disabled by default for portability; enabling
-                // requires pipeline or barrier management. Fallback below.
+                
+                
             #endif
                 for (int o = threadIdx.x; o < load_len; o += blockDim.x) {
                     s_x[o] = prices[g_start + o];
@@ -109,12 +109,12 @@ void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
                 __syncthreads();
 
 
-            // Each thread computes multiple outputs in the tile (stride = blockDim.x).
-            // This allows VPWMA_TILE_T > blockDim.x to amortize sync + global loads.
+            
+            
             for (int out_i = threadIdx.x; out_i < tile_w; out_i += blockDim.x) {
                 float acc = 0.0f;
                 const int x_base = out_i + (win_len - 1);
-                // w[0] multiplies prices[t], i.e., s_x[x_base]
+                
                 #pragma unroll 4
                 for (int k = 0; k < win_len; ++k) {
                     acc = fmaf(s_w[k], s_x[x_base - k], acc);
@@ -126,7 +126,7 @@ void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
         return;
     }
 
-    // -------- Fallback path: one thread per combo (original implementation) --------
+    
     {
         const int combo = blockIdx.x * blockDim.x + threadIdx.x;
         if (combo >= n_combos) return;
@@ -158,21 +158,21 @@ void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
     }
 }
 
-// ---------------------------------------------------------------------------
-// 2) Many series, one parameter (time-major layout)
-//    We keep the one-thread-per-series mapping for compatibility and only
-//    optimize the warmup prefix write. (Shared-weight path is optional and can
-//    be enabled via launch-time dynamic shared memory in future wrappers.)
-// ---------------------------------------------------------------------------
+
+
+
+
+
+
 extern "C" __global__
-void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,  // [series_len][num_series]
-                                     const int*   __restrict__ first_valids, // [num_series]
+void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,  
+                                     const int*   __restrict__ first_valids, 
                                      int num_series,
                                      int series_len,
                                      int period,
-                                     const float* __restrict__ weights,    // [win_len]
+                                     const float* __restrict__ weights,    
                                      float inv_norm,
-                                     float* __restrict__ out_tm) {         // [series_len][num_series]
+                                     float* __restrict__ out_tm) {         
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (series < num_series);
 
@@ -183,14 +183,14 @@ void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,  // [s
     const int first_valid = active ? first_valids[series] : 0;
     const int warm        = active ? (first_valid + win_len) : 0;
 
-    // Shared weights once per block
+    
     extern __shared__ float s_w[];
     for (int k = threadIdx.x; k < win_len; k += blockDim.x) {
         s_w[k] = weights[k];
     }
     __syncthreads();
 
-    // Write only the required NaN prefix
+    
     if (active) {
         const int until = warm < series_len ? warm : series_len;
         for (int t = 0; t < until; ++t) {
@@ -198,10 +198,10 @@ void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,  // [s
         }
     }
     if (!active || warm >= series_len) {
-        // Inactive threads still participate in following __syncthreads() due to block-level control flow
+        
     }
 
-    // Rolling dot products (coalesced across series)
+    
     if (active) {
         for (int t = warm; t < series_len; ++t) {
             float acc = 0.0f;

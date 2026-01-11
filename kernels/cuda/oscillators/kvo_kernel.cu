@@ -1,20 +1,20 @@
-// CUDA kernels for Klinger Volume Oscillator (KVO)
-//
-// This file implements two FP32-only kernels using FMA-centric math and
-// compensated float-float (hi+lo) state for EMA recurrences. Semantics match
-// the scalar implementation: NaN through t < first_valid+1; at t=first_valid+1
-// both EMAs are seeded to the first VF value and the output is 0.0.
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// ======================== Small numeric helpers (FP32 only) ========================
 
-// Write an IEEE-754 quiet NaN as f32
+
+
 __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); }
 
-// Error-free transforms (float-float arithmetic). Based on Dekker/Knuth patterns.
-// Using FMA gives exact product residual cheaply on NVIDIA GPUs.
+
+
 __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
     s = a + b;
     float bb = s - a;
@@ -31,14 +31,14 @@ __device__ __forceinline__ void quick_two_sum(float a, float b, float &s, float 
 }
 __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
     p = a * b;
-    e = fmaf(a, b, -p); // exact residual with one FMA
+    e = fmaf(a, b, -p); 
 }
 
-struct f2 { float hi, lo; }; // value ~= hi + lo
+struct f2 { float hi, lo; }; 
 
 __device__ __forceinline__ f2 f2_make(float x) { f2 r; r.hi = x; r.lo = 0.0f; return r; }
 
-// ema <- ema + alpha * (x - ema) in compensated float-float
+
 __device__ __forceinline__ void ema_update_f2(f2 &ema, float x, float alpha)
 {
     float s, s_err; two_sum(ema.hi, ema.lo, s, s_err);
@@ -51,11 +51,11 @@ __device__ __forceinline__ void ema_update_f2(f2 &ema, float x, float alpha)
 
     float y_hi, y_lo; two_sum(s, p_hi, y_hi, y_lo);
     y_lo += p_lo;
-    quick_two_sum(y_hi, y_lo, ema.hi, ema.lo); // renormalize
+    quick_two_sum(y_hi, y_lo, ema.hi, ema.lo); 
 }
 
-// One-step NR reciprocal (near-1 ulp) — cheaper than a divide, uses FMA.
-// r ≈ 1/c with one Newton step: r = r * (2 - c*r)
+
+
 __device__ __forceinline__ float rcp_nr(float c)
 {
     float r = __fdividef(1.0f, c);
@@ -63,16 +63,16 @@ __device__ __forceinline__ float rcp_nr(float c)
     return r;
 }
 
-// ==================== Batch: one series × many (short,long) ====================
-// Inputs:
-//  - vf:     precomputed VF stream [len]
-//  - shorts/longs: period arrays [n_combos]
-//  - out:    row-major [combo][t] (n_combos x len)
 
-// Warp-wide inclusive scan over affine transforms (A,B) where:
-//   y = A * y_prev + B
-// Composition is associative:
-//   (A_prev,B_prev) then (A_cur,B_cur) => (A_cur*A_prev, A_cur*B_prev + B_cur)
+
+
+
+
+
+
+
+
+
 __device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, unsigned lane, unsigned mask) {
 #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
@@ -98,7 +98,7 @@ extern "C" __global__ void kvo_batch_f32(
 {
     if (len <= 0 || n_combos <= 0) return;
 
-    // One warp per combo; warp-level affine scans compute EMA recurrences 32 timesteps at a time.
+    
     const unsigned mask = 0xffffffffu;
     const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
@@ -112,7 +112,7 @@ extern "C" __global__ void kvo_batch_f32(
         const int l = longs[combo];
         if (s <= 0 || l < s) continue;
 
-        const int warm = first_valid + 1; // same scalar warmup
+        const int warm = first_valid + 1; 
         float* __restrict__ row_out = out + (size_t)combo * (size_t)len;
 
         const float nanv = f32_nan();
@@ -157,11 +157,11 @@ extern "C" __global__ void kvo_batch_f32(
     }
 }
 
-// ================= Many-series × one-param (time-major) =================
-// Inputs (time-major):
-//  - *_tm: float arrays [rows*cols] time-major
-//  - first_valids[cols]
-//  - short_p, long_p >= 1
+
+
+
+
+
 extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -174,7 +174,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
     int long_p,
     float* __restrict__ out_tm)
 {
-    // 1-D launch over columns (series) with grid-stride on grid.x
+    
     for (int s = blockIdx.x * blockDim.x + threadIdx.x;
          s < cols;
          s += blockDim.x * gridDim.x)
@@ -200,10 +200,10 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
         double prev_c = (double)close_tm[idx0];
         double prev_hlc = prev_h + prev_l + prev_c;
         double prev_dm  = prev_h - prev_l;
-        int    trend    = -1; // initial state
+        int    trend    = -1; 
         double cm       = 0.0;
 
-        // First consumable VF at t = warm
+        
         {
             const size_t idx = (size_t)warm * (size_t)cols + s;
             const double h = (double)high_tm[idx];
@@ -224,7 +224,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
 
             float ema_s = vf;
             float ema_l = vf;
-            out_tm[idx] = 0.0f; // seed diff
+            out_tm[idx] = 0.0f; 
 
             prev_hlc = hlc;
             prev_dm  = dm;
@@ -248,7 +248,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
                 const double sign2  = (trend == 1) ? 1.0 : -1.0;
                 const float vf2     = (float)(v2 * temp2 * 100.0 * sign2);
 
-                // EMA in FP32 with FFMA
+                
                 ema_s = fmaf(alpha_s, (vf2 - ema_s), ema_s);
                 ema_l = fmaf(alpha_l, (vf2 - ema_l), ema_l);
                 out_tm[j] = ema_s - ema_l;

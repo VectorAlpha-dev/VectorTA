@@ -1,8 +1,8 @@
-// CUDA kernels for Center of Gravity (CG)
-//
-// Optimized rolling-update implementation for one series × many params, and
-// a strided rolling variant for many series × one param. Optional prefix-sum
-// kernels are provided for large-period, many-combo scenarios.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -11,7 +11,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// --- constants & helpers -----------------------------------------------------
+
 
 #ifndef CG_NAN
 #define CG_NAN (__int_as_float(0x7fffffff))
@@ -24,13 +24,13 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// Emit 0.0 when |den| <= eps or den is not finite (matches scalar policy)
+
 static __device__ __forceinline__ bool cg_bad_den(float den) {
-    return (!isfinite(den)) || fabsf(den) <= 1.1920929e-7f; // FLT_EPSILON
+    return (!isfinite(den)) || fabsf(den) <= 1.1920929e-7f; 
 }
 
-// Light-weight compensated accumulator (Kahan-Babuška/Neumaier style).
-// Works well in FP32 without the FP64 throughput penalty.
+
+
 struct CompSum {
     float s;
     float c;
@@ -44,10 +44,10 @@ struct CompSum {
     __device__ __forceinline__ float val() const { return s + c; }
 };
 
-// ----------------------------------------------------------------------------
-// One price series, many (period) combos. Each thread computes one combo.
-// Time complexity per thread: O(series_len), independent of 'period'.
-// ----------------------------------------------------------------------------
+
+
+
+
 extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
                                         const int*   __restrict__ periods,
                                         int series_len,
@@ -62,7 +62,7 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
     const int base   = combo * series_len;
     float* __restrict__ out_ptr = out + base;
 
-    // Input validation (mirror CPU behavior)
+    
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
@@ -74,24 +74,24 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm   = first_valid + period;   // first computed index
-    const int window = period - 1;             // number of terms in dot product
+    const int warm   = first_valid + period;   
+    const int window = period - 1;             
 
-    // Prefill NaN prefix
+    
     for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
 
     if (window <= 0) {
-        // Degenerate: zeros from warm to end
+        
         for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
         return;
     }
 
-    // --- Initialize first window at i = warm --------------------------------
-    // S = sum of prices in window, T = sum of (k+1)*price (k=0..window-1)
+    
+    
     CompSum S_acc, T_acc;
     int nan_count = 0;
 
-    // Accumulate newest (weight=1) at prices[warm], ... oldest weight=window
+    
     for (int k = 0; k < window; ++k) {
         const float p = prices[warm - k];
         if (isfinite(p)) {
@@ -102,38 +102,38 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    // Emit result for i = warm
+    
     {
         const float S = S_acc.val();
         out_ptr[warm] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
     }
 
-    // --- Slide the window in O(1) per step ----------------------------------
-    // Recurrence: T_{i+1} = T_i + S_{i+1} - w * drop
-    // where S_{i+1} = S_i + add - drop, and w = window.
-    // Periodic re-normalization to limit FP32 drift on long runs.
+    
+    
+    
+    
     const int REFRESH_EVERY = 512;
     int since_refresh = 0;
     for (int i = warm; i < series_len - 1; ++i) {
-        const float add  = prices[i + 1];               // new sample entering
-        const float drop = prices[i - window + 1];      // oldest leaving
+        const float add  = prices[i + 1];               
+        const float drop = prices[i - window + 1];      
 
         if (isfinite(add))  S_acc.add(add); else ++nan_count;
         if (isfinite(drop)) S_acc.sub(drop); else --nan_count;
 
-        // T <- T + S (after S has been updated)
+        
         T_acc.add(S_acc.val());
-        // minus w*drop (only if finite to avoid NaN poisoning)
+        
         if (isfinite(drop)) T_acc.sub((float)window * drop);
 
-        // Write output
+        
         const float S = S_acc.val();
         out_ptr[i + 1] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
 
-        // Periodic refresh to tame accumulated rounding error in FP32
+        
         if (++since_refresh >= REFRESH_EVERY) {
             since_refresh = 0;
-            // Rebuild S and T exactly for the current window [i+1 - (window-1) .. i+1]
+            
             CompSum S_new, T_new;
             int nc = 0;
             const int cur = i + 1;
@@ -149,10 +149,10 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ----------------------------------------------------------------------------
-// prices_tm: time-major layout [row * num_series + series]
-// Many series, one period. Each thread processes one series (column).
-// ----------------------------------------------------------------------------
+
+
+
+
 extern "C" __global__ void cg_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -168,7 +168,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     float*       __restrict__ col_out = out_tm    + series;
 
     if (UNLIKELY(period <= 0 || period > series_len)) {
-        // Fill NaN column
+        
         for (int row = 0; row < series_len; ++row)
             col_out[(size_t)row * num_series] = CG_NAN;
         return;
@@ -191,7 +191,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     const int warm   = first_valid + period;
     const int window = period - 1;
 
-    // Prefill NaN prefix
+    
     for (int row = 0; row < warm; ++row)
         col_out[(size_t)row * num_series] = CG_NAN;
 
@@ -201,7 +201,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
         return;
     }
 
-    // Initialize first window at row = warm
+    
     CompSum S_acc, T_acc;
     int nan_count = 0;
     for (int k = 0; k < window; ++k) {
@@ -253,22 +253,22 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     }
 }
 
-// ----------------------------------------------------------------------------
-// OPTIONAL: prefix-sum precompute path for very large periods with many combos.
-// Build once per price series, then compute any period in O(series_len).
-// ----------------------------------------------------------------------------
 
-// Build prefix arrays (length = series_len):
-//   P[i]   = sum_{t=0..i} price[t]             (non-finite treated as 0)
-//   Q[i]   = sum_{t=0..i} t * price[t]         (non-finite treated as 0)
-//   C[i]   = count_{t=0..i} !isfinite(price[t])
+
+
+
+
+
+
+
+
 extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ prices,
                                                  int series_len,
                                                  float* __restrict__ P,
                                                  float* __restrict__ Q,
                                                  int*   __restrict__ C)
 {
-    // Single-thread scan for simplicity; adequate when amortized across combos.
+    
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     float ps = 0.0f;
@@ -288,9 +288,9 @@ extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ price
     }
 }
 
-// Use prefix arrays to compute CG. Each thread = one period combo.
+
 extern "C" __global__ void cg_batch_f32_from_prefix(
-    const float* __restrict__ /*prices*/,   // unused, kept for symmetry
+    const float* __restrict__ /*prices*/,   
     const int*   __restrict__ periods,
     int series_len,
     int n_combos,
@@ -320,14 +320,14 @@ extern "C" __global__ void cg_batch_f32_from_prefix(
     const int warm   = first_valid + period;
     const int window = period - 1;
 
-    // NaN prefix
+    
     for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
     if (window <= 0) {
         for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
         return;
     }
 
-    // For row i, use range [a..b] = [i-window+1 .. i]
+    
     for (int i = warm; i < series_len; ++i) {
         const int a = i - window + 1;
         const int b = i;
@@ -339,7 +339,7 @@ extern "C" __global__ void cg_batch_f32_from_prefix(
         if (nans > 0 || cg_bad_den(sumP)) {
             out_ptr[i] = 0.0f;
         } else {
-            // num = (i+1)*sumP - sumQ
+            
             const float num = fmaf((float)(i + 1), sumP, -sumQ);
             out_ptr[i] = -num / sumP;
         }

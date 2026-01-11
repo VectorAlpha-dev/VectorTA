@@ -59,7 +59,7 @@ pub struct CudaTrendflex {
     debug_many_logged: bool,
 }
 
-// -------- Kernel selection policy (mirrors ALMA shape; TrendFlex only needs 1D variants) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -88,7 +88,7 @@ impl Default for CudaTrendflexPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -107,7 +107,7 @@ impl CudaTrendflex {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/trendflex_kernel.ptx"));
-        // Prefer context-targeted JIT with explicit O4; fall back gracefully.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -123,7 +123,7 @@ impl CudaTrendflex {
                 }
             }
         };
-        // Optional stream priority via env: CUDA_STREAM_PRIORITY (lower is higher prio)
+        
         let stream_priority = std::env::var("CUDA_STREAM_PRIORITY")
             .ok()
             .and_then(|s| s.parse::<i32>().ok());
@@ -209,7 +209,7 @@ impl CudaTrendflex {
         }
     }
 
-    // ---------- Utilities ----------
+    
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -298,7 +298,7 @@ impl CudaTrendflex {
             .module
             .get_function("trendflex_batch_f32")
             .map_err(|_| CudaTrendflexError::MissingKernelSymbol { name: "trendflex_batch_f32" })?;
-        // Prefer L1 when possible; driver may ignore on unsupported arch
+        
         func.set_cache_config(CacheConfig::PreferL1)?;
 
         if max_period == 0 {
@@ -311,7 +311,7 @@ impl CudaTrendflex {
         }
         let mut max_period_i = max_period as i32;
 
-        // Shared ring per thread: [thread][max_period]; keep block_x small to stay within shared limits.
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
             BatchKernelPolicy::Auto => 32,
@@ -321,7 +321,7 @@ impl CudaTrendflex {
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaTrendflexError::InvalidInput("shared mem size overflow".into()))?
             as u32;
-        // Chunk by combos to keep grid.x blocks under 65_535
+        
         let max_blocks: u32 = 65_535;
         let chunk_cap: usize = (max_blocks as usize) * (block_x as usize);
         let mut launched = 0usize;
@@ -356,7 +356,7 @@ impl CudaTrendflex {
             }
             launched += chunk;
         }
-        // Introspection + optional debug log
+        
         unsafe {
             let this = self as *const _ as *mut CudaTrendflex;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -372,13 +372,13 @@ impl CudaTrendflex {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaTrendflexError> {
-        // VRAM estimate (prices + periods + scratch + out)
+        
         let n_combos = combos.len();
         let prices_bytes = len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
         let out_bytes = n_combos * len * std::mem::size_of::<f32>();
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -433,7 +433,7 @@ impl CudaTrendflex {
         if combos.is_empty() {
             return Err(CudaTrendflexError::InvalidInput("no combos".into()));
         }
-        // Upload small periods list only
+        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let max_period = combos
@@ -497,7 +497,7 @@ impl CudaTrendflex {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        // Ensure kernels finished, then single D2H copy straight to caller's buffer
+        
         self.stream.synchronize()?;
         dev.buf.copy_to(out)?;
         Ok((combos.len(), len, combos))
@@ -627,7 +627,7 @@ impl CudaTrendflex {
 
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        // Introspection + optional debug log
+        
         unsafe {
             let this = self as *const _ as *mut CudaTrendflex;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -644,7 +644,7 @@ impl CudaTrendflex {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaTrendflexError> {
-        // VRAM estimate (prices + first_valids + scratch + out)
+        
         let prices_bytes = cols * rows * std::mem::size_of::<f32>();
         let firsts_bytes = cols * std::mem::size_of::<i32>();
         let scratch_bytes = cols * rows * std::mem::size_of::<f32>();
@@ -763,7 +763,7 @@ impl CudaTrendflex {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

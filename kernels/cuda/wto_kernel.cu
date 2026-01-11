@@ -1,9 +1,9 @@
-// CUDA kernels for the WaveTrend Oscillator (WTO).
-//
-// This file provides FP32-optimized kernels with FMA usage and compensated
-// accumulation for the SMA(4) tail (wt2). For the one-series-many-params path,
-// we also broadcast the price per time step across the warp to reduce redundant
-// global loads.
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,25 +12,25 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// --- Accuracy + memory helpers ------------------------------------------------
+
 
 #ifndef WTO_UTILS_H
 #define WTO_UTILS_H
 
-// Canonical quiet NaN bit-pattern; cheaper than nanf("") inside tight loops.
+
 static __device__ __forceinline__ float wto_nan() {
     return __int_as_float(0x7fc00000u);
 }
 
-// Compensated FP32 accumulator (Kahan/Neumaier style) suitable for streaming sums.
-// Keeps hi+lo representing an extended-precision FP32 sum at FP32 throughput.
+
+
 struct fpair {
     float hi, lo;
     __device__ __forceinline__ void init() { hi = 0.f; lo = 0.f; }
     __device__ __forceinline__ void add(float x) {
         float s  = hi + x;
         float bb = s - hi;
-        float e  = (hi - (s - bb)) + (x - bb);  // round-off
+        float e  = (hi - (s - bb)) + (x - bb);  
         float t  = lo + e;
         float st = s + t;
         lo = t - (st - s);
@@ -39,21 +39,21 @@ struct fpair {
     __device__ __forceinline__ float value() const { return hi + lo; }
 };
 
-// Broadcast prices[t] across the active lanes of a warp.
-// This avoids 32 identical loads per warp (one series, many param combos).
+
+
 static __device__ __forceinline__ float bcast_price(const float* __restrict__ prices, int t) {
     unsigned mask   = __activemask();
     int      leader = __ffs(mask) - 1;
     float    v      = 0.f;
     int      lane   = threadIdx.x & 31;
-    if (lane == leader) { v = __ldg(prices + t); } // RO cache hint; safe for immutable input
+    if (lane == leader) { v = __ldg(prices + t); } 
     return __shfl_sync(mask, v, leader);
 }
 
-#endif // WTO_UTILS_H
+#endif 
 
-// Utility to prefill output rows with NaNs (thread-local row clear; preserves
-// existing host API that does not launch a separate fill kernel).
+
+
 __device__ inline void fill_nan(float* ptr, int len) {
     const float nanv = wto_nan();
     for (int i = 0; i < len; ++i) {
@@ -61,8 +61,8 @@ __device__ inline void fill_nan(float* ptr, int len) {
     }
 }
 
-// Optional coalesced NaN prefill for all three outputs in a single pass.
-// Not wired from host in current integration but provided for future use.
+
+
 extern "C" __global__
 void wto_fill_nan3_f32(float* __restrict__ out_wt1,
                        float* __restrict__ out_wt2,
@@ -102,7 +102,7 @@ void wto_batch_f32(const float* __restrict__ prices,
 
     const float qnan = wto_nan();
 
-    // Invalid parameters -> full NaN row (conservative, keeps host expectations).
+    
     if (chan <= 0 || avg <= 0 || first_valid < 0 || first_valid >= series_len || series_len <= 0) {
         for (int t = 0; t < series_len; ++t) {
             wt1_row[t]  = qnan;
@@ -121,29 +121,29 @@ void wto_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // EMA coefficients in FP64 for closer parity with CPU
+    
     const double alpha_ch = 2.0 / (double(chan) + 1.0);
     const double beta_ch  = 1.0 - alpha_ch;
     const double alpha_av = 2.0 / (double(avg) + 1.0);
     const double beta_av  = 1.0 - alpha_av;
 
-    // Recurrence state (FP64 to match CPU scalar tolerance)
+    
     bool   esa_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    // WT2 via rolling SMA(4) over WT1 (FP64), matching CPU semantics.
+    
     double ring[4] = {0.0, 0.0, 0.0, 0.0};
     double rsum = 0.0;
     int    rlen = 0;
     int    rpos = 0;
 
-    // Warp broadcast constants (price is shared across combos at each time step).
+    
     const unsigned mask   = __activemask();
     const int      lane   = threadIdx.x & 31;
     const int      leader = __ffs(mask) - 1;
 
     for (int t = 0; t < series_len; ++t) {
-        // One load per warp; broadcast to all active lanes.
+        
         float price_f32 = 0.0f;
         if (lane == leader) {
             price_f32 = __ldg(prices + t);
@@ -152,7 +152,7 @@ void wto_batch_f32(const float* __restrict__ prices,
         const bool   priceFinite = isfinite(price_f32);
         const double price      = static_cast<double>(price_f32);
 
-        // Default outputs are NaN; filled in when valid.
+        
         float wt1_f  = qnan;
         float wt2_f  = qnan;
         float hist_f = qnan;
@@ -186,7 +186,7 @@ void wto_batch_f32(const float* __restrict__ prices,
         }
 
         if (t == start_ci) {
-            // Seed ESA already updated; seed d, compute ci (0.015*d) and set wt1=ci unconditionally
+            
             const double absdiff0 = priceFinite ? fabs(diff) : __longlong_as_double(0x7ff8000000000000ULL);
             d = absdiff0;
             const double denom0 = 0.015 * d;
@@ -203,8 +203,8 @@ void wto_batch_f32(const float* __restrict__ prices,
             ring[0] = wt1;
             rsum = wt1;
             rlen = 1;
-            // Standard rolling SMA(4) semantics for WT2 (matches batch CPU reference via SMA).
-            // First overwrite should drop ring[0] (oldest) once full.
+            
+            
             rpos = 0;
         } else if (t > start_ci) {
             const double abs_diff = fabs(diff);
@@ -262,7 +262,7 @@ void wto_many_series_one_param_time_major_f32(
     float* wt2_col  = wt2_tm + series;
     float* hist_col = hist_tm + series;
 
-    // Backward-compat prefill: keep per-column NaN clear
+    
     const float qnan = wto_nan();
     for (int t = 0; t < rows; ++t) {
         wt1_col[t * cols]  = qnan;
@@ -285,7 +285,7 @@ void wto_many_series_one_param_time_major_f32(
     bool   esa_init = false, d_init = false, wt1_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    // WT2 via rolling SMA(4) over WT1 in FP64 (matches CPU scalar/batch semantics).
+    
     double ring[4] = {0.0, 0.0, 0.0, 0.0};
     double rsum = 0.0;
     int    rlen = 0;

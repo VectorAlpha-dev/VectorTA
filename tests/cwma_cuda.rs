@@ -1,18 +1,18 @@
-// Integration tests for CUDA CWMA kernels
 
-use my_project::indicators::moving_averages::cwma::{
+
+use vector_ta::indicators::moving_averages::cwma::{
     cwma_batch_with_kernel, CwmaBatchRange, CwmaBuilder, CwmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaCwma;
+use vector_ta::cuda::moving_averages::CudaCwma;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::{
+use vector_ta::cuda::moving_averages::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaCwmaPolicy, ManySeriesKernelPolicy,
 };
 
@@ -34,7 +34,7 @@ fn cuda_feature_off_noop() {
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    // Allow environments without a working CUDA stack to skip safely
+    
     if std::env::var("SKIP_CUDA_TESTS").is_ok() {
         eprintln!("[cwma_cuda_one_series_many_params_matches_cpu] skipped - SKIP_CUDA_TESTS set");
         return Ok(());
@@ -175,7 +175,7 @@ fn cwma_cuda_batched_tiled_matches_cpu() -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    let series_len = 20000usize; // large enough to trigger tiling
+    let series_len = 20000usize; 
     let mut data = vec![f64::NAN; series_len];
     for i in 7..series_len {
         let x = i as f64;

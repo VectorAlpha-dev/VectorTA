@@ -279,14 +279,14 @@ impl CudaDecOsc {
             .get_function("dec_osc_batch_f32")
             .map_err(|_| CudaDecOscError::MissingKernelSymbol { name: "dec_osc_batch_f32" })?;
 
-        // Use occupancy suggestion for block size and minimum grid size
+        
         let (suggested_block_x, min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => suggested_block_x.max(128),
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
-        // Optional: validate against device max block dim
+        
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)? as u32;
         if block_x > max_bx {
@@ -301,7 +301,7 @@ impl CudaDecOsc {
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
-        // Right-sized grid: one thread per combo → ceil_div(n_combos, block_x)
+        
         let combos_u32 = n_combos as u32;
         let mut grid_x = Self::ceil_div_u32(combos_u32, block_x);
         grid_x = grid_x.max(min_grid);
@@ -365,7 +365,7 @@ impl CudaDecOsc {
         let periods: Vec<i32> = combos.iter().map(|c| c.hp_period.unwrap() as i32).collect();
         let ks: Vec<f32> = combos.iter().map(|c| c.k.unwrap() as f32).collect();
 
-        // Prefer async/pinned path for bulk transfers
+        
         let h_prices = LockedBuffer::from_slice(data_f32)?;
         let h_periods = LockedBuffer::from_slice(&periods)?;
         let h_ks = LockedBuffer::from_slice(&ks)?;
@@ -384,7 +384,7 @@ impl CudaDecOsc {
             d_ks.async_copy_from(&h_ks, &self.stream)?;
         }
 
-        // Compute block_x once to size chunks up to grid.x limit
+        
         let func = self
             .module
             .get_function("dec_osc_batch_f32")
@@ -396,7 +396,7 @@ impl CudaDecOsc {
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         } as usize;
 
-        const MAX_GRID_X: usize = 65_535; // keep legacy guard
+        const MAX_GRID_X: usize = 65_535; 
         let max_combos_per_launch = MAX_GRID_X.saturating_mul(block_x);
 
         let mut launched = 0usize;
@@ -485,14 +485,14 @@ impl CudaDecOsc {
             .get_function("dec_osc_many_series_one_param_time_major_f32")
             .map_err(|_| CudaDecOscError::MissingKernelSymbol { name: "dec_osc_many_series_one_param_time_major_f32" })?;
 
-        // Use occupancy hint for 1D grid across series
+        
         let (suggested_block_x, _min_grid) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => suggested_block_x.max(128),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
         };
-        // Optional: validate against device max block dim
+        
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)? as u32;
         if block_x > max_bx {
@@ -546,7 +546,7 @@ impl CudaDecOsc {
         let (first_valids, period, k_f32) =
             Self::prepare_many_series(data_tm_f32, cols, rows, params)?;
 
-        // VRAM guard similar to batch path
+        
         let prices_bytes = data_tm_f32
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -568,7 +568,7 @@ impl CudaDecOsc {
         let headroom     = 64 * 1024 * 1024;
         self.will_fit(need, headroom)?;
 
-        // Pinned + async transfers for truly asynchronous copies
+        
         let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
@@ -596,7 +596,7 @@ impl CudaDecOsc {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

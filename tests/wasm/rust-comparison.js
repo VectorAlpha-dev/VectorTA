@@ -19,26 +19,26 @@ const projectRoot = path.join(__dirname, '../..');
  * @returns {Promise<Object>} Rust output data
  */
 export async function getRustOutput(indicatorName, source = 'close') {
-    // Check if the reference generator binary already exists
+    
     const binaryPath = path.join(projectRoot, 'target', 'release', 'generate_references');
     const binaryExists = existsSync(binaryPath) || existsSync(binaryPath + '.exe');
     
     if (!binaryExists) {
-        // Build the reference generator if needed
-        // Try multiple times in case of intermittent build issues
+        
+        
         let buildError;
         for (let attempt = 0; attempt < 3; attempt++) {
             try {
                 await execAsync('cargo build --release --bin generate_references', {
                     cwd: projectRoot,
-                    env: { ...process.env, CARGO_INCREMENTAL: '0' } // Disable incremental compilation
+                    env: { ...process.env, CARGO_INCREMENTAL: '0' } 
                 });
                 buildError = null;
                 break;
             } catch (error) {
                 buildError = error;
                 if (attempt < 2) {
-                    // Wait a bit before retrying
+                    
                     await new Promise(resolve => setTimeout(resolve, 1000));
                 }
             }
@@ -49,13 +49,13 @@ export async function getRustOutput(indicatorName, source = 'close') {
         }
     }
     
-    // Run the reference generator
+    
     try {
         const { stdout, stderr } = await execAsync(
             `cargo run --release --bin generate_references -- ${indicatorName} ${source}`,
             {
                 cwd: projectRoot,
-                maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+                maxBuffer: 10 * 1024 * 1024 
             }
         );
         
@@ -81,13 +81,13 @@ export async function getRustOutput(indicatorName, source = 'close') {
 export async function compareWithRust(indicatorName, wasmOutput, source = 'close', params = null, tolerance = 1e-8) {
     const rustData = await getRustOutput(indicatorName, source);
     
-    // Handle special cases for indicators with multiple outputs
+    
     if (indicatorName === 'damiani_volatmeter' && typeof wasmOutput === 'object' && 'vol' in wasmOutput && 'anti' in wasmOutput) {
-        // Damiani Volatmeter has vol and anti outputs
+        
         const rustVol = rustData.vol;
         const rustAnti = rustData.anti;
         
-        // Verify parameters match if provided
+        
         if (params) {
             const rustParams = rustData.params;
             for (const [key, value] of Object.entries(params)) {
@@ -97,20 +97,20 @@ export async function compareWithRust(indicatorName, wasmOutput, source = 'close
             }
         }
         
-        // Compare vol values
+        
         compareArrays(wasmOutput.vol, rustVol, indicatorName + ' vol', tolerance);
-        // Compare anti values
+        
         compareArrays(wasmOutput.anti, rustAnti, indicatorName + ' anti', tolerance);
         
         return true;
     }
     
     if (indicatorName === 'di' && typeof wasmOutput === 'object' && 'plus' in wasmOutput && 'minus' in wasmOutput) {
-        // DI has plus and minus outputs
+        
         const rustPlus = rustData.plus;
         const rustMinus = rustData.minus;
         
-        // Verify parameters match if provided
+        
         if (params) {
             const rustParams = rustData.params;
             for (const [key, value] of Object.entries(params)) {
@@ -120,18 +120,18 @@ export async function compareWithRust(indicatorName, wasmOutput, source = 'close
             }
         }
         
-        // Compare plus values
+        
         compareArrays(wasmOutput.plus, rustPlus, indicatorName + ' plus', tolerance);
-        // Compare minus values
+        
         compareArrays(wasmOutput.minus, rustMinus, indicatorName + ' minus', tolerance);
         
         return true;
     }
     
-    // Default handling for single-output indicators
+    
     const rustOutput = rustData.values;
     
-    // Verify parameters match if provided
+    
     if (params) {
         const rustParams = rustData.params;
         for (const [key, value] of Object.entries(params)) {
@@ -141,17 +141,17 @@ export async function compareWithRust(indicatorName, wasmOutput, source = 'close
         }
     }
     
-    // Compare lengths
+    
     if (wasmOutput.length !== rustOutput.length) {
         throw new Error(`Length mismatch: WASM=${wasmOutput.length}, Rust=${rustOutput.length}`);
     }
     
-    // Compare values
+    
     for (let i = 0; i < wasmOutput.length; i++) {
         const wasmVal = wasmOutput[i];
         const rustVal = rustOutput[i];
         
-        // Both NaN is ok
+        
         if (isNaN(wasmVal) && isNaN(rustVal)) {
             continue;
         }
@@ -183,7 +183,7 @@ function compareArrays(wasmArray, rustArray, name, tolerance) {
         const wasmVal = wasmArray[i];
         const rustVal = rustArray[i];
         
-        // Both NaN is ok
+        
         if (isNaN(wasmVal) && isNaN(rustVal)) {
             continue;
         }

@@ -76,7 +76,7 @@ impl CudaVama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/volume_adjusted_ma_kernel.ptx"));
-        // Prefer target from context + O4 (cust default), with graceful fallback for brittle drivers.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -93,7 +93,7 @@ impl CudaVama {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // No cache preference by default; rely on architecture defaults.
+        
 
         Ok(Self {
             module,
@@ -213,7 +213,7 @@ impl CudaVama {
                 } else {
                     while x >= e - 1e-12 {
                         v.push(x);
-                        x += st; // negative step
+                        x += st; 
                     }
                 }
                 v
@@ -371,20 +371,20 @@ impl CudaVama {
             .get_function("volume_adjusted_ma_batch_f32")
             .map_err(|_| CudaVamaError::MissingKernelSymbol { name: "volume_adjusted_ma_batch_f32" })?;
 
-        // Select block size based on policy or default (stable numerics)
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             _ => 256,
         };
 
-        // One-time debug record
+        
         unsafe {
             let this = self as *const _ as *mut CudaVama;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk Y dimension to avoid exceeding 65,535
+        
         const MAX_GRID_Y: usize = 65_535;
         let mut launched = 0usize;
         while launched < n_combos {
@@ -479,7 +479,7 @@ impl CudaVama {
             .and_then(|x| x.checked_add(param_bytes))
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaVamaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64 MB cushion
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(prices).map_err(CudaVamaError::Cuda)?;
@@ -507,8 +507,8 @@ impl CudaVama {
             first_valid,
             &mut d_out,
         )?;
-        // Ensure kernel completion before returning the device buffer, so callers
-        // using blocking copy_to() on the default stream observe completed work.
+        
+        
         self.stream
             .synchronize()
             .map_err(CudaVamaError::Cuda)?;
@@ -632,13 +632,13 @@ impl CudaVama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVamaError> {
-        // Time-major, coalesced mapping: grid over time, threads over series
+        
         let func = self
             .module
             .get_function("volume_adjusted_ma_multi_series_one_param_time_major_f32")
             .map_err(|_| CudaVamaError::MissingKernelSymbol { name: "volume_adjusted_ma_multi_series_one_param_time_major_f32" })?;
 
-        // Ask driver for a good block size; clamp to series count power-of-two and 256 max
+        
         let (suggested_block_x, min_grid) = func
             .suggested_launch_configuration(0, (0u32, 0u32, 0u32).into())
             .map_err(CudaVamaError::Cuda)?;
@@ -650,7 +650,7 @@ impl CudaVama {
             threads = 32;
         }
 
-        // Use occupancy-guided grid size; kernel grid-strides over time anyway
+        
         let grid_x = (rows as u32).min(min_grid.max(1));
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (threads, 1, 1).into();
@@ -687,7 +687,7 @@ impl CudaVama {
                     .launch(&func, grid, block, 0, args)
                     .map_err(CudaVamaError::Cuda)?;
         }
-        // Introspection for selected kernel
+        
         unsafe {
             let this = self as *const _ as *mut CudaVama;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: threads });
@@ -789,7 +789,7 @@ impl CudaVama {
             series_len,
             max_length,
         )?;
-        // Pinned + async D2H copy for better throughput
+        
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(expected).map_err(CudaVamaError::Cuda)?
         };
@@ -839,7 +839,7 @@ impl CudaVama {
         )
     }
 
-    // ---- Friendly aliases with indicator name (non-breaking) ----
+    
     #[inline]
     pub fn volume_adjusted_ma_batch_dev(
         &self,
@@ -953,7 +953,7 @@ impl CudaVama {
             rows,
             params,
         )?;
-        // Pinned + async D2H copy
+        
         let mut pinned: LockedBuffer<f32> = unsafe {
             LockedBuffer::uninitialized(cols * rows)
                 .map_err(CudaVamaError::Cuda)?
@@ -1059,7 +1059,7 @@ impl CudaVama {
     }
 }
 
-// -------------------- Python: CUDA Array Interface v3 + DLPack ----------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]

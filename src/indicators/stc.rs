@@ -399,7 +399,7 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         });
     }
 
-    // correct warmup: use the crate's quiet-NaN pattern to match alloc_with_nan_prefix
+    
     let warmup_end = first + needed - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end.min(len)] {
@@ -454,8 +454,8 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
     Ok(())
 }
 
-// Native no-allocation API: writes into caller-provided buffer while preserving NaN warmups.
-// Guard against symbol clash with the wasm-bindgen export of the same name.
+
+
 #[cfg(not(feature = "wasm"))]
 /// Computes Schaff Trend Cycle into an existing output slice without allocating.
 ///
@@ -479,14 +479,14 @@ pub fn stc_scalar(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), StcError> {
-    // Check for classic kernel optimization
+    
     if fast_type == "ema" && slow_type == "ema" {
         return unsafe { stc_scalar_classic_ema(data, fast, slow, k, d, first, out) };
     } else if fast_type == "sma" && slow_type == "sma" {
         return unsafe { stc_scalar_classic_sma(data, fast, slow, k, d, first, out) };
     }
 
-    // Fall back to regular implementation for other MA types
+    
     use crate::indicators::ema::{ema, EmaInput, EmaParams};
     use crate::indicators::moving_averages::ma::{ma, MaData};
     use crate::indicators::utility_functions::{max_rolling, min_rolling};
@@ -495,23 +495,23 @@ pub fn stc_scalar(
     let len = data.len();
     let slice = &data[first..];
 
-    // Get MAs
+    
     let fast_ma = ma(fast_type, MaData::Slice(slice), fast)
         .map_err(|e| StcError::Internal(format!("Fast MA error: {}", e)))?;
     let slow_ma = ma(slow_type, MaData::Slice(slice), slow)
         .map_err(|e| StcError::Internal(format!("Slow MA error: {}", e)))?;
 
-    // Allocate working buffers for intermediate calculations
-    // These are algorithm-specific and much smaller than full data size
+    
+    
     let working_len = slice.len();
     let mut macd = alloc_with_nan_prefix(working_len, 0);
 
-    // Calculate MACD
+    
     for i in 0..working_len {
         macd[i] = fast_ma[i] - slow_ma[i];
     }
 
-    // First stochastic calculation
+    
     let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -525,12 +525,12 @@ pub fn stc_scalar(
         }
     }
 
-    // First EMA smoothing
+    
     let d_ema = ema(&EmaInput::from_slice(&stok, EmaParams { period: Some(d) }))
         .map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_vals = &d_ema.values;
 
-    // Second stochastic calculation
+    
     let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -544,12 +544,12 @@ pub fn stc_scalar(
         }
     }
 
-    // Final EMA smoothing
+    
     let kd_ema = ema(&EmaInput::from_slice(&kd, EmaParams { period: Some(d) }))
         .map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let final_stc = &kd_ema.values;
 
-    // Write results directly to output buffer
+    
     for (i, &val) in final_stc.iter().enumerate() {
         out[first + i] = val;
     }
@@ -557,7 +557,7 @@ pub fn stc_scalar(
     Ok(())
 }
 
-// Classic kernel with inline EMA calculations (allocation-light, loop-jammed)
+
 #[inline]
 pub unsafe fn stc_scalar_classic_ema(
     data: &[f64],
@@ -568,17 +568,17 @@ pub unsafe fn stc_scalar_classic_ema(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), StcError> {
-    // Loop‑jammed, allocation‑light (only tiny O(k) rings) scalar kernel.
-    // Computes: MACD -> Stoch(K) -> EMA(d) -> Stoch(K) -> EMA(d)
-    // All warmups/NaNs handled to match existing semantics.
+    
+    
+    
 
     #[inline(always)]
     fn fma(prev: f64, a: f64, x: f64) -> f64 {
-        // EMA update as: prev + a*(x - prev) using a single FMA when possible
+        
         (x - prev).mul_add(a, prev)
     }
 
-    // Constants
+    
     const HUNDRED: f64 = 100.0;
     const EPS: f64 = f64::EPSILON;
 
@@ -588,26 +588,26 @@ pub unsafe fn stc_scalar_classic_ema(
         return Ok(());
     }
 
-    // Alphas
+    
     let fast_a = 2.0 / (fast as f64 + 1.0);
     let slow_a = 2.0 / (slow as f64 + 1.0);
     let d_a = 2.0 / (d as f64 + 1.0);
 
-    // ===== Initialize EMA seed accumulators (skip NaNs) =====
-    // We seed each EMA using the mean of the first `period` finite samples,
-    // matching the semantics in moving_averages/ema.rs (carry-forward on NaN).
+    
+    
+    
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
     let mut fast_init_cnt: usize = 0;
     let mut slow_init_cnt: usize = 0;
 
-    // EMA state (becomes finite once init_cnt == period)
+    
     let mut fast_ema = f64::NAN;
     let mut slow_ema = f64::NAN;
 
-    // ===== Fixed-size rings for MACD and d-EMA with branch-light scans =====
-    // We store the last k values in rings and, when full, scan them to get min/max.
-    // For typical STC (k≈10), scanning is faster than maintaining monotone deques.
+    
+    
+    
     let mut macd_ring: Vec<f64> = vec![f64::NAN; k];
     let mut macd_valid_ring: Vec<u8> = vec![0; k];
     let mut macd_valid_sum: usize = 0;
@@ -618,7 +618,7 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut d_valid_sum: usize = 0;
     let mut d_vpos: usize = 0;
 
-    // EMA(d) state for stok and final smoothing
+    
     let mut d_ema = f64::NAN;
     let mut d_sum = 0.0;
     let mut d_init_cnt = 0usize;
@@ -627,15 +627,15 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut final_sum = 0.0;
     let mut final_init_cnt = 0usize;
 
-    // No index thresholds; we seed based on number of finite samples seen
+    
 
-    // Main loop: fully fused pipeline
+    
     let mut i = 0usize;
     while i < n {
         let x = *slice.get_unchecked(i);
 
-        // --- Update EMAs with NaN-aware seeding and carry-forward semantics ---
-        // Fast EMA
+        
+        
         if x.is_finite() {
             if fast_init_cnt < fast {
                 fast_init_cnt += 1;
@@ -644,15 +644,15 @@ pub unsafe fn stc_scalar_classic_ema(
                     fast_ema = fast_sum / fast as f64;
                 }
             } else {
-                // EMA phase
+                
                 fast_ema = fma(fast_ema, fast_a, x);
             }
         } else {
-            // NaN input: do not update sums or EMA; carry previous state
-            // (fast_ema remains as-is; still NaN until seeded)
+            
+            
         }
 
-        // Slow EMA
+        
         if x.is_finite() {
             if slow_init_cnt < slow {
                 slow_init_cnt += 1;
@@ -664,13 +664,13 @@ pub unsafe fn stc_scalar_classic_ema(
                 slow_ema = fma(slow_ema, slow_a, x);
             }
         } else {
-            // NaN input: carry previous
+            
         }
 
-        // --- MACD value at i ---
+        
         let macd = if slow_init_cnt >= slow { fast_ema - slow_ema } else { f64::NAN };
 
-        // --- Maintain MACD validity and ring ---
+        
         if i >= k {
             macd_valid_sum -= *macd_valid_ring.get_unchecked(macd_vpos) as usize;
         }
@@ -685,15 +685,15 @@ pub unsafe fn stc_scalar_classic_ema(
             macd_vpos = 0;
         }
 
-        // --- Stochastic of MACD (first pass) ---
+        
         let stok = if macd_valid_sum == k && macd_is_valid != 0 {
-            // Scan ring for min/max (branch-light, k is small)
+            
             let mut mn = *macd_ring.get_unchecked(0);
             let mut mx = mn;
             let mut j = 1usize;
             while j < k {
                 let v = *macd_ring.get_unchecked(j);
-                // All valid when macd_valid_sum==k, so no NaNs
+                
                 if v < mn {
                     mn = v;
                 }
@@ -714,7 +714,7 @@ pub unsafe fn stc_scalar_classic_ema(
             f64::NAN
         };
 
-        // --- EMA(d) of stok ---
+        
         let d_val = if !stok.is_nan() {
             if d_init_cnt < d {
                 d_sum += stok;
@@ -723,7 +723,7 @@ pub unsafe fn stc_scalar_classic_ema(
                     d_ema = d_sum / d as f64;
                     d_ema
                 } else {
-                    // Warmup: running mean so far
+                    
                     d_sum / (d_init_cnt as f64)
                 }
             } else {
@@ -731,19 +731,19 @@ pub unsafe fn stc_scalar_classic_ema(
                 d_ema
             }
         } else {
-            // NaN stok: carry-forward EMA semantics
+            
             if d_init_cnt == 0 {
                 f64::NAN
             } else if d_init_cnt < d {
-                // Still warming: return current running mean
+                
                 d_sum / (d_init_cnt as f64)
             } else {
-                // Seeded: carry previous EMA value
+                
                 d_ema
             }
         };
 
-        // --- Maintain d-EMA validity and ring ---
+        
         if i >= k {
             d_valid_sum -= *d_valid_ring.get_unchecked(d_vpos) as usize;
         }
@@ -758,9 +758,9 @@ pub unsafe fn stc_scalar_classic_ema(
             d_vpos = 0;
         }
 
-        // --- Stochastic of d-EMA (second pass) ---
+        
         let kd = if d_valid_sum == k && d_is_valid != 0 {
-            // Scan ring for min/max
+            
             let mut mn = *d_ring.get_unchecked(0);
             let mut mx = mn;
             let mut j = 1usize;
@@ -786,7 +786,7 @@ pub unsafe fn stc_scalar_classic_ema(
             f64::NAN
         };
 
-        // --- Final EMA(d) smoothing and write to output ---
+        
         let dst = out.get_unchecked_mut(first + i);
         if !kd.is_nan() {
             if final_init_cnt < d {
@@ -796,7 +796,7 @@ pub unsafe fn stc_scalar_classic_ema(
                     final_ema = final_sum / d as f64;
                     *dst = final_ema;
                 } else {
-                    // Warmup: running mean so far
+                    
                     *dst = final_sum / (final_init_cnt as f64);
                 }
             } else {
@@ -804,7 +804,7 @@ pub unsafe fn stc_scalar_classic_ema(
                 *dst = final_ema;
             }
         } else {
-            // NaN kd: carry-forward semantics
+            
             if final_init_cnt == 0 {
                 *dst = f64::NAN;
             } else if final_init_cnt < d {
@@ -820,7 +820,7 @@ pub unsafe fn stc_scalar_classic_ema(
     Ok(())
 }
 
-// Classic kernel with inline SMA calculations
+
 #[inline]
 pub unsafe fn stc_scalar_classic_sma(
     data: &[f64],
@@ -837,14 +837,14 @@ pub unsafe fn stc_scalar_classic_sma(
     let slice = &data[first..];
     let working_len = slice.len();
 
-    // Calculate SMAs and MACD
+    
     let mut macd = alloc_with_nan_prefix(working_len, 0);
 
-    // Initialize rolling sums
+    
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
 
-    // Initial sums
+    
     for i in 0..fast.min(working_len) {
         fast_sum += slice[i];
     }
@@ -852,7 +852,7 @@ pub unsafe fn stc_scalar_classic_sma(
         slow_sum += slice[i];
     }
 
-    // Calculate rolling SMAs and MACD
+    
     for i in 0..working_len {
         if i >= fast {
             fast_sum = fast_sum - slice[i - fast] + slice[i];
@@ -865,7 +865,7 @@ pub unsafe fn stc_scalar_classic_sma(
             let fast_ma = if i >= fast - 1 {
                 fast_sum / fast as f64
             } else {
-                // Calculate partial SMA for fast
+                
                 let mut sum = 0.0;
                 let start = if i >= fast - 1 { i - fast + 1 } else { 0 };
                 for j in start..=i {
@@ -880,7 +880,7 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    // First stochastic calculation
+    
     let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -894,7 +894,7 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    // First EMA smoothing (inline)
+    
     let d_alpha = 2.0 / (d as f64 + 1.0);
     let mut d_vals = alloc_with_nan_prefix(working_len, 0);
     let mut d_ema = f64::NAN;
@@ -921,7 +921,7 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    // Second stochastic calculation
+    
     let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -935,7 +935,7 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    // Final EMA smoothing (inline)
+    
     let mut final_ema = f64::NAN;
     let mut final_sum = 0.0;
     let mut final_count = 0;
@@ -1031,7 +1031,7 @@ pub unsafe fn stc_avx512_long(
     stc_scalar(data, fast, slow, k, d, fast_type, slow_type, first, out)
 }
 
-// Batch API and related structs
+
 #[derive(Clone, Debug)]
 pub struct StcBatchRange {
     pub fast_period: (usize, usize, usize),
@@ -1275,7 +1275,7 @@ fn stc_batch_inner(
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1357,14 +1357,14 @@ pub unsafe fn stc_row_scalar(
     let fast_type = prm.fast_ma_type.as_deref().unwrap_or("ema");
     let slow_type = prm.slow_ma_type.as_deref().unwrap_or("ema");
 
-    // Check for classic kernel optimization
+    
     if fast_type == "ema" && slow_type == "ema" {
         return stc_row_scalar_classic_ema(data, first, prm, out);
     } else if fast_type == "sma" && slow_type == "sma" {
         return stc_row_scalar_classic_sma(data, first, prm, out);
     }
 
-    // Fall back to regular implementation
+    
     stc_scalar(
         data,
         prm.fast_period.unwrap(),
@@ -1378,7 +1378,7 @@ pub unsafe fn stc_row_scalar(
     )
 }
 
-// Classic row kernel with inline EMA for batch processing
+
 #[inline(always)]
 pub unsafe fn stc_row_scalar_classic_ema(
     data: &[f64],
@@ -1397,7 +1397,7 @@ pub unsafe fn stc_row_scalar_classic_ema(
     )
 }
 
-// Classic row kernel with inline SMA for batch processing
+
 #[inline(always)]
 pub unsafe fn stc_row_scalar_classic_sma(
     data: &[f64],
@@ -1464,7 +1464,7 @@ pub unsafe fn stc_row_avx512_long(
     stc_row_scalar(data, first, prm, out)
 }
 
-// Streaming STC (O(1) amortized)
+
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -1473,48 +1473,48 @@ pub struct StcStream {
     pub slow_period: usize,
     pub k_period: usize,
     pub d_period: usize,
-    // we keep the MA types so the stream can decide whether to use O(1) or fallback
+    
     fast_ma_type: String,
     slow_ma_type: String,
 
-    // common counters
-    started: bool,  // have we seen the first non-NaN input?
-    poisoned: bool, // if a NaN appears after start, we poison (match offline behavior)
-    ticks: usize,   // number of samples since the first valid (non-NaN)
+    
+    started: bool,  
+    poisoned: bool, 
+    ticks: usize,   
 
-    // warmup policy: we return None until ticks >= min_data to match existing stream contract
+    
     min_data: usize,
 
-    // ---- EMA fast/slow (for ema/ema mode) ----
+    
     fast_ema: EmaSeed,
     slow_ema: EmaSeed,
 
-    // ---- SMA fast/slow (for sma/sma mode) ----
+    
     fast_sma: SmaState,
     slow_sma: SmaState,
 
-    // ---- MACD rolling K stage ----
+    
     macd_last: f64,
-    macd_valid_flags: Vec<u8>, // last k samples, 1 if MACD was valid on that sample
+    macd_valid_flags: Vec<u8>, 
     macd_vpos: usize,
     macd_valid_sum: usize,
-    macd_min: MonoMin, // monotonic deque over valid MACD values in window
+    macd_min: MonoMin, 
     macd_max: MonoMax,
 
-    // ---- EMA(d) of first stochastic ----
+    
     d_ema: EmaSeed,
 
-    // ---- d-EMA rolling K stage ----
-    d_valid_flags: Vec<u8>, // last k samples, 1 if d_ema value was valid on that sample
+    
+    d_valid_flags: Vec<u8>, 
     d_vpos: usize,
     d_valid_sum: usize,
-    d_min: MonoMin, // monotonic deque over valid d-ema values in window
+    d_min: MonoMin, 
     d_max: MonoMax,
 
-    // ---- final EMA(d) smoothing of kd ----
+    
     final_ema: EmaSeed,
 
-    // fallback buffer for non-supported MA types
+    
     fallback: bool,
     buffer: Vec<f64>,
     params: StcParams,
@@ -1555,11 +1555,11 @@ impl EmaSeed {
                 self.seeded = true;
                 self.ema
             } else {
-                // running mean during warmup (partial average)
+                
                 self.sum / self.cnt as f64
             }
         } else {
-            // ema = ema + a*(x - ema)
+            
             let e = (x - self.ema).mul_add(self.alpha, self.ema);
             self.ema = e;
             e
@@ -1624,7 +1624,7 @@ impl SmaState {
             self.cnt += 1;
             (self.sum / self.cnt as f64, false)
         } else {
-            // full window
+            
             let old = self.ring[self.pos];
             self.ring[self.pos] = x;
             self.pos += 1;
@@ -1674,14 +1674,14 @@ impl MonoMin {
         while let Some(&(_, back_v)) = self.q.back() {
             if back_v <= v {
                 break;
-            } // keep increasing
+            } 
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
     }
     #[inline(always)]
     fn evict_older_than(&mut self, cutoff_exclusive: usize, k: usize) {
-        // Remove while front.idx + k <= current_idx  => front.idx <= current_idx - k
+        
         while let Some(&(j, _)) = self.q.front() {
             if j + k <= cutoff_exclusive {
                 self.q.pop_front();
@@ -1707,7 +1707,7 @@ impl MonoMax {
         while let Some(&(_, back_v)) = self.q.back() {
             if back_v >= v {
                 break;
-            } // keep decreasing
+            } 
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
@@ -1743,7 +1743,7 @@ impl StcStream {
 
         let fast_ma = params.fast_ma_type.as_deref().unwrap_or("ema").to_string();
         let slow_ma = params.slow_ma_type.as_deref().unwrap_or("ema").to_string();
-        let min_data = fast.max(slow).max(k).max(d); // stream contract: None until this many samples
+        let min_data = fast.max(slow).max(k).max(d); 
 
         let fallback =
             !((fast_ma == "ema" && slow_ma == "ema") || (fast_ma == "sma" && slow_ma == "sma"));
@@ -1797,7 +1797,7 @@ impl StcStream {
     /// can still be `NaN` until the full pipeline is naturally warmed.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Start only after the first non-NaN; later NaNs carry forward state (no global poisoning).
+        
         if !self.started {
             if value.is_nan() {
                 return None;
@@ -1806,7 +1806,7 @@ impl StcStream {
             self.ticks = 0;
         }
 
-        // === 1) Fast/Slow MAs -> MACD ===
+        
         let (macd, macd_valid) = if self.fast_ma_type == "ema" && self.slow_ma_type == "ema" {
             if value.is_nan() {
                 let valid = self.slow_ema.is_seeded();
@@ -1840,7 +1840,7 @@ impl StcStream {
                 (macd, slow_seeded)
             }
         } else {
-            // Fallback to O(n) exact recompute path for exotic MA types (rare)
+            
             self.buffer.push(value);
             if self.buffer.len() < self.min_data {
                 return None;
@@ -1854,7 +1854,7 @@ impl StcStream {
 
         self.macd_last = macd;
 
-        // Maintain MACD valid ring and monotonic deques over the last k samples
+        
         if self.ticks >= self.k_period {
             self.macd_valid_sum -= self.macd_valid_flags[self.macd_vpos] as usize;
         }
@@ -1866,7 +1866,7 @@ impl StcStream {
         self.macd_valid_flags[self.macd_vpos] = macd_is_valid;
         self.macd_valid_sum += macd_is_valid as usize;
 
-        // push valid macd into min/max deques; evict stale indices
+        
         if macd_is_valid == 1 {
             self.macd_min.push(self.ticks, macd);
             self.macd_max.push(self.ticks, macd);
@@ -1879,13 +1879,13 @@ impl StcStream {
             self.macd_vpos = 0;
         }
 
-        // === 2) First stochastic over MACD ===
+        
         let stok = if self.macd_valid_sum == self.k_period && macd_is_valid == 1 {
             let mn = self.macd_min.min();
             let mx = self.macd_max.max();
             let range = mx - mn;
             if range.abs() > f64::EPSILON {
-                // (macd - mn) / range * 100
+                
                 (macd - mn) * (100.0 / range)
             } else {
                 50.0
@@ -1896,15 +1896,15 @@ impl StcStream {
             f64::NAN
         };
 
-        // === 3) EMA(d) of stok ===
+        
         let d_val = if !stok.is_nan() {
             self.d_ema.step(stok)
         } else {
-            // carry-forward/running-mean during NaN stok (no state mutation)
+            
             self.d_ema.value_or_carry()
         };
 
-        // Maintain d-ema valid ring and min/max deques
+        
         let d_is_valid = (!d_val.is_nan()) as u8;
         if self.ticks >= self.k_period {
             self.d_valid_sum -= self.d_valid_flags[self.d_vpos] as usize;
@@ -1924,7 +1924,7 @@ impl StcStream {
             self.d_vpos = 0;
         }
 
-        // === 4) Second stochastic over d-EMA ===
+        
         let kd = if self.d_valid_sum == self.k_period && d_is_valid == 1 {
             let mn = self.d_min.min();
             let mx = self.d_max.max();
@@ -1940,15 +1940,15 @@ impl StcStream {
             f64::NAN
         };
 
-        // === 5) Final EMA(d) smoothing ===
+        
         let out = if !kd.is_nan() {
             self.final_ema.step(kd)
         } else {
-            // carry-forward/running-mean during NaN kd (no state mutation)
+            
             self.final_ema.value_or_carry()
         };
 
-        // increment tick; enforce stream warmup contract
+        
         self.ticks += 1;
         if self.ticks < self.min_data {
             None
@@ -2229,7 +2229,7 @@ pub fn stc_cuda_many_series_one_param_dev_py<'py>(
     make_device_array_py(device_id, inner)
 }
 
-// Helper function for batch processing
+
 #[inline(always)]
 fn stc_batch_inner_into(
     data: &[f64],
@@ -2289,7 +2289,7 @@ fn stc_batch_inner_into(
         });
     }
 
-    // init NaN prefixes on the destination matrix
+    
     let mut out_mu = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -2338,7 +2338,7 @@ fn stc_batch_inner_into(
         #[cfg(not(target_arch = "wasm32"))]
         {
             out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, mr)| {
-                // reinterpret row back to f64 for compute
+                
                 let row_slice =
                     unsafe { core::slice::from_raw_parts_mut(mr.as_mut_ptr() as *mut f64, cols) };
                 do_row(r, row_slice).unwrap();
@@ -2361,9 +2361,9 @@ fn stc_batch_inner_into(
     Ok(combos)
 }
 
-// ============================================
-// WASM Bindings
-// ============================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2442,7 +2442,7 @@ pub fn stc_into(
         let input = StcInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing case
+            
             let mut temp = vec![0.0; len];
             stc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2521,20 +2521,20 @@ mod tests {
 
     #[test]
     fn test_stc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the repository CSV so this matches other tests and reference expectations.
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = StcInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = stc(&input)?;
 
-        // Preallocate destination and call into-API
+        
         let mut out = vec![0.0f64; baseline.values.len()];
         #[cfg(not(feature = "wasm"))]
         stc_into(&input, &mut out)?;
         #[cfg(feature = "wasm")]
-        stc_into_slice(&mut out, &input, Kernel::Auto)?; // fallback in wasm test builds
+        stc_into_slice(&mut out, &input, Kernel::Auto)?; 
 
         assert_eq!(out.len(), baseline.values.len());
 
@@ -2641,9 +2641,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            StcParams::default(), // fast: 23, slow: 50, k: 10, d: 3
+            StcParams::default(), 
             StcParams {
                 fast_period: Some(2),
                 slow_period: Some(3),
@@ -2692,7 +2692,7 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            // Edge case: minimum periods
+            
             StcParams {
                 fast_period: Some(2),
                 slow_period: Some(2),
@@ -2701,7 +2701,7 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            // Edge case: fast > slow (unusual but valid)
+            
             StcParams {
                 fast_period: Some(25),
                 slow_period: Some(15),
@@ -2718,12 +2718,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2779,7 +2779,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_stc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_stc_tests {
@@ -2824,16 +2824,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, k_start, k_end, k_step, d_start, d_end, d_step)
-            (2, 10, 2, 3, 15, 3, 2, 8, 2, 1, 3, 1), // Small periods
-            (5, 25, 5, 10, 50, 10, 5, 15, 5, 2, 5, 1), // Medium periods
-            (20, 40, 10, 40, 80, 20, 10, 20, 5, 3, 6, 1), // Large periods
-            (2, 5, 1, 3, 6, 1, 2, 4, 1, 1, 2, 1),   // Dense small range
-            (10, 10, 0, 20, 20, 0, 10, 10, 0, 3, 3, 0), // Single values (step=0)
-            (15, 30, 5, 30, 60, 10, 7, 14, 7, 3, 5, 2), // Mixed ranges
-            (50, 100, 25, 100, 200, 50, 20, 30, 10, 5, 10, 5), // Very large periods
+            
+            (2, 10, 2, 3, 15, 3, 2, 8, 2, 1, 3, 1), 
+            (5, 25, 5, 10, 50, 10, 5, 15, 5, 2, 5, 1), 
+            (20, 40, 10, 40, 80, 20, 10, 20, 5, 3, 6, 1), 
+            (2, 5, 1, 3, 6, 1, 2, 4, 1, 1, 2, 1),   
+            (10, 10, 0, 20, 20, 0, 10, 10, 0, 3, 3, 0), 
+            (15, 30, 5, 30, 60, 10, 7, 14, 7, 3, 5, 2), 
+            (50, 100, 25, 100, 200, 50, 20, 30, 10, 5, 10, 5), 
         ];
 
         for (
@@ -2872,7 +2872,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2934,7 +2934,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {

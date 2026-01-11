@@ -1,17 +1,17 @@
-// CUDA kernels for Bollinger Bands Width (BBW) using SMA + standard deviation.
-//
-// Batch kernel: one series × many params. Each parameter combo (period, u_plus_d)
-// maps to blockIdx.y; threads in X iterate over time. Computation uses host-built
-// prefix sums of values and squares plus a prefix count of NaNs to exactly match
-// CPU warmup/NaN semantics.
-//
-// Many-series kernel: many series × one param (time-major layout). Threads in X
-// march across time, Y indexes series. First-valid per series determines warmup.
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Quiet NaN helper
+
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 
 extern "C" __global__ void bbw_sma_prefix_f32(
@@ -29,7 +29,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
-    const float k = uplusd[combo]; // devup + devdn
+    const float k = uplusd[combo]; 
     if (period <= 0) return;
 
     const int warm = first_valid + period - 1;
@@ -41,7 +41,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
     while (t < len) {
         float out_val = nan_f32();
         if (t >= warm) {
-            const int start = t + 1 - period; // using len+1 prefixes
+            const int start = t + 1 - period; 
             const int nan_count = prefix_nan[t + 1] - prefix_nan[start];
             if (nan_count == 0) {
                 const double sum  = prefix_sum[t + 1]    - prefix_sum[start];
@@ -51,7 +51,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
                 double var = sum2 / den - mean * mean;
                 if (var < 0.0) var = 0.0;
                 const double std = (var > 0.0) ? sqrt(var) : 0.0;
-                // Intentionally allow division by zero to mirror scalar semantics
+                
                 out_val = __double2float_rn((static_cast<double>(k) * std) / mean);
             }
         }
@@ -60,8 +60,8 @@ extern "C" __global__ void bbw_sma_prefix_f32(
     }
 }
 
-// Many-series, one-param (time-major). prefix_* arrays are time-major with length rows*cols,
-// holding cumulative sums per series across time. first_valids provides per-series warmup base.
+
+
 extern "C" __global__ void bbw_multi_series_one_param_tm_f32(
     const double* __restrict__ prefix_sum_tm,
     const double* __restrict__ prefix_sum_sq_tm,
@@ -103,14 +103,14 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_f32(
     }
 }
 
-// -------------------------------------------------------------------------------------
-// Float-float (double-single) variants to avoid FP64 while preserving precision.
-// Implements three additional kernels:
-//  - bbw_sma_prefix_ff_f32: one series × many params (compat ABI, per-combo period)
-//  - bbw_sma_prefix_grouped_ff_f32: one series × many params (FAST: grouped by period)
-//  - bbw_multi_series_one_param_tm_ff_f32: many series × one param (time-major)
-// These keep IO as float/int but compute sensitive math using float2 (hi,lo) pairs.
-// -------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
 
 #include <stdint.h>
 
@@ -118,14 +118,14 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_f32(
 #define CUDA_FORCEINLINE __forceinline__
 #endif
 
-// Compose a float2 from hi+lo with quick renormalization
+
 CUDA_FORCEINLINE __device__ float2 ff_make(float hi, float lo) {
     float s = hi + lo;
     float e = lo - (s - hi);
     return make_float2(s, e);
 }
 
-// Error-free sum of two floats (TwoSum), with renormalization
+
 CUDA_FORCEINLINE __device__ float2 ff_two_sum(float a, float b) {
     float s  = a + b;
     float bb = s - a;
@@ -135,7 +135,7 @@ CUDA_FORCEINLINE __device__ float2 ff_two_sum(float a, float b) {
     return make_float2(t, e2);
 }
 
-// Error-free product using FMA (TwoProdFMA)
+
 CUDA_FORCEINLINE __device__ float2 ff_two_prod_fma(float a, float b) {
     float p = a * b;
     float e = fmaf(a, b, -p);
@@ -144,7 +144,7 @@ CUDA_FORCEINLINE __device__ float2 ff_two_prod_fma(float a, float b) {
     return make_float2(t, e2);
 }
 
-// Add two float2 numbers
+
 CUDA_FORCEINLINE __device__ float2 ff_add(float2 x, float2 y) {
     float s  = x.x + y.x;
     float bb = s - x.x;
@@ -155,7 +155,7 @@ CUDA_FORCEINLINE __device__ float2 ff_add(float2 x, float2 y) {
     return make_float2(t, e2);
 }
 
-// Subtract two float2 numbers
+
 CUDA_FORCEINLINE __device__ float2 ff_sub(float2 x, float2 y) {
     float s  = x.x - y.x;
     float bb = s - x.x;
@@ -166,7 +166,7 @@ CUDA_FORCEINLINE __device__ float2 ff_sub(float2 x, float2 y) {
     return make_float2(t, e2);
 }
 
-// Multiply two float2 numbers
+
 CUDA_FORCEINLINE __device__ float2 ff_mul(float2 x, float2 y) {
     float2 p = ff_two_prod_fma(x.x, y.x);
     float e  = fmaf(x.x, y.y, 0.f);
@@ -176,7 +176,7 @@ CUDA_FORCEINLINE __device__ float2 ff_mul(float2 x, float2 y) {
     return make_float2(hi, err);
 }
 
-// Divide float2 by scalar (single Newton correction)
+
 CUDA_FORCEINLINE __device__ float2 ff_div_scalar(float2 a, float b) {
     float y  = a.x / b;
     float2 yb = ff_two_prod_fma(y, b);
@@ -189,7 +189,7 @@ CUDA_FORCEINLINE __device__ float2 ff_div_scalar(float2 a, float b) {
 
 CUDA_FORCEINLINE __device__ float clamp_nonneg(float x) { return x < 0.f ? 0.f : x; }
 
-// Compute base = (std/mean) from float2 prefixes at time t for given period, honoring warmup & NaN rules
+
 CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff(
     const float2* __restrict__ ps,
     const float2* __restrict__ ps2,
@@ -212,10 +212,10 @@ CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff(
     float var    = clamp_nonneg(var2.x + var2.y);
     float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
     float m      = mean.x + mean.y;
-    return stdv / m; // allow div-by-zero as in scalar
+    return stdv / m; 
 }
 
-// Fast path when there are no NaNs after `first_valid` (common in real inputs).
+
 CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff_no_nan(
     const float2* __restrict__ ps,
     const float2* __restrict__ ps2,
@@ -235,10 +235,10 @@ CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff_no_nan(
     float var    = clamp_nonneg(var2.x + var2.y);
     float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
     float m      = mean.x + mean.y;
-    return stdv / m; // allow div-by-zero as in scalar
+    return stdv / m; 
 }
 
-// 1) One series × many params (compat mapping): one combo per block.y
+
 extern "C" __global__ void bbw_sma_prefix_ff_f32(
     const float2* __restrict__ prefix_sum,
     const float2* __restrict__ prefix_sum_sq,
@@ -268,22 +268,22 @@ extern "C" __global__ void bbw_sma_prefix_ff_f32(
         float base = any_nan_since_first
             ? bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm)
             : bbw_base_from_prefix_ff_no_nan(prefix_sum, prefix_sum_sq, t, period, warm);
-        out[row_off + t] = k * base; // NaN/inf propagate as desired
+        out[row_off + t] = k * base; 
         t += stride;
     }
 }
 
-// 2) One series × many params (PERIOD-GROUPED FAST PATH)
+
 extern "C" __global__ void bbw_sma_prefix_grouped_ff_f32(
     const float2* __restrict__ prefix_sum,
     const float2* __restrict__ prefix_sum_sq,
     const int*    __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*   __restrict__ unique_periods,  // U
-    const int*   __restrict__ offsets,         // U+1
-    const float* __restrict__ uplusd_sorted,   // n_combos
-    const int*   __restrict__ combo_index,     // n_combos
+    const int*   __restrict__ unique_periods,  
+    const int*   __restrict__ offsets,         
+    const float* __restrict__ uplusd_sorted,   
+    const int*   __restrict__ combo_index,     
     int num_unique,
     float*       __restrict__ out)
 {
@@ -313,7 +313,7 @@ extern "C" __global__ void bbw_sma_prefix_grouped_ff_f32(
     }
 }
 
-// 3) Many series × one param (time-major)
+
 extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
     const float2* __restrict__ prefix_sum_tm,
     const float2* __restrict__ prefix_sum_sq_tm,
@@ -351,7 +351,7 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
                 float var    = clamp_nonneg(var2.x + var2.y);
                 float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
                 float m      = mean.x + mean.y;
-                out_val = (u_plus_d * stdv) / m; // allow div-by-zero
+                out_val = (u_plus_d * stdv) / m; 
             }
         }
         out_tm[idx] = out_val;
@@ -359,13 +359,13 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
     }
 }
 
-// -----------------------------------------------------------------------------
-// Streaming CPU-parity kernels (double precision) for strict accuracy
-// Use when grouping brings no benefit and combo counts are small.
-// -----------------------------------------------------------------------------
+
+
+
+
 
 extern "C" __global__ void bbw_sma_streaming_f64(
-    const float* __restrict__ data, // length = len
+    const float* __restrict__ data, 
     int len,
     int first_valid,
     const int* __restrict__ periods,
@@ -383,14 +383,14 @@ extern "C" __global__ void bbw_sma_streaming_f64(
     const int warm = first_valid + period - 1;
     const int row_off = combo * len;
 
-    // initialize outputs to NaN before warmup
+    
     for (int t = threadIdx.x; t < min(len, warm); t += blockDim.x) {
         out[row_off + t] = nan_f32();
     }
 
     if (threadIdx.x == 0) {
         if (warm < len) {
-            // initial window sum/sumsq in f64
+            
             int start = warm + 1 - period;
             double sum = 0.0;
             double sum2 = 0.0;
@@ -405,7 +405,7 @@ extern "C" __global__ void bbw_sma_streaming_f64(
             double stdv = sqrt(var);
             out[row_off + warm] = (float)(k * stdv / mean);
 
-            // slide
+            
             for (int t = warm + 1; t < len; ++t) {
                 double vin = (double)data[t];
                 double vout = (double)data[t - period];
@@ -422,7 +422,7 @@ extern "C" __global__ void bbw_sma_streaming_f64(
 }
 
 extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
-    const float* __restrict__ data_tm, // rows x cols, time-major
+    const float* __restrict__ data_tm, 
     int period,
     int num_series,
     int series_len,
@@ -437,14 +437,14 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
     const int warm = first_valids[s] + period - 1;
     const double k = (double)u_plus_d;
 
-    // initialize pre-warm to NaN
+    
     for (int t = threadIdx.x; t < min(series_len, warm); t += blockDim.x) {
         out_tm[t * num_series + s] = nan_f32();
     }
 
     if (threadIdx.x == 0) {
         if (warm < series_len) {
-            // initial window for this series
+            
             int start = warm + 1 - period;
             double sum = 0.0;
             double sum2 = 0.0;
@@ -459,7 +459,7 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
             double stdv = sqrt(var);
             out_tm[warm * num_series + s] = (float)(k * stdv / mean);
 
-            // slide
+            
             for (int t = warm + 1; t < series_len; ++t) {
                 double vin = (double)data_tm[t * num_series + s];
                 double vout = (double)data_tm[(t - period) * num_series + s];

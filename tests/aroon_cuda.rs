@@ -1,17 +1,17 @@
-// Integration tests for CUDA Aroon kernels
 
-use my_project::utilities::enums::Kernel;
 
-use my_project::indicators::aroon::{
+use vector_ta::utilities::enums::Kernel;
+
+use vector_ta::indicators::aroon::{
     aroon_batch_with_kernel, aroon_with_kernel, AroonBatchRange, AroonData, AroonInput, AroonParams,
 };
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaAroon;
+use vector_ta::cuda::CudaAroon;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -45,8 +45,8 @@ fn aroon_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = base - 1.3 - 0.015 * (x * 1.2).sin();
     }
     let sweep = AroonBatchRange { length: (5, 60, 5) };
-    // Quantize baseline to f32 like the device path to avoid precision/tie drift
-    // emulate device precision: cast to f32 then back to f64
+    
+    
     let high_q: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let low_q: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let cpu = aroon_batch_with_kernel(&high_q, &low_q, &sweep, Kernel::ScalarBatch)?;
@@ -89,8 +89,8 @@ fn aroon_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         eprintln!("[aroon_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; // series count
-    let rows = 4096usize; // time
+    let cols = 16usize; 
+    let rows = 4096usize; 
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -103,7 +103,7 @@ fn aroon_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     }
     let length = 25usize;
 
-    // CPU baseline per series
+    
     let mut up_cpu = vec![f64::NAN; cols * rows];
     let mut dn_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {

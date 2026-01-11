@@ -207,11 +207,11 @@ impl CudaDevStop {
     fn build_range_prefixes(high: &[f32], low: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize) {
         let len = high.len().min(low.len());
         let first = Self::first_valid_hl(high, low).unwrap_or(0);
-        // r[i] is defined from (i-1,i); we accumulate dual-f32 prefixes (hi,lo) skipping NaNs
+        
         let mut p1 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
         let mut p2 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
         let mut pc = vec![0i32;  len + 1];
-        // dual-f32 running sums
+        
         let mut s1_hi = 0.0f32; let mut s1_lo = 0.0f32;
         let mut s2_hi = 0.0f32; let mut s2_lo = 0.0f32;
         let mut accc = 0i32;
@@ -270,7 +270,7 @@ impl CudaDevStop {
             .ok_or_else(|| CudaDevStopError::InvalidInput("all values are NaN".into()))?;
 
         let combos_raw = Self::expand_grid(sweep)?;
-        // Validate supported subset: devtype==0 only
+        
         for &(_, _, dt) in &combos_raw {
             if dt != 0 {
                 return Err(CudaDevStopError::InvalidInput(
@@ -279,14 +279,14 @@ impl CudaDevStop {
             }
         }
 
-        // Group combos by period to allow per-launch shared memory sizing
+        
         let mut groups: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
         for (p, m, _dt) in combos_raw { groups.entry(p).or_default().push(m); }
 
-        // Host prefixes over r using dual-f32 (float2)
+        
         let (p1, p2, pc, first_valid) = Self::build_range_prefixes(high, low);
 
-        // Upload invariant inputs (async copy on NON_BLOCKING stream)
+        
         let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_p1: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(p1.len()) }?;
@@ -300,7 +300,7 @@ impl CudaDevStop {
             d_pc.async_copy_from(&pc, &self.stream)?;
         }
 
-        // Final output buffer (rows = total combos, cols = len). VRAM check with headroom.
+        
         let mut total_rows: usize = 0;
         for v in groups.values() {
             total_rows = total_rows
@@ -371,17 +371,17 @@ impl CudaDevStop {
             let n = mults_host.len();
             let d_mults = DeviceBuffer::from_slice(&mults_host)?;
 
-            // Append to meta in the exact launch order (per-period group)
+            
             for &m in &mults_host { meta_launch_order.push((period, m)); }
 
-            // grid.x = n combos, one block per combo; block.x parallelizes NaN init
+            
             let block_x: u32 = 64;
             let grid_x: u32 = (n as u32).max(1);
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             Self::validate_launch(grid, block)?;
 
-            // shared mem size: matches kernel (base_ring[f32] + dq_idx[i32])
+            
             let per_block = std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
             let shmem_bytes_usize = period
                 .checked_mul(per_block)
@@ -460,7 +460,7 @@ impl CudaDevStop {
             return Err(CudaDevStopError::InvalidInput("invalid period".into()));
         }
 
-        // Compute first_valid per series
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -498,7 +498,7 @@ impl CudaDevStop {
         let grid: GridSize = ((cols as u32).max(1), 1, 1).into();
         let block: BlockSize = (64, 1, 1).into();
         Self::validate_launch(grid, block)?;
-        // matches kernel: r_ring[f32], base_ring[f32], dq_idx[i32]
+        
         let per_block = 2 * std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
         let shmem_bytes_usize = period
             .checked_mul(per_block)
@@ -540,7 +540,7 @@ impl CudaDevStop {
     }
 }
 
-// ---------- Bench profiles (lightweight) ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -737,7 +737,7 @@ pub mod benches {
         let cols = 128usize;
         let rows = 1_000_000usize / cols;
         let close = gen_series(cols * rows);
-        // synthesize time-major high/low from close
+        
         let mut high_tm = close.clone();
         let mut low_tm = close.clone();
         for s in 0..cols {
@@ -753,7 +753,7 @@ pub mod benches {
                 low_tm[idx] = v - off;
             }
         }
-        // Compute first_valid per series (high/low finite)
+        
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = 0i32;

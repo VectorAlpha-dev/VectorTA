@@ -1,46 +1,46 @@
-// CUDA kernels for Zscore (SMA mean + standard deviation).
-//
-// Each parameter combination (period, nbdev) is assigned to blockIdx.y. Threads
-// in the x-dimension iterate over time indices and compute z-scores using
-// precomputed prefix sums of the input data and squared data, along with a
-// prefix count of NaNs to preserve CPU parity. All accumulation happens in
-// float64 to minimise drift; the final results are written as float32 values.
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 #include "ds_float2.cuh"
 
-// Combo tiling reduces redundant loads of:
-// - data[t]
-// - prefix_*[t+1]
-// across multiple parameter rows sharing the same `end` index.
+
+
+
+
 #ifndef ZSCORE_COMBO_TILE
 #define ZSCORE_COMBO_TILE 4
 #endif
 
-// ----------------- Helpers -----------------
+
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 __device__ __forceinline__ bool nonpos_or_nan(float x) { return !(x > 0.0f); }
 
-// Load dsf from float2 prefix array (x=hi, y=lo)
+
 __device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx) {
     float2 v = p[idx];
     return ds_make(v.x, v.y);
 }
 
-// ----------------- One-series × many-params (prefix-sum based, DS) -----------------
-// Consumes float2 prefixes (double-single). Grid-x sweeps time; grid-y = combos.
+
+
 extern "C" __global__ void zscore_sma_prefix_f32ds(
-    const float*  __restrict__ data,             // [len]
-    const float2* __restrict__ prefix_sum,       // [len+1] DS (x=hi,y=lo)
-    const float2* __restrict__ prefix_sum_sq,    // [len+1] DS (x=hi,y=lo)
-    const int*    __restrict__ prefix_nan,       // [len+1] prefix count of NaNs
+    const float*  __restrict__ data,             
+    const float2* __restrict__ prefix_sum,       
+    const float2* __restrict__ prefix_sum_sq,    
+    const int*    __restrict__ prefix_nan,       
     int len,
     int first_valid,
-    const int*   __restrict__ periods,           // [n_combos]
-    const float* __restrict__ nbdevs,            // [n_combos]
+    const int*   __restrict__ periods,           
+    const float* __restrict__ nbdevs,            
     int n_combos,
-    float* __restrict__ out                      // [n_combos * len]
+    float* __restrict__ out                      
 ) {
     const int group = blockIdx.y;
     const int co_base = group * ZSCORE_COMBO_TILE;
@@ -95,7 +95,7 @@ extern "C" __global__ void zscore_sma_prefix_f32ds(
                     if (start < 0) start = 0;
                     const int nan_count = end_bad - prefix_nan[start];
                     if (nan_count == 0) {
-                        // DS window sums via prefix diffs
+                        
                         const dsf s1 = ds_sub(ex, load_dsf_f2(prefix_sum, start));
                         const dsf s2 = ds_sub(ex2, load_dsf_f2(prefix_sum_sq, start));
                         const dsf mean_ds = ds_scale(s1, invN);
@@ -118,7 +118,7 @@ extern "C" __global__ void zscore_sma_prefix_f32ds(
     }
 }
 
-// Temporary: pack double prefix -> float2 (hi,lo) for DS kernels
+
 extern "C" __global__
 void pack_prefix_double_to_float2(const double* __restrict__ src,
                                   float2* __restrict__ dst,
@@ -132,7 +132,7 @@ void pack_prefix_double_to_float2(const double* __restrict__ src,
     dst[i] = make_float2(hi, lo);
 }
 
-// ----------------- One-series × many-params (prefix-sum based) -----------------
+
 extern "C" __global__ void zscore_sma_prefix_f32(
     const float* __restrict__ data,
     const double* __restrict__ prefix_sum,
@@ -220,26 +220,26 @@ extern "C" __global__ void zscore_sma_prefix_f32(
     }
 }
 
-// ----------------- Many-series × one-param (time-major) -----------------
-// Time-major layout [t][series]. Each block handles one series (column).
-// Thread 0 performs the sequential sliding-window scan; other threads help
-// initialize the column with NaNs. Mean is SMA; deviation is population stddev.
-// Output is the z-score: (x - mean) / (stddev * nbdev). If nbdev == 0 or
-// any NaN in the window, result is NaN. Warmup and NaN semantics match scalar.
+
+
+
+
+
+
 extern "C" __global__ void zscore_many_series_one_param_f32(
-    const float* __restrict__ data_tm,    // [rows * cols], time-major
-    const int* __restrict__ first_valids, // [cols]
+    const float* __restrict__ data_tm,    
+    const int* __restrict__ first_valids, 
     int period,
     float nbdev,
     int cols,
     int rows,
-    float* __restrict__ out_tm            // [rows * cols], time-major
+    float* __restrict__ out_tm            
 ) {
     const int series = blockIdx.x;
     if (series >= cols || period <= 0) return;
     const int stride = cols;
 
-    // Fill column with NaN cooperatively
+    
     for (int t = threadIdx.x; t < rows; t += blockDim.x) {
         out_tm[t * stride + series] = __int_as_float(0x7fffffff);
     }
@@ -252,13 +252,13 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
 
     const int warm = first_valid + period - 1;
     if (nbdev == 0.0f) {
-        // All outputs remain NaN by contract when denominator is zero
+        
         return;
     }
 
     const double inv_n = 1.0 / (double)period;
 
-    // Bootstrap raw sums over initial window [first_valid .. warm]
+    
     double s1 = 0.0, s2 = 0.0;
     int nan_in_win = 0;
     const int init_end = min(warm + 1, rows);
@@ -276,17 +276,17 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
             const double x = (double)data_tm[warm * stride + series];
             out_tm[warm * stride + series] = (float)((x - mean) / sd_nb);
         }
-        // else stays NaN
+        
     }
 
-    // Slide window forward
+    
     for (int t = warm + 1; t < rows; ++t) {
         const int old_idx = t - period;
         const float old_v = data_tm[old_idx * stride + series];
         const float new_v = data_tm[t * stride + series];
 
         if (isnan(old_v) || isnan(new_v)) {
-            // Rebuild over the current window
+            
             s1 = 0.0; s2 = 0.0; nan_in_win = 0;
             const int start = t + 1 - period;
             for (int k = start; k <= t; ++k) {
@@ -295,7 +295,7 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
                 else { const double d = (double)vv; s1 += d; s2 += d * d; }
             }
         } else {
-            // O(1) update
+            
             const double od = (double)old_v;
             const double nd = (double)new_v;
             s1 += nd - od;
@@ -310,10 +310,10 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
                 const double x = (double)new_v;
                 out_tm[t * stride + series] = (float)((x - mean) / sd_nb);
             } else {
-                // leave NaN
+                
             }
         } else {
-            // leave NaN
+            
         }
     }
 }

@@ -101,10 +101,10 @@ impl CudaTtmSqueeze {
         let device = Device::get_device(device_id as u32)?;
         let context = std::sync::Arc::new(Context::new(device)?);
 
-        // Query default and opt-in per-block dynamic shared memory limits.
+        
         let def = device
             .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
-        // Older cust versions may not expose the opt-in attribute; use default per-block limit.
+        
         let smem_limit_optin = def;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_squeeze_kernel.ptx"));
@@ -325,7 +325,7 @@ impl CudaTtmSqueeze {
             .module
             .get_function("ttm_squeeze_batch_f32")
             .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol { name: "ttm_squeeze_batch_f32" })?;
-        // Dynamic shared memory sizing for largest L
+        
         let smem_bytes = Self::smem_bytes_for_len(l_max);
         if smem_bytes > self.smem_limit_optin {
             let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
@@ -389,7 +389,7 @@ impl CudaTtmSqueeze {
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
 
-        // VRAM estimate: inputs + params + outputs + headroom
+        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(3)
@@ -423,7 +423,7 @@ impl CudaTtmSqueeze {
             }
         }
 
-        // Upload inputs (async)
+        
         let mut d_h: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_l: DeviceBuffer<f32> =
@@ -436,13 +436,13 @@ impl CudaTtmSqueeze {
             d_c.async_copy_from(close_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
         }
 
-        // Upload params
+        
         let v_len: Vec<i32> = combos.iter().map(|c| c.length).collect();
         let v_bb:  Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
         let v_kh:  Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
         let v_km:  Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
         let v_kl:  Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
-        // Upload params (async)
+        
         let mut d_len: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized(v_len.len()) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_bb: DeviceBuffer<f32> =
@@ -461,7 +461,7 @@ impl CudaTtmSqueeze {
             d_kl.async_copy_from(&v_kl, &self.stream).map_err(CudaTtmSqueezeError::from)?;
         }
 
-        // Allocate outputs
+        
         let elems = combos
             .len()
             .checked_mul(len)
@@ -498,7 +498,7 @@ impl CudaTtmSqueeze {
     fn launch_many_series_kernel(
         &self,
         d_h_tm: &DeviceBuffer<f32>, d_l_tm: &DeviceBuffer<f32>, d_c_tm: &DeviceBuffer<f32>,
-        // NOTE: cols = num_series, rows = series_len (time)
+        
         d_first: &DeviceBuffer<i32>, cols: usize, rows: usize, length: usize, bb_mult: f32, kh: f32, km: f32, kl: f32,
         d_mo_tm: &mut DeviceBuffer<f32>, d_sq_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTtmSqueezeError> {
@@ -506,7 +506,7 @@ impl CudaTtmSqueeze {
             .module
             .get_function("ttm_squeeze_many_series_one_param_f32")
             .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol { name: "ttm_squeeze_many_series_one_param_f32" })?;
-        // Dynamic shared memory per-series length
+        
         let smem_bytes = Self::smem_bytes_for_len(length);
         if smem_bytes > self.smem_limit_optin {
             let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
@@ -517,7 +517,7 @@ impl CudaTtmSqueeze {
         }
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 1, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1) };
-        // One block per series on grid.y
+        
         let grid: GridSize = (1u32, cols as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -525,8 +525,8 @@ impl CudaTtmSqueeze {
             let mut p_l = d_l_tm.as_device_ptr().as_raw();
             let mut p_c = d_c_tm.as_device_ptr().as_raw();
             let mut p_fv = d_first.as_device_ptr().as_raw();
-            let mut nser = cols as i32; // num_series
-            let mut slen = rows as i32; // series_len
+            let mut nser = cols as i32; 
+            let mut slen = rows as i32; 
             let mut l_i  = length as i32;
             let mut bb   = bb_mult as f32;
             let mut khf  = kh as f32;
@@ -591,7 +591,7 @@ impl CudaTtmSqueeze {
             ));
         }
 
-        // Compute per-series first_valid indices on host (time-major layout)
+        
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -616,7 +616,7 @@ impl CudaTtmSqueeze {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate
+        
         let elems = expected_elems;
         let elem = std::mem::size_of::<f32>();
         let in_bytes = elems
@@ -645,7 +645,7 @@ impl CudaTtmSqueeze {
             }
         }
 
-        // Upload inputs (async)
+        
         let mut d_h: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_l: DeviceBuffer<f32> =
@@ -689,7 +689,7 @@ impl CudaTtmSqueeze {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

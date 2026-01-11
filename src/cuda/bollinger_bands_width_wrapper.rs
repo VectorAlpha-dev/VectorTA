@@ -26,7 +26,7 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-// ---------- Float-float host POD to mirror CUDA float2 ----------
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Float2 {
@@ -34,16 +34,16 @@ struct Float2 {
     lo: f32,
 }
 
-// SAFETY: Plain old data with no pointers/reference fields, C layout
+
 unsafe impl DeviceCopy for Float2 {}
 
-// ---- Float-float helpers on host (matches GPU math) ----
+
 #[inline]
 fn ff_two_sum(a: f32, b: f32) -> (f32, f32) {
     let s = a + b;
     let bb = s - a;
     let e = (a - (s - bb)) + (b - bb);
-    // renorm
+    
     let t = s + e;
     let e2 = e - (t - s);
     (t, e2)
@@ -93,10 +93,10 @@ struct BbwCombo {
 
 #[derive(Clone, Debug)]
 struct Grouped {
-    unique_periods: Vec<i32>,  // U
-    offsets: Vec<i32>,         // U+1
-    uplusd_sorted: Vec<f32>,   // n_combos grouped by period
-    combo_index: Vec<i32>,     // n_combos (row index)
+    unique_periods: Vec<i32>,  
+    offsets: Vec<i32>,         
+    uplusd_sorted: Vec<f32>,   
+    combo_index: Vec<i32>,     
 }
 
 fn group_by_period(combos: &[BbwCombo]) -> Grouped {
@@ -146,7 +146,7 @@ pub struct CudaBbw {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    // simple policy hooks to mirror ALMA shape (kept plain for now)
+    
     batch_policy: BatchKernelPolicy,
     many_policy: ManySeriesKernelPolicy,
     debug_logged: std::sync::atomic::AtomicBool,
@@ -206,7 +206,7 @@ impl CudaBbw {
         self.many_policy = many;
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
 
     pub fn bbw_batch_dev(
         &self,
@@ -257,7 +257,7 @@ impl CudaBbw {
             .position(|&v| !v.is_nan())
             .ok_or_else(|| CudaBbwError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand sweep
+        
         let mut periods = Vec::new();
         let (ps, pe, pst) = sweep.period;
         if pst == 0 || ps == pe {
@@ -269,7 +269,7 @@ impl CudaBbw {
                 match p.checked_add(pst) { Some(n) => p = n, None => break }
             }
         } else {
-            // reversed bounds supported
+            
             let mut p = ps as i64;
             let step_i = pst as i64;
             while p >= pe as i64 {
@@ -333,7 +333,7 @@ impl CudaBbw {
     }
 
     fn build_prefixes(data: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
-        // len+1 style to simplify window diffs and NaN counting (float-float)
+        
         let len = data.len();
         let mut ps = vec![Float2::default(); len + 1];
         let mut ps2 = vec![Float2::default(); len + 1];
@@ -364,7 +364,7 @@ impl CudaBbw {
     ) -> Result<DeviceArrayF32, CudaBbwError> {
         let len = data_f32.len();
 
-        // Build float-float prefixes and estimate VRAM before output alloc
+        
         let (ps, ps2, pn) = Self::build_prefixes(data_f32);
         let sz_f2 = std::mem::size_of::<Float2>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -397,7 +397,7 @@ impl CudaBbw {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        // Upload inputs
+        
         let d_ps = DeviceBuffer::from_slice(&ps)?;
         let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
         let d_pn = DeviceBuffer::from_slice(&pn)?;
@@ -409,7 +409,7 @@ impl CudaBbw {
 
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        // One-time debug
+        
         if !self
             .debug_logged
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -423,7 +423,7 @@ impl CudaBbw {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Grouped fast path decision
+        
         let grouped = {
             let g = group_by_period(combos);
             if should_use_grouped(combos.len(), g.unique_periods.len()) {
@@ -453,11 +453,11 @@ impl CudaBbw {
                 d_out.as_device_ptr(),
             )?;
         } else {
-            // When periods don't repeat, use a streaming f64 kernel for parity
-            // if combo count is modest; otherwise fall back to float-float prefixes.
+            
+            
             let use_streaming = combos.len() <= 64;
             if use_streaming {
-                // upload price series once
+                
                 let d_data = DeviceBuffer::from_slice(data_f32)?;
                 self.launch_batch_kernel_streaming(
                     &d_data,
@@ -656,7 +656,7 @@ impl CudaBbw {
         Ok(())
     }
 
-    // ---------- Many-series × one param (time-major) ----------
+    
 
     pub fn bbw_many_series_one_param_time_major_dev(
         &self,
@@ -867,7 +867,7 @@ impl CudaBbw {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x; // iterate over time
+        let grid_x = ((rows as u32) + block_x - 1) / block_x; 
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -955,7 +955,7 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 
-// ----- Helpers for time-major prefix sums -----
+
 
 struct ManySeriesPrepared {
     first_valids: Vec<i32>,
@@ -1001,7 +1001,7 @@ struct ManySeriesPrepared {
     (ps, ps2, pn)
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;
@@ -1010,7 +1010,7 @@ pub mod benches {
     use crate::indicators::bollinger_bands_width::BollingerBandsWidthBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // vary periods only; devup/devdn fixed
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
         let prefix = (ONE_SERIES_LEN + 1)

@@ -140,7 +140,7 @@ impl Default for ModGodModeParams {
             n2: Some(6),
             n3: Some(4),
             mode: Some(ModGodModeMode::TraditionMg),
-            use_volume: Some(true), // Default to true to match Pine's implicit behavior
+            use_volume: Some(true), 
         }
     }
 }
@@ -247,9 +247,9 @@ pub enum ModGodModeError {
     CalculationError(String),
 }
 
-// ============================================================================
-// COMPONENT CALCULATIONS
-// ============================================================================
+
+
+
 
 /// TCI Component - Trend Channel Index
 fn calculate_tci(
@@ -313,7 +313,7 @@ fn calculate_csi(
     let rsi = rsi_with_kernel(&rsi_input, kernel)
         .map_err(|e| ModGodModeError::CalculationError(format!("CSI RSI: {}", e)))?;
 
-    // Pine: tsi_basic(src0, short=n1, long=n2)
+    
     let tsi_params = TsiParams {
         short_period: Some(n1),
         long_period: Some(n2),
@@ -345,7 +345,7 @@ fn calculate_csi_mg(
     let rsi = rsi_with_kernel(&rsi_input, kernel)
         .map_err(|e| ModGodModeError::CalculationError(format!("CSI_MG RSI: {}", e)))?;
 
-    // Numerator: normalized pc
+    
     let mut pc_norm = vec![f64::NAN; close.len()];
     for i in 1..close.len() {
         let a = close[i - 1];
@@ -370,7 +370,7 @@ fn calculate_csi_mg(
     )
     .map_err(|e| ModGodModeError::CalculationError(format!("CSI_MG EMA num2: {}", e)))?;
 
-    // Denominator: abs(price change) (not normalized)
+    
     let mut apc = vec![f64::NAN; close.len()];
     for i in 1..close.len() {
         let a = close[i - 1];
@@ -397,7 +397,7 @@ fn calculate_csi_mg(
         let den = e_den2.values[i];
         let num = e_num2.values[i];
         if !num.is_nan() && !den.is_nan() && den != 0.0 {
-            // Pine: 100*(num/den), then *0.5 + 50 when composing CSI_MG
+            
             ttsi[i] = 50.0 * (num / den) + 50.0;
         }
     }
@@ -498,7 +498,7 @@ fn calculate_cbci_pine(
     )
     .map_err(|e| ModGodModeError::CalculationError(format!("CBCI RSI: {}", e)))?;
 
-    // mom(x, n2) = x - x[n2]
+    
     let len = close.len();
     let mut mom = vec![f64::NAN; len];
     for i in 0..len {
@@ -2230,15 +2230,15 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // === RSI Calculation (same as MF for tradition_mg when no volume) ===
+    
     let rsi = if use_volume && volume.is_some() {
-        // When using volume, RSI needs to be calculated separately
+        
         let mut rsi_vals = vec![f64::NAN; len];
         if mf_warmup < len {
             let mut avg_gain = 0.0;
             let mut avg_loss = 0.0;
 
-            // Calculate initial averages
+            
             for i in (first + 1)..(first + n3 + 1).min(len) {
                 let change = close[i] - close[i - 1];
                 if change > 0.0 {
@@ -2250,7 +2250,7 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
             avg_gain /= n3 as f64;
             avg_loss /= n3 as f64;
 
-            // Calculate RSI using Wilder's smoothing
+            
             for i in mf_warmup..len {
                 if i > mf_warmup {
                     let change = close[i] - close[i - 1];
@@ -2276,10 +2276,10 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         mf.clone()
     };
 
-    // === CBCI Calculation (RSI momentum + EMA of RSI) ===
+    
     let mut cbci = vec![f64::NAN; len];
 
-    // RSI momentum (difference over n2 periods)
+    
     let rsi_mom_start = mf_warmup + n2;
     let mut rsi_mom = vec![f64::NAN; len];
     if rsi_mom_start < len {
@@ -2290,7 +2290,7 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // EMA of RSI
+    
     let alpha3 = 2.0 / (n3 as f64 + 1.0);
     let beta3 = 1.0 - alpha3;
     let mut rsi_ema = vec![f64::NAN; len];
@@ -2306,18 +2306,18 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // CBCI = momentum + EMA (starts from cbci_warmup)
+    
     for i in cbci_warmup..len {
         if rsi_mom[i].is_finite() && rsi_ema[i].is_finite() {
             cbci[i] = rsi_mom[i] + rsi_ema[i];
         }
     }
 
-    // === LRSI Calculation (RSI with LSMA smoothing) ===
-    // For simplicity, using RSI values directly as LRSI approximation
+    
+    
     let lrsi = rsi.clone();
 
-    // === Combine components into wavetrend ===
+    
     for i in actual_warmup..len {
         let mut sum = 0.0;
         let mut count = 0;
@@ -2348,10 +2348,10 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // === Signal Calculation (inline SMA of wavetrend) ===
-    let signal_start = actual_warmup + 5; // Need 6 values for SMA
+    
+    let signal_start = actual_warmup + 5; 
     if signal_start < len {
-        // Initialize first SMA value
+        
         let mut sum = 0.0;
         for i in actual_warmup..(actual_warmup + 6).min(len) {
             if wavetrend[i].is_finite() {
@@ -2360,7 +2360,7 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
         signal[signal_start] = sum / 6.0;
 
-        // Sliding window for remaining values
+        
         for i in (signal_start + 1)..len {
             if wavetrend[i].is_finite() && wavetrend[i - 6].is_finite() {
                 sum += wavetrend[i] - wavetrend[i - 6];
@@ -2371,17 +2371,17 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // === Histogram Calculation (inline EMA of (wt - sig)*2 + 50) ===
+    
     let hist_start = signal_start;
     if hist_start < len && signal[hist_start].is_finite() {
         let alpha3 = 2.0 / (n3 as f64 + 1.0);
         let beta3 = 1.0 - alpha3;
 
-        // Calculate initial value
+        
         let diff = (wavetrend[hist_start] - signal[hist_start]) * 2.0 + 50.0;
         histogram[hist_start] = diff;
 
-        // EMA smoothing
+        
         for i in (hist_start + 1)..len {
             if signal[i].is_finite() && wavetrend[i].is_finite() {
                 let diff = (wavetrend[i] - signal[i]) * 2.0 + 50.0;
@@ -2395,9 +2395,9 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
     Ok(())
 }
 
-// ============================================================================
-// BUILDER PATTERN
-// ============================================================================
+
+
+
 
 /// Builder for Modified God Mode indicator
 pub struct ModGodModeBuilder {
@@ -2416,7 +2416,7 @@ impl Default for ModGodModeBuilder {
             n2: 6,
             n3: 4,
             mode: ModGodModeMode::TraditionMg,
-            use_volume: true, // Default to true to match Pine's implicit behavior
+            use_volume: true, 
             kernel: Kernel::Auto,
         }
     }
@@ -3625,9 +3625,9 @@ impl ModGodModeBatchBuilder {
     }
 }
 
-// ============================================================================
-// PYTHON BINDINGS
-// ============================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "mod_god_mode")]
@@ -3762,7 +3762,7 @@ pub fn mod_god_mode_batch_py<'py>(
     Ok(d.into())
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaModGodMode};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -4037,9 +4037,9 @@ impl ModGodModeStreamPy {
     }
 }
 
-// ============================================================================
-// WASM BINDINGS
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = mod_god_mode)]
@@ -4164,9 +4164,9 @@ pub fn mod_god_mode_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct ModGodModeJsFlat {
-    pub values: Vec<f64>, // concatenated [wavetrend..., signal..., histogram...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -4182,7 +4182,7 @@ pub fn mod_god_mode_into_flat(
     n2: usize,
     n3: usize,
     mode: &str,
-    out_ptr: *mut f64, // length = 3*len; rows=3, cols=len; row-major [wt..., sig..., hist...]
+    out_ptr: *mut f64, 
 ) -> Result<(), JsValue> {
     if [
         high_ptr as usize,
@@ -4269,9 +4269,9 @@ pub fn mod_god_mode_js_flat(
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// ============================================================================
-// TESTS
-// ============================================================================
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -4295,7 +4295,7 @@ mod tests {
         }
 
         Candles::new(
-            vec![0; len], // timestamp
+            vec![0; len], 
             open,
             high,
             low,
@@ -4314,7 +4314,7 @@ mod tests {
                         $test_fn(Kernel::Scalar);
                     }
 
-                    // SSE2 kernel not available in this codebase
+                    
 
                     #[test]
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
@@ -4364,7 +4364,7 @@ mod tests {
     }
 
     fn check_mod_god_mode_all_nan(kernel: Kernel) {
-        let nan_data = vec![f64::NAN; 20]; // Make sure we have enough data
+        let nan_data = vec![f64::NAN; 20]; 
         let params = ModGodModeParams {
             n1: Some(3),
             n2: Some(2),
@@ -4375,14 +4375,14 @@ mod tests {
         let input = ModGodModeInput::from_slices(&nan_data, &nan_data, &nan_data, None, params);
         let result = mod_god_mode_with_kernel(&input, kernel);
 
-        // Should compute but return all NaN
+        
         match result {
             Ok(output) => {
                 assert!(output.wavetrend.iter().all(|v| v.is_nan()));
             }
             Err(e) => {
-                // It's actually fine if we get an error with all NaN data
-                // Some indicators may not handle this case
+                
+                
                 println!("All NaN test returned error: {:?}", e);
             }
         }
@@ -4479,16 +4479,16 @@ mod tests {
     fn check_mod_god_mode_stream(_kernel: Kernel) {
         let mut stream = ModGodModeStream::new(3, 2, 2, ModGodModeMode::TraditionMg, false);
 
-        // Need more data for RSI calculations in Pine version
+        
         let test_data = vec![
             (10.5, 9.5, 10.0),
             (11.5, 10.5, 11.0),
             (12.5, 11.5, 12.0),
             (12.0, 11.0, 11.5),
             (11.0, 10.0, 10.5),
-            (11.5, 10.5, 11.0), // Extra data point
-            (12.0, 11.0, 11.5), // Extra data point
-            (12.5, 11.5, 12.0), // Extra data point
+            (11.5, 10.5, 11.0), 
+            (12.0, 11.0, 11.5), 
+            (12.5, 11.5, 12.0), 
         ];
 
         let mut got_result = false;
@@ -4499,7 +4499,7 @@ mod tests {
             }
         }
 
-        // Eventually we should get a result once enough data is accumulated
+        
         assert!(
             got_result,
             "Stream should produce results after sufficient data"
@@ -4539,21 +4539,21 @@ mod tests {
         let result2 = mod_god_mode_with_kernel(&input, kernel).unwrap();
 
         for i in 0..result1.wavetrend.len() {
-            // Check wavetrend
+            
             if !result1.wavetrend[i].is_nan() && !result2.wavetrend[i].is_nan() {
                 assert_eq!(result1.wavetrend[i], result2.wavetrend[i]);
             } else if result1.wavetrend[i].is_nan() != result2.wavetrend[i].is_nan() {
                 panic!("Wavetrend NaN mismatch at index {}", i);
             }
 
-            // Check signal
+            
             if !result1.signal[i].is_nan() && !result2.signal[i].is_nan() {
                 assert_eq!(result1.signal[i], result2.signal[i]);
             } else if result1.signal[i].is_nan() != result2.signal[i].is_nan() {
                 panic!("Signal NaN mismatch at index {}", i);
             }
 
-            // Check histogram
+            
             if !result1.histogram[i].is_nan() && !result2.histogram[i].is_nan() {
                 assert_eq!(result1.histogram[i], result2.histogram[i]);
             } else if result1.histogram[i].is_nan() != result2.histogram[i].is_nan() {
@@ -4563,7 +4563,7 @@ mod tests {
     }
 
     fn check_mod_god_mode_accuracy(kernel: Kernel) {
-        // Test accuracy against known reference values using CSV data
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file_path) {
             Ok(c) => c,
@@ -4572,7 +4572,7 @@ mod tests {
             }
         };
 
-        // Use default parameters
+        
         let params = ModGodModeParams {
             n1: Some(17),
             n2: Some(6),
@@ -4584,7 +4584,7 @@ mod tests {
         let input = ModGodModeInput::from_candles(&candles, params);
         let result = mod_god_mode_with_kernel(&input, kernel).unwrap();
 
-        // Reference values from Pine Script (last 5 wavetrend values)
+        
         let expected_last_five = [
             61.66219598,
             55.92955776,
@@ -4593,7 +4593,7 @@ mod tests {
             15.74958884,
         ];
 
-        // Get last 5 non-NaN values
+        
         let non_nan_values: Vec<f64> = result
             .wavetrend
             .iter()
@@ -4610,7 +4610,7 @@ mod tests {
         let start = non_nan_values.len().saturating_sub(5);
         for (i, &val) in non_nan_values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            // Using a tolerance of 4.0 as we've determined this is the maximum difference
+            
             assert!(
                 diff < 4.0,
                 "MOD_GOD_MODE wavetrend mismatch at index {}: got {:.8}, expected {:.8}, diff {:.8}",
@@ -4634,8 +4634,8 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
 
-        // After warmup, no NaNs should be present
-        let warmup = 7 + 4 + 3; // Conservative warmup estimate
+        
+        let warmup = 7 + 4 + 3; 
         for i in warmup..output.wavetrend.len() {
             if output.wavetrend[i].is_nan() {
                 panic!("Found NaN at index {} after warmup period {}", i, warmup);
@@ -4653,11 +4653,11 @@ mod tests {
             use_volume: Some(false),
         };
 
-        // Compute once
+        
         let input1 = ModGodModeInput::from_candles(&candles, params.clone());
         let result1 = mod_god_mode_with_kernel(&input1, kernel).unwrap();
 
-        // Feed wavetrend back as close
+        
         let input2 = ModGodModeInput::from_slices(
             &candles.high,
             &candles.low,
@@ -4667,7 +4667,7 @@ mod tests {
         );
         let result2 = mod_god_mode_with_kernel(&input2, kernel);
 
-        // Should succeed without errors
+        
         assert!(result2.is_ok());
     }
 
@@ -4681,11 +4681,11 @@ mod tests {
             use_volume: Some(false),
         };
 
-        // Batch calculation
+        
         let input = ModGodModeInput::from_candles(&candles, params.clone());
         let batch_result = mod_god_mode(&input).unwrap();
 
-        // Streaming calculation
+        
         let mut stream = ModGodModeStream::try_new(params).unwrap();
         let mut stream_results = Vec::new();
 
@@ -4694,7 +4694,7 @@ mod tests {
             stream_results.push(result);
         }
 
-        // Last streaming value should match batch last value (when available)
+        
         if let Some(Some((wt, sig, hist))) = stream_results.last() {
             let last_idx = batch_result.wavetrend.len() - 1;
             if !batch_result.wavetrend[last_idx].is_nan() {
@@ -4715,7 +4715,7 @@ mod tests {
     }
 
     fn check_batch_default_row(kernel: Kernel) {
-        // Use the same CSV data as other indicators
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file) {
             Ok(c) => c,
@@ -4732,7 +4732,7 @@ mod tests {
             mode: ModGodModeMode::TraditionMg,
         };
 
-        // Convert single kernel to batch kernel for batch functions
+        
         let batch_kernel = match kernel {
             Kernel::Scalar => Kernel::ScalarBatch,
             Kernel::Avx2 => Kernel::Avx2Batch,
@@ -4758,7 +4758,7 @@ mod tests {
     }
 
     fn check_batch_sweep(kernel: Kernel) {
-        // Use the same CSV data as other indicators
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file) {
             Ok(c) => c,
@@ -4775,7 +4775,7 @@ mod tests {
             mode: ModGodModeMode::TraditionMg,
         };
 
-        // Convert single kernel to batch kernel for batch functions
+        
         let batch_kernel = match kernel {
             Kernel::Scalar => Kernel::ScalarBatch,
             Kernel::Avx2 => Kernel::Avx2Batch,
@@ -4795,11 +4795,11 @@ mod tests {
         )
         .unwrap();
 
-        // 3 n1 values * 2 n2 values * 1 n3 value = 6 combinations
+        
         assert_eq!(batch_result.rows, 6);
         assert_eq!(batch_result.combos.len(), 6);
 
-        // Test row lookup
+        
         let test_params = ModGodModeParams {
             n1: Some(4),
             n2: Some(2),
@@ -4845,7 +4845,7 @@ mod tests {
         check_batch_default_row(Kernel::Auto);
     }
 
-    // Generate all test variants
+    
     generate_all_mod_god_mode_tests!(
         check_mod_god_mode_basic,
         check_mod_god_mode_accuracy,
@@ -4865,7 +4865,7 @@ mod tests {
         check_batch_sweep
     );
 
-    // Property-based tests
+    
     #[cfg(test)]
     mod proptest_tests {
         use super::*;
@@ -4880,7 +4880,7 @@ mod tests {
                 len in 0usize..100,
             ) {
                 let candles = generate_test_candles(len);
-                // Ensure n3 is never greater than or equal to len to avoid RSI issues
+                
                 let n3_safe = if len > 0 { n3.min(len.saturating_sub(1).max(1)) } else { n3 };
                 let params = ModGodModeParams {
                     n1: Some(n1),
@@ -4920,7 +4920,7 @@ mod tests {
         }
     }
 
-    // Parity test: native into() matches Vec API including NaN warmups
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_mod_god_mode_into_matches_api() {
@@ -4928,16 +4928,16 @@ mod tests {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
 
-        // Use the shared CSV used by existing accuracy tests
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file).expect("failed to read candles CSV");
         let params = ModGodModeParams::default();
         let input = ModGodModeInput::from_candles(&candles, params);
 
-        // Baseline via Vec-returning API
+        
         let base = mod_god_mode(&input).expect("baseline mod_god_mode should succeed");
 
-        // Preallocated outputs
+        
         let len = candles.close.len();
         let mut wt = vec![0.0; len];
         let mut sig = vec![0.0; len];

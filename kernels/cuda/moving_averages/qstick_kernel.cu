@@ -1,16 +1,16 @@
-// CUDA kernels for QStick indicator using prefix sums of (close - open).
-//
-// Category: Sliding-sum average over the differences d[t] = close[t] - open[t].
-// We precompute a prefix array P where P[0]=0 and P[t+1] = P[t] + d[t].
-// Then each output is:
-//   out[t] = (P[t+1] - P[t+1-period]) / period, for t >= warm,
-// with warm = first_valid + period - 1. Indices before warm are filled with NaN
-// to match scalar semantics.
-//
-// Provided kernels:
-// - qstick_batch_prefix_f32                         : one-series × many-params (plain 1D time, grid.y = combos)
-// - qstick_batch_prefix_tiled_f32_tile128/256      : optional tiled variants
-// - qstick_many_series_one_param_f32               : many-series × one-param (time-major), 1D
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 
@@ -26,12 +26,12 @@
 #endif
 
 extern "C" __global__ void qstick_batch_prefix_f32(
-    const float* __restrict__ prefix_diff, // length = len + 1
+    const float* __restrict__ prefix_diff, 
     int len,
     int first_valid,
-    const int* __restrict__ periods,       // [n_combos]
+    const int* __restrict__ periods,       
     int n_combos,
-    float* __restrict__ out                // [n_combos * len]
+    float* __restrict__ out                
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -50,7 +50,7 @@ extern "C" __global__ void qstick_batch_prefix_f32(
             out[row_off + t] = QS_NAN;
         } else {
             const int t1 = t + 1;
-            int start = t1 - period; if (start < 0) start = 0; // clamp for safety
+            int start = t1 - period; if (start < 0) start = 0; 
             const float sum = prefix_diff[t1] - prefix_diff[start];
             out[row_off + t] = sum * inv_p;
         }
@@ -110,15 +110,15 @@ extern "C" __global__ void qstick_batch_prefix_tiled_f32_tile256(
     qstick_batch_prefix_tiled_impl<256>(prefix_diff, len, first_valid, periods, n_combos, out);
 }
 
-// ---------------- Many-series, one param (time-major) ----------------------
-// prefix_tm: (rows+1) x cols, time-major. out_tm: rows x cols, time-major.
+
+
 extern "C" __global__ void qstick_many_series_one_param_f32(
-    const float* __restrict__ prefix_tm, // (rows+1) x cols
+    const float* __restrict__ prefix_tm, 
     int period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, // [num_series]
-    float* __restrict__ out_tm             // rows x cols
+    const int* __restrict__ first_valids, 
+    float* __restrict__ out_tm             
 ) {
     const int series = blockIdx.y;
     if (series >= num_series) return;

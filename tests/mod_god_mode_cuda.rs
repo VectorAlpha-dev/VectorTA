@@ -1,18 +1,18 @@
-// CUDA parity tests for Modified God Mode
 
-use my_project::indicators::mod_god_mode::{
+
+use vector_ta::indicators::mod_god_mode::{
     mod_god_mode, mod_god_mode_batch_with_kernel, ModGodModeBatchRange, ModGodModeData,
     ModGodModeInput, ModGodModeMode, ModGodModeParams,
 };
-use my_project::utilities::data_loader::Candles;
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::data_loader::Candles;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::mod_god_mode_wrapper::CudaModGodMode;
+use vector_ta::cuda::mod_god_mode_wrapper::CudaModGodMode;
 
 fn gen_candles(len: usize) -> Candles {
     let mut h = vec![f64::NAN; len];
@@ -64,7 +64,7 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
         mode: ModGodModeMode::TraditionMg,
     };
 
-    // CPU baseline (scalar batch kernel)
+    
     let cpu = mod_god_mode_batch_with_kernel(
         &candles.high,
         &candles.low,
@@ -74,7 +74,7 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
         Kernel::ScalarBatch,
     )?;
 
-    // GPU
+    
     let cuda = CudaModGodMode::new(0).expect("CudaModGodMode");
     let res = cuda
         .mod_god_mode_batch_dev(&h, &l, &c, None, &sweep)
@@ -89,7 +89,7 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     res.outputs.wt2.buf.copy_to(&mut sig_host)?;
     res.outputs.hist.buf.copy_to(&mut hist_host)?;
 
-    let tol = 1.5e-1; // FP32 drift accumulates across multiple recurrences
+    let tol = 1.5e-1; 
     for i in 0..(cpu.rows * cpu.cols) {
         let cpu_wt = cpu.wavetrend[i];
         let gpu_wt = wt_host[i] as f64;
@@ -132,8 +132,8 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         eprintln!("[mod_god_mode_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 4usize; // number of series
-    let rows = 1024usize; // time
+    let cols = 4usize; 
+    let rows = 1024usize; 
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut c_tm = vec![f64::NAN; cols * rows];
@@ -147,7 +147,7 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    // CPU baseline per series
+    
     let mut wt_cpu = vec![f64::NAN; cols * rows];
     let mut sig_cpu = vec![f64::NAN; cols * rows];
     let mut hist_cpu = vec![f64::NAN; cols * rows];
@@ -183,7 +183,7 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    // GPU
+    
     let h_tm_f32: Vec<f32> = h_tm.iter().map(|&v| v as f32).collect();
     let l_tm_f32: Vec<f32> = l_tm.iter().map(|&v| v as f32).collect();
     let c_tm_f32: Vec<f32> = c_tm.iter().map(|&v| v as f32).collect();

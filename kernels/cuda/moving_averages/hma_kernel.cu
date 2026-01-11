@@ -1,39 +1,39 @@
-// CUDA kernels for the Hull Moving Average (HMA).
-//
-// Optimized drop-in rewrite:
-// - Grid-stride loops (decouple launch geometry from problem size)
-// - Remove ring zeroing; never read before write (skip redundant work)
-// - Replace modulo with branch for ring index wrap
-// - Precompute reciprocals for window normalizers; multiply instead of divide
-// - Use FMA for weighted-sum updates (accuracy + throughput)
-// - Optional: host-prefill output with NaNs to skip per-thread fill
-// - Optional: place per-thread sqrt(n) ring in dynamic shared memory
-//   (caller sets shared bytes = max_sqrt_len * blockDim.x * sizeof(float)).
-//   Keep device per-block shared memory limits in mind when tuning.
-//
-// Defaults:
-// Enable both fast paths by default so wrappers do not need per‑indicator
-// build.rs flags. These can still be overridden by -D defines if needed.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #endif
 
-// ---- TUNABLE MACROS ---------------------------------------------------------
-// If 1, the kernel assumes 'out' is already filled with NaNs by the host
-// (via cuMemsetD32Async / cudaMemsetD32Async). If 0, the kernel writes the
-// warmup NaN prefix in-kernel (and fills full-row NaN on invalid inputs).
+
+
+
+
 #ifndef HMA_ASSUME_OUT_PREFILLED
 #define HMA_ASSUME_OUT_PREFILLED 0
 #endif
 
-// If 1, put per-thread ring buffers in dynamic shared memory.
-// Requires passing shared bytes = max_sqrt_len * blockDim.x * sizeof(float)
-// at kernel launch. If 0, use the provided global x_buf (original behavior).
+
+
+
 #ifndef HMA_RING_IN_SHARED
 #define HMA_RING_IN_SHARED 1
 #endif
-// -----------------------------------------------------------------------------
+
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -51,14 +51,14 @@ void hma_batch_f32(const float* __restrict__ prices,
                    int n_combos,
                    int first_valid,
                    int max_sqrt_len,
-                   float* __restrict__ x_buf,   // used only if HMA_RING_IN_SHARED==0
+                   float* __restrict__ x_buf,   
                    float* __restrict__ out) {
 
 #if HMA_RING_IN_SHARED
     extern __shared__ float sh_ring[];
 #endif
 
-    // grid-stride over combos
+    
     const int stride = blockDim.x * gridDim.x;
     for (int combo = blockIdx.x * blockDim.x + threadIdx.x; combo < n_combos; combo += stride) {
 
@@ -102,8 +102,8 @@ void hma_batch_f32(const float* __restrict__ prices,
             continue;
         }
 
-        // Fill warmup NaN prefix in-kernel (avoid full output memset).
-        // Earliest output index is: first_valid + (period - 1) + (sqrt_len - 1).
+        
+        
         int warmup_end = first_valid + period + sqrt_len - 2;
         if (warmup_end > series_len) warmup_end = series_len;
         for (int i = 0; i < warmup_end; ++i) { out[base + i] = HMA_NAN; }
@@ -111,7 +111,7 @@ void hma_batch_f32(const float* __restrict__ prices,
         if (tail_len < period + sqrt_len - 1) { continue; }
 #endif
 
-        // Precompute denominators and reciprocals
+        
         const float f_half   = (float)half;
         const float f_full   = (float)period;
         const float f_sqrt   = (float)sqrt_len;
@@ -124,30 +124,30 @@ void hma_batch_f32(const float* __restrict__ prices,
         const float inv_ws_full = 1.0f / ws_full;
         const float inv_ws_sqrt = 1.0f / ws_sqrt;
 
-        // Running sums for WMA(period) and WMA(half)
+        
         float sum_half = 0.0f, wsum_half = 0.0f;
         float sum_full = 0.0f, wsum_full = 0.0f;
 
-        // sqrt(n)-WMA of x = 2*WMA(half) - WMA(full)
+        
         float sum_x = 0.0f, wsum_x = 0.0f;
         int   ring_head = 0;
         int   ring_count = 0;
 
-        // Choose ring location
+        
 #if HMA_RING_IN_SHARED
-        float* ring = sh_ring + threadIdx.x * max_sqrt_len; // size reserved at launch
+        float* ring = sh_ring + threadIdx.x * max_sqrt_len; 
 #else
         float* ring = x_buf + combo * max_sqrt_len;
 #endif
-        // No ring zeroing; we only read after writing 'sqrt_len' entries.
+        
 
-        // Main pass over the tail (inclusive)
+        
         for (int j = 0; j < tail_len; ++j) {
             const int idx = first_valid + j;
 
             const float val = prices[idx];
 
-            // WMA(period) running update
+            
             if (j < period) {
                 const float jf = (float)(j + 1);
                 wsum_full = fmaf(jf, val, wsum_full);
@@ -159,7 +159,7 @@ void hma_batch_f32(const float* __restrict__ prices,
                 wsum_full = fmaf((float)period, val, wsum_full - prev_sum);
             }
 
-            // WMA(half) running update
+            
             if (j < half) {
                 const float jf = (float)(j + 1);
                 wsum_half = fmaf(jf, val, wsum_half);
@@ -171,7 +171,7 @@ void hma_batch_f32(const float* __restrict__ prices,
                 wsum_half = fmaf((float)half, val, wsum_half - prev_sum);
             }
 
-            // Only emit once the 'period' window is full
+            
             if (j + 1 < period) { continue; }
 
             const float wma_full = wsum_full * inv_ws_full;
@@ -199,8 +199,8 @@ void hma_batch_f32(const float* __restrict__ prices,
 
                 out[base + idx] = wsum_x * inv_ws_sqrt;
             }
-        } // tail loop
-    } // combo grid-stride
+        } 
+    } 
 }
 
 extern "C" __global__
@@ -210,7 +210,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int series_len,
                                    int period,
                                    int max_sqrt_len,
-                                   float* __restrict__ x_buf,     // used only if HMA_RING_IN_SHARED==0
+                                   float* __restrict__ x_buf,     
                                    float* __restrict__ out_tm) {
 
 #if HMA_RING_IN_SHARED
@@ -271,7 +271,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (tail_len < period + sqrt_len - 1) { continue; }
 #endif
 
-        // Running state
+        
         float sum_half = 0.0f, wsum_half = 0.0f;
         float sum_full = 0.0f, wsum_full = 0.0f;
 
@@ -285,7 +285,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         float* ring = x_buf + series * max_sqrt_len;
 #endif
 
-        // Time-major indexing: idx(row) = row * num_series + series
+        
         for (int j = 0; j < tail_len; ++j) {
             const int row = first_valid + j;
             const int a   = row * num_series + series;
@@ -340,6 +340,6 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
                 out_tm[a] = wsum_x * inv_ws_sqrt;
             }
-        } // tail
-    } // series grid-stride
+        } 
+    } 
 }

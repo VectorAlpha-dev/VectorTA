@@ -1,44 +1,44 @@
-// CUDA kernels for Buff Averages batch computation using prefix sums.
-//
-// Sliding-sum MA category: we use precomputed prefix sums for
-//   pv[t] = sum_{i< t}(price[i] * volume[i] if both are finite else 0)
-//   vv[t] = sum_{i< t}(volume[i]            if finite          else 0)
-// which yield O(1) per-output window evaluation:
-//   sum_pv = pv[t+1] - pv[t+1-period]
-//   sum_vv = vv[t+1] - vv[t+1-period]
-//   out    = (sum_vv != 0) ? sum_pv / sum_vv : 0
-//
-// Kernels provided:
-// - buff_averages_batch_prefix_f32                      : plain 1D launch (baseline)
-// - buff_averages_batch_prefix_tiled_f32_*              : tiled 1D variants (tile=128/256)
-// - buff_averages_many_series_one_param_f32             : many-series × one-param (time-major), 1D
-// - buff_averages_many_series_one_param_tiled2d_tx128_ty2/ty4 : many-series × one-param, 2D tiled
-//
-// Notes:
-// - Outputs at t < warm (warm = first_valid + slow_period - 1) are set to NaN.
-// - Kernel grid.y indexes the (fast, slow) combo; grid.x covers time.
-// - This file intentionally avoids shared memory: O(1) arithmetic dominates,
-//   and coalesced global loads suffice. Tiled variants exist for consistency
-//   with the ALMA integration and to control launch geometry deterministically.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// ---- Helpers (drop-in) ------------------------------------------------------
+
 
 #ifndef BA_ENABLE_L2_PREFETCH
-#define BA_ENABLE_L2_PREFETCH 1   // enable inline-PTX L2 prefetch hints by default
+#define BA_ENABLE_L2_PREFETCH 1   
 #endif
 
 #ifndef BA_EXP2_NR_STEPS
-#define BA_EXP2_NR_STEPS 1        // optional extra NR step in div_f2 if set >= 2
+#define BA_EXP2_NR_STEPS 1        
 #endif
 
 __device__ __forceinline__ float qnan32() {
     return __int_as_float(0x7fffffff);
 }
 
-// Ratio from two prefix-sum pairs: (pv_t - pv_s) / (vv_t - vv_s) with 0 on exact-zero denom.
+
 __device__ __forceinline__ float ratio_from_prefix(float pv_t, float pv_s,
                                                    float vv_t, float vv_s) {
     float den = vv_t - vv_s;
@@ -50,7 +50,7 @@ __device__ __forceinline__ float ratio_from_prefix(float pv_t, float pv_s,
     return 0.0f;
 }
 
-// FP32 two-float expansion helpers (hi+lo)
+
 struct f2 { float hi, lo; };
 
 __device__ __forceinline__ f2 two_sum(float a, float b) {
@@ -75,21 +75,21 @@ __device__ __forceinline__ f2 sub_f2(f2 x, f2 y) {
 }
 
 __device__ __forceinline__ float div_f2(f2 n, f2 d) {
-    // Same semantics as existing code: 0 on exact-zero denominator
+    
     if (d.hi == 0.0f && d.lo == 0.0f) return 0.0f;
-    // FP32 reciprocal + Newton refinement(s)
+    
     float rcp = __frcp_rn(d.hi);
 #if BA_EXP2_NR_STEPS >= 1
     rcp = fmaf(rcp, (2.0f - d.hi * rcp), 0.0f);
 #endif
-    // correction using FMAs and the expansion tails
+    
     float q0 = n.hi * rcp;
     float r  = fmaf(-q0, d.hi, n.hi);
     r        = fmaf(-q0, d.lo, r);
     r       += n.lo;
     float q1 = r * rcp;
 #if BA_EXP2_NR_STEPS >= 2
-    // optional tiny correction
+    
     float r2 = fmaf(-(q0 + q1), d.hi, n.hi);
     r2       = fmaf(-(q0 + q1), d.lo, r2);
     r2      += n.lo;
@@ -126,7 +126,7 @@ extern "C" __global__ void buff_averages_batch_prefix_f32(
         float so = qnan32();
 
 #if BA_ENABLE_L2_PREFETCH
-        // Prefetch next stride position of both prefixes into L2 (hint only).
+        
         int t_pref = t + stride;
         if (t_pref + 1 < len + 1) {
             const float* p0 = prefix_pv + (t_pref + 1);
@@ -154,8 +154,8 @@ extern "C" __global__ void buff_averages_batch_prefix_f32(
     }
 }
 
-// Tiled 1D variant: blockDim.x == TILE, grid.x covers ceil(len/TILE).
-// Each thread computes at most one output within its tile.
+
+
 template<int TILE>
 __device__ __forceinline__ void buff_averages_batch_prefix_tiled_f32_impl(
     const float* __restrict__ prefix_pv,
@@ -246,7 +246,7 @@ extern "C" __global__ void buff_averages_batch_prefix_tiled_f32_tile256(
         fast_periods, slow_periods, n_combos, fast_out, slow_out);
 }
 
-// Optional 512-thread tiled variant wrapper
+
 extern "C" __global__ void buff_averages_batch_prefix_tiled_f32_tile512(
     const float* __restrict__ prefix_pv,
     const float* __restrict__ prefix_vv,
@@ -262,23 +262,23 @@ extern "C" __global__ void buff_averages_batch_prefix_tiled_f32_tile512(
         fast_periods, slow_periods, n_combos, fast_out, slow_out);
 }
 
-// ------------------------ Many-series (time-major) -------------------------
-// Inputs are time-major matrices of prefix sums with one extra leading row
-// (length = rows + 1). Each output is computed as:
-//   sum_pv = pv_prefix[(t+1, s)] - pv_prefix[(t+1-fast, s)]
-//   sum_vv = vv_prefix[(t+1, s)] - vv_prefix[(t+1-slow, s)]
-// with the starts clamped to zero. Outputs for t < warm are set to NaN.
+
+
+
+
+
+
 
 extern "C" __global__ void buff_averages_many_series_one_param_f32(
-    const float* __restrict__ pv_prefix_tm,  // (rows+1) x cols
-    const float* __restrict__ vv_prefix_tm,  // (rows+1) x cols
+    const float* __restrict__ pv_prefix_tm,  
+    const float* __restrict__ vv_prefix_tm,  
     int fast_period,
     int slow_period,
     int num_series,
     int series_len,
     const int* __restrict__ first_valids,
-    float* __restrict__ fast_out_tm,         // rows x cols
-    float* __restrict__ slow_out_tm) {       // rows x cols
+    float* __restrict__ fast_out_tm,         
+    float* __restrict__ slow_out_tm) {       
     const int series = blockIdx.y;
     if (series >= num_series) return;
     if (fast_period <= 0 || slow_period <= 0) return;
@@ -317,8 +317,8 @@ extern "C" __global__ void buff_averages_many_series_one_param_f32(
 
 template<int TX, int TY>
 __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_impl(
-    const float* __restrict__ pv_prefix_tm,  // (rows+1) x cols
-    const float* __restrict__ vv_prefix_tm,  // (rows+1) x cols
+    const float* __restrict__ pv_prefix_tm,  
+    const float* __restrict__ vv_prefix_tm,  
     int fast_period,
     int slow_period,
     int num_series,
@@ -391,26 +391,26 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_tx128
         num_series, series_len, first_valids, fast_out_tm, slow_out_tm);
 }
 
-// ---------------- Swizzled 2D kernel (coalesced across series) -------------
-// Warp spans X (series) at a fixed time-row; grid.x tiles time, grid.y tiles columns.
+
+
 template<int SX, int TY>
 __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_swizzled_f32(
-    const float* __restrict__ pv_prefix_tm,  // (rows+1) x cols, time-major
-    const float* __restrict__ vv_prefix_tm,  // (rows+1) x cols, time-major
+    const float* __restrict__ pv_prefix_tm,  
+    const float* __restrict__ vv_prefix_tm,  
     int fast_period,
     int slow_period,
     int num_series,
     int series_len,
     const int* __restrict__ first_valids,
-    float* __restrict__ fast_out_tm,         // rows x cols, time-major
+    float* __restrict__ fast_out_tm,         
     float* __restrict__ slow_out_tm) {
 
     if (fast_period <= 0 || slow_period <= 0) return;
 
-    const int s = blockIdx.y * SX + threadIdx.x;   // series index (contiguous across warp)
+    const int s = blockIdx.y * SX + threadIdx.x;   
     if (s >= num_series) return;
 
-    const int t = blockIdx.x * TY + threadIdx.y;   // time index
+    const int t = blockIdx.x * TY + threadIdx.y;   
     if (t >= series_len) return;
 
     const int warm = first_valids[s] + slow_period - 1;
@@ -440,7 +440,7 @@ __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_swiz
                                              vv_t, vv_prefix_tm[s_idx]);
 }
 
-// Wrappers: SX must match blockDim.x; TY matches blockDim.y.
+
 extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_sx128_ty1(
     const float* __restrict__ pv_prefix_tm,
     const float* __restrict__ vv_prefix_tm,
@@ -471,8 +471,8 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_sx128
         num_series, series_len, first_valids, fast_out_tm, slow_out_tm);
 }
 
-// ------------------------ Expansion-based variants -------------------------
-// Batch (one series, many (fast, slow) combos); expects four prefix arrays.
+
+
 extern "C" __global__ void buff_averages_batch_prefix_exp2_f32(
     const float* __restrict__ pv_hi,
     const float* __restrict__ pv_lo,
@@ -528,7 +528,7 @@ extern "C" __global__ void buff_averages_batch_prefix_exp2_f32(
     }
 }
 
-// Many-series (time-major) expansion variant; prefixes are (rows+1) x cols.
+
 extern "C" __global__ void buff_averages_many_series_one_param_exp2_f32(
     const float* __restrict__ pv_hi_tm,
     const float* __restrict__ pv_lo_tm,

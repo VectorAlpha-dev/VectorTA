@@ -338,7 +338,7 @@ pub fn swma_into(input: &SwmaInput, out: &mut [f64]) -> Result<(), SwmaError> {
         return Err(SwmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
-    // Prefill warmup region with identical quiet-NaN pattern used by Vec-returning API
+    
     let warm = (first + period - 1).min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -386,11 +386,11 @@ fn build_symmetric_triangle_vec(n: usize) -> Vec<f64> {
 #[inline(always)]
 fn triangle_weight_sum(n: usize) -> f64 {
     if (n & 1) == 0 {
-        // n = 2m => sum = m(m+1)
+        
         let m = (n >> 1) as f64;
         m * (m + 1.0)
     } else {
-        // n = 2m-1 => sum = m^2
+        
         let m = ((n + 1) >> 1) as f64;
         m * m
     }
@@ -407,28 +407,28 @@ fn build_symmetric_triangle_avec(n: usize) -> AVec<f64> {
         weights.push(0.5);
     } else if n % 2 == 0 {
         let half = n / 2;
-        // Build first half
+        
         for i in 1..=half {
             weights.push(i as f64);
         }
-        // Build second half (mirror)
+        
         for i in (1..=half).rev() {
             weights.push(i as f64);
         }
     } else {
         let half_plus = (n + 1) / 2;
-        // Build first half including middle
+        
         for i in 1..=half_plus {
             weights.push(i as f64);
         }
-        // Build second half (mirror, excluding middle)
+        
         for i in (1..half_plus).rev() {
             weights.push(i as f64);
         }
     }
 
-    // Normalize in-place (closed-form triangle weight sum).
-    // For n <= 2 we already pushed normalized weights.
+    
+    
     let sum: f64 = if n <= 2 { 1.0 } else { triangle_weight_sum(n) };
     for w in weights.iter_mut() {
         *w /= sum;
@@ -440,7 +440,7 @@ fn build_symmetric_triangle_avec(n: usize) -> AVec<f64> {
 #[inline]
 pub fn swma_scalar(
     data: &[f64],
-    _weights: &[f64], // kept for signature parity; not used by O(n) algo
+    _weights: &[f64], 
     period: usize,
     first_val: usize,
     out: &mut [f64],
@@ -453,7 +453,7 @@ pub fn swma_scalar(
         return;
     }
 
-    // Map triangle length -> two boxcar lengths (a, b) with a + b - 1 = period
+    
     let (a, b) = if (period & 1) != 0 {
         let m = (period + 1) >> 1;
         (m, m)
@@ -462,8 +462,8 @@ pub fn swma_scalar(
         (m, m + 1)
     };
 
-    // Early-outs for small periods for numerical parity with reference
-    // period == 1 is identity after warmup
+    
+    
     if period == 1 {
         unsafe {
             for i in first_val..len {
@@ -472,7 +472,7 @@ pub fn swma_scalar(
         }
         return;
     }
-    // period == 2 is exact simple average of last two points
+    
     if period == 2 {
         unsafe {
             for i in (first_val + 1)..len {
@@ -485,41 +485,41 @@ pub fn swma_scalar(
 
     let inv_ab = 1.0 / ((a as f64) * (b as f64));
     let start_full_a = first_val + a - 1;
-    let start_full_ab = first_val + period - 1; // == first + (a+b-2)
+    let start_full_ab = first_val + period - 1; 
 
-    // Ring buffer of last b "a-window sums" (unnormalized)
+    
     let mut ring = AVec::<f64>::with_capacity(CACHELINE_ALIGN, b);
     ring.resize(b, 0.0);
     let mut rb_idx = 0usize;
 
-    // Running sums
-    let mut s1_sum = 0.0_f64; // sum over last 'a' raw samples
-    let mut s2_sum = 0.0_f64; // sum over last 'b' of the s1_sum values
+    
+    let mut s1_sum = 0.0_f64; 
+    let mut s2_sum = 0.0_f64; 
 
     unsafe {
         for i in first_val..len {
-            // accumulate current sample into the 'a' window sum
+            
             s1_sum += *data.get_unchecked(i);
 
             if i >= start_full_a {
-                // s1_sum now equals sum over data[i-(a-1) ..= i]
-                // update second accumulator with ring-buffered prior
+                
+                
                 let old = *ring.get_unchecked(rb_idx);
                 s2_sum = s2_sum + (s1_sum - old);
                 *ring.get_unchecked_mut(rb_idx) = s1_sum;
 
-                // bump ring index (manual wrap)
+                
                 rb_idx += 1;
                 if rb_idx == b {
                     rb_idx = 0;
                 }
 
-                // write output once both windows are full
+                
                 if i >= start_full_ab {
                     *out.get_unchecked_mut(i) = s2_sum * inv_ab;
                 }
 
-                // slide 'a'-window: drop sample that leaves next iteration
+                
                 s1_sum -= *data.get_unchecked(i + 1 - a);
             }
         }
@@ -580,21 +580,21 @@ unsafe fn swma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SwmaStream {
-    // public-facing parameter
+    
     period: usize,
 
-    // triangle as two boxcars: a + b - 1 = period
+    
     a: usize,
     b: usize,
-    inv_ab: f64, // 1.0 / (a * b)
+    inv_ab: f64, 
 
-    // Stage 1 (SMA over raw samples, length = a)
+    
     ring_a: aligned_vec::AVec<f64>,
     idx_a: usize,
     cnt_a: usize,
     s1_sum: f64,
 
-    // Stage 2 (SMA over s1_sum, length = b)
+    
     ring_b: aligned_vec::AVec<f64>,
     idx_b: usize,
     cnt_b: usize,
@@ -611,8 +611,8 @@ impl SwmaStream {
             });
         }
 
-        // Map period -> (a, b) where a + b - 1 = period.
-        // Odd period: a=b=m, Even period: a=m, b=m+1
+        
+        
         let (a, b) = if (period & 1) != 0 {
             let m = (period + 1) >> 1;
             (m, m)
@@ -621,7 +621,7 @@ impl SwmaStream {
             (m, m + 1)
         };
 
-        // Aligned rings (cacheline aligned like the rest of the codebase)
+        
         let mut ring_a = aligned_vec::AVec::<f64>::with_capacity(aligned_vec::CACHELINE_ALIGN, a);
         ring_a.resize(a, 0.0);
 
@@ -650,28 +650,28 @@ impl SwmaStream {
     /// returns Some(y) when both windows are full, else None (warmup)
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // ---- stage 1: SMA over raw samples (length a) ----
+        
         let ia = self.idx_a;
-        // old value at write position (oldest sample if window is full)
+        
         let old_a = self.ring_a[ia];
 
         if self.cnt_a == self.a {
-            // window full: drop oldest
+            
             self.s1_sum -= old_a;
         } else {
-            // still filling
+            
             self.cnt_a += 1;
         }
         self.ring_a[ia] = x;
         self.s1_sum += x;
 
-        // bump write index with manual wrap (faster than %)
+        
         self.idx_a = ia + 1;
         if self.idx_a == self.a {
             self.idx_a = 0;
         }
 
-        // ---- stage 2: SMA over s1_sum values (length b) ----
+        
         if self.cnt_a == self.a {
             let ib = self.idx_b;
             let old_s1 = self.ring_b[ib];
@@ -679,7 +679,7 @@ impl SwmaStream {
             if self.cnt_b == self.b {
                 self.s2_sum -= old_s1;
             } else {
-                self.cnt_b += 1; // start filling b-window
+                self.cnt_b += 1; 
             }
             self.ring_b[ib] = self.s1_sum;
             self.s2_sum += self.s1_sum;
@@ -690,12 +690,12 @@ impl SwmaStream {
             }
 
             if self.cnt_b == self.b {
-                // both windows full: SWMA = (sum of last b of s1_sums) / (a*b)
+                
                 return Some(self.s2_sum * self.inv_ab);
             }
         }
 
-        // warmup until we have 'a' s1_sums and then 'b' of those
+        
         None
     }
 }
@@ -811,7 +811,7 @@ fn expand_grid(r: &SwmaBatchRange) -> Vec<SwmaParams> {
         if start < end {
             return (start..=end).step_by(step.max(1)).collect();
         }
-        // Support reversed bounds: descend by step
+        
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -912,12 +912,12 @@ fn swma_batch_inner(
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
-    // Pre-compute weights for each period
+    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let w_start = row * max_p;
 
-        // Build weights directly into flat_w to avoid allocation and copy
+        
         if period == 1 {
             flat_w[w_start] = 1.0;
         } else if period == 2 {
@@ -925,30 +925,30 @@ fn swma_batch_inner(
             flat_w[w_start + 1] = 0.5;
         } else if period % 2 == 0 {
             let half = period / 2;
-            // Build first half
+            
             for i in 1..=half {
                 flat_w[w_start + i - 1] = i as f64;
             }
-            // Build second half (mirror)
+            
             for i in (1..=half).rev() {
                 flat_w[w_start + period - i] = i as f64;
             }
-            // Normalize
+            
             let sum: f64 = flat_w[w_start..w_start + period].iter().sum();
             for i in 0..period {
                 flat_w[w_start + i] /= sum;
             }
         } else {
             let half_plus = (period + 1) / 2;
-            // Build first half including middle
+            
             for i in 1..=half_plus {
                 flat_w[w_start + i - 1] = i as f64;
             }
-            // Build second half (mirror, excluding middle)
+            
             for i in (1..half_plus).rev() {
                 flat_w[w_start + period - i] = i as f64;
             }
-            // Normalize
+            
             let sum: f64 = flat_w[w_start..w_start + period].iter().sum();
             for i in 0..period {
                 flat_w[w_start + i] /= sum;
@@ -960,7 +960,7 @@ fn swma_batch_inner(
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
-    // Guard rows*cols overflow
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or_else(|| {
@@ -970,7 +970,7 @@ fn swma_batch_inner(
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Resolve actual kernel once
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -979,11 +979,11 @@ fn swma_batch_inner(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        // if a non-batch enum sneaks in, keep it as-is
+        
         other => other,
     };
 
-    // Writer closure
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -999,7 +999,7 @@ fn swma_batch_inner(
         }
     };
 
-    // Fill
+    
     {
         use std::mem::MaybeUninit;
         let rows_mut: &mut [MaybeUninit<f64>] = &mut buf_mu;
@@ -1023,7 +1023,7 @@ fn swma_batch_inner(
         }
     }
 
-    // Finalize without copies or UB
+    
     use core::mem::ManuallyDrop;
     let mut guard = ManuallyDrop::new(buf_mu);
     let values = unsafe {
@@ -1091,12 +1091,12 @@ fn swma_batch_inner_into(
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
-    // Pre-compute weights for each period
+    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let w_start = row * max_p;
 
-        // Build weights directly into flat_w to avoid allocation and copy
+        
         if period == 1 {
             flat_w[w_start] = 1.0;
         } else if period == 2 {
@@ -1104,30 +1104,30 @@ fn swma_batch_inner_into(
             flat_w[w_start + 1] = 0.5;
         } else if period % 2 == 0 {
             let half = period / 2;
-            // Build first half
+            
             for i in 1..=half {
                 flat_w[w_start + i - 1] = i as f64;
             }
-            // Build second half (mirror)
+            
             for i in (1..=half).rev() {
                 flat_w[w_start + period - i] = i as f64;
             }
-            // Normalize
+            
             let sum: f64 = flat_w[w_start..w_start + period].iter().sum();
             for i in 0..period {
                 flat_w[w_start + i] /= sum;
             }
         } else {
             let half_plus = (period + 1) / 2;
-            // Build first half including middle
+            
             for i in 1..=half_plus {
                 flat_w[w_start + i - 1] = i as f64;
             }
-            // Build second half (mirror, excluding middle)
+            
             for i in (1..half_plus).rev() {
                 flat_w[w_start + period - i] = i as f64;
             }
-            // Normalize
+            
             let sum: f64 = flat_w[w_start..w_start + period].iter().sum();
             for i in 0..period {
                 flat_w[w_start + i] /= sum;
@@ -1153,7 +1153,7 @@ fn swma_batch_inner_into(
     };
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // Resolve once
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1180,7 +1180,7 @@ fn swma_batch_inner_into(
         }
     };
 
-    // Run every row, writing directly into output buffer
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1209,7 +1209,7 @@ unsafe fn swma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    _w_ptr: *const f64, // unused in O(n) algorithm
+    _w_ptr: *const f64, 
     out: &mut [f64],
 ) {
     let len = data.len();
@@ -1552,7 +1552,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_swma_no_poison(
         test_name: &str,
@@ -1563,7 +1563,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to catch uninitialized memory reads
+        
         let test_periods = vec![1, 2, 3, 5, 7, 10, 15, 20, 30, 50, 100];
 
         for period in test_periods {
@@ -1572,23 +1572,23 @@ mod tests {
             };
             let input = SwmaInput::from_candles(&candles, "close", params);
 
-            // Skip if period is too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = swma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1596,7 +1596,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1604,7 +1604,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1617,7 +1617,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_swma_no_poison(
         _test_name: &str,
@@ -1634,12 +1634,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: Generate periods from 1 to 100, then generate data with appropriate length
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    period.max(2)..400, // Ensure at least period elements
+                    period.max(2)..400, 
                 ),
                 Just(period),
             )
@@ -1656,10 +1656,10 @@ mod tests {
                 let SwmaOutput { values: ref_out } =
                     swma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length matches input length
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period check (first period-1 values should be NaN)
+                
                 if period > 1 {
                     for i in 0..(period - 1) {
                         prop_assert!(
@@ -1671,11 +1671,11 @@ mod tests {
                     }
                 }
 
-                // Build weights for validation
+                
                 let weights = build_symmetric_triangle_avec(period);
 
-                // Property 3: Weight properties
-                // 3a: Weights sum to 1.0
+                
+                
                 let weight_sum: f64 = weights.iter().sum();
                 prop_assert!(
                     (weight_sum - 1.0).abs() < 1e-10,
@@ -1683,7 +1683,7 @@ mod tests {
                     weight_sum
                 );
 
-                // 3b: Weights are symmetric
+                
                 for i in 0..period / 2 {
                     let left = weights[i];
                     let right = weights[period - 1 - i];
@@ -1697,7 +1697,7 @@ mod tests {
                     );
                 }
 
-                // Property 4: Bounds checking and specific value tests
+                
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1705,7 +1705,7 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Output should be within window bounds
+                    
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
                         "idx {}: {} ∉ [{}, {}]",
@@ -1715,7 +1715,7 @@ mod tests {
                         hi
                     );
 
-                    // Property 5: Period=1 returns exact input values
+                    
                     if period == 1 {
                         prop_assert!(
                             (y - data[i]).abs() <= f64::EPSILON,
@@ -1726,7 +1726,7 @@ mod tests {
                         );
                     }
 
-                    // Property 6: Period=2 returns simple average
+                    
                     if period == 2 && i >= 1 {
                         let expected = (data[i - 1] + data[i]) / 2.0;
                         prop_assert!(
@@ -1738,7 +1738,7 @@ mod tests {
                         );
                     }
 
-                    // Property 7: Constant data produces constant output
+                    
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                         prop_assert!(
                             (y - data[0]).abs() < 1e-9,
@@ -1749,7 +1749,7 @@ mod tests {
                         );
                     }
 
-                    // Property 8: Cross-kernel validation
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1766,7 +1766,7 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    // Use slightly higher ULP tolerance for AVX512 due to potential FMA differences
+                    
                     let max_ulp = if matches!(kernel, Kernel::Avx512) {
                         20
                     } else {
@@ -1864,7 +1864,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1872,19 +1872,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple different batch configurations to catch edge cases
-        // SWMA typically uses smaller periods than other indicators
+        
+        
         let batch_configs = vec![
-            (1, 10, 1),   // All small periods including edge cases
-            (3, 9, 3),    // Small periods with gaps
-            (5, 25, 5),   // Medium periods
-            (10, 50, 10), // Larger periods
-            (2, 2, 1),    // Single period (edge case)
-            (1, 30, 2),   // Odd periods only
+            (1, 10, 1),   
+            (3, 9, 3),    
+            (5, 25, 5),   
+            (10, 50, 10), 
+            (2, 2, 1),    
+            (1, 30, 2),   
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip if the largest period exceeds data length
+            
             if end > c.close.len() {
                 continue;
             }
@@ -1894,9 +1894,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1910,7 +1910,7 @@ mod tests {
                     0
                 };
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1918,7 +1918,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1926,7 +1926,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1939,7 +1939,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1948,7 +1948,7 @@ mod tests {
         Ok(())
     }
 
-    // Parity test: native into API matches Vec-returning API, including NaN warmups.
+    
     #[test]
     fn test_swma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1965,13 +1965,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In WASM builds, the native name is taken by the bindgen export; use slice variant.
+            
             swma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(out.len(), baseline.len());
 
-        // NaN-aware equality: treat NaN == NaN as equal; otherwise require exact match.
+        
         for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
             assert!(
@@ -2033,12 +2033,12 @@ pub fn swma_py<'py>(
     };
     let swma_in = SwmaInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| swma_with_kernel(&swma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2097,33 +2097,33 @@ pub fn swma_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?; 
 
     let sweep = SwmaBatchRange {
         period: period_range,
     };
 
-    // 1. Expand grid once to know rows*cols
+    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // 2. Pre-allocate NumPy array (1-D, will reshape later) with checked size
+    
     let rows_cols = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("swma: rows*cols overflow during allocation"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows_cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // 3. Heavy work without the GIL
+    
     let combos = py
         .allow_threads(|| {
-            // Pass kernel directly - inner function will resolve Auto if needed
+            
             swma_batch_inner_into(slice_in, &sweep, kern, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 4. Build dict with the GIL
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2211,7 +2211,7 @@ pub fn swma_cuda_many_series_one_param_dev_py(
     })
 }
 
-// ---------------- SWMA Python device handle (CAI v3 + DLPack) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Swma", unsendable)]
 pub struct DeviceArrayF32SwmaPy {

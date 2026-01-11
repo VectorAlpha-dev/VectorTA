@@ -1,12 +1,12 @@
-// Optimized CUDA kernels for the Kaufman Adaptive Moving Average (KAMA).
-//
-// Drop-in replacements tuned for CUDA 13 / Ada (SM 8.9).
-// Changes vs. previous version:
-//  - Remove full-buffer NaN clear + __syncthreads(); only write NaNs where needed.
-//  - Warp-parallel reduction to seed initial Σ|Δp|.
-//  - Fewer global loads by carrying prev_price and reusing trailing_value.
-//  - Use FMA for the recurrence.
-//  - Add __launch_bounds__(32) hint (one warp per block recommended).
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -14,14 +14,14 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
-#include <math_constants.h> // CUDART_NAN_F
+#include <math_constants.h> 
 
 namespace {
 
 constexpr int WARP = 32;
 
 __device__ __forceinline__ double kama_const_max() {
-    return 2.0 / 31.0; // 2 / (30 + 1)
+    return 2.0 / 31.0; 
 }
 
 __device__ __forceinline__ double kama_const_diff() {
@@ -37,12 +37,12 @@ __device__ __forceinline__ double warp_sum(double v) {
     return v;
 }
 
-} // namespace
+} 
 
-// ============================================================================
-// 1) One series, many period combos (batch), prices are contiguous (row-major).
-//    Each block handles one combo; recommend blockDim.x == 32.
-// ============================================================================
+
+
+
+
 extern "C" __global__ __launch_bounds__(32)
 void kama_batch_f32(const float* __restrict__ prices,
                     const int* __restrict__ periods,
@@ -56,7 +56,7 @@ void kama_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    // Validate once; if invalid, fill all NaNs and return.
+    
     const bool invalid =
         (period <= 0) ||
         (first_valid < 0 || first_valid >= series_len) ||
@@ -66,29 +66,29 @@ void kama_batch_f32(const float* __restrict__ prices,
     const float nan_f = CUDART_NAN_F;
 
     if (invalid) {
-        // Parallel full clear to NaN for this combo; no further writes follow.
+        
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out[base + i] = nan_f;
         }
         return;
     }
 
-    // First valid output index for KAMA (right after the warmup window).
+    
     const int initial_idx = first_valid + period;
 
-    // Clear only the prefix that must be NaN. No barrier needed.
+    
     for (int i = threadIdx.x; i < initial_idx; i += blockDim.x) {
         out[base + i] = nan_f;
     }
 
-    // --- Initialize Σ|Δp| over [first_valid .. first_valid + period - 1]
-    // Warp-parallel reduction across the first warp.
+    
+    
     double sum_roc1 = 0.0;
     if (threadIdx.x < WARP) {
         const int lane = threadIdx.x;
         double local = 0.0;
         const int start = first_valid;
-        const int end   = first_valid + period; // exclusive for the left idx
+        const int end   = first_valid + period; 
         for (int j = start + lane; j < end; j += WARP) {
             const double a = static_cast<double>(prices[j]);
             const double b = static_cast<double>(prices[j + 1]);
@@ -98,10 +98,10 @@ void kama_batch_f32(const float* __restrict__ prices,
         if (lane == 0) sum_roc1 = local;
     }
 
-    // Only thread 0 proceeds to the recurrence (sequential by nature).
+    
     if (threadIdx.x != 0) return;
 
-    // Seed the first KAMA output.
+    
     double prev_price = static_cast<double>(prices[initial_idx]);
     double prev_kama  = prev_price;
     out[base + initial_idx] = static_cast<float>(prev_kama);
@@ -116,35 +116,35 @@ void kama_batch_f32(const float* __restrict__ prices,
         const double price         = static_cast<double>(prices[i]);
         const double next_trailing = static_cast<double>(prices[trailing_idx + 1]);
 
-        // Incremental update of Σ|Δp| with two abs terms (entering & leaving).
+        
         sum_roc1 += fabs(price - prev_price) - fabs(next_trailing - trailing_value);
 
-        // Slide the trailing window one step.
+        
         trailing_value = next_trailing;
         trailing_idx  += 1;
 
-        // Reuse trailing_value as the "anchor" (saves a global load).
+        
         const double direction = fabs(price - trailing_value);
         const double er = (sum_roc1 == 0.0) ? 0.0 : (direction / sum_roc1);
 
         double sc = er * cdiff + cmax;
         sc *= sc;
 
-        // Fused multiply-add for the recurrence.
+        
         prev_kama = fma(price - prev_kama, sc, prev_kama);
         out[base + i] = static_cast<float>(prev_kama);
 
-        // Carry prev_price forward (saves a global load of prices[i-1]).
+        
         prev_price = price;
     }
 }
 
-// Prefix-optimized batch kernel: uses host-precomputed prefix of |p[t]-p[t-1]| to
-// seed the initial sum_roc1 in O(1) per combo, matching scalar behavior.
-//
-// prefix_roc1 must be a length-(series_len+1) array where:
-//   prefix_roc1[0] = 0
-//   prefix_roc1[t] = sum_{k=1..t} |p[k]-p[k-1]| with NaN-insensitive accumulation (host)
+
+
+
+
+
+
 extern "C" __global__ __launch_bounds__(32)
 void kama_batch_prefix_f32(const float* __restrict__ prices,
                            const float* __restrict__ prefix_roc1,
@@ -159,7 +159,7 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    const int initial_idx = first_valid + period; // first KAMA output index
+    const int initial_idx = first_valid + period; 
     const float nan_f = CUDART_NAN_F;
 
     const bool invalid =
@@ -183,9 +183,9 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
         out[base + initial_idx] = prices[initial_idx];
     }
 
-    // Warp-cooperative scan over affine transforms:
-    //   x[t] = (1 - sc[t]) * x[t-1] + sc[t] * price[t]
-    // where sc[t] is derived from ER using prefix_roc1 in O(1).
+    
+    
+    
     const int lane = threadIdx.x;
     if (lane >= WARP) return;
 
@@ -223,7 +223,7 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
         prev_kama = __shfl_sync(m, x, WARP - 1);
     }
 
-    // Tail (< 32) is cheap; finish sequentially in lane 0.
+    
     if (lane == 0) {
         float kama = prev_kama;
         for (int t = chunk_start; t < series_len; ++t) {
@@ -261,12 +261,12 @@ void kama_many_series_one_param_time_major_f32(
     const int initial_idx = first_valid + period;
     const float nan_f = CUDART_NAN_F;
 
-    // Helper for time-major indexing
+    
     auto at = [num_series](const float* buf, int row, int col) {
         return buf[row * num_series + col];
     };
 
-    // If invalid, clear the entire column.
+    
     if (invalid || initial_idx >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_tm[t * num_series + series] = nan_f;
@@ -274,18 +274,18 @@ void kama_many_series_one_param_time_major_f32(
         return;
     }
 
-    // Clear only the prefix to NaN.
+    
     for (int t = threadIdx.x; t < initial_idx; t += blockDim.x) {
         out_tm[t * num_series + series] = nan_f;
     }
 
-    // Warp-parallel init of Σ|Δp|.
+    
     double sum_roc1 = 0.0;
     if (threadIdx.x < WARP) {
         const int lane = threadIdx.x;
         double local = 0.0;
         const int start = first_valid;
-        const int end   = first_valid + period; // exclusive for left idx
+        const int end   = first_valid + period; 
         for (int j = start + lane; j < end; j += WARP) {
             const double a = static_cast<double>(at(prices_tm, j,     series));
             const double b = static_cast<double>(at(prices_tm, j + 1, series));

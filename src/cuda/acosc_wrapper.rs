@@ -21,11 +21,11 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-// --- Kernel constants (must match CUDA kernels) ---
+
 const P5: usize = 5;
 const P34: usize = 34;
 const WARP: usize = 32;
-// Dynamic shared memory required by the warp kernel (bytes)
+
 const SHMEM_WARP_BYTES: u32 = ((P34 + P5 + P5) * WARP * std::mem::size_of::<f32>()) as u32;
 
 #[derive(Debug, Error)]
@@ -116,7 +116,7 @@ impl CudaAcosc {
         } else { Ok(()) }
     }
 
-    // -------- Batch: one series (degenerate single row) --------
+    
     pub fn acosc_batch_dev(
         &self,
         high_f32: &[f32],
@@ -128,7 +128,7 @@ impl CudaAcosc {
             .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite())
             .unwrap_or(len);
 
-        // VRAM estimate: 2 inputs + 2 outputs
+        
         let in_bytes = 2usize.saturating_mul(len).saturating_mul(std::mem::size_of::<f32>());
         let out_bytes = 2usize.saturating_mul(len).saturating_mul(std::mem::size_of::<f32>());
         let required = in_bytes.saturating_add(out_bytes);
@@ -200,12 +200,12 @@ impl CudaAcosc {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        // Ensure temporaries on device live until the kernel completes.
+        
         self.stream.synchronize()?;
         Ok(())
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
     pub fn acosc_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -221,7 +221,7 @@ impl CudaAcosc {
                 "time-major inputs must be same length and match rows*cols".into(),
             ));
         }
-        // first_valid per series
+        
         let mut first_valids = vec![series_len as i32; num_series];
         for s in 0..num_series {
             for t in 0..series_len {
@@ -330,7 +330,7 @@ impl CudaAcosc {
         if num_series <= 0 || series_len <= 0 {
             return Ok(());
         }
-        // Heuristic: prefer warp-striped kernel for large series counts with enough time steps
+        
         let use_warp = (num_series as usize) >= 64 && (series_len as usize) >= 128;
         unsafe {
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
@@ -380,13 +380,13 @@ impl CudaAcosc {
                 self.stream.launch(&func, grid, block, 0, &mut args)?;
             }
         }
-        // Ensure temporary inputs aren’t dropped until this work finishes.
+        
         self.stream.synchronize()?;
         Ok(())
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -503,7 +503,7 @@ pub mod benches {
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaAcosc::new(0).unwrap();
-        // Build time-major arrays
+        
         let mut high_tm = vec![f32::NAN; NUM_SERIES * SERIES_LEN];
         let mut low_tm = vec![f32::NAN; NUM_SERIES * SERIES_LEN];
         for s in 0..NUM_SERIES {

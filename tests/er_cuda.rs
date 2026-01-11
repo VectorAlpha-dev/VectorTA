@@ -1,16 +1,16 @@
-// CUDA integration tests for Kaufman Efficiency Ratio (ER)
 
-use my_project::indicators::er::{
+
+use vector_ta::indicators::er::{
     er_batch_with_kernel, er_with_kernel, ErBatchRange, ErData, ErInput, ErParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::er_wrapper::CudaEr;
+use vector_ta::cuda::er_wrapper::CudaEr;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -42,10 +42,10 @@ fn er_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = ErBatchRange { period: (5, 49, 2) };
 
-    // CPU baseline
+    
     let cpu = er_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU
+    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaEr::new(0).expect("CudaEr::new");
     let dev = cuda.er_batch_dev(&price_f32, &sweep).expect("er_batch_dev");
@@ -55,7 +55,7 @@ fn er_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
 
-    let tol = 5e-2; // ER in FP32 can drift up to ~4e-2 vs f64 in worst cases
+    let tol = 5e-2; 
     for idx in 0..got.len() {
         assert!(
             approx_eq(cpu.values[idx], got[idx] as f64, tol),
@@ -74,8 +74,8 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 1024usize; // time
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -85,7 +85,7 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 20usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -105,7 +105,7 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         }
     }
 
-    // GPU
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaEr::new(0).expect("CudaEr::new");
     let dev = cuda

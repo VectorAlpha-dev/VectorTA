@@ -23,16 +23,16 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-// ---- OBV scan constants must match CUDA defaults ----
-// Kernels are compiled with OBV_BLOCK_SIZE = 256 and OBV_ITEMS_PER_THREAD = 8.
+
+
 const OBV_BLOCK_X: u32 = 256;
 const OBV_ITEMS_PER_THREAD: u32 = 8;
 const OBV_TILE: usize = (OBV_BLOCK_X as usize) * (OBV_ITEMS_PER_THREAD as usize);
 
-// Heuristic: switch to fast 3-pass path when series_len >= FAST_MIN_LEN
+
 const FAST_MIN_LEN: usize = 4096;
 
-// ABI mirror of the CUDA struct used for block totals/offsets.
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct FPair {
@@ -195,7 +195,7 @@ impl CudaObv {
         Ok(())
     }
 
-    // ---------- Public API: one-series × many-params (OBV: single row) ----------
+    
 
     pub fn obv_batch_dev(
         &self,
@@ -215,7 +215,7 @@ impl CudaObv {
             .find(|&i| !close[i].is_nan() && !volume[i].is_nan())
             .ok_or_else(|| CudaObvError::InvalidInput("all values are NaN".into()))?;
 
-        // VRAM estimate: 2 inputs + 1 output + workspace (sums+offsets)
+        
         let tiles = (series_len + OBV_TILE - 1) / OBV_TILE;
         let sz_pair = std::mem::size_of::<FPair>();
         let sz_f32 = std::mem::size_of::<f32>();
@@ -234,10 +234,10 @@ impl CudaObv {
         let bytes = in_bytes
             .checked_add(workspace_bytes)
             .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing total bytes".into()))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(bytes, headroom)?;
 
-        // H2D copies
+        
         let d_close = DeviceBuffer::from_slice(close)?;
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
@@ -262,14 +262,14 @@ impl CudaObv {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaObvError> {
-        // Heuristic: serial fallback for very small series; fast path otherwise
+        
         if series_len < FAST_MIN_LEN {
             let func = self
                 .module
                 .get_function("obv_batch_f32_serial_ref")
                 .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_serial_ref" })?;
 
-            // Cover warmup writes in parallel for larger fv
+            
             let grid_x = ((series_len as u32) + OBV_BLOCK_X - 1) / OBV_BLOCK_X;
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
             let grid: GridSize = (grid_x.max(1), (n_combos as u32).max(1), 1).into();
@@ -295,7 +295,7 @@ impl CudaObv {
             return Ok(());
         }
 
-        // Fast path: three-pass scan and tile offset add
+        
         let pass1 = self
             .module
             .get_function("obv_batch_f32_pass1_tilescan")
@@ -311,18 +311,18 @@ impl CudaObv {
         let repl = self
             .module
             .get_function("obv_batch_f32_replicate_rows")
-            .ok(); // optional if n_combos==1
+            .ok(); 
 
-        // Geometry (matches CUDA defaults): block_x=256, ITEMS=8 => tile=2048
+        
         let tiles = ((series_len + OBV_TILE - 1) / OBV_TILE).max(1);
 
-        // Workspaces: block_sums and block_offsets as [tiles] of FPair
+        
         let mut d_block_sums: DeviceBuffer<FPair> =
             unsafe { DeviceBuffer::uninitialized(tiles) }?;
         let mut d_block_offsets: DeviceBuffer<FPair> =
             unsafe { DeviceBuffer::uninitialized(tiles) }?;
 
-        // Pass 1
+        
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -350,7 +350,7 @@ impl CudaObv {
             }
         }
 
-        // Pass 2
+        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (32, 1, 1).into();
@@ -368,7 +368,7 @@ impl CudaObv {
             }
         }
 
-        // Pass 3
+        
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -392,7 +392,7 @@ impl CudaObv {
             }
         }
 
-        // Optional: replicate row 0 to remaining rows (not used currently, n_combos=1)
+        
         if n_combos > 1 {
             if let Some(func) = repl {
                 let threads = 256u32;
@@ -419,7 +419,7 @@ impl CudaObv {
         Ok(())
     }
 
-    // ---------- Public API: many-series × one-param (time-major) ----------
+    
 
     pub fn obv_many_series_one_param_time_major_dev(
         &self,
@@ -439,7 +439,7 @@ impl CudaObv {
                 "mismatched input sizes for time-major matrix".into(),
             ));
         }
-        // Compute per-series first_valid
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -459,7 +459,7 @@ impl CudaObv {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate: 2 inputs + 1 output + first_valids
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let inputs_bytes = elems
@@ -538,7 +538,7 @@ impl CudaObv {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -551,7 +551,7 @@ pub mod benches {
     const MANY_COLS: usize = 128;
 
     fn bytes_one_series() -> usize {
-        // 2 inputs + 1 output + workspace (FPair sums + offsets)
+        
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let tile = (OBV_BLOCK_X as usize) * (OBV_ITEMS_PER_THREAD as usize);
@@ -562,7 +562,7 @@ pub mod benches {
 
     fn bytes_many_series() -> usize {
         let elems = MANY_ROWS * MANY_COLS;
-        // 2 inputs + 1 output + first_valids
+        
         (2 * elems + elems) * std::mem::size_of::<f32>()
             + MANY_COLS * std::mem::size_of::<i32>()
             + 32 * 1024 * 1024
@@ -608,7 +608,7 @@ pub mod benches {
 
             let stream = &self.cuda.stream;
 
-            // Pass 1
+            
             {
                 let grid: GridSize = (self.tiles as u32, 1, 1).into();
                 let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -635,7 +635,7 @@ pub mod benches {
                 }
             }
 
-            // Pass 2
+            
             {
                 let grid: GridSize = (1, 1, 1).into();
                 let block: BlockSize = (32, 1, 1).into();
@@ -652,7 +652,7 @@ pub mod benches {
                 }
             }
 
-            // Pass 3
+            
             {
                 let grid: GridSize = (self.tiles as u32, 1, 1).into();
                 let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();

@@ -196,8 +196,8 @@ pub fn eval_double_ma_one(candles: &Candles, params: &DoubleMaParams) -> Metrics
         };
     }
 
-    // Backwards-compat: treat ids as a minimal catalog.
-    // Prefer `eval_double_ma_one_with_types` for selector-based MA dispatch.
+    
+    
     let fast = match params.fast_ma_id {
         0 => compute_ma_series(candles, params.fast_len as usize, "sma", "close"),
         1 => compute_ma_series(candles, params.fast_len as usize, "ema", "close"),
@@ -387,7 +387,7 @@ pub fn double_ma_batch_cpu(
 struct PeriodMatrixF64 {
     period_start: u16,
     period_end: u16,
-    values: Vec<f64>, // row-major: period-major rows, time-major cols
+    values: Vec<f64>, 
 }
 
 impl PeriodMatrixF64 {
@@ -462,8 +462,8 @@ fn build_ma_matrices_cpu<'a>(
 
         let mut values: Vec<f64> = vec![f64::NAN; expected_len];
 
-        // Prefer the batch dispatcher (SIMD + scalar batch kernels). If unsupported, fall back
-        // to per-period `ma()` calls but still cache results per MA type.
+        
+        
         let batch = ma_batch(
             ma_type,
             MaData::Candles {
@@ -577,7 +577,7 @@ mod tests {
 
         let metrics = builder.run_cpu(&candles);
         assert_eq!(metrics.len(), 1);
-        // In a simple uptrend, long-only MA crossover should not be catastrophic.
+        
         let m = &metrics[0];
         assert!(m.max_dd >= 0.0);
     }

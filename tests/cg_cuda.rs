@@ -1,16 +1,16 @@
-// CUDA integration tests for Center of Gravity (CG)
 
-use my_project::indicators::cg::{
+
+use vector_ta::indicators::cg::{
     cg_batch_with_kernel, cg_with_kernel, CgBatchRange, CgInput, CgParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaCg;
+use vector_ta::cuda::oscillators::CudaCg;
 
 fn approx_close(a: f64, b: f64, rtol: f64, atol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -62,8 +62,8 @@ fn cg_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda cg batch result");
 
-    // Slightly relaxed tolerances for FP32 CUDA vs FP64 CPU.
-    // Prior default (rtol=1e-4, atol=5e-4) was too strict for some windows.
+    
+    
     let rtol = 1.0e-3f64;
     let atol = 6.0e-2f64;
     for idx in 0..(cpu.rows * cpu.cols) {

@@ -24,7 +24,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-// Host-side DS primitives for building float2 prefix sums (FP64-free)
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 struct Float2 {
@@ -289,7 +289,7 @@ impl CudaKurtosis {
         Ok((combos, first_valid, len))
     }
 
-    // Build DS prefixes directly into pinned host buffers for faster H2D transfers.
+    
     fn build_prefixes_ds(
         &self,
         data: &[f32],
@@ -310,14 +310,14 @@ impl CudaKurtosis {
         let mut ps4 = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
         let mut ps_nan = unsafe { LockedBuffer::<i32>::uninitialized(n + 1) }?;
 
-        // init first element
+        
         ps1.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps2.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps3.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps4.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps_nan.as_mut_slice()[0] = 0;
 
-        // running DS accumulators (hi, lo)
+        
         let mut s1 = (0.0f32, 0.0f32);
         let mut s2 = (0.0f32, 0.0f32);
         let mut s3 = (0.0f32, 0.0f32);
@@ -382,7 +382,7 @@ impl CudaKurtosis {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        // Chunk grid.y to <= 65_535
+        
         let mut launched = 0usize;
         while launched < combos {
             let chunk = (combos - launched).min(65_535);
@@ -395,7 +395,7 @@ impl CudaKurtosis {
                 let mut psn = d_ps_nan.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_valid_i = first_valid as i32;
-                // Adjust raw device pointer by element offset (u64 arithmetic)
+                
                 let mut periods = d_periods
                     .as_device_ptr()
                     .as_raw()
@@ -432,7 +432,7 @@ impl CudaKurtosis {
         let (h_ps1, h_ps2, h_ps3, h_ps4, h_ps_nan) = self.build_prefixes_ds(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
 
-        // VRAM estimate with checked arithmetic
+        
         let bytes_prefix = (h_ps1.len() + h_ps2.len() + h_ps3.len() + h_ps4.len())
             .checked_mul(std::mem::size_of::<Float2>())
             .ok_or_else(|| {
@@ -468,7 +468,7 @@ impl CudaKurtosis {
             .ok_or_else(|| {
                 CudaKurtosisError::InvalidInput("VRAM bytes overflow".into())
             })?;
-        let headroom = 64 * 1024 * 1024; // ~64MB headroom
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaKurtosisError::OutOfMemory {
@@ -483,7 +483,7 @@ impl CudaKurtosis {
             }
         }
 
-        // Device allocations/copies
+        
         let d_ps1 =
             unsafe { DeviceBuffer::from_slice_async(h_ps1.as_slice(), &self.stream) }?;
         let d_ps2 =
@@ -549,7 +549,7 @@ impl CudaKurtosis {
             return Err(CudaKurtosisError::InvalidInput("period must be > 0".into()));
         }
 
-        // Compute per-series first_valid
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -563,7 +563,7 @@ impl CudaKurtosis {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate
+        
         let bytes_in = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| {
@@ -655,7 +655,7 @@ impl CudaKurtosis {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

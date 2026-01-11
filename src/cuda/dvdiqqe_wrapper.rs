@@ -128,14 +128,14 @@ impl CudaDvdiqqe {
 
     #[inline]
     fn chunk_size_for_batch(n_rows: usize, len: usize) -> usize {
-        // Allow large grid.x (limit ~2.147e9). Keep a modest VRAM guard
-        // and cap by memory-per-combo (4 planes: dvdi, fast, slow, center).
-        let max_grid_x = 2_147_000_000usize; // below u32::MAX for safety
+        
+        
+        let max_grid_x = 2_147_000_000usize; 
         let per_combo_bytes = 4usize * len * std::mem::size_of::<f32>();
 
         let mut max_by_mem = n_rows;
         if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize << 20; // ~64MB headroom
+            let headroom = 64usize << 20; 
             if free > (per_combo_bytes + headroom) {
                 let budget = free - headroom;
                 max_by_mem = (budget / per_combo_bytes).max(1);
@@ -180,13 +180,13 @@ impl CudaDvdiqqe {
         let len = close.len();
         if len == 0 { return Err(CudaDvdiqqeError::InvalidInput("empty series".into())); }
 
-        // Find first finite close
+        
         let first_valid = match close.iter().position(|x| x.is_finite()) {
             Some(i) => i,
             None => return Err(CudaDvdiqqeError::InvalidInput("all NaN close".into())),
         };
 
-        // Build parameter grid like CPU path
+        
         let (p_start, p_end, p_step) = sweep.period;
         let (s_start, s_end, s_step) = sweep.smoothing_period;
         let (f_start, f_end, f_step) = sweep.fast_multiplier;
@@ -196,7 +196,7 @@ impl CudaDvdiqqe {
         let mut fasts = Vec::<f32>::new();
         let mut slows = Vec::<f32>::new();
         let mut n_combos = 0usize;
-        // robust range expansion: zero step => static; reversed bounds supported
+        
         let mut push_axis_usize = |start: usize, end: usize, step: usize, dst: &mut Vec<i32>| {
             if step == 0 || start == end { dst.push(start as i32); return; }
             if start < end {
@@ -222,11 +222,11 @@ impl CudaDvdiqqe {
         if n_combos == 0 {
             return Err(CudaDvdiqqeError::InvalidInput("empty sweep".into()));
         }
-        // checked sizes
+        
         let plane = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("n_combos*len overflow".into()))?;
-        // VRAM budget check (4 planes + params)
+        
         let bytes_out = plane
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("bytes overflow".into()))?;
@@ -239,7 +239,7 @@ impl CudaDvdiqqe {
             .saturating_add(slows.len() * std::mem::size_of::<f32>());
         self.will_fit(required, 64usize << 20)?;
 
-        // Device inputs
+        
         let d_open: DeviceBuffer<f32> = DeviceBuffer::from_slice(open)?;
         let d_close: DeviceBuffer<f32> = DeviceBuffer::from_slice(close)?;
         let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume { Some(DeviceBuffer::from_slice(v)?) } else { None };
@@ -249,20 +249,20 @@ impl CudaDvdiqqe {
         let d_fasts: DeviceBuffer<f32> = DeviceBuffer::from_slice(&fasts)?;
         let d_slows: DeviceBuffer<f32> = DeviceBuffer::from_slice(&slows)?;
 
-        // Outputs
+        
         let mut d_dvdi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_fast: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_slow: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_cent: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
 
-        // Kernel
+        
         let func = self
             .module
             .get_function("dvdiqqe_batch_f32")
             .map_err(|_| CudaDvdiqqeError::MissingKernelSymbol { name: "dvdiqqe_batch_f32" })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => Self::align_to_warp(block_x).max(32),
-            BatchKernelPolicy::Auto => 32, // one warp per param row; lane 0 scans, others help NaN warmup
+            BatchKernelPolicy::Auto => 32, 
         };
         let chunk = Self::chunk_size_for_batch(n_combos, len);
         let mut launched = 0usize;
@@ -275,7 +275,7 @@ impl CudaDvdiqqe {
             unsafe {
                 let mut open_ptr = d_open.as_device_ptr().as_raw();
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
-                // Honor tick-only volume mode
+                
                 let use_tick_only = volume_type.eq_ignore_ascii_case("tick-only")
                     || volume_type.eq_ignore_ascii_case("tick_only")
                     || volume_type.eq_ignore_ascii_case("tick");
@@ -311,7 +311,7 @@ impl CudaDvdiqqe {
                 let mut len_i = len as i32;
                 let mut fv_i = first_valid as i32;
                 let mut tick_f = tick_size as f32;
-                // Note: current CUDA kernel assumes center_type is constant across rows; 1=dynamic, 0=static
+                
                 let mut center_dyn = if center_type.eq_ignore_ascii_case("dynamic") {
                     1i32
                 } else {
@@ -465,7 +465,7 @@ impl CudaDvdiqqe {
             ));
         }
 
-        // First-valid per series based on close
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -486,7 +486,7 @@ impl CudaDvdiqqe {
             }
         }
 
-        // VRAM fit for outputs
+        
         let bytes = n
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("bytes overflow".into()))?;
@@ -512,18 +512,18 @@ impl CudaDvdiqqe {
             .map_err(|_| CudaDvdiqqeError::MissingKernelSymbol { name: "dvdiqqe_many_series_one_param_f32" })?;
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => Self::align_to_warp(block_x),
-            ManySeriesKernelPolicy::Auto => 128, // 4 warps per block
+            ManySeriesKernelPolicy::Auto => 128, 
         };
         block_x = block_x.max(32);
         let wpb = Self::warps_per_block(block_x);
-        let grid_x = ((cols as u32) + wpb - 1) / wpb; // 1 warp -> 1 series
+        let grid_x = ((cols as u32) + wpb - 1) / wpb; 
         if grid_x == 0 || block_x == 0 { return Err(CudaDvdiqqeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut open_ptr = d_open.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            // Honor tick-only volume mode
+            
             let use_tick_only = volume_type.eq_ignore_ascii_case("tick-only")
                 || volume_type.eq_ignore_ascii_case("tick_only")
                 || volume_type.eq_ignore_ascii_case("tick");
@@ -594,7 +594,7 @@ impl CudaDvdiqqe {
     }
 }
 
-// ---------------- Benches ----------------
+
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
@@ -785,7 +785,7 @@ pub mod benches {
         let cuda = CudaDvdiqqe::new(0).unwrap();
         let first_valid = close.iter().position(|x| x.is_finite()).unwrap_or(0);
 
-        // Expand the sweep into param vectors (same cartesian order as dvdiqqe_batch_dev)
+        
         let axis_usize = |(start, end, step): (usize, usize, usize)| -> Vec<i32> {
             if step == 0 || start == end {
                 return vec![start as i32];
@@ -912,7 +912,7 @@ pub mod benches {
                 vol_tm[t * cols + s] = (0.4 + (x * 0.77).cos().abs()).max(0.0);
             }
         }
-        // First-valid per series (open+close finite)
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -935,7 +935,7 @@ pub mod benches {
         let d_slow: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_slow");
         let d_cent: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_cent");
 
-        // Match wrapper defaults: block_x=128 and 1 warp per series
+        
         let block_x: u32 = 128;
         let wpb = CudaDvdiqqe::warps_per_block(block_x);
         let grid_x = ((cols as u32) + wpb - 1) / wpb;

@@ -1,14 +1,14 @@
-// CUDA kernels for TRIX (Triple Exponential Average Oscillator)
-//
-// Math: triple EMA of ln(price), output is delta of EMA3 scaled by 10000.
-// Category: recurrence/IIR per parameter or per series (no large shared memory).
-//
-// Semantics (must match scalar):
-// - Warmup index for a given period p and first valid index fv is
-//   warmup_end = fv + 3*(p-1) + 1. Indices < warmup_end are filled with NaN.
-// - The first finite TRIX sample is written at index == warmup_end.
-// - We use FP32 on device; upstream wrappers build CPU baselines on FP32-rounded
-//   inputs for CUDA tests.
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,7 +18,7 @@
 #include <math.h>
 #include <stdint.h>
 
-// Quiet NaN (canonical single-precision)
+
 #ifndef TRIX_QNAN_U32
 #define TRIX_QNAN_U32 0x7fc00000u
 #endif
@@ -27,21 +27,21 @@ static __device__ __forceinline__ float trix_qnan() {
     return __int_as_float((int)TRIX_QNAN_U32);
 }
 
-// FMA EMA update: prev += a * (x - prev)
+
 static __device__ __forceinline__ float ema_step(float prev, float x, float a) {
     return fmaf(a, x - prev, prev);
 }
 
-// Double-precision EMA update (used to better match scalar reference on tricky series).
+
 static __device__ __forceinline__ double ema_step_d(double prev, double x, double a) {
     return fma(a, x - prev, prev);
 }
 
-// -------------------------------------------
-// 1) Param-sweep over periods (one price series)
-//    Inputs are ln(price) precomputed on host for reuse across rows.
-//    One block per combo, single thread sequential scan (simple+robust).
-// -------------------------------------------
+
+
+
+
+
 extern "C" __global__
 void trix_batch_f32(const float* __restrict__ logs,
                     const int*   __restrict__ periods,
@@ -58,7 +58,7 @@ void trix_batch_f32(const float* __restrict__ logs,
 
     float* __restrict__ out_row = out + combo * series_len;
 
-    const int warmup_end = first_valid + 3 * (period - 1) + 1; // first finite sample index
+    const int warmup_end = first_valid + 3 * (period - 1) + 1; 
     const int nan_to = warmup_end < series_len ? warmup_end : series_len;
     const float qn = trix_qnan();
     for (int i = 0; i < nan_to; ++i) out_row[i] = qn;
@@ -70,14 +70,14 @@ void trix_batch_f32(const float* __restrict__ logs,
     const double a_d = (double)a;
     const double inv_n_d = (double)inv_n;
 
-    // Stage 1 seed: EMA1 via SMA of logs[first_valid .. first_valid+period)
+    
     float sum1 = 0.0f;
     for (int i = first_valid; i < first_valid + period; ++i) {
         sum1 += logs[i];
     }
-    float ema1 = sum1 * inv_n; // at idx = first_valid + period - 1
+    float ema1 = sum1 * inv_n; 
 
-    // Build remaining EMA1 values (period-1) and accumulate for EMA2 seed
+    
     float sum_ema1 = ema1;
     int end2 = first_valid + 2 * period - 1;
     for (int i = first_valid + period; i < end2; ++i) {
@@ -85,10 +85,10 @@ void trix_batch_f32(const float* __restrict__ logs,
         sum_ema1 += ema1;
     }
 
-    // Stage 2 seed: EMA2 via SMA of first `period` EMA1s
-    float ema2 = sum_ema1 * inv_n; // at idx = first_valid + 2*period - 2
+    
+    float ema2 = sum_ema1 * inv_n; 
 
-    // Build remaining EMA2 values (period-1) and accumulate for EMA3 seed
+    
     double sum_ema2 = (double)ema2;
     int end3 = first_valid + 3 * period - 2;
     for (int i = end2; i < end3; ++i) {
@@ -97,10 +97,10 @@ void trix_batch_f32(const float* __restrict__ logs,
         sum_ema2 += (double)ema2;
     }
 
-    // Stage 3 seed: EMA3 via SMA of first `period` EMA2s
-    double ema3_prev = sum_ema2 * inv_n_d; // at idx = first_valid + 3*period - 3
+    
+    double ema3_prev = sum_ema2 * inv_n_d; 
 
-    // First TRIX sample at warmup_end (== first_valid + 3*(p-1) + 1)
+    
     int t = warmup_end;
     double ema3 = ema3_prev;
     {
@@ -113,7 +113,7 @@ void trix_batch_f32(const float* __restrict__ logs,
         ++t;
     }
 
-    // Main time loop
+    
     for (; t < series_len; ++t) {
         const float lv = logs[t];
         ema1 = ema_step(ema1, lv, a);
@@ -124,15 +124,15 @@ void trix_batch_f32(const float* __restrict__ logs,
     }
 }
 
-// -------------------------------------------
-// 1b) Param-sweep over periods (one price series), warp-cooperative scan.
-//
-// - One warp per combo; emits 32 timesteps per iteration via an inclusive scan
-//   over affine transforms for each EMA stage.
-// - Warmup/seed is computed sequentially in lane0 (<= ~3*period steps).
-//
-// Launch guidance: blockDim.x should be a multiple of 32 (e.g., 256).
-// -------------------------------------------
+
+
+
+
+
+
+
+
+
 extern "C" __global__
 void trix_batch_warp_scan_f32(const float* __restrict__ logs,
                               const int*   __restrict__ periods,
@@ -160,7 +160,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
     int fv = first_valid;
     if (fv < 0) fv = 0;
 
-    const int warmup_end = fv + 3 * (period - 1) + 1; // first finite sample index
+    const int warmup_end = fv + 3 * (period - 1) + 1; 
     const int nan_to = warmup_end < series_len ? warmup_end : series_len;
     for (int i = lane; i < nan_to; i += 32) out_row[i] = qn;
     if (warmup_end >= series_len) return;
@@ -176,7 +176,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
     if (lane == 0) {
         float sum1 = 0.0f;
         for (int i = fv; i < fv + period; ++i) sum1 += logs[i];
-        ema1 = sum1 * inv_n; // at idx = fv + period - 1
+        ema1 = sum1 * inv_n; 
 
         float sum_ema1 = ema1;
         const int end2 = fv + 2 * period - 1;
@@ -184,7 +184,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
             ema1 = ema_step(ema1, logs[i], a);
             sum_ema1 += ema1;
         }
-        ema2 = sum_ema1 * inv_n; // at idx = fv + 2*period - 2
+        ema2 = sum_ema1 * inv_n; 
 
         float sum_ema2 = ema2;
         const int end3 = fv + 3 * period - 2;
@@ -193,7 +193,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
             ema2 = ema_step(ema2, ema1, a);
             sum_ema2 += ema2;
         }
-        ema3_prev = sum_ema2 * inv_n; // at idx = fv + 3*period - 3 (== warmup_end - 1)
+        ema3_prev = sum_ema2 * inv_n; 
     }
 
     ema1 = __shfl_sync(mask, ema1, 0);
@@ -204,7 +204,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         const int t = t0 + lane;
         const float lv = (t < series_len) ? logs[t] : 0.0f;
 
-        // EMA1 scan: y = one_minus_a*y_prev + a*lv
+        
         float A1 = one_minus_a;
         float B1 = a * lv;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -219,7 +219,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         }
         const float ema1_lane = __fmaf_rn(A1, ema1, B1);
 
-        // EMA2 scan: y = one_minus_a*y_prev + a*ema1_lane
+        
         float A2 = one_minus_a;
         float B2 = a * ema1_lane;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -234,7 +234,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         }
         const float ema2_lane = __fmaf_rn(A2, ema2, B2);
 
-        // EMA3 scan: y = one_minus_a*y_prev + a*ema2_lane
+        
         float A3 = one_minus_a;
         float B3 = a * ema2_lane;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -261,10 +261,10 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
     }
 }
 
-// --------------------------------------------------------------
-// 2) Multi-series, one period, time-major layout (prices_tm[t*N + s])
-//    Compute ln(price) on device (series are independent).
-// --------------------------------------------------------------
+
+
+
+
 extern "C" __global__
 void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     int period,
@@ -292,7 +292,7 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float inv_n = 1.0f / float(period);
     const float SCALE = 10000.0f;
 
-    // Stage 1 seed: EMA1 via SMA of ln(price)
+    
     float sum1 = 0.0f;
     for (int i = fv; i < fv + period; ++i) {
         const float px = prices_tm[i * num_series + sidx];
@@ -300,7 +300,7 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float ema1 = sum1 * inv_n;
 
-    // Build remaining EMA1 values (period-1) and accumulate for EMA2 seed
+    
     float sum_ema1 = ema1;
     int end2 = fv + 2 * period - 1;
     for (int i = fv + period; i < end2; ++i) {
@@ -309,10 +309,10 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
         sum_ema1 += ema1;
     }
 
-    // Stage 2 seed: EMA2 via SMA of EMA1
+    
     float ema2 = sum_ema1 * inv_n;
 
-    // Build remaining EMA2 values (period-1) and accumulate for EMA3 seed
+    
     float sum_ema2 = ema2;
     int end3 = fv + 3 * period - 2;
     for (int i = end2; i < end3; ++i) {
@@ -322,10 +322,10 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
         sum_ema2 += ema2;
     }
 
-    // Stage 3 seed
+    
     float ema3_prev = sum_ema2 * inv_n;
 
-    // First TRIX sample at warmup_end
+    
     int t = warmup_end;
     float ema3 = ema3_prev;
     {

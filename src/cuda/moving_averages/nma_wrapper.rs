@@ -29,10 +29,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// Must match device-side array in kernels/cuda/moving_averages/nma_kernel.cu
+
 const NMA_MAX_PERIOD: usize = 4096;
 
-// ---- Kernel selection policy (kept intentionally minimal for NMA) ----
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -61,7 +61,7 @@ impl Default for CudaNmaPolicy {
     }
 }
 
-// Introspection of which kernel got picked (for BENCH_DEBUG=1)
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -102,7 +102,7 @@ pub struct CudaNma {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Tracks how many weights are uploaded to __constant__ c_sqrt_diffs
+    
     weights_len_uploaded: AtomicUsize,
 }
 
@@ -204,7 +204,7 @@ impl CudaNma {
         }
     }
 
-    // ---- VRAM checks + launch chunking ----
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -330,7 +330,7 @@ impl CudaNma {
         Ok((combos, first_valid, len, max_period, abs_diffs))
     }
 
-    // Upload constant-memory weights (c_sqrt_diffs) once per module
+    
     #[inline]
     fn ensure_const_weights(&self, need: usize) -> Result<(), CudaNmaError> {
         if need == 0 {
@@ -347,7 +347,7 @@ impl CudaNma {
             return Ok(());
         }
 
-        // Build host weights sqrt(i+1) - sqrt(i)
+        
         let mut host = [0f32; NMA_MAX_PERIOD];
         for i in 0..need {
             let s0 = (i as f32).sqrt();
@@ -355,7 +355,7 @@ impl CudaNma {
             host[i] = s1 - s0;
         }
 
-        // Resolve symbol and copy to constant memory
+        
         let name = CString::new("c_sqrt_diffs").unwrap();
         let mut sym = self
             .module
@@ -384,7 +384,7 @@ impl CudaNma {
             .get_function("nma_batch_f32")
             .map_err(|_| CudaNmaError::MissingKernelSymbol { name: "nma_batch_f32" })?;
 
-        // Block size selection (default 256; good occupancy on Ada)
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
@@ -392,7 +392,7 @@ impl CudaNma {
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Kernel uses static shared memory for tile+halo; no dynamic shared memory required
+        
         let shared = 0u32;
 
         unsafe {
@@ -417,7 +417,7 @@ impl CudaNma {
             self.stream.launch(&func, grid, block, shared, args)?;
         }
 
-        // Introspection: record selection once per call-site
+        
         unsafe {
             let this = self as *const _ as *mut CudaNma;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -436,10 +436,10 @@ impl CudaNma {
         max_period: usize,
         abs_diffs: &[f32],
     ) -> Result<DeviceArrayF32, CudaNmaError> {
-        // Ensure device-side constant weights are ready
+        
         self.ensure_const_weights(max_period)?;
 
-        // Pinned HtoD uploads with async copies
+        
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
         let mut d_abs_diffs = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
         let h_prices = cust::memory::LockedBuffer::from_slice(data_f32)?;
@@ -451,7 +451,7 @@ impl CudaNma {
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
 
-        // VRAM estimate and headroom (~64MB)
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let bytes_inputs = len.checked_mul(sz_f32).ok_or_else(|| CudaNmaError::InvalidInput("byte size overflow".into()))?;
@@ -469,7 +469,7 @@ impl CudaNma {
         let elems = out_elems;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-        // Chunk grid.y to respect CUDA limits
+        
         for (start, chunk_len) in Self::grid_y_chunks(combos.len()) {
             let periods_ptr = unsafe { d_periods.as_device_ptr().add(start) };
             let out_ptr = unsafe { d_out.as_device_ptr().add(start * len) };
@@ -523,7 +523,7 @@ impl CudaNma {
 
         let dev =
             self.run_batch_kernel(data_f32, &combos, first_valid, len, max_period, &abs_diffs)?;
-        // Use pinned DtoH for faster copy-back
+        
         let mut h_out = unsafe { cust::memory::LockedBuffer::<f32>::uninitialized(expected) }
             .map_err(|e| CudaNmaError::Cuda(e))?;
         unsafe {
@@ -636,7 +636,7 @@ impl CudaNma {
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // No dynamic shared memory required; kernel uses constant memory weights
+        
         let shared = 0u32;
 
         unsafe {
@@ -661,7 +661,7 @@ impl CudaNma {
             self.stream.launch(&func, grid, block, shared, args)?;
         }
 
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaNma;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -680,10 +680,10 @@ impl CudaNma {
         series_len: usize,
         period: usize,
     ) -> Result<DeviceArrayF32, CudaNmaError> {
-        // Ensure constant-memory weights are available for this period
+        
         self.ensure_const_weights(period)?;
 
-        // Pinned HtoD uploads with async copies
+        
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }?;
         let mut d_abs_diffs = unsafe { DeviceBuffer::<f32>::uninitialized(num_series * series_len) }?;
         let h_prices = cust::memory::LockedBuffer::from_slice(data_tm_f32)?;
@@ -693,7 +693,7 @@ impl CudaNma {
             d_abs_diffs.async_copy_from(h_diffs.as_slice(), &self.stream)?;
         }
         let d_first = DeviceBuffer::from_slice(first_valids)?;
-        // VRAM estimate
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let elems_inputs = num_series.checked_mul(series_len).ok_or_else(|| CudaNmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -788,7 +788,7 @@ impl CudaNma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

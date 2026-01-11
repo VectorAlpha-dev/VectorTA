@@ -87,7 +87,7 @@ impl DeviceArrayF32Ao {
     pub fn len(&self) -> usize { self.rows * self.cols }
 }
 
-// Host-side POD matching CUDA float2 ABI (8-byte aligned)
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct Float2 { pub x: f32, pub y: f32 }
@@ -95,7 +95,7 @@ unsafe impl cust::memory::DeviceCopy for Float2 {}
 
 #[inline(always)]
 fn build_prefix_ds(hl2: &[f32], first_valid: usize) -> Vec<Float2> {
-    // Exclusive prefix: out[0] = {0,0}
+    
     let mut out = Vec::with_capacity(hl2.len() + 1);
     out.push(Float2 { x: 0.0, y: 0.0 });
     #[inline(always)]
@@ -163,7 +163,7 @@ impl CudaAo {
         self.policy = p;
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn ao_batch_dev(
         &self,
         hl2: &[f32],
@@ -179,7 +179,7 @@ impl CudaAo {
 
         let combos = expand_grid_checked_cuda(sweep)?;
 
-        // Validate params and warmup
+        
         let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
         let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
         for prm in &combos {
@@ -203,10 +203,10 @@ impl CudaAo {
             longs.push(l);
         }
 
-        // Build DS (float2) exclusive prefix on host (FP64-free on device)
+        
         let prefix: Vec<Float2> = build_prefix_ds(hl2, first_valid);
 
-        // VRAM estimate and headroom (checked arithmetic)
+        
         let rows = combos.len();
         let len_plus_one = len
             .checked_add(1)
@@ -231,10 +231,10 @@ impl CudaAo {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        // Device buffers
+        
         let d_prefix: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&prefix)?;
 
-        // Allocate one device output for all rows (avoid host bounce)
+        
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
 
         if rows <= 65_535 {
@@ -246,7 +246,7 @@ impl CudaAo {
             return Ok(DeviceArrayF32Ao { buf: d_out, rows, cols: len, ctx: self._context.clone(), device_id: self.device_id });
         }
 
-        // Chunk grid.y to ≤ 65_535, writing each chunk directly into d_out
+        
         unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
         self.maybe_log_batch_debug();
         let max_grid = 65_535usize;
@@ -280,7 +280,7 @@ impl CudaAo {
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Optional launch bounds validation
+        
         let dev = Device::get_device(self.device_id).map_err(CudaAoError::Cuda)?;
         let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX).map_err(CudaAoError::Cuda)? as u32;
         if block_x > max_bx || n_combos as u32 > 65_535 {
@@ -316,7 +316,7 @@ impl CudaAo {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn ao_many_series_one_param_time_major_dev(
         &self,
         hl2_tm: &[f32],
@@ -342,7 +342,7 @@ impl CudaAo {
             return Err(CudaAoError::InvalidInput("invalid short/long".into()));
         }
 
-        // Per-series first_valids
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -472,7 +472,7 @@ impl CudaAo {
     }
 }
 
-// ---- Local helpers ----
+
 fn expand_grid_checked_cuda(r: &AoBatchRange) -> Result<Vec<AoParams>, CudaAoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAoError> {
         if step == 0 || start == end { return Ok(vec![start]); }
@@ -519,14 +519,14 @@ fn expand_grid_checked_cuda(r: &AoBatchRange) -> Result<Vec<AoParams>, CudaAoErr
     Ok(out)
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // ~250 (short,long) pairs
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
         let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<super::Float2>();
@@ -566,8 +566,8 @@ pub mod benches {
         let cuda = CudaAo::new(0).expect("cuda ao");
         let hl2 = gen_series(ONE_SERIES_LEN);
         let sweep = AoBatchRange {
-            // Keep output surface O(PARAM_SWEEP * len). Sweeping both short+long
-            // multiplies combinations and can exceed VRAM / overflow indices.
+            
+            
             short_period: (5, 5, 0),
             long_period: (20, 20 + PARAM_SWEEP - 1, 1),
         };

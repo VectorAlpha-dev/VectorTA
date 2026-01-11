@@ -11,7 +11,7 @@
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
-// Reuse common policy enums exported by CWMA to stay consistent with ALMA.
+
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::reflex::{ReflexBatchRange, ReflexParams};
 use cust::context::{CacheConfig, Context};

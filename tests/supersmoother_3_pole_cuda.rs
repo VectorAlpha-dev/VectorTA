@@ -1,17 +1,17 @@
-// Integration tests for CUDA SuperSmoother 3-Pole kernels
 
-use my_project::indicators::moving_averages::supersmoother_3_pole::{
+
+use vector_ta::indicators::moving_averages::supersmoother_3_pole::{
     supersmoother_3_pole_batch_with_kernel, supersmoother_3_pole_with_kernel,
     SuperSmoother3PoleBatchRange, SuperSmoother3PoleInput, SuperSmoother3PoleParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaSupersmoother3Pole;
+use vector_ta::cuda::moving_averages::CudaSupersmoother3Pole;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

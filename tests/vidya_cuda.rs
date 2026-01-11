@@ -1,16 +1,16 @@
-// Integration tests for CUDA VIDYA kernels
 
-use my_project::indicators::vidya::{
+
+use vector_ta::indicators::vidya::{
     vidya_batch_with_kernel, vidya_with_kernel, VidyaBatchRange, VidyaData, VidyaInput, VidyaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVidya;
+use vector_ta::cuda::moving_averages::CudaVidya;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -96,7 +96,7 @@ fn vidya_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let lp = 21usize;
     let alpha = 0.2f64;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

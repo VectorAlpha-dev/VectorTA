@@ -1,16 +1,16 @@
-// Integration tests for CUDA UltOsc kernels
 
-use my_project::indicators::ultosc::{
+
+use vector_ta::indicators::ultosc::{
     ultosc_batch_with_kernel, ultosc_with_kernel, UltOscBatchRange, UltOscInput, UltOscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaUltosc;
+use vector_ta::cuda::oscillators::CudaUltosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -41,7 +41,7 @@ fn ultosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut close = vec![f64::NAN; len];
     for i in 1..len {
         let x = i as f64;
-        // create a plausible candle with some spread
+        
         let base = (x * 0.00123).sin() + 0.00017 * x;
         let spread = (0.0031 * x.cos()).abs() + 0.05;
         close[i] = base;
@@ -70,7 +70,7 @@ fn ultosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 3e-3; // loosened for FP32 double-single path
+    let tol = 3e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -101,7 +101,7 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in 1..rows {
-            // start at 1 so prev-close is present
+            
             let x = (t as f64) + (s as f64) * 0.41;
             let base = (x * 0.002).sin() + 0.0003 * x;
             let spread = (x * 0.0013).cos().abs() + 0.04;
@@ -115,7 +115,7 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let p2 = 14usize;
     let p3 = 28usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -150,7 +150,7 @@ fn ultosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     assert_eq!(dev_tm.cols, cols);
     let mut host_tm = vec![0f32; dev_tm.len()];
     dev_tm.buf.copy_to(&mut host_tm)?;
-    let tol = 3e-3; // allow small drift vs CPU in FP32 compensated path
+    let tol = 3e-3; 
     for idx in 0..host_tm.len() {
         assert!(
             approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),

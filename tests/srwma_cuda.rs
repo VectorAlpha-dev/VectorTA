@@ -1,16 +1,16 @@
-// Integration tests for CUDA SRWMA kernels
 
-use my_project::indicators::moving_averages::srwma::{
+
+use vector_ta::indicators::moving_averages::srwma::{
     srwma_batch_with_kernel, srwma_with_kernel, SrwmaBatchRange, SrwmaInput, SrwmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaSrwma;
+use vector_ta::cuda::moving_averages::CudaSrwma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

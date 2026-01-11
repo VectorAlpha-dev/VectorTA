@@ -1,22 +1,22 @@
-// CUDA kernels for Directional Movement Index (DX)
-//
-// Math mirrors src/indicators/dx.rs exactly:
-// - Warmup: accumulate +DM, -DM, TR over (period-1) steps from first_valid+1.
-// - Then Wilder-style smoothing per step using FP64 accumulations.
-// - DX = 100 * |DI+ - DI-| / (DI+ + DI-), with division-by-zero -> carry
-// - NaN handling: if carry[i]!=0 (input at i was NaN), write previous output.
-// - Before warm threshold, outputs are NaN (host pre-fills NaN prefix).
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Batch kernel using host-precomputed per-bar terms shared across rows.
-// Arguments:
-//  - plus_dm, minus_dm, tr: length = series_len; valid from first_valid+1 ..
-//  - carry: length = series_len; 1 => carry-forward this bar, 0 => normal
-//  - periods: per-row period (length = n_combos)
-//  - series_len, n_combos, first_valid: sizes and prefix index
-//  - out: row-major [n_combos x series_len]
+
+
+
+
+
+
+
 extern "C" __global__
 void dx_batch_f32(const double* __restrict__ plus_dm,
                   const double* __restrict__ minus_dm,
@@ -37,11 +37,11 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
     if (first_valid < 0 || first_valid + 1 >= series_len) return;
 
     const int i0 = first_valid;
-    const int warm_needed = p - 1; // number of accumulation steps needed
+    const int warm_needed = p - 1; 
     const int warm = first_valid + p - 1;
     const float nanv = nanf("");
 
-    // Fill the warmup prefix; the main loop writes all t >= warm (NaN vs computed).
+    
     for (int i = 0; i < min(warm, series_len); ++i) {
         dst[i] = nanv;
     }
@@ -55,7 +55,7 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
 
     for (int i = i0 + 1; i < series_len; ++i) {
         if (carry[i] != 0) {
-            // carry-forward last value (or NaN if none yet)
+            
             dst[i] = last_out;
             continue;
         }
@@ -77,13 +77,13 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
                 last_out = (float)dx;
                 dst[i] = last_out;
             } else if (i >= warm) {
-                // If NaNs delayed warmup, preserve scalar behavior by emitting NaN.
+                
                 dst[i] = nanv;
             }
             continue;
         }
 
-        // Wilder recurrence
+        
         s_plus  = s_plus  - (s_plus  * rp) + pdm;
         s_minus = s_minus - (s_minus * rp) + mdm;
         s_tr    = s_tr    - (s_tr    * rp) + t;
@@ -101,7 +101,7 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
     }
 }
 
-// Many-series, one param (time-major): compute DM/TR on the fly per series.
+
 extern "C" __global__
 void dx_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -112,7 +112,7 @@ void dx_many_series_one_param_time_major_f32(
     int period,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series index
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
     if (period <= 0) return;
@@ -147,7 +147,7 @@ void dx_many_series_one_param_time_major_f32(
             prev_h = ch; prev_l = cl; prev_c = cc;
             continue;
         }
-        // If previous bar was NaN (after a NaN carry), treat this bar as a new seed
+        
         if (isnan(prev_h) || isnan(prev_l) || isnan(prev_c)) {
             prev_h = ch; prev_l = cl; prev_c = cc;
             out_tm[at(t)] = nanv;
@@ -197,10 +197,10 @@ void dx_many_series_one_param_time_major_f32(
     }
 }
 
-// -------------------- Experimental fast variants (FP32 DS + TR-less DX) --------------------
-// Note: These are provided for future integration. They are not invoked by the current
-// Rust wrappers, so unit tests remain bound to the reference path above. The intent is to
-// enable evaluation/benching without changing host code.
+
+
+
+
 
 struct dsf32 { float hi, lo; };
 __device__ __forceinline__ void two_sum_f(float a, float b, float& s, float& err) {

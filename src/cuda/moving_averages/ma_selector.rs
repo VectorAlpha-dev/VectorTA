@@ -15,7 +15,7 @@
 use super::alma_wrapper::DeviceArrayF32;
 use crate::cuda::moving_averages::*;
 use crate::utilities::data_loader::{source_type, Candles};
-// Faster D2H with pinned buffers; enable async copies when possible
+
 use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, LockedBuffer};
 use cust::stream::{Stream, StreamFlags};
 use cust::context::Context;
@@ -125,7 +125,7 @@ impl<'a> CudaMaData<'a> {
 /// dispatcher sets sensible defaults that match the scalar path.
 pub struct CudaMaSelector {
     device_id: usize,
-    // Reusable non-blocking stream for async D2H copies
+    
     stream: Stream,
 }
 
@@ -145,7 +145,7 @@ impl CudaMaSelector {
         data: CudaMaData,
         period: usize,
     ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
-        // Validate early without forcing a conversion
+        
         let n = data.prices_len();
         if n == 0 {
             return Err(CudaMaSelectorError::InvalidInput(
@@ -159,10 +159,10 @@ impl CudaMaSelector {
             )));
         }
 
-        // Case-insensitive helper without allocating
+        
         let is = |s: &str| ma_type.eq_ignore_ascii_case(s);
 
-        // Coverage additions that require volume/ohlc
+        
         if is("vwma") {
             if let CudaMaData::Candles { candles, source } = data {
                 let prices = source_type(candles, source);
@@ -189,7 +189,7 @@ impl CudaMaSelector {
                 let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
                 let sweep = crate::indicators::moving_averages::vpwma::VpwmaBatchRange {
                     period: (period, period, 0),
-                    power: (0.382, 0.382, 0.0), // match CPU default
+                    power: (0.382, 0.382, 0.0), 
                 };
                 let cuda = CudaVpwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
@@ -209,7 +209,7 @@ impl CudaMaSelector {
                 let sweep = crate::indicators::moving_averages::vwap::VwapBatchRange {
                     anchor: ("1d".to_string(), "1d".to_string(), 0),
                 };
-                // Use HLC3 to mirror CPU default
+                
                 let prices = &candles.hlc3;
                 let cuda = CudaVwap::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
@@ -223,7 +223,7 @@ impl CudaMaSelector {
             }
         }
 
-        // Lazy f64→f32 conversion only when we actually need price-only slices
+        
         let mut prices_f32_cache: Option<Vec<f32>> = None;
         macro_rules! ensure_prices {
             () => {{
@@ -235,7 +235,7 @@ impl CudaMaSelector {
         }
 
         match ma_type.to_ascii_lowercase().as_str() {
-            // --- Price-only, period-only (direct mapping) ---
+            
             "sma" => {
                 let sweep = crate::indicators::moving_averages::sma::SmaBatchRange {
                     period: (period, period, 0),
@@ -435,7 +435,7 @@ impl CudaMaSelector {
                 Ok(dev)
             }
             "hwma" => {
-                // Uses default smoothing params (na, nb, nc). Period is ignored.
+                
                 let sweep = crate::indicators::moving_averages::hwma::HwmaBatchRange::default();
                 let cuda = CudaHwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
@@ -491,11 +491,11 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
 
-            // --- Price-only with extra params (use scalar defaults) ---
+            
             "alma" => {
                 let sweep = crate::indicators::moving_averages::alma::AlmaBatchRange {
                     period: (period, period, 0),
-                    // Defaults: offset=0.85, sigma=6.0 (single-combo)
+                    
                     offset: (0.85, 0.85, 0.0),
                     sigma: (6.0, 6.0, 0.0),
                 };
@@ -507,7 +507,7 @@ impl CudaMaSelector {
             "epma" => {
                 let sweep = crate::indicators::moving_averages::epma::EpmaBatchRange {
                     period: (period, period, 0),
-                    // Default offset=4
+                    
                     offset: (4, 4, 0),
                 };
                 let cuda = CudaEpma::new(self.device_id)
@@ -518,7 +518,7 @@ impl CudaMaSelector {
             "gaussian" => {
                 let sweep = crate::indicators::moving_averages::gaussian::GaussianBatchRange {
                     period: (period, period, 0),
-                    // Default poles=4
+                    
                     poles: (4, 4, 0),
                 };
                 let cuda = CudaGaussian::new(self.device_id)
@@ -529,7 +529,7 @@ impl CudaMaSelector {
             "jma" => {
                 let sweep = crate::indicators::moving_averages::jma::JmaBatchRange {
                     period: (period, period, 0),
-                    // Defaults: phase=50.0, power=2
+                    
                     phase: (50.0, 50.0, 0.0),
                     power: (2, 2, 0),
                 };
@@ -586,7 +586,7 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "sama" => {
-                // Map period -> length; other params use defaults (maj=14, min=6)
+                
                 let sweep = crate::indicators::moving_averages::sama::SamaBatchRange {
                     length: (period, period, 0),
                     ..Default::default()
@@ -610,13 +610,13 @@ impl CudaMaSelector {
             "ehlers_itrend" => {
                 let sweep =
                     crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
-                        // Match ma.rs convention
+                        
                         warmup_bars: (20, 20, 0),
                         max_dc_period: (period, period, 0),
                     };
                 let sweep =
                     crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
-                        // Match ma.rs convention
+                        
                         warmup_bars: (20, 20, 0),
                         max_dc_period: (period, period, 0),
                     };
@@ -626,7 +626,7 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "ehlers_ecema" => {
-                // Defaults: length=20, gain_limit=50, pine_compatible=false, confirmed_only=false
+                
                 let sweep =
                     crate::indicators::moving_averages::ehlers_ecema::EhlersEcemaBatchRange {
                         length: (period, period, 0),
@@ -647,7 +647,7 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "nama" => {
-                // Price-only NAMA path
+                
                 let sweep = crate::indicators::moving_averages::nama::NamaBatchRange {
                     period: (period, period, 0),
                 };
@@ -712,7 +712,7 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "volatility_adjusted_ma" | "vama" => {
-                // Map base_period to `period` and keep a reasonable default vol_period (51)
+                
                 let sweep =
                     crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
                         base_period: (period, period, 0),
@@ -737,12 +737,12 @@ impl CudaMaSelector {
                 Ok(dev)
             }
 
-            // --- Not supported in this thin selector ---
-            // Require OHLC or volume, or produce multiple outputs.
+            
+            
             "frama" => Err(CudaMaSelectorError::Unsupported(
                 "frama requires high/low/close; use CudaFrama directly".into(),
             )),
-            // These are now handled earlier for Candles inputs
+            
             "vwap" | "vwma" | "vpwma" => Err(CudaMaSelectorError::Unsupported(
                 "requires candles; pass CudaMaData::Candles for VWAP/VWMA/VPWMA".into(),
             )),
@@ -1338,7 +1338,7 @@ impl CudaMaSelector {
     }
 }
 
-// ---------------- Python interop (CAI v3 + DLPack v1.x) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]

@@ -335,10 +335,10 @@ pub fn percentile_nearest_rank_into_slice(
         });
     }
 
-    // compute into `dst`
+    
     pnr_compute_into(data, length, percentage, first, chosen, dst);
 
-    // set warmup NaNs exactly like alma.rs
+    
     let warmup_end = first + length - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -346,7 +346,7 @@ pub fn percentile_nearest_rank_into_slice(
     Ok(())
 }
 
-// ==================== BUILDER PATTERN ====================
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct PercentileNearestRankBuilder {
@@ -463,7 +463,7 @@ impl PercentileNearestRankBuilder {
     }
 }
 
-// ==================== STREAMING SUPPORT ====================
+
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -2140,7 +2140,7 @@ pub fn register_percentile_nearest_rank_module(
     Ok(())
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

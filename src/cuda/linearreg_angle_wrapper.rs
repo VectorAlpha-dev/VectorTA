@@ -25,11 +25,11 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-// Module-level alias matching CUDA float2 (8-byte aligned)
+
 type Float2 = [f32; 2];
 
 #[inline] fn f2(x: f32, y: f32) -> Float2 { [x, y] }
-// Compensated primitives (Dekker/Kahan style)
+
 #[inline] fn two_sum(a: f32, b: f32) -> (f32, f32) {
     let s = a + b;
     let bb = s - a;
@@ -53,7 +53,7 @@ struct Combo {
     period: usize,
 }
 
-// ---------------- Kernel policy & selection (ALMA-style, simplified) ----------------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -201,7 +201,7 @@ impl CudaLinearregAngle {
         Ok(())
     }
 
-    // -------- VRAM checks --------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -263,7 +263,7 @@ impl CudaLinearregAngle {
         Ok(())
     }
 
-    // -------- Inputs prep --------
+    
 
     fn expand_combos(range: &Linearreg_angleBatchRange) -> Result<Vec<Combo>, CudaLinearregAngleError> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -309,9 +309,9 @@ impl CudaLinearregAngle {
 
     fn build_prefixes_lra_f2(data: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
         let n = data.len();
-        let mut ps = vec![f2(0.0, 0.0); n + 1]; // Σy
-        let mut pk = vec![f2(0.0, 0.0); n + 1]; // Σ(k_abs * y)
-        let mut pn = vec![0i32; n + 1];               // count NaN
+        let mut ps = vec![f2(0.0, 0.0); n + 1]; 
+        let mut pk = vec![f2(0.0, 0.0); n + 1]; 
+        let mut pn = vec![0i32; n + 1];               
 
         let mut s  = f2(0.0, 0.0);
         let mut kd = f2(0.0, 0.0);
@@ -320,7 +320,7 @@ impl CudaLinearregAngle {
         for i in 0..n {
             let v = data[i];
             if v.is_nan() {
-                cn += 1; // exclude NaN by not changing sums
+                cn += 1; 
             } else {
                 s  = df_add_f(s, v);
                 kd = df_add_prod(kd, i as f32, v);
@@ -375,7 +375,7 @@ impl CudaLinearregAngle {
                     p, first_valid, len - first_valid
                 )));
             }
-            // Keep denominator consistent with scalar (reversed-x form): Σx² - p·Σx²
+            
             let pf = p as f64; let sx = (p * (p - 1)) as f64 * 0.5; let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
             let denom = sx * sx - pf * sx2; let invd = 1.0 / denom;
             periods_i32.push(p as i32); sum_x.push(sx as f32); inv_div.push(invd as f32);
@@ -408,7 +408,7 @@ impl CudaLinearregAngle {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        // Grid-stride loop: cap blocks.x to ~8×SMs
+        
         let blocks_needed = ((len as u32) + block_x - 1) / block_x;
         let max_blocks_x  = self.sm_count.saturating_mul(8).max(1);
         let grid_x        = blocks_needed.min(max_blocks_x).max(1);
@@ -432,7 +432,7 @@ impl CudaLinearregAngle {
             self.validate_launch(grid_tuple, (block_x, 1, 1))?;
             let grid: GridSize = grid_tuple.into();
             unsafe {
-                // prices pointer unused in kernel; pass NULL
+                
                 let mut p_prices: u64 = 0;
                 let mut p_ps = d_ps2.as_device_ptr().as_raw();
                 let mut p_pk = d_pk2.as_device_ptr().as_raw();
@@ -488,7 +488,7 @@ impl CudaLinearregAngle {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let rows = combos.len();
 
-        // VRAM estimate: (ps2, pk2, pn) + params + output (no price upload needed)
+        
         let len_p1 = len
             .checked_add(1)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("len+1 overflow".into()))?;
@@ -512,7 +512,7 @@ impl CudaLinearregAngle {
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(req, 64 * 1024 * 1024)?;
 
-        // H2D copies (no price upload for batch kernel)
+        
         let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
         let d_pk2 = DeviceBuffer::from_slice(&pk2)?;
         let d_pn = DeviceBuffer::from_slice(&pn)?;
@@ -555,7 +555,7 @@ impl CudaLinearregAngle {
                 "invalid period".into(),
             ));
         }
-        // first_valid per column
+        
         let mut first = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -692,7 +692,7 @@ impl CudaLinearregAngle {
     }
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

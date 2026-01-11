@@ -1583,7 +1583,7 @@ mod tests {
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1591,7 +1591,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1599,7 +1599,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1612,7 +1612,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cmo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1651,14 +1651,14 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: period 1-50 (including edge case), data length period-400
-        // Avoid near-zero values to prevent edge cases
+        
+        
         let strat = (1usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64)
                         .prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
-                    (period + 1).max(2)..400, // Need period+1 data points for CMO
+                    (period + 1).max(2)..400, 
                 ),
                 Just(period),
             )
@@ -1675,11 +1675,11 @@ mod tests {
                 let CmoOutput { values: ref_out } =
                     cmo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length should match input length
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period validation
-                // CMO warmup is first_valid + period
+                
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_valid + period;
 
@@ -1692,7 +1692,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: First valid output should be at warmup index
+                
                 if warmup < out.len() {
                     prop_assert!(
                         !out[warmup].is_nan(),
@@ -1701,12 +1701,12 @@ mod tests {
                     );
                 }
 
-                // Properties for valid outputs (after warmup)
+                
                 for i in warmup..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 4: Output bounds check - CMO is bounded [-100, 100]
+                    
                     prop_assert!(
                         y.is_nan() || (y >= -100.0 - 1e-9 && y <= 100.0 + 1e-9),
                         "CMO value {} at index {} outside bounds [-100, 100]",
@@ -1714,7 +1714,7 @@ mod tests {
                         i
                     );
 
-                    // Property 5: Finite inputs produce finite outputs
+                    
                     if data[..=i].iter().all(|x| x.is_finite()) {
                         prop_assert!(
                             y.is_finite(),
@@ -1724,7 +1724,7 @@ mod tests {
                         );
                     }
 
-                    // Property 6: Kernel consistency (reduced ULP tolerance for better precision)
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1751,7 +1751,7 @@ mod tests {
                     );
                 }
 
-                // Property 7: Constant data should produce CMO of 0 (tighter tolerance)
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < data.len() {
                     let cmo_val = out[warmup];
                     prop_assert!(
@@ -1762,7 +1762,7 @@ mod tests {
                     );
                 }
 
-                // Property 8: Monotonically increasing data should produce positive CMO
+                
                 let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
                 if is_increasing && warmup < data.len() {
                     for i in warmup..data.len() {
@@ -1775,7 +1775,7 @@ mod tests {
                     }
                 }
 
-                // Property 9: Monotonically decreasing data should produce negative CMO
+                
                 let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
                 if is_decreasing && warmup < data.len() {
                     for i in warmup..data.len() {
@@ -1788,12 +1788,12 @@ mod tests {
                     }
                 }
 
-                // Property 10: Extreme movements test - strong gains should approach +100
+                
                 if period > 1 && warmup + 5 < data.len() {
-                    // Check if we have strong upward movement
+                    
                     let has_strong_gains = (warmup..data.len().min(warmup + 10))
                         .zip(warmup.saturating_sub(1)..data.len().saturating_sub(1).min(warmup + 9))
-                        .all(|(i, j)| data[i] > data[j] * 1.1); // 10% gains each step
+                        .all(|(i, j)| data[i] > data[j] * 1.1); 
 
                     if has_strong_gains {
                         let last_idx = data.len() - 1;
@@ -1840,7 +1840,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1848,15 +1848,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CmoBatchBuilder::new()
             .kernel(kernel)
-            .period_range(7, 28, 7) // Test periods: 7, 14, 21, 28
+            .period_range(7, 28, 7) 
             .apply_candles(&c, "close")?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -1865,7 +1865,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1873,7 +1873,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1881,7 +1881,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1893,7 +1893,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1923,14 +1923,14 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn cmo_js(data: &[f64], period: Option<usize>) -> Result<Vec<f64>, JsValue> {
     let params = CmoParams { period };
     let input = CmoInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()]; 
     cmo_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1955,7 +1955,7 @@ pub fn cmo_into(
         let input = CmoInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
+            
             let mut temp = vec![0.0; len];
             cmo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -80,7 +80,7 @@ impl CudaBollingerBands {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Query SM count for launch sizing heuristics
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
             .map(|v| v as u32)
@@ -306,7 +306,7 @@ impl CudaBollingerBands {
         Ok((combos, first_valid, len))
     }
 
-    // -------- Host-side double-single prefix builders --------
+    
     #[inline(always)]
     fn two_sum(a: f32, b: f32) -> (f32, f32) {
         let s = a + b;
@@ -378,7 +378,7 @@ impl CudaBollingerBands {
             let chunk = (n_combos - start).min(MAX_GRID_Y);
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
             unsafe {
-                // Kernel ignores `data` pointer; pass null (0)
+                
                 let mut p_data: u64 = 0;
                 let mut p_ps = d_ps.as_device_ptr().as_raw();
                 let mut p_ps2 = d_ps2.as_device_ptr().as_raw();
@@ -484,7 +484,7 @@ impl CudaBollingerBands {
         sweep: &BollingerBandsBatchRange,
     ) -> Result<(DeviceArrayF32Bb, DeviceArrayF32Bb, DeviceArrayF32Bb), CudaBollingerError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        // Estimate VRAM and guard
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let prefix_each = 2 * std::mem::size_of::<[f32; 2]>() + item_i32;
@@ -496,7 +496,7 @@ impl CudaBollingerBands {
         self.run_batch_kernel(data_f32, &combos, first_valid)
     }
 
-    // ------------------- Many-series, one param (time-major) -------------------
+    
     pub fn bollinger_bands_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -528,7 +528,7 @@ impl CudaBollingerBands {
             return Err(CudaBollingerError::InvalidInput("invalid period".into()));
         }
 
-        // Build time-major double-single prefixes (rows+1)×cols; track first_valid per series
+        
         let rows_p1 = rows
             .checked_add(1)
             .ok_or_else(|| CudaBollingerError::InvalidInput("rows+1 overflow".into()))?;
@@ -593,7 +593,7 @@ impl CudaBollingerBands {
         let mut d_md_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_tm) }?;
         let mut d_lo_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_tm) }?;
 
-        // Launch many-series kernel
+        
         let func = self
             .module
             .get_function("bollinger_bands_many_series_one_param_f32")
@@ -649,7 +649,7 @@ impl CudaBollingerBands {
     pub fn synchronize(&self) -> Result<(), CudaBollingerError> { self.stream.synchronize().map_err(Into::into) }
 }
 
-// ------------- Benches -------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -720,7 +720,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaBollingerBands::new(0).expect("cuda bb");
         let data = gen_series(ONE_SERIES_LEN);
-        // Sweep periods; devup=devdn=2.0; SMA; devtype=0
+        
         let sweep = BollingerBandsBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             devup: (2.0, 2.0, 0.0),

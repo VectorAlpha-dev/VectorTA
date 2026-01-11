@@ -43,7 +43,7 @@ pub enum CudaAlligatorError {
     #[error("not implemented")]
     NotImplemented,
 }
-// Display impl is provided by thiserror via #[derive(Error)]
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -174,7 +174,7 @@ impl CudaAlligator {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaAlligatorError::InvalidInput("all values are NaN".into()))?;
 
-        // Local grid expansion (usize axes)
+        
         fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAlligatorError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
@@ -291,7 +291,7 @@ impl CudaAlligator {
         let grid_x = ((n as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Validate launch sizes against device limits (best-effort)
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -347,7 +347,7 @@ impl CudaAlligator {
         let (combos, first, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n = combos.len();
 
-        // VRAM estimate (prices + 6 params + 3 outputs)
+        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
@@ -525,7 +525,7 @@ impl CudaAlligator {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Validate launch sizes against device limits (best-effort)
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -820,7 +820,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::OneD { block_x: 256 },
         });
         let cols = 256usize;
-        let rows = 1_000_000usize / cols * cols; // ensure multiple of cols
+        let rows = 1_000_000usize / cols * cols; 
         let mut data_tm = vec![f32::NAN; cols * rows];
         for t in 8..rows {
             for j in 0..cols {

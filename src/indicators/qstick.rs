@@ -228,7 +228,7 @@ pub fn qstick_with_kernel(
         });
     }
 
-    // Find first valid index by checking both open and close
+    
     let mut first = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -302,7 +302,7 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
     let len = open.len().min(close.len());
     let period = input.get_period();
 
-    // Length/period validation mirrors the Vec API and `qstick_into_slice` behavior
+    
     if len == 0 {
         return Err(QstickError::EmptyInputData);
     }
@@ -319,7 +319,7 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         });
     }
 
-    // Find first valid index where both open and close are finite
+    
     let mut first = 0usize;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -338,7 +338,7 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         });
     }
 
-    // Warmup prefix: identical to alloc_with_nan_prefix (quiet NaN payload)
+    
     let warm = first
         .checked_add(period)
         .and_then(|v| v.checked_sub(1))
@@ -348,7 +348,7 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Dispatch to the best compute kernel
+    
     let chosen = match Kernel::Auto {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -376,7 +376,7 @@ pub fn qstick_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Pre-checked by caller: period in [1..], len - first_valid >= period
+    
     let len = open.len().min(close.len());
     if len == 0 {
         return;
@@ -386,10 +386,10 @@ pub fn qstick_scalar(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    // Fast path: period == 1 ⇒ QStick = close - open
+    
     if period == 1 {
         let mut i = start;
-        // Unroll by 4, safe indexing
+        
         while i + 3 < len {
             out[i] = close[i] - open[i];
             out[i + 1] = close[i + 1] - open[i + 1];
@@ -404,11 +404,11 @@ pub fn qstick_scalar(
         return;
     }
 
-    // Initial window sum of (close - open)
+    
     let mut sum = 0.0f64;
     let end_init = start + period;
     let mut k = start;
-    // Unroll by 4 for fewer branches
+    
     let end_unroll = start + ((period) & !3usize);
     while k < end_unroll {
         sum += (close[k] - open[k])
@@ -424,20 +424,20 @@ pub fn qstick_scalar(
 
     out[warm] = sum * inv_p;
 
-    // Rolling update: add entering diff, subtract leaving diff; unrolled by 4
+    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
-        // 0
+        
         sum = (sum + (close[i_new] - open[i_new])) - (close[i_old] - open[i_old]);
         out[i_new] = sum * inv_p;
-        // 1
+        
         sum = (sum + (close[i_new + 1] - open[i_new + 1])) - (close[i_old + 1] - open[i_old + 1]);
         out[i_new + 1] = sum * inv_p;
-        // 2
+        
         sum = (sum + (close[i_new + 2] - open[i_new + 2])) - (close[i_old + 2] - open[i_old + 2]);
         out[i_new + 2] = sum * inv_p;
-        // 3
+        
         sum = (sum + (close[i_new + 3] - open[i_new + 3])) - (close[i_old + 3] - open[i_old + 3]);
         out[i_new + 3] = sum * inv_p;
 
@@ -517,7 +517,7 @@ unsafe fn qstick_avx2_impl(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    // period == 1
+    
     if period == 1 {
         let mut i = start;
         while i + 3 < len {
@@ -534,10 +534,10 @@ unsafe fn qstick_avx2_impl(
         return;
     }
 
-    // Initial window sum using AVX2
+    
     let mut v_sum = _mm256_setzero_pd();
     let mut k = 0usize;
-    let vec_end = period & !3usize; // multiple of 4
+    let vec_end = period & !3usize; 
     while k < vec_end {
         let idx = start + k;
         let c = _mm256_loadu_pd(close.as_ptr().add(idx));
@@ -546,7 +546,7 @@ unsafe fn qstick_avx2_impl(
         v_sum = _mm256_add_pd(v_sum, d);
         k += 4;
     }
-    // horizontal reduce v_sum
+    
     let hi = _mm256_extractf128_pd(v_sum, 1);
     let lo = _mm256_castpd256_pd128(v_sum);
     let s2 = _mm_add_pd(lo, hi);
@@ -561,23 +561,23 @@ unsafe fn qstick_avx2_impl(
 
     *out.get_unchecked_mut(warm) = sum * inv_p;
 
-    // Rolling update remains scalar; unroll by 4
+    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
-        // 0
+        
         sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
             - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
         *out.get_unchecked_mut(i_new) = sum * inv_p;
-        // 1
+        
         sum = (sum + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
             - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
         *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
-        // 2
+        
         sum = (sum + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
             - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
         *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
-        // 3
+        
         sum = (sum + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
             - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
         *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
@@ -611,7 +611,7 @@ unsafe fn qstick_avx512_impl(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    // period == 1
+    
     if period == 1 {
         let mut i = start;
         while i + 7 < len {
@@ -628,10 +628,10 @@ unsafe fn qstick_avx512_impl(
         return;
     }
 
-    // Initial window sum using AVX512
+    
     let mut v_sum = _mm512_setzero_pd();
     let mut k = 0usize;
-    let vec_end = period & !7usize; // multiple of 8
+    let vec_end = period & !7usize; 
     while k < vec_end {
         let idx = start + k;
         let c = _mm512_loadu_pd(close.as_ptr().add(idx));
@@ -640,7 +640,7 @@ unsafe fn qstick_avx512_impl(
         v_sum = _mm512_add_pd(v_sum, d);
         k += 8;
     }
-    // reduce 8-lane vector to scalar
+    
     let lo256 = _mm512_castpd512_pd256(v_sum);
     let hi256 = _mm512_extractf64x4_pd(v_sum, 1);
     let lo_hi128 = _mm256_extractf128_pd(lo256, 1);
@@ -664,7 +664,7 @@ unsafe fn qstick_avx512_impl(
 
     *out.get_unchecked_mut(warm) = sum * inv_p;
 
-    // Rolling update remains scalar; unroll by 4
+    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
@@ -882,7 +882,7 @@ fn qstick_batch_inner(
         return Err(QstickError::EmptyInputData);
     }
 
-    // Find first valid index
+    
     let mut first = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -908,10 +908,10 @@ fn qstick_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| QstickError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Use proper uninitialized memory allocation like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -923,7 +923,7 @@ fn qstick_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -931,7 +931,7 @@ fn qstick_batch_inner(
 
     qstick_batch_inner_into(open, close, sweep, kern, parallel, out)?;
 
-    // Take ownership of the buffer
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -965,7 +965,7 @@ fn qstick_batch_inner_into(
     }
     let cols = len;
 
-    // first valid across both inputs
+    
     let first = (0..len)
         .find(|&i| !open[i].is_nan() && !close[i].is_nan())
         .ok_or(QstickError::AllValuesNaN)?;
@@ -978,7 +978,7 @@ fn qstick_batch_inner_into(
         });
     }
 
-    // Initialize NaN prefixes for each row based on warmup period
+    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first
             .checked_add(combo.period.unwrap_or(0))
@@ -992,8 +992,8 @@ fn qstick_batch_inner_into(
         }
     }
 
-    // If using AVX2/AVX512 batch kernels, compute shared prefix of (close - open)
-    // to eliminate redundant work across rows. ScalarBatch path remains per-row.
+    
+    
     match kern {
         Kernel::Avx2Batch | Kernel::Avx512Batch => {
             qstick_batch_shared_prefix_into(open, close, &combos, first, cols, out);
@@ -1002,14 +1002,14 @@ fn qstick_batch_inner_into(
         _ => {}
     }
 
-    // Treat output as uninitialized, like alma_batch_inner_into for per-row path
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        // cast current row to f64 slice
+        
         let dst: &mut [f64] =
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1063,14 +1063,14 @@ fn qstick_batch_shared_prefix_into(
     if len == 0 {
         return;
     }
-    // Build diff d[i] = close[i] - open[i] and prefix P where P[0]=0, P[i+1]=P[i]+d[i]
+    
     let cap = len
         .checked_add(1)
         .unwrap_or(len);
     let mut prefix = Vec::with_capacity(cap);
     prefix.push(0.0);
     let mut acc = 0.0f64;
-    // Before `first`, diffs are treated as zero; start accumulation at `first`
+    
     let mut i = 0usize;
     while i < first && i < len {
         prefix.push(acc);
@@ -1097,7 +1097,7 @@ fn qstick_batch_shared_prefix_into(
         i += 1;
     }
 
-    // For each row, fill from warmup onward using prefix sums
+    
     for (row, combo) in combos.iter().enumerate() {
         let p = combo.period.unwrap_or(5);
         let warm = first
@@ -1195,12 +1195,12 @@ pub struct QstickStream {
     /// Decision: streaming kernel uses O(1) ring buffer with length counter and reciprocal.
     /// Same warmup semantics; avoids NaN sentinel and uses bitmask wrap when period is power-of-two.
     period: usize,
-    inv_p: f64,       // 1.0 / period, avoids a division every tick
-    buffer: Vec<f64>, // ring buffer of last `period` diffs (close - open)
-    head: usize,      // write index
-    len: usize,       // number of valid elements in buffer, clamped to period
-    sum: f64,         // rolling sum of diffs in the current window
-    mask: usize,      // period - 1 if period is power-of-two, else 0
+    inv_p: f64,       
+    buffer: Vec<f64>, 
+    head: usize,      
+    len: usize,       
+    sum: f64,         
+    mask: usize,      
 }
 
 impl QstickStream {
@@ -1221,7 +1221,7 @@ impl QstickStream {
         Ok(Self {
             period,
             inv_p: 1.0 / (period as f64),
-            buffer: vec![0.0; period], // contents irrelevant until len == period
+            buffer: vec![0.0; period], 
             head: 0,
             len: 0,
             sum: 0.0,
@@ -1237,7 +1237,7 @@ impl QstickStream {
         let h = self.head;
 
         if self.len < self.period {
-            // Filling phase: no subtraction yet
+            
             self.buffer[h] = diff;
             self.sum += diff;
             self.head = if self.mask != 0 {
@@ -1254,7 +1254,7 @@ impl QstickStream {
                 None
             }
         } else {
-            // Steady-state: subtract the one we overwrite, add the new one
+            
             let old = self.buffer[h];
             self.sum += diff - old;
             self.buffer[h] = diff;
@@ -1324,16 +1324,16 @@ mod tests {
 
     #[test]
     fn test_qstick_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the repo CSV data to mirror other qstick tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let params = QstickParams { period: Some(5) }; // default behavior
+        let params = QstickParams { period: Some(5) }; 
         let input = QstickInput::from_candles(&candles, "open", "close", params);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = qstick(&input)?.values;
 
-        // New into API writes in-place
+        
         let mut into_out = vec![0.0; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         qstick_into(&input, &mut into_out)?;
@@ -1479,17 +1479,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            QstickParams::default(),            // period: 5
-            QstickParams { period: Some(2) },   // minimum viable
-            QstickParams { period: Some(3) },   // small
-            QstickParams { period: Some(7) },   // small-medium
-            QstickParams { period: Some(10) },  // medium
-            QstickParams { period: Some(20) },  // medium-large
-            QstickParams { period: Some(30) },  // large
-            QstickParams { period: Some(50) },  // very large
-            QstickParams { period: Some(100) }, // extra large
+            QstickParams::default(),            
+            QstickParams { period: Some(2) },   
+            QstickParams { period: Some(3) },   
+            QstickParams { period: Some(7) },   
+            QstickParams { period: Some(10) },  
+            QstickParams { period: Some(20) },  
+            QstickParams { period: Some(30) },  
+            QstickParams { period: Some(50) },  
+            QstickParams { period: Some(100) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1498,12 +1498,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1550,7 +1550,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_qstick_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1562,16 +1562,16 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data
+        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (period..=400usize).prop_flat_map(move |len| {
                 (
-                    // Generate open prices
+                    
                     prop::collection::vec(
                         (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    // Generate close prices as deltas from open
+                    
                     prop::collection::vec(
                         (-100.0f64..100.0f64).prop_filter("finite", |x| x.is_finite()),
                         len,
@@ -1583,7 +1583,7 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(open_prices, close_deltas, period)| {
-                // Create close prices from open + delta
+                
                 let close_prices: Vec<f64> = open_prices
                     .iter()
                     .zip(close_deltas.iter())
@@ -1599,7 +1599,7 @@ mod tests {
                 let QstickOutput { values: ref_out } =
                     qstick_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Test 1: Warmup period - first (period - 1) values should be NaN
+                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1609,17 +1609,17 @@ mod tests {
                     );
                 }
 
-                // Test valid output values
+                
                 for i in (period - 1)..open_prices.len() {
                     let window_start = i + 1 - period;
                     let window_end = i + 1;
 
-                    // Calculate the differences in the window
+                    
                     let diffs: Vec<f64> = (window_start..window_end)
                         .map(|j| close_prices[j] - open_prices[j])
                         .collect();
 
-                    // Test 2: Bounds property - QStick should be within min/max of differences
+                    
                     let min_diff = diffs.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_diff = diffs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let y = out[i];
@@ -1633,7 +1633,7 @@ mod tests {
                         max_diff
                     );
 
-                    // Test 3: Period=1 property - should equal close - open
+                    
                     if period == 1 {
                         let expected = close_prices[i] - open_prices[i];
                         prop_assert!(
@@ -1645,7 +1645,7 @@ mod tests {
                         );
                     }
 
-                    // Test 4: Constant difference property
+                    
                     if diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                         let expected = diffs[0];
                         prop_assert!(
@@ -1657,7 +1657,7 @@ mod tests {
                         );
                     }
 
-                    // Test 5: Zero difference property - if open == close everywhere
+                    
                     if diffs.iter().all(|&d| d.abs() < 1e-10) {
                         prop_assert!(
                             y.abs() <= 1e-9,
@@ -1667,7 +1667,7 @@ mod tests {
                         );
                     }
 
-                    // Test 6: Manual calculation verification
+                    
                     let expected_qstick = diffs.iter().sum::<f64>() / (period as f64);
                     prop_assert!(
                         (y - expected_qstick).abs() <= 1e-9,
@@ -1677,7 +1677,7 @@ mod tests {
                         i
                     );
 
-                    // Test 7: Kernel consistency - compare with scalar reference
+                    
                     let r = ref_out[i];
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
@@ -1693,7 +1693,7 @@ mod tests {
                         continue;
                     }
 
-                    // ULP tolerance for floating point comparison
+                    
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1776,15 +1776,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (10, 50, 10), // Wide range medium step
-            (15, 30, 5),  // Medium range small step
-            (2, 100, 20), // Full range large step
+            (2, 10, 2),   
+            (5, 25, 5),   
+            (30, 60, 15), 
+            (2, 5, 1),    
+            (10, 50, 10), 
+            (15, 30, 5),  
+            (2, 100, 20), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1803,7 +1803,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1856,7 +1856,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2116,7 +2116,7 @@ pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<
     Ok(())
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "qstick_cuda_batch_dev")]
 #[pyo3(signature = (open_f32, close_f32, period_range, device_id=0))]
@@ -2213,7 +2213,7 @@ pub fn qstick_into_slice(
     period: usize,
     kern: Kernel,
 ) -> Result<(), QstickError> {
-    // Validate inputs
+    
     let len = open.len().min(close.len());
     if len == 0 {
         return Err(QstickError::InvalidPeriod {
@@ -2234,7 +2234,7 @@ pub fn qstick_into_slice(
         });
     }
 
-    // Find first valid index
+    
     let mut first_valid = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -2246,7 +2246,7 @@ pub fn qstick_into_slice(
         }
     }
 
-    // Check if we have enough valid data
+    
     if len - first_valid < period {
         return Err(QstickError::NotEnoughValidData {
             needed: period,
@@ -2254,7 +2254,7 @@ pub fn qstick_into_slice(
         });
     }
 
-    // Compute directly into output
+    
     let kernel = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -2273,7 +2273,7 @@ pub fn qstick_into_slice(
         _ => unreachable!(),
     }
 
-    // match alma.rs: apply warmup NaNs after compute
+    
     let warmup_end = first_valid + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2285,7 +2285,7 @@ pub fn qstick_into_slice(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-    // Validate minimum inputs
+    
     let len = open.len();
     if len != close.len() {
         return Err(JsValue::from_str(
@@ -2293,7 +2293,7 @@ pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>,
         ));
     }
 
-    // Single allocation
+    
     let mut output = vec![0.0; len];
 
     qstick_into_slice(&mut output, open, close, period, Kernel::Auto)
@@ -2319,8 +2319,8 @@ pub fn qstick_into(
         let open = std::slice::from_raw_parts(open_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        // CRITICAL: Check for aliasing
-        // If either input overlaps with output, we need a temporary buffer
+        
+        
         if open_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             qstick_into_slice(&mut temp, open, close, period, Kernel::Auto)
@@ -2435,8 +2435,8 @@ pub fn qstick_batch_into(
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("size overflow"))?;
 
-        // For batch, we write directly to the output - no aliasing check needed
-        // as batch output is different size than input
+        
+        
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         qstick_batch_inner_into(open, close, &sweep, Kernel::Auto, false, out)

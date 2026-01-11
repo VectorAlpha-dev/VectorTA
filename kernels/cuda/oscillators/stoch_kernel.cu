@@ -1,17 +1,17 @@
-// CUDA kernels for Stochastic Oscillator (Stoch)
-//
-// Kernels:
-// - stoch_k_raw_from_hhll_f32: raw %K from precomputed HH/LL for one series.
-//   Optimized: fully parallel via grid‑stride loop; single‑pass warmup fill + compute.
-// - stoch_many_series_one_param_f32: raw %K for many series (time‑major), shared
-//   fastk_period. Optimized memory access (time‑major), hoisted invariants, partial
-//   unrolling of the inner O(period) loop.
-// - stoch_one_series_many_params_f32 (optional): one series × many params path where
-//   each thread owns one parameter. Time‑major outputs; same policy.
-//
-// Notes:
-// - FP32 only. Warmup semantics: indices < first_valid + fastk - 1 → NaN.
-// - NaNs in inputs propagate to NaN. Near‑zero denom → 50.0f.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -35,12 +35,12 @@
 #define CUDART_INF_F (__int_as_float(0x7f800000))
 #endif
 
-// Small absolute epsilon for denom checks (policy‑compatible)
+
 #ifndef STOCH_EPS
 #define STOCH_EPS (1e-12f)
 #endif
 
-// Single place for %K computation when (C, H, L) are known
+
 static __device__ __forceinline__
 float stoch_k_from_chl(float c, float h, float l) {
     if (!(isfinite(c) && isfinite(h) && isfinite(l))) return STOCH_NAN;
@@ -64,12 +64,12 @@ void stoch_k_raw_from_hhll_f32(const float* __restrict__ close,
     const int stride = blockDim.x * gridDim.x;
 
     if (UNLIKELY(warm >= series_len)) {
-        // Entire range is warmup → fill NaNs in parallel
+        
         for (int t = tid; t < series_len; t += stride) out[t] = STOCH_NAN;
         return;
     }
 
-    // One parallel pass: fill warmup with NaN; compute %K for the rest
+    
     for (int t = tid; t < series_len; t += stride) {
         if (t < warm) {
             out[t] = STOCH_NAN;
@@ -82,8 +82,8 @@ void stoch_k_raw_from_hhll_f32(const float* __restrict__ close,
     }
 }
 
-// Time-major many-series kernel (shared fastk, naive O(period) window scan per step)
-// prices are laid out time-major: idx = row * num_series + series
+
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
                                      const float* __restrict__ low_tm,
@@ -93,10 +93,10 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
                                      int series_len,
                                      int fastk_period,
                                      float* __restrict__ k_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series id
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= num_series) return;
 
-    // Validate once per series
+    
     if (UNLIKELY(fastk_period <= 0 || fastk_period > series_len)) {
         float* out_col = k_tm + s;
         for (int row = 0; row < series_len; ++row, out_col += num_series) *out_col = STOCH_NAN;
@@ -113,7 +113,7 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
     const int S = num_series;
     const int warm = first_valid + fastk_period - 1;
 
-    // Prefill NaN up to warm-1 (time-major stride S)
+    
     {
         float* out_col = k_tm + s;
         const int limit = (warm < series_len) ? warm : series_len;
@@ -121,7 +121,7 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
         if (warm >= series_len) return;
     }
 
-    // Fast path for period == 1
+    
     if (fastk_period == 1) {
         const float* hptr = high_tm  + ((size_t)first_valid) * S + s;
         const float* lptr = low_tm   + ((size_t)first_valid) * S + s;
@@ -135,7 +135,7 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
         return;
     }
 
-    // General O(period) loop per row (partially unrolled by 4)
+    
     for (int row = warm; row < series_len; ++row) {
         const int start = row - fastk_period + 1;
 
@@ -147,7 +147,7 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
         bool any_nan = false;
 
         int k = 0;
-        // Unrolled body: 4-at-a-time
+        
         for (; k + 3 < fastk_period; k += 4) {
             const float h0 = hptr[0];  const float l0 = lptr[0];
             const float h1 = hptr[S];  const float l1 = lptr[S];
@@ -164,7 +164,7 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
 
             hptr += S * 4; lptr += S * 4;
         }
-        // Remainder
+        
         for (; k < fastk_period; ++k) {
             const float hv = *hptr; const float lv = *lptr;
             any_nan |= !(isfinite(hv) && isfinite(lv));
@@ -185,17 +185,17 @@ void stoch_many_series_one_param_f32(const float* __restrict__ high_tm,
     }
 }
 
-// Optional: one series × many params path (time‑major output: [series_len, num_params])
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void stoch_one_series_many_params_f32(const float* __restrict__ high,
                                       const float* __restrict__ low,
                                       const float* __restrict__ close,
-                                      const int*   __restrict__ fastk_periods,   // [num_params]
-                                      const int*   __restrict__ first_valids,    // [num_params]
+                                      const int*   __restrict__ fastk_periods,   
+                                      const int*   __restrict__ first_valids,    
                                       int series_len,
                                       int num_params,
                                       float* __restrict__ k_tm) {
-    const int p = blockIdx.x * blockDim.x + threadIdx.x; // parameter id
+    const int p = blockIdx.x * blockDim.x + threadIdx.x; 
     if (p >= num_params) return;
 
     const int fastk = fastk_periods[p];
@@ -209,10 +209,10 @@ void stoch_one_series_many_params_f32(const float* __restrict__ high,
 
     const int warm = first_valid + fastk - 1;
 
-    // Warmup prefill
+    
     for (int t = 0; t < warm; ++t) k_tm[((size_t)t) * num_params + p] = STOCH_NAN;
 
-    // Fast path: window size == 1
+    
     if (fastk == 1) {
         for (int t = first_valid; t < series_len; ++t) {
             const float h = high[t];
@@ -223,7 +223,7 @@ void stoch_one_series_many_params_f32(const float* __restrict__ high,
         return;
     }
 
-    // General path, partially unrolled by 4
+    
     for (int t = warm; t < series_len; ++t) {
         const int start = t - fastk + 1;
 
@@ -232,7 +232,7 @@ void stoch_one_series_many_params_f32(const float* __restrict__ high,
         bool any_nan = false;
 
         int k = 0;
-        // Unrolled body
+        
         for (; k + 3 < fastk; k += 4) {
             const float h0 = high[start + k + 0]; const float l0 = low[start + k + 0];
             const float h1 = high[start + k + 1]; const float l1 = low[start + k + 1];
@@ -266,14 +266,14 @@ void stoch_one_series_many_params_f32(const float* __restrict__ high,
     }
 }
 
-// Tiny helper: broadcast a single row vector into multiple rows of a row‑major matrix
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void pack_row_broadcast_rowmajor_f32(const float* __restrict__ src,
                                      int len,
-                                     const int* __restrict__ rows_idx, // length nrows
+                                     const int* __restrict__ rows_idx, 
                                      int nrows,
-                                     float* __restrict__ dst,          // [num_rows_total, len] row-major
-                                     int row_stride)                   // == len
+                                     float* __restrict__ dst,          
+                                     int row_stride)                   
 {
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -287,20 +287,20 @@ void pack_row_broadcast_rowmajor_f32(const float* __restrict__ src,
     }
 }
 
-// Utility: 32x32 tiled transpose (time-major -> row-major)
-// Input in_tm: [rows=time][cols=series] (row-major)
-// Output out_rm: [rows=series][cols=time] (row-major)
+
+
+
 extern "C" __global__
 void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
                             int rows,
                             int cols,
                             float* __restrict__ out_rm) {
-    // Match the common "tiled transpose" pattern (avoid shared-memory bank conflicts).
-    // Use 32x8 threads and unroll over 32 rows.
+    
+    
     __shared__ float tile[32][33];
 
-    const int x0 = blockIdx.x * 32 + threadIdx.x; // col in input
-    const int y0 = blockIdx.y * 32 + threadIdx.y; // row in input
+    const int x0 = blockIdx.x * 32 + threadIdx.x; 
+    const int y0 = blockIdx.y * 32 + threadIdx.y; 
 
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
@@ -312,8 +312,8 @@ void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
 
     __syncthreads();
 
-    const int x1 = blockIdx.y * 32 + threadIdx.x; // col in output (time)
-    const int y1 = blockIdx.x * 32 + threadIdx.y; // row in output (series)
+    const int x1 = blockIdx.y * 32 + threadIdx.x; 
+    const int y1 = blockIdx.x * 32 + threadIdx.y; 
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
         const int y = y1 + j;

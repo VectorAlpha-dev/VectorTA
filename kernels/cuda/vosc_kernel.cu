@@ -1,18 +1,18 @@
-// CUDA kernels for VOSC (Volume Oscillator)
-//
-// Category: Prefix-sum/rational.
-// Given prefix sums P where P[0]=0 and P[t+1]=P[t]+x[t], each output is:
-//   long_avg = (P[t+1] - P[t+1-L]) / L
-//   short_avg = (P[t+1] - P[t+1-S]) / S
-//   VOSC = 100 * (short_avg - long_avg) / long_avg
-// Warmup: indices < first_valid + L - 1 are NaN.
-//
-// Optimization: Replace sustained FP64 math with compensated FP32 (double-single)
-// using two-float arithmetic (hi+lo). We keep wrapper signatures unchanged
-// (double* prefix inputs) and convert the few prefix entries we touch per output
-// to float2 on-the-fly. This removes FP64 multiply/divide from the hot path and
-// uses FP32 FMA and fast divide, while preserving accuracy against cancellation
-// when subtracting adjacent prefix sums.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -28,10 +28,10 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// ---------------- Float-Float (double-single) utilities ----------------
-// Represent a number as hi+lo (two floats). Based on TwoSum/Dekker family.
-// Keeping intrinsics in FP32 gives high throughput on Ada+ while providing
-// enough precision (~44-48 bits) for prefix-sum differences.
+
+
+
+
 struct ds {
     float hi;
     float lo;
@@ -39,11 +39,11 @@ struct ds {
 
 __device__ __forceinline__ ds ds_make(float hi, float lo) { ds r{hi, lo}; return r; }
 
-// Convert a double to ds (hi,lo) with one FP64 subtraction. Used for on-the-fly
-// packing when wrappers provide double prefix arrays.
+
+
 __device__ __forceinline__ ds ds_from_double(double d) {
     float hi = (float)d;
-    float lo = (float)(d - (double)hi); // one FP64 subtract during conversion
+    float lo = (float)(d - (double)hi); 
     return ds_make(hi, lo);
 }
 
@@ -60,7 +60,7 @@ __device__ __forceinline__ ds ds_neg(ds a) { return ds_make(-a.hi, -a.lo); }
 __device__ __forceinline__ ds ds_sub(ds a, ds b) { return ds_add(a, ds_neg(b)); }
 
 __device__ __forceinline__ ds ds_mul_f(ds a, float k) {
-    // hi*k plus error term; use FMA to capture FP32 rounding error
+    
     float p  = a.hi * k;
     float e  = fmaf(a.hi, k, -p) + a.lo * k;
     float hi = p + e;
@@ -70,15 +70,15 @@ __device__ __forceinline__ ds ds_mul_f(ds a, float k) {
 
 __device__ __forceinline__ float ds_to_float(ds a) { return a.hi + a.lo; }
 
-// One-series × many-params (plain), grid.y enumerates parameter combos
+
 extern "C" __global__ void vosc_batch_prefix_f32(
-    const double* __restrict__ prefix_sum, // length = len + 1
+    const double* __restrict__ prefix_sum, 
     int len,
     int first_valid,
-    const int* __restrict__ short_periods, // [n_combos]
-    const int* __restrict__ long_periods,  // [n_combos]
+    const int* __restrict__ short_periods, 
+    const int* __restrict__ long_periods,  
     int n_combos,
-    float* __restrict__ out                // [n_combos * len]
+    float* __restrict__ out                
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -89,7 +89,7 @@ extern "C" __global__ void vosc_batch_prefix_f32(
 
     const int warm = first_valid + L - 1;
     const int row_off = combo * len;
-    // Compute reciprocals in FP32 (fast path)
+    
     const float inv_S = __fdividef(1.0f, (float)S);
     const float inv_L = __fdividef(1.0f, (float)L);
 
@@ -101,12 +101,12 @@ extern "C" __global__ void vosc_batch_prefix_f32(
             const int t1 = t + 1;
             int sS = t1 - S; if (sS < 0) sS = 0;
             int sL = t1 - L; if (sL < 0) sL = 0;
-            // Convert the three needed prefix entries to ds (one FP64 subtract each)
+            
             ds PT = ds_from_double(prefix_sum[t1]);
             ds PS = ds_from_double(prefix_sum[sS]);
             ds PL = ds_from_double(prefix_sum[sL]);
 
-            // Window sums in DS, then average; compute numerator in DS to reduce cancellation
+            
             ds short_sum = ds_sub(PT, PS);
             ds long_sum  = ds_sub(PT, PL);
             ds savg_ds = ds_mul_f(short_sum, inv_S);
@@ -121,16 +121,16 @@ extern "C" __global__ void vosc_batch_prefix_f32(
     }
 }
 
-// Many-series × one-param (time-major):
-// prefix_tm: (rows+1) x cols, time-major; out_tm: rows x cols, time-major
+
+
 extern "C" __global__ void vosc_many_series_one_param_f32(
-    const double* __restrict__ prefix_tm, // (rows+1) x cols in time-major order
+    const double* __restrict__ prefix_tm, 
     int short_period,
     int long_period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, // [num_series]
-    float* __restrict__ out_tm            // rows x cols, time-major
+    const int* __restrict__ first_valids, 
+    float* __restrict__ out_tm            
 ) {
     const int series = blockIdx.y;
     if (series >= num_series) return;
@@ -165,9 +165,9 @@ extern "C" __global__ void vosc_many_series_one_param_f32(
     }
 }
 
-// ---------------- Optional DS variants and pack kernel ----------------
-// These are not wired by the current Rust wrappers, but are provided for
-// future use when switching to packed float2 prefix arrays.
+
+
+
 extern "C" __global__ void pack_double_to_float2(
     const double* __restrict__ in, float2* __restrict__ out, int n)
 {

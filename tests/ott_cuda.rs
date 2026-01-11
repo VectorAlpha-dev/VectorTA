@@ -1,14 +1,14 @@
-use my_project::indicators::ott::{
+use vector_ta::indicators::ott::{
     ott_batch_with_kernel, ott_with_kernel, OttBatchRange, OttData, OttInput, OttParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaOtt;
+use vector_ta::cuda::moving_averages::CudaOtt;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -86,7 +86,7 @@ fn ott_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series (VAR default)
+    
     let period = 10usize;
     let percent = 1.4;
     let mut cpu_tm = vec![f64::NAN; cols * rows];

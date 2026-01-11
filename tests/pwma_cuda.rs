@@ -1,16 +1,16 @@
-// Integration tests for CUDA PWMA kernels
 
-use my_project::indicators::moving_averages::pwma::{
+
+use vector_ta::indicators::moving_averages::pwma::{
     pwma_batch_with_kernel, PwmaBatchRange, PwmaBuilder, PwmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaPwma;
+use vector_ta::cuda::moving_averages::CudaPwma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

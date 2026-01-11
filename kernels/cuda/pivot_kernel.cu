@@ -1,10 +1,10 @@
-// Pivot indicator CUDA kernels (FP32)
-// - Batch: one series × many params (modes)
-// - Many-series × one-param (time-major)
-//
-// Outputs layout for both kernels is row-major with rows = combos*9 (batch) or rows = rows*9 (many-series),
-// columns = series length (batch: n) or number of series (many-series). Level order per combo:
-//   [r4, r3, r2, r1, pp, s1, s2, s3, s4]
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
@@ -17,18 +17,18 @@ static inline __device__ float f_nan() { return CUDART_NAN_F; }
 
 static constexpr int LEVELS = 9;
 
-// Core compute: assumes inputs are valid (non-NaN as required by mode).
+
 FORCE_INLINE void pivot_compute_levels_core(
     const int mode, const float h, const float l, const float c, const float o,
     float &r4, float &r3, float &r2, float &r1, float &pp, float &s1, float &s2, float &s3, float &s4)
 {
     const float d = h - l;
 
-    // Default NaNs (for default case)
+    
     r4 = r3 = r2 = r1 = pp = s1 = s2 = s3 = s4 = f_nan();
 
     switch (mode) {
-        // 0: Standard
+        
         case 0: {
             pp = (h + l + c) * (1.0f / 3.0f);
             const float t2 = pp + pp;
@@ -38,7 +38,7 @@ FORCE_INLINE void pivot_compute_levels_core(
             s2 = pp - d;
             break;
         }
-        // 1: Fibonacci
+        
         case 1: {
             pp = (h + l + c) * (1.0f / 3.0f);
             r1 = fmaf(d, 0.382f, pp);
@@ -49,7 +49,7 @@ FORCE_INLINE void pivot_compute_levels_core(
             s3 = fmaf(d, -1.000f, pp);
             break;
         }
-        // 2: Demark (needs open)
+        
         case 2: {
             const float p_lt = (h + (l + l) + c) * 0.25f;
             const float p_gt = ((h + h) + l + c) * 0.25f;
@@ -66,10 +66,10 @@ FORCE_INLINE void pivot_compute_levels_core(
             s1 = n - h;
             break;
         }
-        // 3: Camarilla
+        
         case 3: {
             pp = (h + l + c) * (1.0f / 3.0f);
-            // canonical coefficients
+            
             const float c1 = 0.0916f, c2 = 0.183f, c3 = 0.275f, c4 = 0.55f;
             r1 = fmaf(d,  c1, c);
             r2 = fmaf(d,  c2, c);
@@ -81,7 +81,7 @@ FORCE_INLINE void pivot_compute_levels_core(
             s4 = fmaf(d, -c4, c);
             break;
         }
-        // 4: Woodie (needs open)
+        
         case 4: {
             pp = (h + l + (o + o)) * 0.25f;
             const float t2p = pp + pp;
@@ -101,57 +101,57 @@ FORCE_INLINE void pivot_compute_levels_core(
     }
 }
 
-// ================================================================
-// Optimized one-series × many-params (modes) kernel (FP32)
-// Reads H/L/C once per t; reads O once per t only if any mode needs it.
-// ================================================================
+
+
+
+
 extern "C" __global__
-void pivot_batch_f32( // same symbol; NEW semantics: loops combos in-thread
+void pivot_batch_f32( 
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
     const float* __restrict__ open,
-    const int*   __restrict__ modes,   // size = n_combos
+    const int*   __restrict__ modes,   
     int n,
     int first_valid,
     int n_combos,
-    float* __restrict__ out)           // size = (n_combos*9) * n, row-major planes
+    float* __restrict__ out)           
 {
-    // Back-compat: ignore any extra Y blocks the old launcher might create.
+    
     if (blockIdx.y != 0) return;
 
-    // Determine once per block whether any mode needs 'open'.
+    
     __shared__ unsigned char s_need_open_any;
     if (threadIdx.x == 0) {
         unsigned char f = 0;
         for (int j = 0; j < n_combos; ++j) {
             const int m = modes[j];
-            f |= (m == 2) | (m == 4); // Demark or Woodie
+            f |= (m == 2) | (m == 4); 
         }
         s_need_open_any = f;
     }
     __syncthreads();
     const bool need_open_any = (s_need_open_any != 0);
 
-    // 1D grid-stride over the series (coalesced by t).
+    
     const int stride = blockDim.x * gridDim.x;
     for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < n; t += stride)
     {
         const float h = high[t];
         const float l = low[t];
         const float c = close[t];
-        const float o = need_open_any ? open[t] : 0.0f; // read once if needed by any mode
+        const float o = need_open_any ? open[t] : 0.0f; 
 
-        // Base validity for H/L/C (fast NaN test: x==x is false for NaN)
+        
         const bool base_ok = (t >= first_valid) && (h == h) && (l == l) && (c == c);
 
-        // Loop over all combos/modes; stores remain coalesced per plane for a given j.
+        
         for (int j = 0; j < n_combos; ++j) {
             const int mode = modes[j];
             const bool need_o = (mode == 2) || (mode == 4);
-            const bool valid  = base_ok && (!need_o || (o == o)); // only require O if the mode needs it
+            const bool valid  = base_ok && (!need_o || (o == o)); 
 
-            // plane base for combo j at column t
+            
             const int base = (j * LEVELS) * n + t;
 
             float r4, r3, r2, r1, pp, s1, s2, s3, s4;
@@ -161,7 +161,7 @@ void pivot_batch_f32( // same symbol; NEW semantics: loops combos in-thread
                 r4 = r3 = r2 = r1 = pp = s1 = s2 = s3 = s4 = f_nan();
             }
 
-            // Coalesced per plane across the warp
+            
             out[base + 0 * n] = r4;
             out[base + 1 * n] = r3;
             out[base + 2 * n] = r2;
@@ -175,29 +175,29 @@ void pivot_batch_f32( // same symbol; NEW semantics: loops combos in-thread
     }
 }
 
-// ================================================================
-// Many-series × one-param (time-major) kernel (FP32)
-// Only loads open_tm when the mode requires it; unchanged layout.
-// ================================================================
+
+
+
+
 extern "C" __global__
 void pivot_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
     const float* __restrict__ open_tm,
-    const int*   __restrict__ first_valids, // per series
-    int cols,  // number of series (columns)
-    int rows,  // length (rows) per series
+    const int*   __restrict__ first_valids, 
+    int cols,  
+    int rows,  
     int mode,
-    float* __restrict__ out_tm) // size = 9 * rows * cols (row-major planes)
+    float* __restrict__ out_tm) 
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; // series column
+    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols) return;
 
     const bool need_o = (mode == 2) || (mode == 4);
     const int first_valid = first_valids[s];
 
-    // Walk time-major rows for this series column; loads/stores coalesced across s at each t.
+    
     for (int t = 0; t < rows; ++t) {
         const int idx = t * cols + s;
 
@@ -214,7 +214,7 @@ void pivot_many_series_one_param_time_major_f32(
             r4 = r3 = r2 = r1 = pp = s1 = s2 = s3 = s4 = f_nan();
         }
 
-        // Write stacked planes (row-major): (level*rows + t, s)
+        
         out_tm[(0 * rows + t) * cols + s] = r4;
         out_tm[(1 * rows + t) * cols + s] = r3;
         out_tm[(2 * rows + t) * cols + s] = r2;

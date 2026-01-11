@@ -1,15 +1,15 @@
-// Integration tests for CUDA STC kernels (batch and many-series)
 
-use my_project::indicators::stc::{
+
+use vector_ta::indicators::stc::{
     StcBatchRange, StcParams,
 };
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaStc;
+use vector_ta::cuda::oscillators::CudaStc;
 
 fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -79,7 +79,7 @@ fn stc_series_f32(
     let slow_a = 2.0f32 / (slow as f32 + 1.0f32);
     let d_a = 2.0f32 / (d as f32 + 1.0f32);
 
-    // SMA seeds (kernel-style: require contiguous finite window at first_valid)
+    
     let mut fast_acc = KahanF32::new();
     let mut slow_acc = KahanF32::new();
     let mut fast_seed_nan = false;
@@ -183,7 +183,7 @@ fn stc_series_f32(
             f32::NAN
         };
 
-        // EMA(d) of stok (running mean warmup + carry-forward semantics)
+        
         let d_val = if stok.is_finite() {
             if d_seed_cnt < d {
                 d_seed_acc.add(stok);
@@ -233,7 +233,7 @@ fn stc_series_f32(
             f32::NAN
         };
 
-        // Final EMA(d) (running mean warmup + carry-forward semantics)
+        
         let out_i = if kd.is_finite() {
             if final_seed_cnt < d {
                 final_seed_acc.add(kd);
@@ -344,8 +344,8 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // number of series
-    let rows = 2048usize; // time length
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in 40..rows {
@@ -354,7 +354,7 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series
+    
     let params = StcParams {
         fast_period: Some(23),
         slow_period: Some(50),

@@ -1,10 +1,10 @@
-// CUDA kernels for Pearson correlation between High and Low (CORREL_HL)
-//
-// Semantics mirror src/indicators/correl_hl.rs (scalar path):
-// - Output is NaN before warm = first_valid + period - 1
-// - If any NaN exists in a window, output is NaN for that index
-// - If either window variance is <= 0, output is 0.0
-// - Accumulations in float64; outputs in float32
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -15,23 +15,23 @@
 #include <stdint.h>
 #include "ds_float2.cuh"
 
-// ----------------- One-series × many-params (prefix-sum based) -----------------
 
-// Each block-y is a parameter row. Threads along x sweep time indices using
-// precomputed prefix sums for h, l, h^2, l^2, and h*l, plus a prefix of NaN counts
-// (counting indices where high or low is NaN).
+
+
+
+
 extern "C" __global__ void correl_hl_batch_f32(
-    const double* __restrict__ ps_h,   // [len+1]
-    const double* __restrict__ ps_h2,  // [len+1]
-    const double* __restrict__ ps_l,   // [len+1]
-    const double* __restrict__ ps_l2,  // [len+1]
-    const double* __restrict__ ps_hl,  // [len+1]
-    const int* __restrict__ ps_nan,    // [len+1]
+    const double* __restrict__ ps_h,   
+    const double* __restrict__ ps_h2,  
+    const double* __restrict__ ps_l,   
+    const double* __restrict__ ps_l2,  
+    const double* __restrict__ ps_hl,  
+    const int* __restrict__ ps_nan,    
     int len,
     int first_valid,
-    const int* __restrict__ periods,   // [n_combos]
+    const int* __restrict__ periods,   
     int n_combos,
-    float* __restrict__ out            // [n_combos * len]
+    float* __restrict__ out            
 ){
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -53,7 +53,7 @@ extern "C" __global__ void correl_hl_batch_f32(
         if (t >= warm) {
             const int end = t + 1;
             int start = end - period;
-            if (start < 0) start = 0; // clamp for safety
+            if (start < 0) start = 0; 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
                 const double sum_h  = ps_h[end]  - ps_h[start];
@@ -81,19 +81,19 @@ extern "C" __global__ void correl_hl_batch_f32(
     }
 }
 
-// DS/FP32 variant that consumes float2 prefixes (double-single). See ds_float2.cuh.
+
 extern "C" __global__ void correl_hl_batch_f32ds(
-    const float2* __restrict__ ps_h,    // [len+1], dsf packed in float2
-    const float2* __restrict__ ps_h2,   // [len+1]
-    const float2* __restrict__ ps_l,    // [len+1]
-    const float2* __restrict__ ps_l2,   // [len+1]
-    const float2* __restrict__ ps_hl,   // [len+1]
-    const int*    __restrict__ ps_nan,  // [len+1] prefix of NaN counts
+    const float2* __restrict__ ps_h,    
+    const float2* __restrict__ ps_h2,   
+    const float2* __restrict__ ps_l,    
+    const float2* __restrict__ ps_l2,   
+    const float2* __restrict__ ps_hl,   
+    const int*    __restrict__ ps_nan,  
     int len,
     int first_valid,
-    const int*    __restrict__ periods, // [n_combos]
+    const int*    __restrict__ periods, 
     int n_combos,
-    float*        __restrict__ out      // [n_combos * len]
+    float*        __restrict__ out      
 ){
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -125,7 +125,7 @@ extern "C" __global__ void correl_hl_batch_f32ds(
 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
-                // window sums via DS prefix diffs
+                
                 float2 ah = ps_h[end];
                 float2 bh = ps_h[start];
                 float2 al = ps_l[end];
@@ -143,9 +143,9 @@ extern "C" __global__ void correl_hl_batch_f32ds(
                 dsf sum_l2 = ds_sub(ds_make(al2.y, al2.x), ds_make(bl2.y, bl2.x));
                 dsf sum_hl = ds_sub(ds_make(ahl.y, ahl.x), ds_make(bhl.y, bhl.x));
 
-                // cov = sum_hl - (sum_h*sum_l)/period
+                
                 dsf cov  = ds_sub(sum_hl, ds_scale(ds_mul(sum_h, sum_l), inv_pf));
-                // varh = sum_h2 - (sum_h*sum_h)/period; same for varl
+                
                 dsf varh = ds_sub(sum_h2, ds_scale(ds_mul(sum_h, sum_h), inv_pf));
                 dsf varl = ds_sub(sum_l2, ds_scale(ds_mul(sum_l, sum_l), inv_pf));
 
@@ -172,18 +172,18 @@ extern "C" __global__ void correl_hl_batch_f32ds(
     }
 }
 
-// ----------------- Many-series × one-param (time-major) -----------------
 
-// Each block handles one series (column) in a time-major layout [t][series].
-// Thread 0 in the block runs the sequential sliding window with O(1) updates.
+
+
+
 extern "C" __global__ void correl_hl_many_series_one_param_f32(
-    const float* __restrict__ high_tm, // [series_len * num_series], time-major
-    const float* __restrict__ low_tm,  // [series_len * num_series], time-major
-    const int* __restrict__ first_valids, // [num_series]
+    const float* __restrict__ high_tm, 
+    const float* __restrict__ low_tm,  
+    const int* __restrict__ first_valids, 
     int period,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm // [series_len * num_series], time-major
+    float* __restrict__ out_tm 
 ){
     const int series = blockIdx.x;
     if (series >= num_series || period <= 0) return;
@@ -193,7 +193,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
 
     const int stride = num_series;
 
-    // Fill column with NaNs cooperatively
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = __int_as_float(0x7fffffff);
     }
@@ -201,7 +201,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
 
     if (threadIdx.x != 0) return;
 
-    // Bootstrap running sums over [first_valid .. first_valid+period-1]
+    
     const int init_start = first_valid;
     const int init_end = min(first_valid + period, series_len);
     double sum_h = 0.0, sum_l = 0.0, sum_h2 = 0.0, sum_l2 = 0.0, sum_hl = 0.0;
@@ -236,7 +236,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
         out_tm[warm * stride + series] = out0;
     }
 
-    // Slide window
+    
     for (int t = warm + 1; t < series_len; ++t) {
         const int old_idx = t - period;
         const float old_h = high_tm[old_idx * stride + series];
@@ -245,7 +245,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
         const float new_l = low_tm[t * stride + series];
 
         if (isnan(old_h) || isnan(old_l) || isnan(new_h) || isnan(new_l)) {
-            // Rebuild sums from scratch over the window [t-period+1 .. t]
+            
             sum_h = sum_l = sum_h2 = sum_l2 = sum_hl = 0.0;
             nan_in_win = 0;
             const int start = t + 1 - period;
@@ -265,7 +265,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
                 }
             }
         } else {
-            // O(1) update
+            
             const double oh = (double)old_h, ol = (double)old_l;
             const double nh = (double)new_h, nl = (double)new_l;
             sum_h += nh - oh;

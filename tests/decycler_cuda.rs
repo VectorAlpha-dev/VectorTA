@@ -1,17 +1,17 @@
-// Integration tests for CUDA decycler kernels
 
-use my_project::indicators::decycler::{
+
+use vector_ta::indicators::decycler::{
     decycler_batch_with_kernel, decycler_with_kernel, DecyclerBatchRange, DecyclerInput,
     DecyclerParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaDecycler;
+use vector_ta::cuda::moving_averages::CudaDecycler;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -102,7 +102,7 @@ fn decycler_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         k: Some(0.707),
     };
 
-    // CPU reference: per series
+    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for s in 0..num_series {
         let mut one = vec![f64::NAN; series_len];

@@ -1,16 +1,16 @@
-// CUDA kernels for Ehlers Distance Coefficient Filter (EDCF).
-//
-// Design goals (mirrors ALMA CUDA scaffolding):
-// - Plain batch path: one series × many-params using a scratch distance buffer
-//   per parameter (avoids Ncombo×Ntime temporary matrices).
-// - Tiled apply path: shared-memory tiling along time for long series to
-//   improve locality when reducing the (dist,price) window per output.
-// - Many-series path: supports 1D (per-series sequential time walk) and a 2D
-//   tiled variant that computes local distance tiles on-the-fly with halos to
-//   avoid global dist matrices.
-// - FP32 arithmetic with FMA where appropriate; NaN boundary semantics match
-//   the scalar implementation: outputs prior to warmup are NaN, where
-//   warm = first_valid + 2*period.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -21,7 +21,7 @@
 #include <math_constants.h>
 #include "../ds_float2.cuh"
 
-// Robust double-single renormalization (no |hi| >= |lo| assumption).
+
 __device__ __forceinline__ dsf ds_renorm_full(float s, float e) {
     float t  = s + e;
     float z  = t - s;
@@ -30,7 +30,7 @@ __device__ __forceinline__ dsf ds_renorm_full(float s, float e) {
 }
 
 __device__ __forceinline__ dsf ds_add_full(dsf a, dsf b) {
-    // Knuth TwoSum on hi parts + accumulate lo parts; renormalize without ordering assumptions.
+    
     float s  = a.hi + b.hi;
     float z  = s - a.hi;
     float e  = (a.hi - (s - z)) + (b.hi - z);
@@ -61,8 +61,8 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
                            int period,
                            int first_valid,
                            float* __restrict__ dist) {
-    // Plain O(P) distance per k. Left in place as a reliable fallback.
-    // Rolling-tiled O(1) variants are provided below for integration where appropriate.
+    
+    
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int start = first_valid + period;
@@ -87,9 +87,9 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
     }
 }
 
-// ---- O(1) distance via rolling sums (tiled) ----
-// Uses: sum1 = sum of last (period-1) prices; sum2 = sum of their squares.
-// For outputs k in [base..base+TILE-1], with j0 = max(start, base).
+
+
+
 template<int TILE>
 __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float* __restrict__ prices,
                                                     int len,
@@ -100,32 +100,32 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
     const int m = period - 1;
     if (m <= 0 || len <= 0) return;
 
-    const int start = first_valid + period;               // first k where window is full
+    const int start = first_valid + period;               
     const int base  = blockIdx.x * TILE;
     const int j1    = min(base + TILE - 1, len - 1);
 
-    // If entire tile is before 'start', quickly zero and exit
+    
     if (j1 < start) {
         for (int k = base + threadIdx.x; k <= j1; k += blockDim.x) dist[k] = 0.0f;
         return;
     }
 
     const int j0 = max(start, base);
-    const int p_start = j0 - m;                           // first element needed
-    const int p_len   = j1 - p_start + 1;                 // m "prev" + outputs
+    const int p_start = j0 - m;                           
+    const int p_len   = j1 - p_start + 1;                 
 
-    extern __shared__ float sh_prices[];                  // size >= m + TILE
-    // Coalesced load of [p_start..j1] into shared
+    extern __shared__ float sh_prices[];                  
+    
     for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
         sh_prices[t] = prices[p_start + t];
     }
     __syncthreads();
 
-    // Initialize rolling sums for the first output at j0
+    
     if (threadIdx.x == 0) {
-        // Use double-single (float2) accumulators to avoid catastrophic cancellation:
-        // w = m*x^2 - 2*x*sum(prev) + sum(prev^2) is small for near-flat data yet involves
-        // subtracting large terms; DS keeps enough mantissa to preserve small weights.
+        
+        
+        
         dsf sum1 = ds_set(0.f);
         dsf sum2 = ds_set(0.f);
         #pragma unroll 1
@@ -136,10 +136,10 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
             sum2 = ds_add_full(sum2, ds_mul_full(dv, dv));
         }
 
-        // Emit zeros for [base..j0-1] (tile head before warm)
+        
         for (int k = base; k < j0; ++k) if (k <= j1) dist[k] = 0.0f;
 
-        // Slide across outputs j in [j0..j1]
+        
         const int out_cnt = j1 - j0 + 1;
         #pragma unroll 1
         for (int u = 0; u < out_cnt; ++u) {
@@ -149,11 +149,11 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
             dsf w_ds = ds_add_full(ds_scale_full(xk2_ds, (float)m), sum2);
             w_ds = ds_add_full(w_ds, ds_scale_full(ds_mul_full(xk_ds, sum1), -2.f));
             float w = w_ds.hi + w_ds.lo;
-            // Distance weights are a sum of squared differences and must be >= 0.
+            
             w = fmaxf(w, 0.0f);
             dist[j0 + u] = w;
 
-            // Advance window: remove sh_prices[u], add xk
+            
             const float v_out  = sh_prices[u];
             sum1 = ds_add_full(sum1, ds_set(xk - v_out));
             const dsf v_out2_ds = ds_mul_full(ds_set(v_out), ds_set(v_out));
@@ -236,12 +236,12 @@ void edcf_apply_weights_f32(const float* __restrict__ prices,
     }
 }
 
-// ------------------------ Tiled apply kernel ------------------------
-// Each block computes `TILE` outputs for a single row (parameter combo).
-// Shared memory stages the contiguous region [base-(P-1) .. base+TILE-1]
-// for both `prices` and `dist`, enabling coalesced global loads and reuse.
-// The distance buffer is expected to be already computed for this period
-// into `dist` (scratch for the series), avoiding huge Ncombo×Ntime temporaries.
+
+
+
+
+
+
 
 template<int TILE>
 __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* __restrict__ prices,
@@ -255,20 +255,20 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     const int base = blockIdx.x * TILE;
     if (base >= len) { return; }
 
-    // Dynamic shared: [prices | dist]; reuse in-place to hold prefix_wv and prefix_w respectively.
+    
     extern __shared__ __align__(16) unsigned char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
-    const int tile_prices_elems = (TILE + m); // [base-m .. base+TILE-1]
+    const int tile_prices_elems = (TILE + m); 
     float* sh_prices = smem;
-    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4; // align to 16B
+    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4; 
     float* sh_dist   = sh_prices + sh_prices_aligned_elems;
 
-    // Load [prices, dist] window to shared (zero fill OOB)
+    
     const int start = base - m;
     const int end_incl = min(base + TILE - 1, len - 1);
     const int tile_elems = (end_incl - start + 1);
 
-    // Vectorized load when aligned and length >= 4
+    
     const int vec_elems = (tile_elems / 4) * 4;
     for (int i = threadIdx.x * 4; i < vec_elems; i += blockDim.x * 4) {
         int gidx = start + i;
@@ -315,7 +315,7 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     }
     __syncthreads();
 
-    // Build in-place prefix sums: sh_dist := pref_w, sh_prices := pref_wv
+    
     if (threadIdx.x == 0) {
         float a = 0.f, b = 0.f;
         #pragma unroll 1
@@ -324,8 +324,8 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
             const float p = sh_prices[i];
             a += w;
             b = __fmaf_rn(w, p, b);
-            sh_dist[i]   = a; // prefix_w
-            sh_prices[i] = b; // prefix_wv
+            sh_dist[i]   = a; 
+            sh_prices[i] = b; 
         }
     }
     __syncthreads();
@@ -335,7 +335,7 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     for (int off = threadIdx.x; off < TILE && (base + off) < len; off += blockDim.x) {
         const int j = base + off;
         if (j < warm) { out_row[j] = CUDART_NAN_F; continue; }
-        const int pos_j    = j - start; // index in tile arrays
+        const int pos_j    = j - start; 
         const int pos_prev = pos_j - P;
         const float pw  = sh_dist[pos_j]  - ((pos_prev >= 0) ? sh_dist[pos_prev]  : 0.f);
         const float pwv = sh_prices[pos_j]- ((pos_prev >= 0) ? sh_prices[pos_prev]: 0.f);
@@ -368,10 +368,10 @@ extern "C" __global__ void edcf_apply_weights_tiled_f32_tile512(const float* __r
     edcf_apply_weights_tiled_f32_impl<512>(prices, dist, len, period, first_valid, out_row);
 }
 
-// ------------------------ Many-series (1D) -------------------------
-// Each block owns one series (grid.x = num_series). A single thread (lane 0)
-// walks time sequentially using small ring buffers for the last `period`
-// distances and prices. Other lanes zero-init the output then exit.
+
+
+
+
 
 extern "C" __global__
 void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
@@ -384,7 +384,7 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series_idx >= num_series) { return; }
     const int stride = num_series;
 
-    // Initialize output row with NaN in parallel
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series_idx] = CUDART_NAN_F;
     }
@@ -398,35 +398,35 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int warm = first_valid + 2 * period;
     if (warm >= series_len) { return; }
 
-    // Small local rings for last-period prices and distances (align shared)
+    
     extern __shared__ __align__(16) unsigned char local_raw[];
     float* local = reinterpret_cast<float*>(local_raw);
-    float* ring_p = local;            // [period]
-    float* ring_d = local + period;   // [period]
+    float* ring_p = local;            
+    float* ring_d = local + period;   
     for (int i = 0; i < period; ++i) { ring_p[i] = 0.f; ring_d[i] = 0.f; }
     int head = 0;
 
-    // Prime with values from [first_valid .. first_valid + period - 1]
+    
     for (int t = first_valid; t < first_valid + period && t < series_len; ++t) {
         ring_p[head] = prices_tm[t * stride + series_idx];
         head = (head + 1) % period;
     }
 
-    // Rolling sums for O(1) apply
+    
     float w_sum = 0.f;
     float wv_sum = 0.f;
 
-    // Compute distances for t in [first_valid + period .. series_len)
+    
     for (int t = first_valid + period; t < series_len; ++t) {
         const float xk = prices_tm[t * stride + series_idx];
 
-        // Remove outgoing slot from rolling sums
+        
         const float w_out = ring_d[head];
         const float p_out = ring_p[head];
         w_sum  -= w_out;
         wv_sum -= w_out * p_out;
 
-        // Compute new distance for xk vs previous P-1 prices
+        
         float sum_h = 0.f, sum_c = 0.f;
         int pos = (head + period - 1) % period;
         for (int lb = 1; lb < period; ++lb) {
@@ -442,29 +442,29 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
         const float w_new = sum_h + sum_c;
 
-        // Overwrite head with the new sample
+        
         ring_p[head] = xk;
         ring_d[head] = w_new;
 
-        // Add new slot to rolling sums
+        
         w_sum  += w_new;
         wv_sum = __fmaf_rn(w_new, xk, wv_sum);
 
         head = (head + 1) % period;
 
-        // Emit once we pass warm
+        
         if (t >= warm) {
             out_tm[t * stride + series_idx] = (w_sum != 0.f) ? (wv_sum / w_sum) : CUDART_NAN_F;
         }
     }
 }
 
-// ------------------------ Many-series (2D tiled) -------------------
-// Grid.x sweeps time in tiles of TX; grid.y sweeps series in tiles of TY.
-// For each (tile_t, tile_s) block, we load a price halo large enough to
-// compute distances for [t0-(P-1) .. t0+TX-1] so that outputs for
-// [t0 .. t0+TX-1] can be formed entirely from shared memory without global
-// dist storage. For early times, outputs remain NaN by warmup check.
+
+
+
+
+
+
 
 template<int TX, int TY>
 __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict__ prices_tm,
@@ -478,53 +478,53 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     if (tile_t0 >= rows || tile_s0 >= cols) { return; }
     const int stride = cols;
 
-    // Shared layout per series lane: [prices tile | dist tile]
-    const int prices_elems = TX + 2 * (period - 1); // [t0-2(P-1) .. t0+TX-1]
-    const int dist_elems   = TX + (period - 1);     // [t0-(P-1) .. t0+TX-1]
+    
+    const int prices_elems = TX + 2 * (period - 1); 
+    const int dist_elems   = TX + (period - 1);     
     extern __shared__ __align__(16) unsigned char smem2_raw[];
     float* smem2 = reinterpret_cast<float*>(smem2_raw);
-    // Partition by TY
+    
     const int per_series = prices_elems + dist_elems;
     float* base_ptr = smem2 + threadIdx.y * per_series;
     float* sh_prices = base_ptr;
     float* sh_dist   = base_ptr + prices_elems;
 
-    // For each active series lane (<= TY and within cols)
+    
     const int s = tile_s0 + threadIdx.y;
     if (s >= cols) { return; }
 
-    // Compute first_valid and warm for this series
+    
     const int first_valid = first_valids[s];
     const int warm = first_valid + 2 * period;
 
-    // Load prices window
+    
     const int p_start = tile_t0 - 2 * (period - 1);
     const int p_end = min(tile_t0 + TX - 1, rows - 1);
     const int p_len = (p_end - p_start + 1);
 
-    // Vectorized load across time for this series (threadIdx.x provides lanes)
+    
     for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
         int ti = p_start + t;
         float v = 0.f;
         if (ti >= 0 && ti < rows) {
-            // Treat leading warmup values (ti < first_valid) as zeros so they don't
-            // poison prefix sums via 0*NaN propagation.
+            
+            
             v = (ti >= first_valid) ? prices_tm[ti * stride + s] : 0.f;
         }
         sh_prices[t] = v;
     }
     __syncthreads();
 
-    // Compute dist for k in [t0-(P-1) .. t0+TX-1]
+    
     const int d_start = tile_t0 - (period - 1);
     const int d_end = min(tile_t0 + TX - 1, rows - 1);
     const int d_len = (d_end - d_start + 1);
 
     for (int u = threadIdx.x; u < d_len; u += blockDim.x) {
         int k = d_start + u;
-        // Match scalar semantics: weights are defined only once we have `period` prior samples.
-        // For k < first_valid + period, treat distance weights as 0 so early warmup values
-        // don't pollute prefix sums via large dummy distances.
+        
+        
+        
         const int start = first_valid + period;
         if (k < start) {
             sh_dist[u] = 0.f;
@@ -537,7 +537,7 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
             xk = 0.f;
         }
         float sum_h = 0.f, sum_c = 0.f;
-        // Gather from sh_prices with index (k-lb - p_start)
+        
         #pragma unroll 4
         for (int lb = 1; lb < period; ++lb) {
             int idx = (k - lb) - p_start;
@@ -555,8 +555,8 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     }
     __syncthreads();
 
-    // Build in-place prefix sums over dist and dist*price in the dist-space [d_start..d_end]
-    // Reuse sh_dist as prefix_w, and the head of sh_prices as prefix_wv (safe since p_idx = i + (d_start - p_start) = i + (period-1) > i).
+    
+    
     if (threadIdx.x == 0) {
         float a = 0.f, b = 0.f;
         #pragma unroll 1
@@ -566,18 +566,18 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
             const float p = (xp >= 0 && xp < p_len) ? sh_prices[xp] : 0.f;
             a += w;
             b = __fmaf_rn(w, p, b);
-            sh_dist[i]   = a;     // prefix_w at dist-space index
-            sh_prices[i] = b;     // prefix_wv stored contiguously at head of sh_prices
+            sh_dist[i]   = a;     
+            sh_prices[i] = b;     
         }
     }
     __syncthreads();
 
-    // Emit outputs for j in [t0 .. t0+TX-1]
+    
     for (int off = threadIdx.x; off < TX && (tile_t0 + off) < rows; off += blockDim.x) {
         const int j = tile_t0 + off;
         float y = CUDART_NAN_F;
         if (j >= warm) {
-            const int pos_j    = (j - d_start);      // index into prefix arrays
+            const int pos_j    = (j - d_start);      
             const int pos_prev = pos_j - period;
             const float pw  = sh_dist[pos_j]   - ((pos_prev >= 0) ? sh_dist[pos_prev]   : 0.f);
             const float pwv = sh_prices[pos_j] - ((pos_prev >= 0) ? sh_prices[pos_prev] : 0.f);

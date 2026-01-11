@@ -55,7 +55,7 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 
-// Introspection enums (parity with ALMA/CWMA style)
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -113,7 +113,7 @@ impl CudaDi {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Query SM count for launch heuristics
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)?
             as u32;
@@ -151,7 +151,7 @@ impl CudaDi {
     pub fn device_id(&self) -> u32 { self.device_id }
     pub fn synchronize(&self) -> Result<(), CudaDiError> { Ok(self.stream.synchronize()?) }
 
-    // ---- Helpers ------------------------------------------------------------
+    
     #[inline]
     fn will_fit(&self, required: usize, headroom: usize) -> Result<(), CudaDiError> {
         match mem_get_info() {
@@ -170,7 +170,7 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput("empty input".into()));
         }
         let n = high.len().min(low.len()).min(close.len());
-        // second scan duplicate removed
+        
         for i in 0..n {
             if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
                 return Ok(i);
@@ -187,7 +187,7 @@ impl CudaDi {
         if start < end {
             return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let mut cur = start;
         let st = step.max(1);
@@ -207,7 +207,7 @@ impl CudaDi {
     }
 
     fn chunk_size_for_batch(&self, n_combos: usize, len: usize) -> usize {
-        // Inputs: 3×len (up,dn,tr) + params (periods,warm) + outputs: 2×(combos×len)
+        
         let in_bytes = 3usize
             .checked_mul(len)
             .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
@@ -283,7 +283,7 @@ impl CudaDi {
         }
     }
 
-    // Build up/dn/tr precompute on host (mirrors scalar).
+    
     
     fn build_up_dn_tr(
         high: &[f32],
@@ -368,7 +368,7 @@ impl CudaDi {
             .get_function("di_batch_from_precomputed_f32")
             .map_err(|_| CudaDiError::MissingKernelSymbol { name: "di_batch_from_precomputed_f32" })?;
         let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, _ => 256 };
-        // Grid-stride over combos: size grid by device parallelism (~8 blocks/SM), cap by chunk size
+        
         let target_blocks = self.sm_count.saturating_mul(8).max(1);
         let grid_x = core::cmp::min(chunk_len as u32, target_blocks).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -400,7 +400,7 @@ impl CudaDi {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        // Record selection for introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaDi)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -441,10 +441,10 @@ impl CudaDi {
             }
         }
 
-        // Host precompute shared across combos
+        
         let (up_h, dn_h, tr_h) = Self::build_up_dn_tr(high, low, close, first_valid);
 
-        // Async uploads to overlap H2D with later work on the same stream
+        
         let d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&up_h, &self.stream)? };
         let d_dn: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&dn_h, &self.stream)? };
         let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&tr_h, &self.stream)? };
@@ -458,9 +458,9 @@ impl CudaDi {
         let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
         let d_warms: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream)? };
 
-        // Allocate outputs (combos x len)
+        
         let elems = n_combos.checked_mul(len).ok_or_else(|| CudaDiError::InvalidInput("size overflow".into()))?;
-        // Best-effort VRAM check
+        
         let in_bytes = 3usize
             .checked_mul(len).and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaDiError::InvalidInput("byte size overflow".into()))?;
@@ -480,7 +480,7 @@ impl CudaDi {
         let mut d_plus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
         let mut d_minus: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
-        // VRAM-aware chunking across combos if needed
+        
         let chunk = self.chunk_size_for_batch(n_combos, len);
         let mut processed = 0usize;
         while processed < n_combos {
@@ -504,7 +504,7 @@ impl CudaDi {
 
         self.synchronize()?;
 
-        // Wrap for return
+        
         let plus = DeviceArrayF32 { buf: d_plus, rows: n_combos, cols: len };
         let minus = DeviceArrayF32 { buf: d_minus, rows: n_combos, cols: len };
         let combos: Vec<DiParams> = periods.into_iter().map(|p| DiParams { period: Some(p) }).collect();
@@ -535,7 +535,7 @@ impl CudaDi {
             return Err(CudaDiError::InvalidInput("period must be > 0".into()));
         }
 
-        // Build first_valid per series on host
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -556,7 +556,7 @@ impl CudaDi {
         let d_first: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
 
-        // Best-effort VRAM check for outputs (plus/minus time-major grids)
+        
         let out_bytes = 2usize
             .checked_mul(total)
             .and_then(|b| b.checked_mul(std::mem::size_of::<f32>()))
@@ -569,7 +569,7 @@ impl CudaDi {
         let mut d_minus_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
 
-        // Launch config: warp-per-series 1D tiling
+        
         let func = self
             .module
             .get_function("di_many_series_one_param_f32")
@@ -611,7 +611,7 @@ impl CudaDi {
         }
 
         self.synchronize()?;
-        // Record selection and optionally log
+        
         unsafe {
             (*(self as *const _ as *mut CudaDi)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -624,7 +624,7 @@ impl CudaDi {
     }
 }
 
-// ---------- Benches (registered by benches/cuda_bench.rs) -------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_time_major_prices;
@@ -696,7 +696,7 @@ pub mod benches {
         });
 
         let len = 60_000usize;
-        // Synthesize H/L/C from a smooth close
+        
         let mut close = vec![f32::NAN; len];
         for i in 5..len {
             let x = i as f32;
@@ -799,7 +799,7 @@ pub mod benches {
         cuda.set_policy(CudaDiPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto });
         let cols = 250usize; let rows = 1_000_000usize; let period = 14usize;
         let close_tm = gen_time_major_prices(cols, rows);
-        // Synthesize H/L from close (mirrors patterns used in tests)
+        
         let mut high_tm = close_tm.clone();
         let mut low_tm = close_tm.clone();
         for s in 0..cols {
@@ -814,7 +814,7 @@ pub mod benches {
                 low_tm[idx] = v - off;
             }
         }
-        // first_valids on host
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {

@@ -1,15 +1,15 @@
-// Chandelier Exit CUDA kernels (FP32, optimized)
-// - FP64 removed; compensated FP32 for ATR seed/smoothing
-// - One-pass write (no pre-init loop to NaN/0)
-// - Amortized-O(1) sliding extrema via "lazy rescan" (recompute only when needed)
-// - Grid-stride loops for scalability
-// - NaN/warmup semantics preserved
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math_constants.h>
 
 static __device__ __forceinline__ float f32_nan() {
-    // Quiet NaN bit pattern (keeps scalar semantics)
+    
     return __int_as_float(0x7fffffff);
 }
 
@@ -32,11 +32,11 @@ extern "C" __global__ void chandelier_exit_batch_f32(
     const float* __restrict__ close,
     const int    len,
     const int    first_valid,
-    const int*   __restrict__ periods, // length = rows
-    const float* __restrict__ mults,   // length = rows
-    const int    rows,                 // number of parameter combos
-    const int    use_close_flag,       // 1 => use close for extremums
-    float*       __restrict__ out      // length = (2*rows) * len
+    const int*   __restrict__ periods, 
+    const float* __restrict__ mults,   
+    const int    rows,                 
+    const int    use_close_flag,       
+    float*       __restrict__ out      
 )
 {
     const int stride = blockDim.x * gridDim.x;
@@ -45,7 +45,7 @@ extern "C" __global__ void chandelier_exit_batch_f32(
         const int   period = periods[r];
         const float mult   = mults[r];
 
-        // Quick guards: non-positive period => all NaN after warm logic
+        
         if (period <= 0) {
             float* long_row_ptr  = out + (size_t)(2 * r)     * len;
             float* short_row_ptr = out + (size_t)(2 * r + 1) * len;
@@ -62,19 +62,19 @@ extern "C" __global__ void chandelier_exit_batch_f32(
         float* long_row_ptr  = out + (size_t)(2 * r)     * len;
         float* short_row_ptr = out + (size_t)(2 * r + 1) * len;
 
-        // ATR state (FP32 + compensation)
+        
         bool  prev_close_set = false;
         float prev_close     = 0.0f;
         float atr            = CUDART_NAN_F;
         KahanF32 warm_sum;
         int   warm_count = 0;
 
-        // Trailing raw and direction
+        
         float long_raw_prev  = CUDART_NAN_F;
         float short_raw_prev = CUDART_NAN_F;
         int   dir_prev = 1;
 
-        // Sliding-extremum state (lazy rescan)
+        
         int   hi_idx = -1, lo_idx = -1;
         float hi_val = f32_nan(), lo_val = f32_nan();
 
@@ -83,12 +83,12 @@ extern "C" __global__ void chandelier_exit_batch_f32(
             const float l = low[i];
             const float c = close[i];
 
-            // --- ATR (Wilder) ---
+            
             if (i >= first_valid) {
                 const float hl = fabsf(h - l);
                 float tr;
                 if (!prev_close_set) {
-                    tr = hl;            // first bar uses only HL
+                    tr = hl;            
                     prev_close = c;
                     prev_close_set = true;
                 } else {
@@ -102,28 +102,28 @@ extern "C" __global__ void chandelier_exit_batch_f32(
                     if (!isnan(tr)) warm_sum.add(tr);
                     ++warm_count;
                     if (warm_count == period) {
-                        atr = warm_sum.value() * invP; // seed
+                        atr = warm_sum.value() * invP; 
                     }
                 } else {
-                    // Wilder smoothing: atr += (tr - atr)/period
+                    
                     if (!isnan(tr) && !isnan(atr)) {
                         atr += (tr - atr) * invP;
                     }
                 }
             }
 
-            // --- Sliding extrema maintenance (amortized O(1)) ---
-            // New candidates (respecting use_close_flag)
+            
+            
             const float x_max = use_close_flag ? c : h;
             const float x_min = use_close_flag ? c : l;
 
-            // Incorporate new sample
+            
             if (!isnan(x_max) && (isnan(hi_val) || x_max >= hi_val)) { hi_val = x_max; hi_idx = i; }
             if (!isnan(x_min) && (isnan(lo_val) || x_min <= lo_val)) { lo_val = x_min; lo_idx = i; }
 
             const int start = (i - period + 1 > 0) ? (i - period + 1) : 0;
 
-            // If current extremum is out of window, recompute on [start, i]
+            
             if (hi_idx < start) {
                 hi_val = f32_nan(); hi_idx = -1;
                 for (int j = start; j <= i; ++j) {
@@ -139,23 +139,23 @@ extern "C" __global__ void chandelier_exit_batch_f32(
                 }
             }
 
-            // --- Warmup prefix ---
+            
             if (i < warm) {
                 long_row_ptr[i]  = f32_nan();
                 short_row_ptr[i] = f32_nan();
                 continue;
             }
 
-            // If ATR/extrema invalid -> NaN
+            
             if (isnan(atr) || isnan(hi_val) || isnan(lo_val)) {
                 long_row_ptr[i]  = f32_nan();
                 short_row_ptr[i] = f32_nan();
                 continue;
             }
 
-            // Base stops (use FMA to reduce rounding)
-            const float ls0 = fmaf(-mult, atr, hi_val); // highest - mult*atr
-            const float ss0 = fmaf( mult, atr, lo_val); // lowest  + mult*atr
+            
+            const float ls0 = fmaf(-mult, atr, hi_val); 
+            const float ss0 = fmaf( mult, atr, lo_val); 
 
             const float lsp = (i == warm || isnan(long_raw_prev))  ? ls0 : long_raw_prev;
             const float ssp = (i == warm || isnan(short_raw_prev)) ? ss0 : short_raw_prev;
@@ -163,8 +163,8 @@ extern "C" __global__ void chandelier_exit_batch_f32(
             float ls = ls0, ss = ss0;
             if (i > warm) {
                 const float pc = close[i - 1];
-                if (pc > lsp) ls = (ls0 > lsp) ? ls0 : lsp;   // max(lsp, ls0)
-                if (pc < ssp) ss = (ss0 < ssp) ? ss0 : ssp;   // min(ssp, ss0)
+                if (pc > lsp) ls = (ls0 > lsp) ? ls0 : lsp;   
+                if (pc < ssp) ss = (ss0 < ssp) ? ss0 : ssp;   
             }
 
             int d;
@@ -186,13 +186,13 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int    cols,     // number of series (columns)
-    const int    rows,     // number of time steps (rows)
+    const int    cols,     
+    const int    rows,     
     const int    period,
     const float  mult,
-    const int*   __restrict__ first_valids, // length = cols
+    const int*   __restrict__ first_valids, 
     const int    use_close_flag,
-    float*       __restrict__ out_tm        // length = (2*rows) * cols
+    float*       __restrict__ out_tm        
 )
 {
     const int stride = blockDim.x * gridDim.x;
@@ -200,7 +200,7 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
     {
         const int fv = first_valids[s];
         if (period <= 0) {
-            // All NaN
+            
             float* long_mat  = out_tm + 0;
             float* short_mat = out_tm + (size_t)rows * cols;
             for (int t = 0; t < rows; ++t) {
@@ -216,18 +216,18 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
         float* long_mat  = out_tm + 0;
         float* short_mat = out_tm + (size_t)rows * cols;
 
-        // ATR per series
+        
         float atr = CUDART_NAN_F;
         KahanF32 warm_sum;
         int   warm_count = 0;
         float prev_close = 0.0f; bool prev_set = false;
 
-        // Trailing state per series
+        
         float long_raw_prev  = CUDART_NAN_F;
         float short_raw_prev = CUDART_NAN_F;
         int   dir_prev = 1;
 
-        // Sliding extrema (lazy rescan)
+        
         int   hi_idx = -1, lo_idx = -1;
         float hi_val = f32_nan(), lo_val = f32_nan();
 
@@ -237,7 +237,7 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
             const float l = low_tm[idx];
             const float c = close_tm[idx];
 
-            // ATR
+            
             if (t >= fv) {
                 const float hl = fabsf(h - l);
                 float tr;
@@ -265,7 +265,7 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
                 }
             }
 
-            // Sliding extrema
+            
             const float x_max = use_close_flag ? c : h;
             const float x_min = use_close_flag ? c : l;
 
@@ -288,7 +288,7 @@ extern "C" __global__ void chandelier_exit_many_series_one_param_time_major_f32(
                 }
             }
 
-            // Warmup prefix
+            
             if (t < warm_base) {
                 long_mat[idx]  = f32_nan();
                 short_mat[idx] = f32_nan();

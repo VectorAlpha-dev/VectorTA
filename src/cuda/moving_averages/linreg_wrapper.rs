@@ -26,7 +26,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-// ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {

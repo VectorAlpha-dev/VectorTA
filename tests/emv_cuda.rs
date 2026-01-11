@@ -1,14 +1,14 @@
-// Integration tests for CUDA EMV kernels
 
-use my_project::indicators::emv::{emv_with_kernel, EmvInput};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::emv::{emv_with_kernel, EmvInput};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaEmv;
+use vector_ta::cuda::CudaEmv;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -47,13 +47,13 @@ fn emv_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         volume[i] = ((x * 0.0067).sin().abs() + 0.9) * 500.0 + 100.0;
     }
 
-    // CPU baseline
+    
     let cpu = {
         let input = EmvInput::from_slices(&high, &low, &close, &volume);
         emv_with_kernel(&input, Kernel::Scalar)?.values
     };
 
-    // GPU
+    
     let h32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let v32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
@@ -104,7 +104,7 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU per-series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -125,7 +125,7 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let high_tm32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let vol_tm32: Vec<f32> = vol_tm.iter().map(|&v| v as f32).collect();

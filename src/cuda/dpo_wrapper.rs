@@ -46,13 +46,13 @@ pub enum CudaDpoError {
     NotImplemented,
 }
 
-// ---------------------- Host mirror for CUDA float2 ----------------------
-// 8-byte aligned to match device-side float2 alignment.
+
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 pub struct Float2 {
-    pub x: f32, // hi
-    pub y: f32, // lo
+    pub x: f32, 
+    pub y: f32, 
 }
 unsafe impl DeviceCopy for Float2 {}
 
@@ -96,7 +96,7 @@ impl CudaDpo {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/dpo_kernel.ptx"));
-        // Determine target from current context; keep defaults otherwise
+        
         let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])?;
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -126,10 +126,10 @@ impl CudaDpo {
         None
     }
 
-    // Upload helper: page-locked (pinned) + async copy for large slices
+    
     fn upload_slice<T: DeviceCopy + Clone>(&self, h: &[T]) -> Result<DeviceBuffer<T>, CudaDpoError> {
         use std::mem::size_of;
-        const PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        const PIN_THRESHOLD_BYTES: usize = 1 << 20; 
         let bytes = h
             .len()
             .checked_mul(size_of::<T>())
@@ -157,7 +157,7 @@ impl CudaDpo {
         &self.policy
     }
 
-    // ---------- One-series × many-params ----------
+    
 
     pub fn dpo_batch_dev(
         &self,
@@ -168,11 +168,11 @@ impl CudaDpo {
         let len = data_f32.len();
         let n_combos = periods.len();
 
-        // Build dual-fp32 (float2) prefix over [first_valid..)
+        
         let ps = build_prefixes_from_first(data_f32, first_valid);
 
-        // VRAM estimate with checked arithmetic and headroom
-        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        
+        let headroom = 64 * 1024 * 1024; 
         let bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_add((len + 1).checked_mul(std::mem::size_of::<Float2>())?))
@@ -187,7 +187,7 @@ impl CudaDpo {
         }
 
         let d_data = self.upload_slice(data_f32)?;
-        let d_ps = self.upload_slice(&ps)?; // Float2
+        let d_ps = self.upload_slice(&ps)?; 
         let d_periods = self.upload_slice(&periods)?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(len * n_combos, &self.stream)
@@ -203,7 +203,7 @@ impl CudaDpo {
             n_combos as i32,
             &mut d_out,
         )?;
-        // Ensure completion so Python CAI can omit a stream key
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
@@ -233,7 +233,7 @@ impl CudaDpo {
             _ => 256,
         };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
-        // Launch in grid.y chunks to respect 65_535 limit
+        
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let grid: GridSize = (grid_x.max(1), count as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -261,7 +261,7 @@ impl CudaDpo {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
 
     pub fn dpo_many_series_one_param_time_major_dev(
         &self,
@@ -273,12 +273,12 @@ impl CudaDpo {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Build time-major dual-fp32 prefix P per series
+        
         let ps_tm = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
-        // VRAM estimate (checked) + headroom
+        
         let elems = cols.checked_mul(rows).ok_or_else(|| CudaDpoError::InvalidInput("cols*rows overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let headroom = 64 * 1024 * 1024; 
         let bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_add((elems + 1).checked_mul(std::mem::size_of::<Float2>())?))
@@ -309,7 +309,7 @@ impl CudaDpo {
             period as i32,
             &mut d_out,
         )?;
-        // Ensure completion so Python CAI can omit a stream key
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 { buf: d_out, rows, cols })
@@ -341,7 +341,7 @@ impl CudaDpo {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        // Use 1D over time and y-dim over series for modest sizes
+        
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -401,7 +401,7 @@ impl CudaDpo {
         Ok(())
     }
 
-    // ----- Prep helpers -----
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -492,7 +492,7 @@ impl CudaDpo {
     }
 }
 
-// ---- Prefix builders ----
+
 
 #[inline(always)]
 fn kahan_add(mut hi: f32, mut lo: f32, v: f32) -> (f32, f32) {
@@ -505,7 +505,7 @@ fn kahan_add(mut hi: f32, mut lo: f32, v: f32) -> (f32, f32) {
 
 fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> Vec<Float2> {
     let len = data.len();
-    // length+1, 1-based prefix; ps[w] holds sum over [first_valid .. w-1]
+    
     let mut ps = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
     let (mut hi, mut lo) = (0.0f32, 0.0f32);
     for i in 0..len {
@@ -541,7 +541,7 @@ fn build_prefixes_time_major(
     ps
 }
 
-// ---- Grid expand (mirror indicator) ----
+
 
 fn expand_grid(r: &DpoBatchRange) -> Result<Vec<DpoParams>, CudaDpoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaDpoError> {
@@ -567,7 +567,7 @@ fn expand_grid(r: &DpoBatchRange) -> Result<Vec<DpoParams>, CudaDpoError> {
             }
             return Ok(v);
         }
-        // reversed bounds: walk downward in `step` units
+        
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -614,7 +614,7 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
     YChunks { n, launched: 0 }
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;
@@ -622,14 +622,14 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // vary periods only
+    const PARAM_SWEEP: usize = 250; 
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // prefixes dominate but amortized
+        
         let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>();
         in_bytes + out_bytes + prefix_bytes + 64 * 1024 * 1024
     }

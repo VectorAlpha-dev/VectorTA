@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 use std::sync::Arc;
 
-// -------- Policies and introspection (API parity with ALMA) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -116,7 +116,7 @@ impl CudaEhlersKama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_kama_kernel.ptx"));
-        // Match ALMA: prefer context-determined target and O2, with fallbacks
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -217,7 +217,7 @@ impl CudaEhlersKama {
         }
     }
 
-    // ---------- VRAM checks ----------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -276,7 +276,7 @@ impl CudaEhlersKama {
                 }
             }
         } else {
-            // reversed bounds supported
+            
             let mut value = start;
             let step_sz = step.max(1);
             loop {
@@ -362,7 +362,7 @@ impl CudaEhlersKama {
             ));
         }
 
-        // Grid-stride launch: single kernel launch covers all combos.
+        
         let func = self
             .module
             .get_function("ehlers_kama_batch_f32")
@@ -422,7 +422,7 @@ impl CudaEhlersKama {
             periods_i32.push(period as i32);
         }
 
-        // VRAM check
+        
         let required =
             Self::bytes_for::<f32>(data_f32.len())?
                 .checked_add(Self::bytes_for::<i32>(combos.len())?)
@@ -629,11 +629,11 @@ impl CudaEhlersKama {
             ));
         }
 
-        // Select kernel according to policy and availability
+        
         let (selected, launch) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
-                // Prefer 2D whenever available; adapt tile to small N to avoid degenerate
-                // large tiles on very few series.
+                
+                
                 let has_2d = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_2d_f32")
@@ -687,8 +687,8 @@ impl CudaEhlersKama {
 
         match launch {
             ManySeriesKernelPolicy::OneD { block_x } => {
-                // Use the dedicated 1D kernel for one-param many-series.
-                // Grid.x maps to series, each block processes one full series sequentially.
+                
+                
                 let func = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_f32")
@@ -720,21 +720,21 @@ impl CudaEhlersKama {
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_2d_f32")
                     .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol { name: "ehlers_kama_multi_series_one_param_2d_f32" })?;
-                // Prefer shared when the ring buffer is sizable (advisory).
+                
                 let _ = func.set_cache_config(CacheConfig::PreferShared);
 
                 let tile = (tx * ty).max(1);
                 let blocks = ((num_series as u32 + tile - 1) / tile).max(1);
                 let grid: GridSize = (blocks, 1, 1).into();
                 let block: BlockSize = (tx, ty, 1).into();
-                // Dynamic shared memory for per-thread ring: (period-1) * tile_series * sizeof(f32)
+                
                 let mut shmem_bytes: u32 = ((period.saturating_sub(1) * tile as usize)
                     .saturating_mul(std::mem::size_of::<f32>()))
                 .try_into()
                 .map_err(|_| {
                     CudaEhlersKamaError::InvalidInput("shared memory bytes overflow".into())
                 })?;
-                // Soft-guard: if requested dynamic shared exceeds device limit, fall back to 0.
+                
                 if let Ok(dev) = Device::get_device(self.device_id) {
                     let max_dyn = dev
                         .get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock)
@@ -817,7 +817,7 @@ impl CudaEhlersKama {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM check
+        
         let required =
             Self::bytes_for::<f32>(cols.checked_mul(rows).ok_or(CudaEhlersKamaError::SizeOverflow)?)?
                 .checked_add(Self::bytes_for::<i32>(cols)?)
@@ -830,7 +830,7 @@ impl CudaEhlersKama {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
 
-        // Pre-fill outputs with NaN to ensure warm-up region is NaN across all variants
+        
         if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
             let total = (cols * rows) as u32;
             let block_x: u32 = 256;
@@ -855,7 +855,7 @@ impl CudaEhlersKama {
             &mut d_out_tm,
         )?;
 
-        // Enforce warm-up NaN boundaries explicitly.
+        
         if let Ok(func) = self
             .module
             .get_function("ehlers_kama_enforce_warm_nan_tm_f32")
@@ -879,7 +879,7 @@ impl CudaEhlersKama {
             }
         }
 
-        // Guard-rail: explicitly set t=0 to NaN when warm>0 for each series.
+        
         if let Ok(func) = self
             .module
             .get_function("ehlers_kama_fix_first_row_nan_tm_f32")
@@ -900,9 +900,9 @@ impl CudaEhlersKama {
                 self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
         }
-        // Guard rails: as an ultimate safety, patch warm-up NaNs on host and
-        // No host-side warm-up enforcement/patching needed: compute kernels skip warm region
-        // and outputs were prefilled with NaN.
+        
+        
+        
 
         self.stream.synchronize()?;
 
@@ -971,7 +971,7 @@ impl CudaEhlersKama {
         )?;
         self.stream.synchronize()?;
 
-        // Use pinned host buffer for faster D2H, then copy into provided slice.
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows)? };
         unsafe {
             d_out_tm.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
@@ -982,7 +982,7 @@ impl CudaEhlersKama {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

@@ -43,7 +43,7 @@ pub enum CudaReverseRsiError {
     DeviceMismatch { buf: u32, current: u32 },
 }
 
-// Minimal policy surface mirroring other oscillators
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -114,7 +114,7 @@ impl CudaReverseRsi {
             }
         };
 
-        // Favor L1 as working sets are read-mostly
+        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -267,7 +267,7 @@ impl CudaReverseRsi {
         Ok(())
     }
 
-    // ---- Batch (one series × many params) ----
+    
 
     fn expand_grid(sweep: &ReverseRsiBatchRange) -> Result<Vec<ReverseRsiParams>, CudaReverseRsiError> {
         let (ls, le, lp) = sweep.rsi_length_range;
@@ -308,7 +308,7 @@ impl CudaReverseRsi {
             let mut x = vs;
             while x >= ve - 1e-12 {
                 levels.push(x);
-                x += vp; // negative step
+                x += vp; 
             }
         }
 
@@ -348,7 +348,7 @@ impl CudaReverseRsi {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaReverseRsiError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep)?;
-        // Validate feasibility for at least max length
+        
         let max_len = combos
             .iter()
             .map(|p| p.rsi_length.unwrap_or(14))
@@ -386,8 +386,8 @@ impl CudaReverseRsi {
             .map_err(|_| CudaReverseRsiError::MissingKernelSymbol { name: "reverse_rsi_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Dynamic shared memory required by the kernel's async tiling path.
-        // Keep TILE consistent with the kernel (TILE=256).
+        
+        
         const TILE: usize = 256;
         let shmem_bytes: usize = 4usize
             .checked_mul(TILE)
@@ -396,15 +396,15 @@ impl CudaReverseRsi {
                 CudaReverseRsiError::InvalidInput("shmem byte size overflow".into())
             })?;
 
-        // Block size via a parallelism heuristic or env override RRSI_BLOCK_X.
-        // This kernel maps 1 thread -> 1 parameter combo and runs a long serial loop
-        // over time, so we prefer enough blocks to utilize the GPU (especially for
-        // large combo sweeps like 5k+). Occupancy-only suggestions often pick 1024
-        // which underutilizes the device for moderate `n_combos`.
+        
+        
+        
+        
+        
         let block_x: u32 = match std::env::var("RRSI_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
-                // Feed dynamic shared memory into occupancy so suggested block size
-                // respects per-block SMEM usage.
+                
+                
                 let (_min_grid, suggested) = func
                     .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))?;
                 let mut bx = suggested.max(32).min(1024);
@@ -436,7 +436,7 @@ impl CudaReverseRsi {
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
 
-        // Record selection for introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaReverseRsi)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -460,7 +460,7 @@ impl CudaReverseRsi {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            // Pass dynamic shared memory size for kernels using extern __shared__
+            
             self.stream
                 .launch(&func, grid, block, (shmem_bytes as u32), args)?;
         }
@@ -476,7 +476,7 @@ impl CudaReverseRsi {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(prices, sweep)?;
         let rows = combos.len();
 
-        // VRAM estimate: prices + lengths + levels + out
+        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| {
@@ -507,7 +507,7 @@ impl CudaReverseRsi {
             .ok_or_else(|| {
                 CudaReverseRsiError::InvalidInput("aggregate byte size overflow".into())
             })?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(bytes, headroom)?;
 
         let lengths_i32: Vec<i32> = combos
@@ -519,7 +519,7 @@ impl CudaReverseRsi {
             .map(|c| c.rsi_level.unwrap_or(50.0) as f32)
             .collect();
 
-        // Pinned host buffers + async H2D
+        
         let h_prices = LockedBuffer::from_slice(prices)?;
         let h_lens = LockedBuffer::from_slice(&lengths_i32)?;
         let h_lvls = LockedBuffer::from_slice(&levels_f32)?;
@@ -560,7 +560,7 @@ impl CudaReverseRsi {
         ))
     }
 
-    // ---- Many-series × one-param (time-major) ----
+    
 
     fn prepare_many_series_inputs(
         prices_tm: &[f32],
@@ -588,7 +588,7 @@ impl CudaReverseRsi {
             let mut fv = -1i32;
             for r in 0..rows {
                 let v = prices_tm[r * cols + s];
-                // de-duped
+                
                 if !v.is_nan() {
                     fv = r as i32;
                     break;
@@ -672,7 +672,7 @@ impl CudaReverseRsi {
         let (first_valids, period, level) =
             Self::prepare_many_series_inputs(prices_tm, cols, rows, params)?;
 
-        // VRAM estimate
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| {
@@ -704,7 +704,7 @@ impl CudaReverseRsi {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        // Use pinned host buffers + async copies for higher throughput and true async behavior
+        
         let h_prices_tm = LockedBuffer::from_slice(prices_tm)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
@@ -746,8 +746,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP_L: usize = 100; // lengths
-    const PARAM_SWEEP_V: usize = 50; // levels
+    const PARAM_SWEEP_L: usize = 100; 
+    const PARAM_SWEEP_V: usize = 50; 
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_LEN: usize = 1_000_000;
 

@@ -227,12 +227,12 @@ pub fn reflex_with_kernel(
     let (data, period, first, chosen) = reflex_prepare(input, kernel)?;
     let len = data.len();
 
-    // Only need a warm prefix of `period` for Reflex.
+    
     let mut out = alloc_with_nan_prefix(len, period);
 
     reflex_compute_into(data, period, first, chosen, &mut out);
 
-    // Reflex contract: first `period` outputs are 0.0
+    
     out[..period.min(len)].fill(0.0);
 
     Ok(ReflexOutput { values: out })
@@ -397,11 +397,11 @@ fn reflex_prepare<'a>(
     (
         // data
         &'a [f64],
-        // period
+        
         usize,
-        // first
+        
         usize,
-        // chosen
+        
         Kernel,
     ),
     ReflexError,
@@ -442,7 +442,7 @@ fn reflex_prepare<'a>(
 
 #[inline(always)]
 fn reflex_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
-    // No need to fill warmup - reflex implementations handle this
+    
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => reflex_scalar(data, period, first, out),
@@ -459,34 +459,34 @@ fn reflex_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel
     }
 }
 
-// --- Streaming API ---
+
 
 #[derive(Debug, Clone)]
 pub struct ReflexStream {
     period: usize,
 
-    // coefficients
+    
     a_sq: f64,
     b: f64,
     c: f64,
 
-    // precomputed normalization weights
-    alpha: f64, // (p+1)/(2p)
-    beta: f64,  // 1 - alpha
-    inv_p: f64, // 1/p
+    
+    alpha: f64, 
+    beta: f64,  
+    inv_p: f64, 
 
-    // ring buffer only to recall ssf[t - period] and maintain the rolling sum
+    
     ssf_buf: Vec<f64>,
-    head: usize, // write position: t mod (period+1)
-    tail: usize, // position of ssf[t - period] once t >= period
+    head: usize, 
+    tail: usize, 
 
-    // rolling state
-    ssf_sum: f64,   // Σ_{k=t-period..t-1} ssf[k] at entry
-    last_ms: f64,   // EW variance proxy MS[t-1]
-    prev_x: f64,    // raw x[t-1]
-    last_ssf1: f64, // ssf[t-1]
-    last_ssf2: f64, // ssf[t-2]
-    count: usize,   // t
+    
+    ssf_sum: f64,   
+    last_ms: f64,   
+    prev_x: f64,    
+    last_ssf1: f64, 
+    last_ssf2: f64, 
+    count: usize,   
 }
 
 impl ReflexStream {
@@ -497,14 +497,14 @@ impl ReflexStream {
             return Err(ReflexError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // Same coefficients as scalar (half-period per Ehlers reflex article)
+        
         let half_p = (period / 2).max(1) as f64;
         let a = (-1.414_f64 * std::f64::consts::PI / half_p).exp();
         let a_sq = a * a;
         let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / half_p).cos();
         let c = 0.5 * (1.0 + a_sq - b);
 
-        // Closed-form Reflex weights
+        
         let inv_p = 1.0 / (period as f64);
         let alpha = 0.5 * (1.0 + inv_p);
         let beta = 1.0 - alpha;
@@ -538,9 +538,9 @@ impl ReflexStream {
         let ring_len = p + 1;
         let t = self.count;
 
-        // Exact seeding (matches scalar numerics)
+        
         if t == 0 {
-            // ssf[0] = x
+            
             self.prev_x = x;
             self.last_ssf1 = x;
             self.ssf_buf[self.head] = x;
@@ -553,7 +553,7 @@ impl ReflexStream {
             return None;
         }
         if t == 1 {
-            // ssf[1] = x
+            
             self.prev_x = x;
             self.last_ssf2 = self.last_ssf1;
             self.last_ssf1 = x;
@@ -567,23 +567,23 @@ impl ReflexStream {
             return None;
         }
 
-        // t >= 2: ssf[t] = c*(x + x[t-1]) + b*ssf[t-1] - a^2*ssf[t-2]
+        
         let t0 = self.c * (x + self.prev_x);
         let t1 = (-self.a_sq).mul_add(self.last_ssf2, t0);
         let ssf_t = self.b.mul_add(self.last_ssf1, t1);
 
         let mut out = None;
         if t >= p {
-            // old value leaving the "last p" window
+            
             let ssf_tp = self.ssf_buf[self.tail];
 
-            // mean of the last p values (ssf[t-1]..ssf[t-p])
+            
             let mean_lp = self.ssf_sum * self.inv_p;
 
-            // Closed-form Reflex sum: beta*ssf[t] + alpha*ssf[t-p] - mean_last_p
+            
             let my_sum = self.beta.mul_add(ssf_t, self.alpha * ssf_tp) - mean_lp;
 
-            // EW variance and normalization (FMA matches scalar path)
+            
             let ms = 0.96_f64.mul_add(self.last_ms, 0.04_f64 * (my_sum * my_sum));
             self.last_ms = ms;
             out = if ms > 0.0 {
@@ -592,25 +592,25 @@ impl ReflexStream {
                 Some(0.0)
             };
 
-            // roll window for next call
+            
             self.ssf_sum += ssf_t - ssf_tp;
             self.tail += 1;
             if self.tail == ring_len {
                 self.tail = 0;
             }
         } else {
-            // still building first window
+            
             self.ssf_sum += ssf_t;
         }
 
-        // store current, advance head
+        
         self.ssf_buf[self.head] = ssf_t;
         self.head += 1;
         if self.head == ring_len {
             self.head = 0;
         }
 
-        // advance recurrent state
+        
         self.prev_x = x;
         self.last_ssf2 = self.last_ssf1;
         self.last_ssf1 = ssf_t;
@@ -620,7 +620,7 @@ impl ReflexStream {
     }
 }
 
-// --- Batch/grid API ---
+
 
 #[derive(Clone, Debug)]
 pub struct ReflexBatchRange {
@@ -797,7 +797,7 @@ fn reflex_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    // Guard rows * cols against overflow
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(ReflexError::InvalidRange {
@@ -806,23 +806,23 @@ fn reflex_batch_inner(
             step: 0,
         })?;
 
-    // Allocate rows×cols uninit and mark only the Reflex warm prefix per row.
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Alias to &mut [f64] without materializing Vec<f64> yet.
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Compute directly into the matrix, making each row self-contained.
+    
     let kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
     };
 
-    // Convert batch kernels to scalar equivalents (like ALMA does)
+    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -832,7 +832,7 @@ fn reflex_batch_inner(
 
     let meta = reflex_batch_inner_into(data, sweep, simd, parallel, out)?;
 
-    // Reconstitute Vec<f64> without copies.
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -866,7 +866,7 @@ unsafe fn reflex_row_avx512(data: &[f64], first: usize, period: usize, out: &mut
     reflex_avx512(data, period, first, out)
 }
 
-// --- Zero-copy batch operations ---
+
 
 #[inline(always)]
 fn reflex_batch_inner_into(
@@ -892,7 +892,7 @@ fn reflex_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    // checked arithmetic for shape and output buffer length
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(ReflexError::InvalidRange {
@@ -904,11 +904,11 @@ fn reflex_batch_inner_into(
         return Err(ReflexError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // Write into the provided output buffer
+    
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Fill warmup with zeros
+        
         for x in &mut dst[..period.min(cols)] {
             *x = 0.0;
         }
@@ -956,7 +956,7 @@ pub struct ReflexBatchMetadata {
     pub cols: usize,
 }
 
-// --- Python bindings ---
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "reflex")]
@@ -998,12 +998,12 @@ pub fn reflex_py<'py>(
     };
     let input = ReflexInput::from_slice(data_slice, params);
 
-    // Get Vec<f64> from Rust function for zero-copy transfer
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| reflex_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1262,17 +1262,17 @@ pub fn reflex_batch_rows_cols_js(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn reflex_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn reflex_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1288,16 +1288,16 @@ pub fn reflex_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
@@ -1308,15 +1308,15 @@ pub fn reflex_into(
         let input = ReflexInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
-            // In-place operation: use temporary buffer
+            
+            
             let mut temp = vec![0.0; len];
             reflex_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing: compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             reflex_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1343,7 +1343,7 @@ pub fn reflex_batch_into(
         period: (period_start, period_end, period_step),
     };
 
-    // rows = combos.len()
+    
     let combos = expand_grid_checked(&sweep)
         .map_err(|e| JsValue::from_str(&format!("reflex batch error: {}", e)))?;
     let rows = combos.len();
@@ -1358,7 +1358,7 @@ pub fn reflex_batch_into(
     Ok(rows)
 }
 
-// -- Test coverage macros: ALMA parity --
+
 
 #[cfg(test)]
 mod tests {
@@ -1579,7 +1579,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_reflex_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1587,33 +1587,33 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations
+        
         let test_cases = vec![
-            ReflexParams { period: Some(20) }, // default
-            ReflexParams { period: Some(2) },  // minimum period (must be >= 2)
-            ReflexParams { period: Some(5) },  // small period
-            ReflexParams { period: Some(10) }, // smaller medium
-            ReflexParams { period: Some(30) }, // larger period
-            ReflexParams { period: Some(50) }, // large period
-            ReflexParams { period: Some(15) }, // different medium
-            ReflexParams { period: Some(40) }, // another large
-            ReflexParams { period: None },     // None value (use default)
+            ReflexParams { period: Some(20) }, 
+            ReflexParams { period: Some(2) },  
+            ReflexParams { period: Some(5) },  
+            ReflexParams { period: Some(10) }, 
+            ReflexParams { period: Some(30) }, 
+            ReflexParams { period: Some(50) }, 
+            ReflexParams { period: Some(15) }, 
+            ReflexParams { period: Some(40) }, 
+            ReflexParams { period: None },     
         ];
 
         for params in test_cases {
             let input = ReflexInput::from_candles(&candles, "close", params);
             let output = reflex_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1622,7 +1622,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1631,7 +1631,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1645,7 +1645,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_reflex_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1660,7 +1660,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Single comprehensive strategy following ALMA pattern
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1682,10 +1682,10 @@ mod tests {
                 let ReflexOutput { values: ref_out } =
                     reflex_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length must match input
+                
                 prop_assert_eq!(out.len(), data.len());
 
-                // Property 2: First period values must be 0.0 (unique to reflex)
+                
                 for i in 0..period.min(data.len()) {
                     prop_assert!(
                         out[i] == 0.0,
@@ -1696,7 +1696,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: SIMD consistency
+                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1726,7 +1726,7 @@ mod tests {
                     );
                 }
 
-                // Property 4: After warmup, values should be finite for reasonable inputs
+                
                 for i in period..data.len() {
                     if data[i].abs() < 1e10 {
                         prop_assert!(
@@ -1739,9 +1739,9 @@ mod tests {
                     }
                 }
 
-                // Property 5: Constant data should produce near-zero values
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
-                    // For constant data, reflex should be very close to 0 after 2*period
+                    
                     for i in (period * 2)..data.len() {
                         prop_assert!(
                             out[i].abs() < 0.001,
@@ -1753,8 +1753,8 @@ mod tests {
                     }
                 }
 
-                // Remaining checks (distribution bounds / step response) are heuristic and can be
-                // violated for some synthetic patterns; keep the suite focused on strict invariants.
+                
+                
 
                 Ok(())
             })
@@ -1834,7 +1834,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1842,18 +1842,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
+        
         let batch_configs = vec![
-            // Original test case
+            
             (10, 30, 10),
-            // Edge cases (period must be >= 2)
-            (20, 20, 0),  // Single parameter (default)
-            (2, 10, 2),   // Small periods starting from minimum
-            (25, 50, 25), // Large periods
-            (5, 20, 5),   // Different step
-            (15, 45, 15), // Medium to large
-            (3, 15, 3),   // Small range
-            (30, 60, 10), // Large periods with smaller step
+            
+            (20, 20, 0),  
+            (2, 10, 2),   
+            (25, 50, 25), 
+            (5, 20, 5),   
+            (15, 45, 15), 
+            (3, 15, 3),   
+            (30, 60, 10), 
         ];
 
         for (p_start, p_end, p_step) in batch_configs {
@@ -1862,9 +1862,9 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1874,7 +1874,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -1883,7 +1883,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -1892,7 +1892,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -1906,7 +1906,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1915,16 +1915,16 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_reflex_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with an initial quiet-NaN prefix
+        
         let mut data = vec![f64::from_bits(0x7ff8_0000_0000_0000); 3];
         data.extend((0..256).map(|i| ((i as f64) * 0.1).sin() * 1.23 + (i as f64) * 0.01));
 
         let input = ReflexInput::from_slice(&data, ReflexParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = reflex_with_kernel(&input, Kernel::Auto)?.values;
 
-        // Preallocate and compute via new into API
+        
         let mut out = vec![0.0; data.len()];
         super::reflex_into(&input, &mut out)?;
 

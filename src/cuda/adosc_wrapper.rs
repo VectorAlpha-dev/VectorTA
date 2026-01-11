@@ -158,7 +158,7 @@ impl CudaAdosc {
         }
         let combos = expand_grid_checked_cuda(sweep)?;
 
-        // Async H2D copies
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
             ?;
@@ -167,11 +167,11 @@ impl CudaAdosc {
         let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }
             ?;
 
-        // Precompute ADL on device (enqueued)
+        
         let mut d_adl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         self.launch_adl(&d_high, &d_low, &d_close, &d_volume, len, &mut d_adl)?;
 
-        // Period arrays
+        
         let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
         let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
         for prm in &combos {
@@ -188,7 +188,7 @@ impl CudaAdosc {
         let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
         let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
 
-        // Memory sizing
+        
         let (rows, cols) = (combos.len(), len);
         let bytes_inputs = 4usize
             .checked_mul(cols)
@@ -230,12 +230,12 @@ impl CudaAdosc {
             }
             self.launch_batch_from_adl(&d_adl, &d_shorts, &d_longs, cols, rows, &mut d_out)?;
             self.maybe_log_batch_debug();
-            // Synchronize producing stream so CAI can omit 'stream'
+            
             self.stream.synchronize()?;
             return Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
         }
 
-        // Try keeping a full device output and fill by chunks
+        
         let can_hold_whole_output = match mem_get_info() {
             Ok((free, _)) => {
                 let static_now = bytes_inputs + bytes_adl + headroom;
@@ -267,13 +267,13 @@ impl CudaAdosc {
                 unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
                 start += chunk;
             }
-            // Synchronize producing stream so CAI may omit 'stream'.
+            
             self.stream.synchronize()?;
             return Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
         }
 
-        // If we cannot hold the full output in VRAM, fall back to chunked device fill
-        // into a single preallocated device buffer (no host re-upload).
+        
+        
         let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_out_full: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
         let mut start = 0usize;
@@ -286,7 +286,7 @@ impl CudaAdosc {
             let d_longs_off = unsafe {
                 DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)?
             };
-            // launch directly into the correct offset inside the final output using a scratch chunk
+            
             let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
                 DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)?
             };
@@ -296,7 +296,7 @@ impl CudaAdosc {
             unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
             start += chunk;
         }
-        // Synchronize producing stream so CAI can omit 'stream'
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
@@ -330,7 +330,7 @@ impl CudaAdosc {
             return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
 
-        // Rough VRAM estimate: 4 inputs + 1 output plus headroom.
+        
         let bytes_inputs = 4usize
             .checked_mul(len)
             .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
@@ -354,7 +354,7 @@ impl CudaAdosc {
         self.launch_many_series_one_param(
             &d_high, &d_low, &d_close, &d_volume, cols, rows, short, long, &mut d_out,
         )?;
-        // Synchronize producing stream so CAI can omit 'stream'
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
     }
@@ -410,7 +410,7 @@ impl CudaAdosc {
             .module
             .get_function("adosc_batch_from_adl_f32")
             .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_batch_from_adl_f32" })?;
-        // Throughput mapping: warp-per-combo (see `adosc_batch_from_adl_f32`).
+        
         let mut block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
             BatchKernelPolicy::Auto => 256,
@@ -484,7 +484,7 @@ impl CudaAdosc {
             .module
             .get_function("adosc_many_series_one_param_f32")
             .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_many_series_one_param_f32" })?;
-        // Throughput mapping: threads grid‑stride over series
+        
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
             ManySeriesKernelPolicy::Auto => 256,
@@ -524,7 +524,7 @@ impl CudaAdosc {
     }
 }
 
-// -------- Policy and introspection (parity with ALMA style) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -604,17 +604,17 @@ impl CudaAdosc {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // ~250 (short,long) combos
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
-        // 4 inputs + 1 ADL + outputs
+        
         let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let adl_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
@@ -671,8 +671,8 @@ pub mod benches {
             volume[i] = (x.cos().abs() + 0.4) * 1000.0;
         }
         let sweep = AdoscBatchRange {
-            // Keep output surface O(PARAM_SWEEP * len). Sweeping both short+long
-            // multiplies combinations and can exceed VRAM / overflow indices.
+            
+            
             short_period: (3, 3, 0),
             long_period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
@@ -687,10 +687,10 @@ pub mod benches {
             longs.push(prm.long_period.unwrap_or(0) as i32);
         }
 
-        // Upload inputs once and precompute ADL once (params-independent).
-        //
-        // Note: use synchronous H2D transfers for bench prep so that if an allocation fails
-        // (e.g., due to fragmentation) we don't unwind with in-flight async copies/kernels.
+        
+        
+        
+        
         let d_high = DeviceBuffer::from_slice(&high).expect("H2D");
         let d_low = DeviceBuffer::from_slice(&low).expect("H2D");
         let d_close = DeviceBuffer::from_slice(&close).expect("H2D");

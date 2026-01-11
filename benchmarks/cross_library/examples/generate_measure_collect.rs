@@ -1,5 +1,5 @@
-// Helper script to generate the complete measure_and_collect function
-// This generates the code needed to measure all indicators
+
+
 
 use std::collections::HashSet;
 

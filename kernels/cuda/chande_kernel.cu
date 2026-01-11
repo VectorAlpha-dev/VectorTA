@@ -1,15 +1,15 @@
-// CUDA kernels for Chande (Chandelier Exit) indicator.
-//
-// For each parameter combo (period, mult, direction), compute:
-//  - Long:  HighestHigh(period) - mult * ATR(period)
-//  - Short: LowestLow(period)   + mult * ATR(period)
-//
-// ATR uses Wilder's RMA recurrence with True Range defined as in scalar:
-//  TR(t) = max(high-low, |high-prev_close|, |low-prev_close|),
-//  with t==first_valid seeded as (high-low).
-//
-// Warmup/NaN semantics:
-//  warm = first_valid + period - 1; out[0..warm) = NaN; out[warm..] valid.
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -47,7 +47,7 @@ void chande_batch_f32(const float* __restrict__ high,
                       const float* __restrict__ close,
                       const int* __restrict__ periods,
                       const float* __restrict__ mults,
-                      const int* __restrict__ dirs,   // 1=long, 0=short
+                      const int* __restrict__ dirs,   
                       const float* __restrict__ alphas,
                       const int* __restrict__ warm_indices,
                       int series_len,
@@ -65,22 +65,22 @@ void chande_batch_f32(const float* __restrict__ high,
     if (period <= 0 || warm >= series_len || first_valid >= series_len) return;
 
     const int base = combo * series_len;
-    // Initialize entire row to NaN cooperatively
+    
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[base + idx] = NAN;
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single-lane sequential kernel per combo
+    if (threadIdx.x != 0) return; 
 
-    // Seed ATR over first window [first_valid, first_valid+period)
+    
     double sum_tr = 0.0;
     for (int t = first_valid; t < first_valid + period; ++t) {
         sum_tr += (double)tr_at(high, low, close, t, first_valid);
     }
     double atr = sum_tr / (double)period;
-    // Write first output at warm index
-    // Compute rolling max/min via naive scan over current window for simplicity and correctness
+    
+    
     {
         float extrema = (dir != 0) ? -FLT_MAX : FLT_MAX;
         const int wstart = warm + 1 - period;
@@ -92,7 +92,7 @@ void chande_batch_f32(const float* __restrict__ high,
         out[base + warm] = (dir != 0) ? (extrema - mult * (float)atr) : (extrema + mult * (float)atr);
     }
 
-    // Steady state
+    
     for (int t = warm + 1; t < series_len; ++t) {
         const float tri = tr_at(high, low, close, t, first_valid);
         atr = fma((double)tri - atr, (double)alpha, atr);
@@ -107,7 +107,7 @@ void chande_batch_f32(const float* __restrict__ high,
     }
 }
 
-// Optimized batch variant that reuses host-precomputed TR (True Range) across parameter rows.
+
 extern "C" __global__
 void chande_batch_from_tr_f32(const float* __restrict__ high,
                               const float* __restrict__ low,
@@ -136,7 +136,7 @@ void chande_batch_from_tr_f32(const float* __restrict__ high,
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    // Seed ATR from TR
+    
     double sum_tr = 0.0;
     for (int t = first_valid; t < first_valid + period; ++t) { sum_tr += (double)tr[t]; }
     double atr = sum_tr / (double)period;
@@ -166,15 +166,15 @@ void chande_batch_from_tr_f32(const float* __restrict__ high,
     }
 }
 
-// Many-series × one-parameter (time-major). Each warp handles a series (lane 0 does sequential work).
+
 extern "C" __global__
 void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                                       const float* __restrict__ low_tm,
                                       const float* __restrict__ close_tm,
-                                      const int* __restrict__ first_valids, // per series (column)
+                                      const int* __restrict__ first_valids, 
                                       int period,
                                       float mult,
-                                      int dir, // 1=long, 0=short
+                                      int dir, 
                                       float alpha,
                                       int num_series,
                                       int series_len,
@@ -193,7 +193,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
-        // Initialize column to NaN cooperatively
+        
         for (int t = lane; t < series_len; t += warpSize) {
             out_tm[t * stride + s] = NAN;
         }
@@ -202,7 +202,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
         if (warm >= series_len) continue;
 
         if (lane == 0) {
-            // Seed ATR
+            
             double sum_tr = 0.0;
             for (int t = first_valid; t < first_valid + period; ++t) {
                 const float hi = high_tm[t * stride + s];
@@ -222,7 +222,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                 sum_tr += (double)tri;
             }
             double atr = sum_tr / (double)period;
-            // First output
+            
             {
                 float extrema = (dir != 0) ? -FLT_MAX : FLT_MAX;
                 const int wstart = warm + 1 - period;
@@ -233,7 +233,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                 }
                 out_tm[warm * stride + s] = (dir != 0) ? (extrema - mult * (float)atr) : (extrema + mult * (float)atr);
             }
-            // Steady state
+            
             for (int t = warm + 1; t < series_len; ++t) {
                 const float hi = high_tm[t * stride + s];
                 const float lo = low_tm[t * stride + s];
@@ -257,17 +257,17 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
     }
 }
 
-// === Optimized one-series × many-params path ===============================
-// Drop-in kernels that prioritize the common "one price series – many params"
-// use case. They implement rolling extrema via a monotone deque (amortized
-// O(1) per step) and seed/update ATR in FP32 using Kahan compensation and FMA.
-//
-// These kernels are additive and do not change existing entry points. Host
-// wrappers may opt-in to these names for better performance:
-//   - chande_one_series_many_params_f32(...)
-//   - chande_one_series_many_params_from_tr_f32(...)
 
-// Compute True Range from high/low/prev_close (broadcast per warp).
+
+
+
+
+
+
+
+
+
+
 static __forceinline__ __device__ float tr_from_hlpc(
     float hi, float lo, float pc, int t, int first_valid)
 {
@@ -280,8 +280,8 @@ static __forceinline__ __device__ float tr_from_hlpc(
     return tr;
 }
 
-// Power-of-two ring buffer ops (mask = cap-1). Head points to valid front.
-// We store both index and value so we don't reload historical v from global.
+
+
 static __forceinline__ __device__ void dq_push_monotone(
     int* __restrict__ idx_buf,
     float* __restrict__ val_buf,
@@ -289,7 +289,7 @@ static __forceinline__ __device__ void dq_push_monotone(
     int& head, int& tail,
     int idx_new, float val_new, bool keep_max)
 {
-    // Pop from back while monotonicity is violated.
+    
     while (head != tail) {
         unsigned int last = (static_cast<unsigned int>(tail - 1)) & mask;
         float back_val = val_buf[last];
@@ -301,7 +301,7 @@ static __forceinline__ __device__ void dq_push_monotone(
     tail = static_cast<int>((static_cast<unsigned int>(tail) + 1u) & mask);
 }
 
-// Drop expired entries (index < window_start).
+
 static __forceinline__ __device__ void dq_pop_expired(
     const int* __restrict__ idx_buf,
     unsigned int mask,
@@ -313,32 +313,32 @@ static __forceinline__ __device__ void dq_pop_expired(
     }
 }
 
-// Return current extremum value at deque front. Assumes not empty.
+
 static __forceinline__ __device__ float dq_front_value(
     const float* __restrict__ val_buf, unsigned int mask, int head)
 {
     return val_buf[head & mask];
 }
 
-// Inputs:
-//  - high, low, close: single series (length = series_len)
-//  - periods, mults, dirs, alphas: size = n_combos
-//  - first_valid: common across combos for this series
-//  - queue_cap: power-of-two >= (max_period + 1) across combos
-//  - dq_idx, dq_val: workspace sized n_combos * queue_cap (int / float)
-// Output layout: row-major [combo][t], same as existing batch kernels.
+
+
+
+
+
+
+
 extern "C" __global__
 void chande_one_series_many_params_f32(const float* __restrict__ high,
                                        const float* __restrict__ low,
                                        const float* __restrict__ close,
                                        const int*   __restrict__ periods,
                                        const float* __restrict__ mults,
-                                       const int*   __restrict__ dirs,   // 1=long, 0=short
+                                       const int*   __restrict__ dirs,   
                                        const float* __restrict__ alphas,
                                        int first_valid,
                                        int series_len,
                                        int n_combos,
-                                       int queue_cap,          // power-of-two >= max_period+1
+                                       int queue_cap,          
                                        int*   __restrict__ dq_idx,
                                        float* __restrict__ dq_val,
                                        float* __restrict__ out)
@@ -367,32 +367,32 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
         const int base = combo * series_len;
 
         if (period <= 0 || warm >= series_len || first_valid >= series_len) {
-            // Invalid/degenerate: define full row as NaN.
+            
             for (int t0 = 0; t0 < series_len; ++t0) {
                 out[base + t0] = NAN;
             }
             continue;
         }
 
-        // Warmup prefix only; the main loop writes all t >= warm.
+        
         for (int t0 = 0; t0 < warm; ++t0) {
             out[base + t0] = NAN;
         }
 
-        // Per-thread deque state mapped into the flat workspaces
+        
         int*   ring_idx = dq_idx + combo * queue_cap;
         float* ring_val = dq_val + combo * queue_cap;
         int head = 0, tail = 0;
 
-        // ATR state: Kahan-compensated sum for seeding, then FMA recurrence.
+        
         float seed_sum = 0.0f, c = 0.0f;
         float atr = 0.0f;
         bool  atr_seeded = false;
 
-        // Main time loop with warp-level broadcast of inputs.
-        float prev_close_b = 0.0f; // broadcast pc at t-1
+        
+        float prev_close_b = 0.0f; 
         for (int t = 0; t < series_len; ++t) {
-            // Lane0 loads scalars once per warp; broadcast to others.
+            
             float hi = 0.0f, lo = 0.0f, pc = 0.0f;
             if (lane == 0) {
                 hi = high[t];
@@ -403,19 +403,19 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
             lo = __shfl_sync(full_mask, lo, 0);
             if (t > 0) prev_close_b = __shfl_sync(full_mask, pc, 0);
 
-            // Push into deque only once we enter the valid region.
+            
             if (t >= first_valid) {
-                const float v = (dir != 0) ? hi : lo; // per-combo choice
+                const float v = (dir != 0) ? hi : lo; 
                 dq_push_monotone(ring_idx, ring_val, qmask, head, tail, t, v, /*keep_max=*/(dir != 0));
-                // Expire elements that fell out of this combo's window
+                
                 const int wstart = t + 1 - period;
                 dq_pop_expired(ring_idx, qmask, head, tail, wstart);
             }
 
-            // ATR seeding for this combo over its own period
+            
             if (t >= first_valid && !atr_seeded) {
                 const float tri = tr_from_hlpc(hi, lo, prev_close_b, t, first_valid);
-                // Kahan compensated sum
+                
                 const float y = tri - c;
                 const float tmp = seed_sum + y;
                 c = (tmp - seed_sum) - y;
@@ -425,16 +425,16 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
                     atr = seed_sum / static_cast<float>(period);
                     atr_seeded = true;
 
-                    // First valid output at warm
+                    
                     const float ext = dq_front_value(ring_val, qmask, head);
                     out[base + t] = (dir != 0) ? (ext - mult * atr) : (ext + mult * atr);
                 }
             } else if (atr_seeded && t > warm) {
-                // Wilder's RMA (FMA keeps one rounding)
+                
                 const float tri = tr_from_hlpc(hi, lo, prev_close_b, t, first_valid);
-                atr = __fmaf_rn(alpha, (tri - atr), atr); // atr += alpha*(tri - atr)
+                atr = __fmaf_rn(alpha, (tri - atr), atr); 
 
-                // Output
+                
                 const float ext = dq_front_value(ring_val, qmask, head);
                 out[base + t] = (dir != 0) ? (ext - mult * atr) : (ext + mult * atr);
             }
@@ -442,7 +442,7 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
     }
 }
 
-// Variant that reuses precomputed TR[t] for the series, broadcast across warp.
+
 extern "C" __global__
 void chande_one_series_many_params_from_tr_f32(const float* __restrict__ high,
                                                const float* __restrict__ low,
@@ -454,7 +454,7 @@ void chande_one_series_many_params_from_tr_f32(const float* __restrict__ high,
                                                int first_valid,
                                                int series_len,
                                                int n_combos,
-                                               int queue_cap,          // power-of-two >= max_period+1
+                                               int queue_cap,          
                                                int*   __restrict__ dq_idx,
                                                float* __restrict__ dq_val,
                                                float* __restrict__ out)

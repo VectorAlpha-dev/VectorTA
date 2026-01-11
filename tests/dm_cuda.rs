@@ -1,16 +1,16 @@
-// Integration tests for CUDA DM (+DM/-DM) kernels
 
-use my_project::indicators::dm::{
+
+use vector_ta::indicators::dm::{
     dm_batch_with_kernel, dm_with_kernel, DmBatchRange, DmInput, DmParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::dm_wrapper::CudaDm;
+use vector_ta::cuda::dm_wrapper::CudaDm;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -104,7 +104,7 @@ fn dm_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_plus_tm = vec![f64::NAN; cols * rows];
     let mut cpu_minus_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

@@ -369,7 +369,7 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 
     let warmup_end = first + slow - 1;
     for v in &mut dst[..warmup_end] {
-        // Match alloc_with_nan_prefix's quiet-NaN pattern for warmups
+        
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
@@ -438,7 +438,7 @@ pub unsafe fn ppo_scalar(
         let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
             f64::NAN
         } else {
-            // 100 * (ff/sf - 1)
+            
             let ratio = ff / sf;
             f64::mul_add(ratio, 100.0, -100.0)
         };
@@ -447,7 +447,7 @@ pub unsafe fn ppo_scalar(
     }
 }
 
-// Classic kernel with inline EMA calculations
+
 #[inline]
 pub unsafe fn ppo_scalar_classic_ema(
     data: &[f64],
@@ -456,7 +456,7 @@ pub unsafe fn ppo_scalar_classic_ema(
     first: usize,
     out: &mut [f64],
 ) {
-    // Constants
+    
     let n = data.len();
     let start_idx = first + slow - 1;
 
@@ -465,8 +465,8 @@ pub unsafe fn ppo_scalar_classic_ema(
     let fb = 1.0 - fa;
     let sb = 1.0 - sa;
 
-    // Build initial SMA windows for both EMAs in one pass over the first `slow`
-    // Fast window is the last `fast` elements within the first `slow` values
+    
+    
     let mut slow_sum = 0.0f64;
     let mut fast_sum = 0.0f64;
     let overlap = slow - fast;
@@ -480,11 +480,11 @@ pub unsafe fn ppo_scalar_classic_ema(
         k += 1;
     }
 
-    // Initial EMA values
+    
     let mut fast_ema = fast_sum / (fast as f64);
     let mut slow_ema = slow_sum / (slow as f64);
 
-    // Advance fast EMA up to start_idx so both are aligned
+    
     let mut i = first + fast;
     while i <= start_idx {
         let x = *data.get_unchecked(i);
@@ -492,7 +492,7 @@ pub unsafe fn ppo_scalar_classic_ema(
         i += 1;
     }
 
-    // First PPO output
+    
     *out.get_unchecked_mut(start_idx) = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan()
     {
         f64::NAN
@@ -501,7 +501,7 @@ pub unsafe fn ppo_scalar_classic_ema(
         f64::mul_add(ratio, 100.0, -100.0)
     };
 
-    // Main loop
+    
     let mut j = start_idx + 1;
     while j < n {
         let x = *data.get_unchecked(j);
@@ -519,7 +519,7 @@ pub unsafe fn ppo_scalar_classic_ema(
     }
 }
 
-// Classic kernel with inline SMA calculations
+
 #[inline]
 pub unsafe fn ppo_scalar_classic_sma(
     data: &[f64],
@@ -528,19 +528,19 @@ pub unsafe fn ppo_scalar_classic_sma(
     first: usize,
     out: &mut [f64],
 ) {
-    // Constants
+    
     let n = data.len();
     let start_idx = first + slow - 1;
 
-    // Precompute constants so each step is one division total:
-    // PPO = 100 * ((fast_sum/fast) - (slow_sum/slow)) / (slow_sum/slow)
-    //     = 100 * ((fast_sum * (slow/fast)) / slow_sum - 1)
+    
+    
+    
     let k = (slow as f64) / (fast as f64);
 
-    // Build both rolling sums in one pass over the first `slow`
+    
     let mut slow_sum = 0.0f64;
     let mut fast_sum = 0.0f64;
-    let overlap = slow - fast; // where fast window begins inside the slow window
+    let overlap = slow - fast; 
     let mut t = 0usize;
     while t < slow {
         let v = *data.get_unchecked(first + t);
@@ -551,7 +551,7 @@ pub unsafe fn ppo_scalar_classic_sma(
         t += 1;
     }
 
-    // First PPO at start_idx
+    
     *out.get_unchecked_mut(start_idx) = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan()
     {
         f64::NAN
@@ -560,11 +560,11 @@ pub unsafe fn ppo_scalar_classic_sma(
         f64::mul_add(ratio, 100.0, -100.0)
     };
 
-    // Rolling window updates
+    
     let mut i = start_idx + 1;
     while i < n {
         let add = *data.get_unchecked(i);
-        // subtract the element leaving each window
+        
         let sub_fast = *data.get_unchecked(i - fast);
         let sub_slow = *data.get_unchecked(i - slow);
 
@@ -859,17 +859,17 @@ fn ppo_batch_inner_into(
             got: out.len(),
         });
     }
-    // Treat the destination as uninitialized like ALMA
+    
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Row-specific optimization: precompute MA series for SMA/EMA once per unique period
+    
     let ma_type = sweep.ma_type.as_str();
     let use_cached = ma_type == "sma" || ma_type == "ema";
     let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
     if use_cached {
-        // Collect unique periods across fast and slow
+        
         let mut uniq: Vec<usize> = Vec::new();
         for c in &combos {
             let f = c.fast_period.unwrap();
@@ -885,7 +885,7 @@ fn ppo_batch_inner_into(
             if let Ok(v) = ma(ma_type, MaData::Slice(data), p) {
                 ma_cache.insert(p, v);
             } else {
-                // In case of MA failure (unexpected), insert a NaN vector to keep behavior predictable
+                
                 let mut v = vec![f64::NAN; data.len()];
                 ma_cache.insert(p, v);
             }
@@ -1000,30 +1000,30 @@ fn ppo_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner".into()))?;
 
-    // Create uninitialized matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.slow_period.unwrap() - 1)
         .collect();
 
-    // Initialize matrix with NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Row-specific optimization: precompute MA series for SMA/EMA once per unique period
+    
     let ma_type = sweep.ma_type.as_str();
     let use_cached = ma_type == "sma" || ma_type == "ema";
     let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
     if use_cached {
-        // Collect unique periods across fast and slow
+        
         let mut uniq: Vec<usize> = Vec::new();
         for c in &combos {
             let f = c.fast_period.unwrap();
@@ -1120,7 +1120,7 @@ fn ppo_batch_inner(
         }
     }
 
-    // Convert buffer back to Vec
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1146,7 +1146,7 @@ pub unsafe fn ppo_row_scalar(
     ma_type: &str,
     out: &mut [f64],
 ) {
-    // Check for classic kernel optimization
+    
     if ma_type == "ema" {
         ppo_row_scalar_classic_ema(data, first, fast, slow, out);
     } else if ma_type == "sma" {
@@ -1156,7 +1156,7 @@ pub unsafe fn ppo_row_scalar(
     }
 }
 
-// Classic row kernel with inline EMA for batch processing
+
 #[inline(always)]
 pub unsafe fn ppo_row_scalar_classic_ema(
     data: &[f64],
@@ -1168,7 +1168,7 @@ pub unsafe fn ppo_row_scalar_classic_ema(
     ppo_scalar_classic_ema(data, fast, slow, first, out);
 }
 
-// Classic row kernel with inline SMA for batch processing
+
 #[inline(always)]
 pub unsafe fn ppo_row_scalar_classic_sma(
     data: &[f64],
@@ -1236,11 +1236,11 @@ pub unsafe fn ppo_row_avx512_long(
     ppo_scalar(data, fast, slow, ma_type, first, out)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Streaming PPO — O(1) per update for "sma" and "ema"
-// Fallback to existing MA engine for other ma_type values
-// (Decision: enabled; matches scalar classic kernels; >O(1) fallback unchanged)
-// ──────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
 
 pub struct PpoStream {
     fast_period: usize,
@@ -1251,21 +1251,21 @@ pub struct PpoStream {
 
 #[derive(Debug)]
 enum StreamMode {
-    // O(1) SMA path
+    
     Sma(SmaState),
-    // O(1) EMA path (after an O(slow) one-time seed matching classic EMA path)
+    
     Ema(EmaState),
-    // Fallback: preserve semantics for unknown ma types (O(n) like before)
+    
     Generic { data: Vec<f64> },
 }
 
 #[derive(Debug)]
 struct SmaState {
-    started: bool, // saw first finite value (mirrors `first` logic)
+    started: bool, 
     fast: usize,
     slow: usize,
-    k: f64, // slow / fast (precompute to reduce divisions)
-    // rolling sums + rings
+    k: f64, 
+    
     fast_sum: f64,
     slow_sum: f64,
     fast_buf: Vec<f64>,
@@ -1278,19 +1278,19 @@ struct SmaState {
 
 #[derive(Debug)]
 struct EmaState {
-    started: bool, // saw first finite
+    started: bool, 
     fast: usize,
     slow: usize,
-    // α/β for both EMAs
+    
     fa: f64,
     fb: f64,
     sa: f64,
     sb: f64,
-    // state
+    
     fast_ema: f64,
     slow_ema: f64,
     seeded: bool,
-    // warmup buffer for initial O(slow) seed (exactly matches classic_ema path)
+    
     warm: Vec<f64>,
 }
 
@@ -1349,13 +1349,13 @@ impl PpoStream {
         match &mut self.mode {
             StreamMode::Sma(state) => update_sma(state, value),
             StreamMode::Ema(state) => update_ema(state, value),
-            // Fallback: same behavior as the original streaming impl
+            
             StreamMode::Generic { data } => {
                 data.push(value);
                 if data.len() < self.slow_period {
                     return None;
                 }
-                // preserve original MA engine semantics
+                
                 let fast_ma = ma(&self.ma_type, MaData::Slice(&data), self.fast_period).ok()?;
                 let slow_ma = ma(&self.ma_type, MaData::Slice(&data), self.slow_period).ok()?;
                 let ff = *fast_ma.last()?;
@@ -1373,7 +1373,7 @@ impl PpoStream {
 
 #[inline(always)]
 fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
-    // Skip leading NaNs to mirror "first non-NaN" behavior in batch kernels.
+    
     if !s.started {
         if x.is_nan() {
             return None;
@@ -1381,7 +1381,7 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.started = true;
     }
 
-    // Fast ring/sum
+    
     if s.filled_fast < s.fast {
         s.fast_buf.push(x);
         s.fast_sum += x;
@@ -1393,13 +1393,13 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.i_fast = (s.i_fast + 1) % s.fast;
     }
 
-    // Slow ring/sum
+    
     if s.filled_slow < s.slow {
         s.slow_buf.push(x);
         s.slow_sum += x;
         s.filled_slow += 1;
         if s.filled_slow < s.slow {
-            return None; // not warm yet
+            return None; 
         }
     } else {
         let old = s.slow_buf[s.i_slow];
@@ -1408,7 +1408,7 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.i_slow = (s.i_slow + 1) % s.slow;
     }
 
-    // 100 * ((fast_sum * (slow/fast)) / slow_sum - 1)
+    
     let slow_sum = s.slow_sum;
     let fast_sum = s.fast_sum;
     if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan() {
@@ -1421,7 +1421,7 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
 
 #[inline(always)]
 fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
-    // Skip leading NaNs like the batch code
+    
     if !e.started {
         if x.is_nan() {
             return None;
@@ -1429,29 +1429,29 @@ fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
         e.started = true;
     }
 
-    // One-time O(slow) seed that exactly mirrors `ppo_scalar_classic_ema`
+    
     if !e.seeded {
         e.warm.push(x);
         if e.warm.len() < e.slow {
             return None;
         }
 
-        // slow EMA seeded as SMA over first `slow` values
+        
         let mut slow_sum = 0.0f64;
         for &v in &e.warm {
             slow_sum += v;
         }
         e.slow_ema = slow_sum / e.slow as f64;
 
-        // fast EMA seeded as SMA over the last `fast` inside the first `slow`
+        
         let mut fast_sum = 0.0f64;
-        let start = e.slow - e.fast; // assumes fast <= slow
+        let start = e.slow - e.fast; 
         for &v in &e.warm[start..] {
             fast_sum += v;
         }
         e.fast_ema = fast_sum / e.fast as f64;
 
-        // Advance fast EMA across the intervening points to align with slow
+        
         for &v in &e.warm[e.fast..] {
             e.fast_ema = f64::mul_add(e.fa, v, e.fb * e.fast_ema);
         }
@@ -1468,7 +1468,7 @@ fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
         };
     }
 
-    // Steady-state O(1) EMA updates
+    
     e.fast_ema = f64::mul_add(e.fa, x, e.fb * e.fast_ema);
     e.slow_ema = f64::mul_add(e.sa, x, e.sb * e.slow_ema);
 
@@ -1510,10 +1510,10 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let input = PpoInput::from_candles(&candles, "close", PpoParams::default());
 
-        // Baseline via existing Vec API
+        
         let baseline = ppo(&input)?.values;
 
-        // New no-allocation path
+        
         let mut out = vec![0.0; candles.close.len()];
         ppo_into(&input, &mut out)?;
 
@@ -1720,23 +1720,23 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             PpoParams::default(),
-            // Minimum viable periods
+            
             PpoParams {
                 fast_period: Some(2),
                 slow_period: Some(3),
                 ma_type: Some("sma".to_string()),
             },
-            // Small periods
+            
             PpoParams {
                 fast_period: Some(5),
                 slow_period: Some(10),
                 ma_type: Some("sma".to_string()),
             },
-            // Different MA types with default periods
+            
             PpoParams {
                 fast_period: Some(12),
                 slow_period: Some(26),
@@ -1747,31 +1747,31 @@ mod tests {
                 slow_period: Some(26),
                 ma_type: Some("wma".to_string()),
             },
-            // Medium periods
+            
             PpoParams {
                 fast_period: Some(20),
                 slow_period: Some(40),
                 ma_type: Some("sma".to_string()),
             },
-            // Large periods
+            
             PpoParams {
                 fast_period: Some(50),
                 slow_period: Some(100),
                 ma_type: Some("sma".to_string()),
             },
-            // Edge case: fast and slow close together
+            
             PpoParams {
                 fast_period: Some(10),
                 slow_period: Some(11),
                 ma_type: Some("sma".to_string()),
             },
-            // Different ratios
+            
             PpoParams {
                 fast_period: Some(3),
                 slow_period: Some(21),
                 ma_type: Some("ema".to_string()),
             },
-            // More edge cases
+            
             PpoParams {
                 fast_period: Some(7),
                 slow_period: Some(14),
@@ -1782,7 +1782,7 @@ mod tests {
                 slow_period: Some(21),
                 ma_type: Some("sma".to_string()),
             },
-            // Very large period
+            
             PpoParams {
                 fast_period: Some(100),
                 slow_period: Some(200),
@@ -1796,12 +1796,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1854,7 +1854,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ppo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1867,19 +1867,19 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate test parameters
+        
         let strat = (2usize..=64).prop_flat_map(|slow_period| {
             (
-                // Data vector with length from slow_period to 400
+                
                 prop::collection::vec(
                     (10f64..100000f64)
                         .prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
                     slow_period..400,
                 ),
-                // Fast period must be less than or equal to slow period
+                
                 2usize..=slow_period,
                 Just(slow_period),
-                // MA type - focus on SMA for mathematical verification
+                
                 Just("sma"),
             )
         });
@@ -1893,17 +1893,17 @@ mod tests {
                 };
                 let input = PpoInput::from_slice(&data, params);
 
-                // Get output from kernel under test
+                
                 let PpoOutput { values: out } = ppo_with_kernel(&input, kernel).unwrap();
-                // Get reference output from scalar kernel
+                
                 let PpoOutput { values: ref_out } =
                     ppo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Calculate MAs independently for verification
+                
                 let fast_ma = ma(&ma_type, MaData::Slice(&data), fast_period).unwrap();
                 let slow_ma = ma(&ma_type, MaData::Slice(&data), slow_period).unwrap();
 
-                // Property 1: Check warmup period consistency
+                
                 for i in 0..(slow_period - 1).min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1913,15 +1913,15 @@ mod tests {
                     );
                 }
 
-                // Check properties for each valid output value
+                
                 for i in (slow_period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
                     let fast_val = fast_ma[i];
                     let slow_val = slow_ma[i];
 
-                    // Property 2: Verify mathematical formula
-                    // PPO = 100 * (fast_ma - slow_ma) / slow_ma
+                    
+                    
                     if !fast_val.is_nan() && !slow_val.is_nan() && slow_val != 0.0 {
                         let expected_ppo = 100.0 * (fast_val - slow_val) / slow_val;
 
@@ -1934,7 +1934,7 @@ mod tests {
                         }
                     }
 
-                    // Property 3: Consistency between kernels
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1959,7 +1959,7 @@ mod tests {
                         ulp_diff
                     );
 
-                    // Property 4: Sign correctness
+                    
                     if y.is_finite()
                         && fast_val.is_finite()
                         && slow_val.is_finite()
@@ -1986,7 +1986,7 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Special case - equal periods
+                    
                     if fast_period == slow_period && y.is_finite() {
                         prop_assert!(
                             y.abs() < 1e-9,
@@ -1996,7 +1996,7 @@ mod tests {
                         );
                     }
 
-                    // Property 6: Constant data check
+                    
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && y.is_finite() {
                         prop_assert!(
                             y.abs() < 1e-6,
@@ -2006,11 +2006,11 @@ mod tests {
                         );
                     }
 
-                    // Property 7: Reasonable bounds for price data
-                    // For realistic price data (10-100000 range), PPO rarely exceeds ±200%
-                    // unless there's extreme volatility in a small window
+                    
+                    
+                    
                     if y.is_finite() {
-                        // Calculate data volatility in the window
+                        
                         let window_start = i.saturating_sub(slow_period - 1);
                         let window = &data[window_start..=i];
                         let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -2021,20 +2021,20 @@ mod tests {
                             1.0
                         };
 
-                        // PPO should be bounded by the volatility of the underlying data
-                        // High volatility (10x price change) could produce PPO around ±900%
+                        
+                        
                         let max_expected_ppo = 100.0 * (volatility_ratio - 1.0);
 
                         prop_assert!(
-							y.abs() <= max_expected_ppo * 1.5, // Allow some margin for MA lag
+							y.abs() <= max_expected_ppo * 1.5, 
 							"PPO exceeds expected bounds at index {}: got {}%, max expected ~{}% (volatility ratio {})",
 							i, y, max_expected_ppo, volatility_ratio
 						);
                     }
 
-                    // Property 8: Handle near-zero slow_ma correctly
+                    
                     if slow_val.abs() < 1e-10 && slow_val != 0.0 {
-                        // When slow_ma is very close to zero, PPO should be NaN or very large
+                        
                         prop_assert!(
 							y.is_nan() || y.abs() > 1000.0,
 							"PPO should be NaN or very large when slow_ma ~0 at index {}: slow_ma={}, ppo={}",
@@ -2043,14 +2043,14 @@ mod tests {
                     }
                 }
 
-                // Property 9: Monotonic data behavior
+                
                 let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                 let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                 if (is_monotonic_increasing || is_monotonic_decreasing)
                     && data.len() > slow_period * 2
                 {
-                    // After sufficient data, PPO should stabilize
+                    
                     let last_values = &out[out.len() - slow_period / 2..];
                     let valid_last: Vec<f64> = last_values
                         .iter()
@@ -2060,7 +2060,7 @@ mod tests {
 
                     if valid_last.len() > 2 {
                         if is_monotonic_increasing && fast_period < slow_period {
-                            // For increasing data with fast < slow, PPO should be positive
+                            
                             let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
                             prop_assert!(
                                 avg > -1e-6,
@@ -2068,7 +2068,7 @@ mod tests {
                                 avg
                             );
                         } else if is_monotonic_decreasing && fast_period < slow_period {
-                            // For decreasing data with fast < slow, PPO should be negative
+                            
                             let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
                             prop_assert!(
                                 avg < 1e-6,
@@ -2180,16 +2180,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (fast_start, fast_end, fast_step, slow_start, slow_end, slow_step, ma_type)
-            (2, 10, 2, 12, 30, 3, "sma"),     // Small periods
-            (5, 25, 5, 26, 50, 5, "sma"),     // Medium periods
-            (30, 60, 15, 65, 100, 10, "sma"), // Large periods
-            (2, 5, 1, 6, 10, 1, "ema"),       // Dense small range with EMA
-            (10, 20, 2, 21, 40, 4, "wma"),    // Medium range with WMA
-            (3, 9, 3, 12, 21, 3, "sma"),      // Classic ratios
-            (7, 14, 7, 21, 28, 7, "ema"),     // Weekly/monthly periods
+            
+            (2, 10, 2, 12, 30, 3, "sma"),     
+            (5, 25, 5, 26, 50, 5, "sma"),     
+            (30, 60, 15, 65, 100, 10, "sma"), 
+            (2, 5, 1, 6, 10, 1, "ema"),       
+            (10, 20, 2, 21, 40, 4, "wma"),    
+            (3, 9, 3, 12, 21, 3, "sma"),      
+            (7, 14, 7, 21, 28, 7, "ema"),     
         ];
 
         for (cfg_idx, &(f_start, f_end, f_step, s_start, s_end, s_step, ma_type)) in
@@ -2212,7 +2212,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2278,9 +2278,9 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ┌────────────────────────────────────────────────────────────────────────────┐
-// │                          Python Bindings                                   │
-// └────────────────────────────────────────────────────────────────────────────┘
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ppo")]
@@ -2340,7 +2340,7 @@ impl PpoStreamPy {
     }
 }
 
-// CUDA device handle for PPO (FP32, 2D) with CAI v3 + DLPack v1.x.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct PpoDeviceArrayF32Py {

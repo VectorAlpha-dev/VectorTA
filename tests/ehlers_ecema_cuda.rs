@@ -1,17 +1,17 @@
-// Integration tests for CUDA Ehlers ECEMA kernels.
 
-use my_project::indicators::moving_averages::ehlers_ecema::{
+
+use vector_ta::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema_batch_with_kernel, ehlers_ecema_with_kernel, EhlersEcemaBatchRange,
     EhlersEcemaInput, EhlersEcemaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaEhlersEcema;
+use vector_ta::cuda::moving_averages::CudaEhlersEcema;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -68,7 +68,7 @@ fn ehlers_ecema_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     let mut gpu_host = vec![0f32; handle.len()];
     handle.buf.copy_to(&mut gpu_host)?;
 
-    // FP32 compensated is the default for batch; allow slightly looser tol
+    
     let tol = 1e-4;
     for idx in 0..gpu_host.len() {
         let cpu_v = cpu.values[idx];
@@ -108,7 +108,7 @@ fn ehlers_ecema_cuda_batch_pine_confirmed_matches_cpu() -> Result<(), Box<dyn st
         gain_limit: (20, 40, 10),
     };
 
-    // Build CPU reference row by row so we can set pine/confirmed flags.
+    
     let lengths: Vec<usize> = (sweep.length.0..=sweep.length.1)
         .step_by(sweep.length.2.max(1))
         .collect();
@@ -206,7 +206,7 @@ fn ehlers_ecema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             confirmed_only: Some(confirmed),
         };
 
-        // CPU reference for each series
+        
         let mut cpu_tm = vec![f64::NAN; cols * rows];
         for series in 0..cols {
             let mut series_data = vec![f64::NAN; rows];

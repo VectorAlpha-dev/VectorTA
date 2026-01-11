@@ -1,8 +1,8 @@
-// CUDA kernels for RSI (Relative Strength Index)
-//
-// Drop-in rewrite focused on one-series×many-params batch case with shared-memory
-// tiling and per-row register-resident Wilder updates. FP32 only; outputs clamped
-// post-division to [0,100]. Matches existing warmup/NaN semantics.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -22,12 +22,12 @@ static __device__ __forceinline__ float clamp_rsi(float x) {
     return x;
 }
 
-// ===============================
-// One series × many params (batch)
-// prices: length = series_len
-// periods: length = n_combos
-// out: rows=n_combos, cols=series_len (row-major)
-// ===============================
+
+
+
+
+
+
 extern "C" __global__
 void rsi_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ periods,
@@ -36,7 +36,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
                    int n_combos,
                    float* __restrict__ out)
 {
-    // One warp per combo. Each lane advances 1 timestep; warp scan emits 32 outputs per iteration.
+    
     const unsigned lane = threadIdx.x & 31u;
     const unsigned warp = threadIdx.x >> 5;
     const unsigned warps_per_block = blockDim.x >> 5;
@@ -46,7 +46,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * (size_t)series_len;
 
-    // Basic validation mirroring wrapper guards
+    
     if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
         for (int i = (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
         return;
@@ -58,17 +58,17 @@ void rsi_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm = fv + period; // first index with a defined output
+    const int warm = fv + period; 
 
-    // Prefill NaN up to (warm-1) only (avoid full-row writes)
+    
     for (int i = (int)lane; i < warm; i += 32) out_row[i] = RSI_NAN;
 
-    // Precompute alpha & beta for Wilder smoothing (FP32)
+    
     const float inv_p = 1.0f / (float)period;
     const float beta  = inv_p;
-    const float alpha = 1.0f - inv_p; // (period - 1) / period
+    const float alpha = 1.0f - inv_p; 
 
-    // ----- Initial averages over (fv+1 ..= warm) computed by lane 0 -----
+    
     float avg_g = 0.0f;
     float avg_l = 0.0f;
     int dead_i = 0;
@@ -106,7 +106,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Rolling update: process 32 timesteps per iteration, starting at warm+1
+    
     for (int t0 = warm + 1; t0 < series_len; t0 += 32) {
         const int t = t0 + (int)lane;
 
@@ -130,8 +130,8 @@ void rsi_batch_f32(const float* __restrict__ prices,
 
         const unsigned invalid_mask = __ballot_sync(mask, (t < series_len) && (!ok));
 
-        // Inclusive warp scan composing (A,B) left-to-right.
-        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
+        
+        
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev  = __shfl_up_sync(mask, A, offset);
             const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
@@ -166,7 +166,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        // If a non-finite delta occurred in this window, the row becomes "dead" (all future NaN).
+        
         if (invalid_mask) {
             const int remaining = series_len - t0;
             const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
@@ -177,7 +177,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        // Advance to next window using the last valid lane.
+        
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         avg_g = __shfl_sync(mask, yg, last_lane);
@@ -185,10 +185,10 @@ void rsi_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// ===============================
-// Many series × one param (time-major)
-// prices_tm/out_tm index: t * cols + s
-// ===============================
+
+
+
+
 extern "C" __global__
 void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int* __restrict__ first_valids,
@@ -219,7 +219,7 @@ void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float inv_p = 1.0f / (float)period;
     const float beta  = 1.0f - inv_p;
 
-    // Warmup sums across first `period` deltas for this series
+    
     float avg_g = 0.0f, avg_l = 0.0f;
     float sum_g = 0.0f, sum_l = 0.0f;
     bool  has_nan = false;
@@ -242,10 +242,10 @@ void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[warm * cols + s] = clamp_rsi(rsi);
     }
 
-    // Recursive updates; semantics: treat NaN deltas after warmup as zero change
+    
     for (int t = warm + 1; t < rows; ++t) {
         const float d = prices_tm[t * cols + s] - prices_tm[(t - 1) * cols + s];
-        const float g = (d > 0.0f) ? d : 0.0f; // comparisons false for NaN -> 0
+        const float g = (d > 0.0f) ? d : 0.0f; 
         const float l = (d < 0.0f) ? -d : 0.0f;
         avg_g = fmaf(beta, avg_g, inv_p * g);
         avg_l = fmaf(beta, avg_l, inv_p * l);

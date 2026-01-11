@@ -167,8 +167,8 @@ impl CudaSafeZoneStop {
         &self,
         src: &[f32],
     ) -> Result<(DeviceBuffer<f32>, LockedBuffer<f32>), CudaSafeZoneStopError> {
-        // NOTE: For async copies, the pinned host buffer must stay alive until the stream
-        // completes. Callers are responsible for keeping the returned LockedBuffer alive.
+        
+        
         let h_pin = LockedBuffer::from_slice(src)?;
         let mut d = unsafe { DeviceBuffer::<f32>::uninitialized_async(src.len(), &self.stream) }?;
         unsafe {
@@ -328,7 +328,7 @@ impl CudaSafeZoneStop {
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_grid(sweep)?;
-        // Validate and collect params per row
+        
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut mults_f32 = Vec::with_capacity(combos.len());
         let mut looks_i32 = Vec::with_capacity(combos.len());
@@ -362,13 +362,13 @@ impl CudaSafeZoneStop {
             max_look = max_look.max(lb);
         }
 
-        // Shared precompute
+        
         let dm_raw = Self::compute_dm_raw_f32(high_f32, low_f32, first, dir_long);
 
-        // Decide if we need deque workspace (lb <= 4 uses register-only path)
+        
         let need_deque = max_look > 4;
 
-        // VRAM accounting: inputs + params + outputs (+ optional deque), with checked arithmetic.
+        
         let out_elems = combos
             .len()
             .checked_mul(n)
@@ -408,7 +408,7 @@ impl CudaSafeZoneStop {
                 .checked_add(deque_bytes)
                 .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("total bytes overflow".into()))?;
         }
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaSafeZoneStopError::OutOfMemory {
@@ -423,19 +423,19 @@ impl CudaSafeZoneStop {
             }
         }
 
-        // Uploads: pinned for big arrays for true async H2D
+        
         let (d_high, h_high_pin) = self.upload_pinned_f32(high_f32)?;
         let (d_low, h_low_pin) = self.upload_pinned_f32(low_f32)?;
         let (d_dm, h_dm_pin) = self.upload_pinned_f32(&dm_raw)?;
 
-        // Small arrays sync-upload is fine
+        
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_mults = DeviceBuffer::from_slice(&mults_f32)?;
         let d_looks = DeviceBuffer::from_slice(&looks_i32)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Optional deque workspace only when needed
+        
         let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
         let mut lb_cap_i32 = 0i32;
         if need_deque {
@@ -449,7 +449,7 @@ impl CudaSafeZoneStop {
             opt_q_val = Some(d_q_val);
         }
 
-        // Launch: 1D grid.x with many threads per block
+        
         let func = self
             .module
             .get_function("safezonestop_batch_f32")
@@ -509,13 +509,13 @@ impl CudaSafeZoneStop {
             }
         }
 
-        // Keep optional buffers alive across the launch
+        
         drop(opt_q_idx);
         drop(opt_q_val);
 
         self.stream.synchronize()?;
 
-        // Keep pinned host staging buffers alive until all async copies are complete.
+        
         drop(h_high_pin);
         drop(h_low_pin);
         drop(h_dm_pin);
@@ -564,7 +564,7 @@ impl CudaSafeZoneStop {
             _ => true,
         };
 
-        // first-valid per series
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -592,7 +592,7 @@ impl CudaSafeZoneStop {
             }
         }
 
-        // VRAM accounting: inputs + first_valids + outputs (+ optional deque)
+        
         let need_deque = max_lookback > 4;
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -638,14 +638,14 @@ impl CudaSafeZoneStop {
             }
         }
 
-        // Uploads (pinned for big matrices)
+        
         let (d_high, h_high_pin) = self.upload_pinned_f32(high_tm_f32)?;
         let (d_low, h_low_pin) = self.upload_pinned_f32(low_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
 
-        // Optional deque workspace per series
+        
         let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
         let mut lb_cap_i32 = 0i32;
         if need_deque {
@@ -659,7 +659,7 @@ impl CudaSafeZoneStop {
             opt_q_val = Some(d_q_val);
         }
 
-        // Launch (1D grid.x with threads-per-block)
+        
         let func = self
             .module
             .get_function("safezonestop_many_series_one_param_time_major_f32")
@@ -714,13 +714,13 @@ impl CudaSafeZoneStop {
                 )?;
             }
         }
-        // Keep optional buffers alive across the launch
+        
         drop(opt_q_idx);
         drop(opt_q_val);
 
         self.stream.synchronize()?;
 
-        // Keep pinned host staging buffers alive until all async copies are complete.
+        
         drop(h_high_pin);
         drop(h_low_pin);
 

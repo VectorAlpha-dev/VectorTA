@@ -1,11 +1,11 @@
-// CUDA kernels for the Linear Regression Intercept (LINEARREG_INTERCEPT) indicator.
-//
-// Matches scalar semantics in src/indicators/linearreg_intercept.rs:
-// - Output is the y-value of the fitted line evaluated at the last point of
-//   the window using the project’s reference convention (a + b*(1 - Σx/n)).
-// - Warmup rows (before first_valid + period - 1) are NaN.
-// - period == 1 fast-path copies the current value.
-// - Double accumulators with fma for numerical stability.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -22,7 +22,7 @@
 #define LRI_LAUNCH_BOUNDS 256, 2
 #endif
 
-// See linreg_kernel.cu for the prefix derivation (prefix_y / prefix_yi).
+
 extern "C" __global__ void linearreg_intercept_exclusive_prefix_y_yi_f64(
     const float* __restrict__ prices,
     int series_len,
@@ -93,7 +93,7 @@ void linearreg_intercept_batch_from_prefix_f64(
 
     const int warm = first_valid + period - 1;
 
-    // period == 1 -> passthrough from first_valid
+    
     if (period == 1) {
         while (t < series_len) {
             if (t < warm) {
@@ -130,7 +130,7 @@ void linearreg_intercept_batch_from_prefix_f64(
     }
 }
 
-// -------------------------- Batch kernel (one series × many params) --------------------------
+
 
 extern "C" __global__
 __launch_bounds__(LRI_LAUNCH_BOUNDS)
@@ -153,7 +153,7 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        // Guards
+        
         if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = LINREG_INTERCEPT_NAN;
             continue;
@@ -169,18 +169,18 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
         const double x_sum      = static_cast<double>(x_sums[combo]);
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
-        const double k          = 1.0 - x_sum * inv_period; // 1 - Σx/n
+        const double k          = 1.0 - x_sum * inv_period; 
 
-        // Warmup prefix
+        
         for (int i = 0; i < warm; ++i) out[base + i] = LINREG_INTERCEPT_NAN;
 
-        // period == 1 -> passthrough from first_valid
+        
         if (period == 1) {
             for (int idx = warm; idx < series_len; ++idx) out[base + idx] = prices[idx];
             continue;
         }
 
-        // Init rolling sums over first (period-1)
+        
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int kx = 0; kx < period - 1; ++kx) {
@@ -194,11 +194,11 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
 
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum += latest;
-            xy_sum = fma(latest, period_f, xy_sum); // * period
+            xy_sum = fma(latest, period_f, xy_sum); 
 
             const double b_num = fma(period_f, xy_sum, -x_sum * y_sum);
             const double b     = b_num * denom_inv;
-            const double y     = y_sum * inv_period + b * k; // intercept at last point per spec
+            const double y     = y_sum * inv_period + b * k; 
             out[base + idx] = static_cast<float>(y);
 
             xy_sum -= y_sum;
@@ -210,7 +210,7 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// -------------------------- Time-major kernel (many series × one param) --------------------------
+
 
 static __device__ __forceinline__ int tm_idx(int row, int num_series, int series) {
     return row * num_series + series;

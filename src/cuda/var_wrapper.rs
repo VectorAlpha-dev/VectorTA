@@ -47,7 +47,7 @@ pub enum CudaVarError {
     NotImplemented,
 }
 
-// ---------- Float-float host POD to mirror CUDA float2 ----------
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Float2 {
@@ -55,7 +55,7 @@ struct Float2 {
     lo: f32,
 }
 
-// SAFETY: Plain old data with no pointers/reference fields, C layout
+
 unsafe impl DeviceCopy for Float2 {}
 
 #[inline]
@@ -82,7 +82,7 @@ impl CudaVar {
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
-            // Max window size supported by device
+            
             let mut max_window_bytes_i32: i32 = 0;
             if let Ok(dev) = CuDevice::get_device(self.device_id) {
                 let _ = cuDeviceGetAttribute(
@@ -96,10 +96,10 @@ impl CudaVar {
                 return;
             }
 
-            // Best-effort set-aside for L2 persistence
+            
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
 
-            // Configure the stream access policy window
+            
             let mut val: CUstreamAttrValue = std::mem::zeroed();
             val.accessPolicyWindow = CUaccessPolicyWindow {
                 base_ptr: base_dev_ptr as *mut std::ffi::c_void,
@@ -274,7 +274,7 @@ impl CudaVar {
         rows: usize,
         first_valids: &[i32],
     ) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
-        // prefix at (t,s) stored at index (t*cols + s) + 1
+        
         let total = data_tm_f32.len();
         let mut ps = vec![0.0f64; total + 1];
         let mut ps2 = vec![0.0f64; total + 1];
@@ -305,7 +305,7 @@ impl CudaVar {
         (ps, ps2, pn)
     }
 
-    // -------------------------- Batch entry point --------------------------
+    
     pub fn var_batch_dev(
         &self,
         data_f32: &[f32],
@@ -338,7 +338,7 @@ impl CudaVar {
             }
         }
 
-        // VRAM estimate + chunking (grid.y and memory)
+        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let nb2: Vec<f32> = combos
             .iter()
@@ -351,7 +351,7 @@ impl CudaVar {
         let out_elems = Self::checked_mul(rows, len, "var: rows * len")?;
         let out_bytes = Self::checked_mul(out_elems, std::mem::size_of::<f32>(), "var: out_bytes")?;
 
-        // Convert f64 prefixes to float2 (double-single) to match device
+        
         let ps_ff: Vec<Float2> = split_f64_to_float2_vec(&ps);
         let ps2_ff: Vec<Float2> = split_f64_to_float2_vec(&ps2);
 
@@ -399,10 +399,10 @@ impl CudaVar {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Ensure estimated working set fits before allocations
+        
         Self::will_fit(work_bytes, headroom)?;
 
-        // Upload static inputs (pinned host + async copies for large arrays)
+        
         let mut d_ps: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::uninitialized_async(ps_ff.len(), &self.stream) }?;
         let mut d_ps2: DeviceBuffer<Float2> =
@@ -428,14 +428,14 @@ impl CudaVar {
             d_nb2.async_copy_from(&h_nb2, &self.stream)?;
         }
 
-        // Best-effort persisting L2 for prefix buffer
+        
         self.try_enable_persisting_l2(
             d_ps.as_device_ptr().as_raw() as u64,
             ps_ff.len() * std::mem::size_of::<Float2>(),
         );
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        // Launch in chunks across parameter rows
+        
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
@@ -445,7 +445,7 @@ impl CudaVar {
             let end_row = ((c + 1) * chunk_rows).min(rows);
             let n_rows = end_row - start_row;
 
-            // Sub-pointer views
+            
             let periods_ptr = unsafe {
                 d_periods
                     .as_device_ptr()
@@ -510,7 +510,7 @@ impl CudaVar {
             ));
         }
 
-        // The kernel tiles a small group of combos per block in grid.y (4 per group).
+        
         const TILE: u32 = 4;
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
@@ -547,7 +547,7 @@ impl CudaVar {
         Ok(())
     }
 
-    // ----------------------- Many-series: one param -----------------------
+    
     pub fn var_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -574,7 +574,7 @@ impl CudaVar {
         }
         let nb2 = (nbdev as f32) * (nbdev as f32);
 
-        // Compute first-valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -673,7 +673,7 @@ impl CudaVar {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x; // iterate over time
+        let grid_x = ((rows as u32) + block_x - 1) / block_x; 
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -704,7 +704,7 @@ impl CudaVar {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

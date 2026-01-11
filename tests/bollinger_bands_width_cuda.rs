@@ -1,18 +1,18 @@
-// Integration tests for CUDA Bollinger Bands Width (BBW)
 
-use my_project::indicators::bollinger_bands_width::{
+
+use vector_ta::indicators::bollinger_bands_width::{
     bollinger_bands_width_batch_with_kernel, bollinger_bands_width_with_kernel,
     BollingerBandsWidthBatchRange, BollingerBandsWidthData, BollingerBandsWidthInput,
     BollingerBandsWidthParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::bollinger_bands_width_wrapper::CudaBbw;
+use vector_ta::cuda::bollinger_bands_width_wrapper::CudaBbw;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -103,7 +103,7 @@ fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
     let devdn = 2.0f64;
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
-    // CPU baseline per series (quantize inputs to match GPU FP32 path)
+    
     let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

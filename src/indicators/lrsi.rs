@@ -221,7 +221,7 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
         return Err(LrsiError::InvalidAlpha { alpha });
     }
 
-    // Find first valid price without allocating
+    
     let mut first_valid_idx = None;
     for i in 0..high.len() {
         let price = (high[i] + low[i]) / 2.0;
@@ -240,12 +240,12 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
         });
     }
 
-    let warmup_period = first_valid_idx + 3; // Needs at least 4 values
+    let warmup_period = first_valid_idx + 3; 
     let mut out = alloc_with_nan_prefix(n, warmup_period);
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
-        // Reject batch kernels in single-row calculations
+        
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::NotEnoughValidData {
                 needed: 2,
@@ -292,7 +292,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         return Err(LrsiError::InvalidAlpha { alpha });
     }
 
-    // Find first valid price without allocating
+    
     let mut first_valid_idx = None;
     for i in 0..high.len() {
         let price = (high[i] + low[i]) / 2.0;
@@ -321,7 +321,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
-        // Reject batch kernels in single-row calculations
+        
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::InvalidKernelForBatch(kern));
         }
@@ -339,7 +339,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         }
     }
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first_valid_idx + 3;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -354,18 +354,18 @@ mod tests_into_api {
 
     #[test]
     fn test_lrsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a small input with a NaN prefix and varying values
+        
         let n = 256usize;
         let mut high = vec![f64::NAN; n];
         let mut low = vec![f64::NAN; n];
 
-        // First valid at index 3; ensure at least 4 valid after that
+        
         let mut v = 100.0f64;
         for i in 3..n {
-            // Create a simple rising high/low band
+            
             high[i] = v + 1.0;
             low[i] = v - 1.0;
-            // Inject a few NaNs deeper in the series to test handling
+            
             if i % 37 == 0 { high[i] = f64::NAN; }
             if i % 53 == 0 { low[i] = f64::NAN; }
             v += (i as f64).sin() * 0.25 + 0.5;
@@ -373,10 +373,10 @@ mod tests_into_api {
 
         let input = LrsiInput::from_slices(&high, &low, LrsiParams::default());
 
-        // Baseline Vec-returning API
+        
         let base = lrsi(&input)?.values;
 
-        // New into API
+        
         let mut out = vec![0.0f64; n];
         #[cfg(not(feature = "wasm"))]
         {
@@ -384,7 +384,7 @@ mod tests_into_api {
         }
         #[cfg(feature = "wasm")]
         {
-            // Guard for wasm builds: fall back to existing into_slice path
+            
             lrsi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -416,7 +416,7 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     let mgamma = -gamma;
     let warm = first + 3;
 
-    // Initialize state from first valid price
+    
     let first_price = (high[first] + low[first]) * 0.5;
     let mut l0 = first_price;
     let mut l1 = first_price;
@@ -424,35 +424,35 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     let mut l3 = first_price;
 
     for i in (first + 1)..len {
-        // mid-price = (high + low) * 0.5
+        
         let p = (high[i] + low[i]) * 0.5;
 
         if p.is_nan() {
-            // Keep poison-free contract after warmup
+            
             if i >= warm {
                 out[i] = f64::NAN;
             }
             continue;
         }
 
-        // 4-stage Laguerre filter using FMAs where profitable
+        
         let t0 = (p - l0).mul_add(alpha, l0);
         let t1 = gamma.mul_add(l1, mgamma.mul_add(t0, l0));
         let t2 = gamma.mul_add(l2, mgamma.mul_add(t1, l1));
         let t3 = gamma.mul_add(l3, mgamma.mul_add(t2, l2));
 
         if i >= warm {
-            // Differences
+            
             let d01 = t0 - t1;
             let d12 = t1 - t2;
             let d23 = t2 - t3;
 
-            // Branchless up/down components via abs identities
+            
             let a01 = d01.abs();
             let a12 = d12.abs();
             let a23 = d23.abs();
 
-            let sum_abs = a01 + a12 + a23; // cu + cd
+            let sum_abs = a01 + a12 + a23; 
             let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
             let v = if sum_abs <= f64::EPSILON {
@@ -460,11 +460,11 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
             } else {
                 cu / sum_abs
             };
-            // Numerical safety: clamp to [0,1]
+            
             out[i] = v.min(1.0).max(0.0);
         }
 
-        // Commit state
+        
         l0 = t0;
         l1 = t1;
         l2 = t2;
@@ -472,7 +472,7 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     }
 }
 
-// Keep old function for compatibility with row functions
+
 #[inline]
 pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
     let len = price.len();
@@ -520,7 +520,7 @@ pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
             } else {
                 cu / sum_abs
             };
-            // Numerical safety: clamp to [0,1]
+            
             out[i] = v.min(1.0).max(0.0);
         }
 
@@ -543,7 +543,7 @@ pub fn lrsi_avx512_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     lrsi_scalar_hl(high, low, alpha, first, out)
 }
 
-// Keep old functions for compatibility with row functions
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn lrsi_avx2(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
@@ -568,7 +568,7 @@ pub fn lrsi_avx512_long(price: &[f64], alpha: f64, first: usize, out: &mut [f64]
     lrsi_scalar(price, alpha, first, out)
 }
 
-// Streaming API
+
 #[derive(Debug, Clone)]
 pub struct LrsiStream {
     alpha: f64,
@@ -578,7 +578,7 @@ pub struct LrsiStream {
     l2: f64,
     l3: f64,
     initialized: bool,
-    count: usize, // Track number of updates to match batch warmup
+    count: usize, 
 }
 
 impl LrsiStream {
@@ -600,12 +600,12 @@ impl LrsiStream {
     }
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        // Ignore NaNs; do not advance state
+        
         if price.is_nan() {
             return None;
         }
 
-        // One-time init to match batch warmup behavior
+        
         if !self.initialized {
             self.l0 = price;
             self.l1 = price;
@@ -613,10 +613,10 @@ impl LrsiStream {
             self.l3 = price;
             self.initialized = true;
             self.count = 0;
-            return None; // first seen sample doesn't produce output
+            return None; 
         }
 
-        // 4-stage Laguerre filter with FMA ordering (matches scalar batch path)
+        
         let gamma = self.gamma;
         let mgamma = -gamma;
 
@@ -630,19 +630,19 @@ impl LrsiStream {
         let t2 = gamma.mul_add(l2_prev, mgamma.mul_add(t1, l1_prev));
         let t3 = gamma.mul_add(l3_prev, mgamma.mul_add(t2, l2_prev));
 
-        // Commit state
+        
         self.l0 = t0;
         self.l1 = t1;
         self.l2 = t2;
         self.l3 = t3;
         self.count += 1;
 
-        // Warmup = 4 samples total (emit after 3 updates post-initialization)
+        
         if self.count < 3 {
             return None;
         }
 
-        // Branchless CU/CD via positive-part identity
+        
         let d01 = t0 - t1;
         let d12 = t1 - t2;
         let d23 = t2 - t3;
@@ -656,10 +656,10 @@ impl LrsiStream {
             return Some(0.0);
         }
 
-        // Match scalar addition order for numerical reproducibility
+        
         let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
-        // Use exact divide to mirror scalar kernel
+        
         let v = cu / sum_abs;
         Some(v.min(1.0).max(0.0))
     }
@@ -797,7 +797,7 @@ fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, LrsiError> {
             }
             return Ok(v);
         }
-        // Reversed bounds
+        
         let mut v = Vec::new();
         let mut x = start;
         let st = step.abs();
@@ -877,7 +877,7 @@ fn lrsi_batch_inner(
             step: "rows*cols".into(),
         })?;
 
-    // Find first valid price
+    
     let first = (0..cols)
         .find(|&i| ((high[i] + low[i]) / 2.0).is_finite())
         .ok_or(LrsiError::AllValuesNaN)?;
@@ -888,17 +888,17 @@ fn lrsi_batch_inner(
         });
     }
 
-    // Allocate rows×cols uninit and set warm prefixes to NaN via helper
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm = vec![first + 3; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Temporary &mut [f64] view for filling
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Resolve kernel for rows (batch→simd choice matches ALMA)
+    
     let resolved = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k if k.is_batch() => k,
@@ -913,7 +913,7 @@ fn lrsi_batch_inner(
 
     let combos = lrsi_batch_inner_into(high, low, sweep, row_kernel, parallel, out_slice)?;
 
-    // Turn buffer into Vec<f64> without copying
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -947,7 +947,7 @@ unsafe fn lrsi_row_avx512_hl(high: &[f64], low: &[f64], first: usize, alpha: f64
     lrsi_scalar_hl(high, low, alpha, first, out)
 }
 
-// Keep old functions for compatibility
+
 #[inline(always)]
 unsafe fn lrsi_row_scalar(price: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
     lrsi_scalar(price, alpha, first, out)
@@ -977,7 +977,7 @@ unsafe fn lrsi_row_avx512_long(price: &[f64], first: usize, alpha: f64, out: &mu
     lrsi_scalar(price, alpha, first, out)
 }
 
-// WASM Bindings
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1069,7 +1069,7 @@ pub fn lrsi_into(
         let params = LrsiParams { alpha: Some(alpha) };
         let input = LrsiInput::from_slices(high, low, params);
 
-        // Check if we need to handle aliasing (in-place operation)
+        
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             lrsi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1101,7 +1101,7 @@ pub fn lrsi_batch_into(
         return Err(JsValue::from_str("null pointer passed to lrsi_batch_into"));
     }
 
-    // Validate alpha parameters
+    
     if !(0.0 < alpha_start && alpha_start <= 1.0) {
         return Err(JsValue::from_str(&format!(
             "Invalid alpha_start: {}",
@@ -1282,7 +1282,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Fill poison values
+        
         let len = candles.close.len();
         let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
         let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
@@ -1290,14 +1290,14 @@ mod tests {
         high.resize(len, f64::from_bits(0x11111111_11111111));
         low.resize(len, f64::from_bits(0x22222222_22222222));
 
-        // Copy real data
+        
         high.copy_from_slice(&candles.high);
         low.copy_from_slice(&candles.low);
 
-        // Test with different alpha values
+        
         let test_params = vec![
             LrsiParams { alpha: Some(0.1) },
-            LrsiParams { alpha: Some(0.2) }, // default
+            LrsiParams { alpha: Some(0.2) }, 
             LrsiParams { alpha: Some(0.5) },
             LrsiParams { alpha: Some(0.8) },
             LrsiParams { alpha: Some(0.95) },
@@ -1307,7 +1307,7 @@ mod tests {
             let input = LrsiInput::from_slices(&high, &low, params.clone());
             let result = lrsi_with_kernel(&input, kernel)?;
 
-            // Check for poison values after warmup period
+            
             for (i, &val) in result.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1366,11 +1366,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic high/low price pairs
+        
         let strat = (4usize..=400, 0.01f64..0.99f64, prop::bool::weighted(0.1)).prop_flat_map(
             |(len, alpha, use_constant_price)| {
                 if use_constant_price && len < 50 {
-                    // Generate truly constant prices for testing Property 5
+                    
                     let constant_price = (10.0f64..200.0f64);
                     constant_price
                         .prop_map(move |price| {
@@ -1380,22 +1380,22 @@ mod tests {
                         })
                         .boxed()
                 } else {
-                    // Generate normal price data with spreads
+                    
                     (
-                        // Generate base prices
+                        
                         proptest::collection::vec(
                             (10.0f64..200.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
                         ),
-                        // Generate spread percentages for high/low
+                        
                         proptest::collection::vec(
-                            (0.0f64..0.05f64), // 0-5% spread
+                            (0.0f64..0.05f64), 
                             len,
                         ),
                         Just(alpha),
                     )
                         .prop_map(|(base_prices, spreads, alpha)| {
-                            // Create high/low pairs from base prices and spreads
+                            
                             let mut high = Vec::with_capacity(base_prices.len());
                             let mut low = Vec::with_capacity(base_prices.len());
 
@@ -1417,18 +1417,18 @@ mod tests {
                 let params = LrsiParams { alpha: Some(alpha) };
                 let input = LrsiInput::from_slices(&high, &low, params.clone());
 
-                // Test with specified kernel
+                
                 let result = lrsi_with_kernel(&input, kernel)?;
                 let out = result.values;
 
-                // Test with scalar reference
+                
                 let ref_result = lrsi_with_kernel(&input, Kernel::Scalar)?;
                 let ref_out = ref_result.values;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                // Find first valid price index
+                
                 let mut first_valid_idx = None;
                 for i in 0..high.len() {
                     let price = (high[i] + low[i]) / 2.0;
@@ -1441,9 +1441,9 @@ mod tests {
                 if let Some(first_idx) = first_valid_idx {
                     let warmup_end = first_idx + 3;
 
-                    // Property 2: Warmup period handling
-                    // The implementation sets out[first] = 0.0 and starts calculating from first+1
-                    // So only indices before first_idx should be NaN
+                    
+                    
+                    
                     for i in 0..first_idx {
                         prop_assert!(
                             out[i].is_nan(),
@@ -1453,11 +1453,11 @@ mod tests {
                         );
                     }
 
-                    // The first output value after warmup should be valid
-                    // Warmup period is first_idx + 3, so first valid output is at first_idx + 3
+                    
+                    
                     let first_output_idx = first_idx + 3;
                     if first_output_idx < out.len() && !out[first_output_idx].is_nan() {
-                        // First output after warmup should be a valid LRSI value [0, 1]
+                        
                         prop_assert!(
                             out[first_output_idx] >= 0.0 && out[first_output_idx] <= 1.0,
                             "First output after warmup at index {} = {}, should be in [0, 1]",
@@ -1466,8 +1466,8 @@ mod tests {
                         );
                     }
 
-                    // Property 3: LRSI values bounded [0, 1]
-                    // LRSI produces values starting from first_idx + 3 (after warmup)
+                    
+                    
                     for i in (first_idx + 3)..out.len() {
                         if !out[i].is_nan() {
                             prop_assert!(
@@ -1479,7 +1479,7 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Kernel consistency (comparing with scalar)
+                    
                     for i in 0..out.len() {
                         let y = out[i];
                         let r = ref_out[i];
@@ -1510,15 +1510,15 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Constant price behavior
-                    // If high == low for all values, LRSI should stabilize
+                    
+                    
                     let is_constant = high
                         .iter()
                         .zip(low.iter())
                         .all(|(h, l)| (h - l).abs() < f64::EPSILON && h.is_finite());
 
                     if is_constant && out.len() > first_idx + 10 {
-                        // After sufficient iterations, LRSI should stabilize near 0 or a constant
+                        
                         let last_values = &out[out.len() - 5..];
                         let valid_last = last_values
                             .iter()
@@ -1531,8 +1531,8 @@ mod tests {
                                 .map(|w| (w[1] - w[0]).abs())
                                 .fold(0.0, f64::max);
 
-                            // LRSI can oscillate even with constant prices due to filter dynamics
-                            // Allow reasonable variance for an oscillator
+                            
+                            
                             prop_assert!(
                                 variance < 0.1,
                                 "LRSI not stable for constant prices, variance: {}",
@@ -1541,10 +1541,10 @@ mod tests {
                         }
                     }
 
-                    // Property 6: Alpha boundary behavior
-                    // Very low alpha (< 0.05) = less responsive, very high alpha (> 0.95) = more responsive
+                    
+                    
                     if out.len() > first_idx + 25 {
-                        // Calculate input data volatility for dynamic threshold
+                        
                         let prices: Vec<f64> = high
                             .iter()
                             .zip(low.iter())
@@ -1560,7 +1560,7 @@ mod tests {
                             let input_volatility = if !price_changes.is_empty() {
                                 price_changes.iter().sum::<f64>() / price_changes.len() as f64
                             } else {
-                                0.01 // Default volatility
+                                0.01 
                             };
 
                             let start = (first_idx + 5).min(out.len().saturating_sub(5));
@@ -1581,8 +1581,8 @@ mod tests {
                                         / (valid_mid.len() - 1) as f64;
 
                                     if alpha < 0.05 {
-                                        // Low alpha should smooth the output relative to input volatility
-                                        // The smoother the alpha, the more it should dampen volatility
+                                        
+                                        
                                         let expected_max_change =
                                             input_volatility * (alpha * 20.0).max(0.1);
                                         prop_assert!(
@@ -1595,11 +1595,11 @@ mod tests {
 											input_volatility
 										);
                                     } else if alpha > 0.95 {
-                                        // High alpha should be more responsive
-                                        // But LRSI is still bounded [0,1] so it won't match input volatility exactly
-                                        // Use a more reasonable expectation
+                                        
+                                        
+                                        
                                         let expected_min_change = (input_volatility * 0.2).min(0.1);
-                                        // Only test if there's meaningful volatility
+                                        
                                         if input_volatility > 0.01 {
                                             prop_assert!(
 												avg_change >= expected_min_change || avg_change < 0.001,
@@ -1617,12 +1617,12 @@ mod tests {
                         }
                     }
 
-                    // Property 7: Monotonic trend response (with tighter tolerance)
-                    // Check if prices are monotonically increasing or decreasing with actual change
+                    
+                    
                     let is_monotonic_up = high.windows(2).all(|w| w[1] >= w[0])
-                        && high.windows(2).any(|w| w[1] > w[0] + f64::EPSILON); // Must have actual increase
+                        && high.windows(2).any(|w| w[1] > w[0] + f64::EPSILON); 
                     let is_monotonic_down = high.windows(2).all(|w| w[1] <= w[0])
-                        && high.windows(2).any(|w| w[1] < w[0] - f64::EPSILON); // Must have actual decrease
+                        && high.windows(2).any(|w| w[1] < w[0] - f64::EPSILON); 
 
                     if (is_monotonic_up || is_monotonic_down) && out.len() > first_idx + 20 {
                         let valid_out: Vec<(usize, f64)> = out
@@ -1634,7 +1634,7 @@ mod tests {
                             .collect();
 
                         if valid_out.len() >= 20 {
-                            // Check general trend direction over chunks
+                            
                             let chunk_size = valid_out.len() / 3;
                             if chunk_size >= 5 {
                                 let first_chunk_avg =
@@ -1646,7 +1646,7 @@ mod tests {
                                     .sum::<f64>()
                                     / chunk_size as f64;
 
-                                // Calculate how strong the trend is
+                                
                                 let price_range = high
                                     .iter()
                                     .zip(low.iter())
@@ -1661,11 +1661,11 @@ mod tests {
                                     0.01
                                 };
 
-                                // Tighter tolerance: 0.05 base, adjusted by trend strength and alpha
+                                
                                 let tolerance = (0.05 * (1.0 - alpha * 0.5)).min(0.05);
 
                                 if is_monotonic_up {
-                                    // For uptrend, LRSI should increase
+                                    
                                     prop_assert!(
 										last_chunk_avg >= first_chunk_avg - tolerance,
 										"LRSI should respond to uptrend, but first_avg={}, last_avg={}, \
@@ -1677,7 +1677,7 @@ mod tests {
 										trend_strength
 									);
                                 } else if is_monotonic_down {
-                                    // For downtrend, LRSI should decrease
+                                    
                                     prop_assert!(
 										last_chunk_avg <= first_chunk_avg + tolerance,
 										"LRSI should respond to downtrend, but first_avg={}, last_avg={}, \
@@ -1693,8 +1693,8 @@ mod tests {
                         }
                     }
 
-                    // Property 8: Extreme alpha values
-                    // Test behavior at alpha boundaries
+                    
+                    
                     if alpha < 0.02 || alpha > 0.98 {
                         if out.len() > first_idx + 50 {
                             let valid_values: Vec<f64> = out
@@ -1706,10 +1706,10 @@ mod tests {
 
                             if valid_values.len() >= 20 {
                                 if alpha < 0.02 {
-                                    // Very low alpha: LRSI should be smooth after initial settling
-                                    // Skip first few values which might have larger steps due to initialization
+                                    
+                                    
                                     let settled_values = if valid_values.len() > 10 {
-                                        &valid_values[5..] // Skip first 5 values
+                                        &valid_values[5..] 
                                     } else {
                                         &valid_values[..]
                                     };
@@ -1720,10 +1720,10 @@ mod tests {
                                             .map(|w| (w[1] - w[0]).abs())
                                             .fold(0.0f64, f64::max);
 
-                                        // LRSI with low alpha can still have steps due to filter dynamics
-                                        // but should be generally smooth
+                                        
+                                        
                                         prop_assert!(
-											max_step < 0.7,  // Allow for Laguerre filter dynamics
+											max_step < 0.7,  
 											"Extreme low alpha ({}) should produce smooth output after settling, \
 											but max step is {}",
 											alpha,
@@ -1731,11 +1731,11 @@ mod tests {
 										);
                                     }
 
-                                    // Should converge to a relatively stable value
-                                    // Check the last values for stability
+                                    
+                                    
                                     if valid_values.len() >= 20 {
                                         let last_10 = &valid_values[valid_values.len() - 10..];
-                                        // Check max difference in last 10 values
+                                        
                                         let min_val =
                                             last_10.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                                         let max_val = last_10
@@ -1743,7 +1743,7 @@ mod tests {
                                             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                                         let range = max_val - min_val;
 
-                                        // With extreme low alpha, the range should be small
+                                        
                                         prop_assert!(
 											range < 0.5,
 											"Extreme low alpha ({}) should converge to stable value, \
@@ -1753,14 +1753,14 @@ mod tests {
 										);
                                     }
                                 } else {
-                                    // Very high alpha: LRSI should be highly responsive
-                                    // Should have meaningful variation if input has variation
+                                    
+                                    
                                     let range = valid_values.iter().fold(
                                         (f64::INFINITY, f64::NEG_INFINITY),
                                         |(min, max), &v| (min.min(v), max.max(v)),
                                     );
 
-                                    // Only test if input has meaningful variation
+                                    
                                     let input_has_variation =
                                         high.windows(2).any(|w| (w[1] - w[0]).abs() > w[0] * 0.001);
 
@@ -1859,18 +1859,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Use smaller dataset for batch testing
+        
         let slice_end = c.close.len().min(1000);
         let high_slice = &c.high[..slice_end];
         let low_slice = &c.low[..slice_end];
 
-        // Test with different parameter sweeps
+        
         let test_configs = vec![
-            (0.1, 0.3, 0.1),    // Small alpha values
-            (0.2, 0.8, 0.2),    // Medium range
-            (0.5, 0.9, 0.1),    // Higher alpha values
-            (0.1, 0.95, 0.15),  // Wide range
-            (0.85, 0.95, 0.05), // High alpha values
+            (0.1, 0.3, 0.1),    
+            (0.2, 0.8, 0.2),    
+            (0.5, 0.9, 0.1),    
+            (0.1, 0.95, 0.15),  
+            (0.85, 0.95, 0.05), 
         ];
 
         for (cfg_idx, &(a_start, a_end, a_step)) in test_configs.iter().enumerate() {
@@ -1879,7 +1879,7 @@ mod tests {
                 .alpha_range(a_start, a_end, a_step)
                 .apply_slices(high_slice, low_slice)?;
 
-            // Check for poison values in output
+            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1969,7 +1969,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Batch function that writes directly to output slice for Python bindings
+
 #[inline(always)]
 fn lrsi_batch_inner_into(
     high: &[f64],
@@ -1995,7 +1995,7 @@ fn lrsi_batch_inner_into(
         return Err(LrsiError::EmptyInputData);
     }
 
-    // Precompute mid-price once for all rows and find first valid index
+    
     let len = high.len();
     let mut prices = Vec::with_capacity(len);
     prices.extend((0..len).map(|i| (high[i] + low[i]) * 0.5));
@@ -2025,7 +2025,7 @@ fn lrsi_batch_inner_into(
         });
     }
 
-    // Work through MaybeUninit to avoid UB on uninitialized cells
+    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -2035,11 +2035,11 @@ fn lrsi_batch_inner_into(
 
     let do_row = |row: usize, dst_row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let alpha = combos[row].alpha.unwrap();
-        // View as f64 for kernel writes
+        
         let dst_row =
             std::slice::from_raw_parts_mut(dst_row_mu.as_mut_ptr() as *mut f64, dst_row_mu.len());
 
-        // Initialize warmup period with NaN
+        
         let warmup_end = first + 3;
         for i in 0..warmup_end.min(dst_row.len()) {
             dst_row[i] = f64::NAN;
@@ -2138,7 +2138,7 @@ pub fn lrsi_batch_py<'py>(
     let rows = combos.len();
     let cols = h.len();
 
-    // Preallocate NumPy 1D buffer rows*cols; we will fill it in place
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -2171,7 +2171,7 @@ pub fn lrsi_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "lrsi_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, alpha_range, device_id=0))]

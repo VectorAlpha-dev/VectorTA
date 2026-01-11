@@ -219,7 +219,7 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         JsaData::Slice(sl) => sl,
     };
 
-    // Check for empty input data
+    
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
     }
@@ -249,9 +249,9 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         .ok_or(JsaError::ArithmeticOverflow)?;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
-        // JSA is bandwidth-bound; on AVX512-capable CPUs the explicit AVX2/AVX512
-        // kernels can underperform due to downclock versus the compiler’s scalar
-        // autovec. Prefer the scalar reference for `Auto`.
+        
+        
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -286,14 +286,14 @@ pub fn jsa_with_kernel_into(
         JsaData::Slice(sl) => sl,
     };
 
-    // Check for empty input data
+    
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
     }
 
     let len = data.len();
 
-    // Ensure output buffer is the correct size
+    
     if out.len() != len {
         return Err(JsaError::OutputLengthMismatch {
             expected: len,
@@ -322,11 +322,11 @@ pub fn jsa_with_kernel_into(
 
     let warm = first + period;
 
-    // Initialize NaN prefix
+    
     out[..warm].fill(f64::NAN);
 
     let chosen = match kernel {
-        // See `jsa_with_kernel`: avoid AVX downclock for `Auto`.
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -494,8 +494,8 @@ impl JsaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Produce output only after we've seen `period` samples.
-        // Keep the exact `(x + y) * 0.5` order for bit‑exact parity.
+        
+        
         let out = if self.filled {
             let past = self.buffer[self.head];
             Some((value + past) * 0.5)
@@ -503,15 +503,15 @@ impl JsaStream {
             None
         };
 
-        // Write the new sample into the slot that will be `period` steps old next wrap.
+        
         self.buffer[self.head] = value;
 
-        // Branch-once wraparound instead of `% self.period` (avoids integer division).
+        
         let next = self.head + 1;
         if next == self.period {
             self.head = 0;
             if !self.filled {
-                // Becomes true exactly after inserting the first `period` samples.
+                
                 self.filled = true;
             }
         } else {
@@ -620,7 +620,7 @@ impl JsaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &JsaBatchRange) -> Result<Vec<JsaParams>, JsaError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, JsaError> {
-        // zero step or equal bounds → static
+        
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -629,18 +629,18 @@ fn expand_grid(r: &JsaBatchRange) -> Result<Vec<JsaParams>, JsaError> {
             let mut cur = start;
             while cur <= end {
                 v.push(cur);
-                // checked add; break on overflow to avoid infinite loop
+                
                 match cur.checked_add(step) {
                     Some(next) => cur = next,
                     None => break,
                 }
             }
         } else {
-            // reversed bounds supported (descending)
+            
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                // checked sub; stop if step is larger than cur - end
+                
                 if cur < end + step { break; }
                 cur -= step;
                 if cur == usize::MAX { break; }
@@ -682,7 +682,7 @@ fn jsa_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<JsaBatchOutput, JsaError> {
-    // Check for empty input data
+    
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
     }
@@ -701,7 +701,7 @@ fn jsa_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Guard rows*cols before allocating
+    
     let _total = rows.checked_mul(cols).ok_or(JsaError::ArithmeticOverflow)?;
     let mut warm: Vec<usize> = Vec::with_capacity(rows);
     for c in &combos {
@@ -710,26 +710,26 @@ fn jsa_batch_inner(
         warm.push(w);
     }
 
-    // -----------------------------------
-    // 2.  allocate rows × cols as MaybeUninit
-    // -----------------------------------
+    
+    
+    
     let mut raw = make_uninit_matrix(rows, cols);
-    // fill each row’s warm prefix with quiet-NaNs
+    
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    // Resolve Auto kernel before use
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    // -----------------------------------
-    // 3.  per-row worker (writes into MaybeUninit)
-    // -----------------------------------
+    
+    
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // cast this row to &mut [f64] for the SIMD/scalar kernels
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -743,9 +743,9 @@ fn jsa_batch_inner(
         }
     };
 
-    // -----------------------------------
-    // 4.  run all rows, filling `raw`
-    // -----------------------------------
+    
+    
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -766,9 +766,9 @@ fn jsa_batch_inner(
         }
     }
 
-    // -----------------------------------
-    // 5.  transmute to Vec<f64> (all cells written)
-    // -----------------------------------
+    
+    
+    
     use core::mem::ManuallyDrop;
 
     let mut buf_guard = ManuallyDrop::new(raw);
@@ -796,7 +796,7 @@ fn jsa_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<(Vec<JsaParams>, usize, usize), JsaError> {
-    // Check for empty input data
+    
     if data.is_empty() {
         return Err(JsaError::EmptyInputData);
     }
@@ -815,7 +815,7 @@ fn jsa_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Ensure output buffer is the correct size (checked mul)
+    
     let expected = rows.checked_mul(cols).ok_or(JsaError::ArithmeticOverflow)?;
     if out.len() != expected {
         return Err(JsaError::OutputLengthMismatch {
@@ -830,19 +830,19 @@ fn jsa_batch_inner_into(
         warm.push(w);
     }
 
-    // Cast output to MaybeUninit for initialization
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // Resolve Auto kernel before use
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    // ---------- closure that fills ONE row ---------------------------
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
@@ -856,7 +856,7 @@ fn jsa_batch_inner_into(
         }
     };
 
-    // ---------- run every row ----------------------------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1010,7 +1010,7 @@ unsafe fn jsa_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -1045,12 +1045,12 @@ pub fn jsa_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     use numpy::PyArrayMethods;
 
-    let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
+    let kern = validate_kernel(kernel, false)?; 
 
-    // Accept non-contiguous inputs by copying once (match ALMA behavior).
+    
     if data.is_c_contiguous() {
         let slice_in = data.as_slice()?;
-        // Contiguous fast path: write directly into a new NumPy array
+        
         let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
         let slice_out = unsafe { out_arr.as_slice_mut()? };
         let params = JsaParams {
@@ -1061,7 +1061,7 @@ pub fn jsa_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(out_arr)
     } else {
-        // Non‑contiguous (e.g., column view) — copy then compute
+        
         let owned = data.as_array().to_owned();
         let slice_in = owned.as_slice().expect("owned array should be contiguous");
         let params = JsaParams {
@@ -1091,12 +1091,12 @@ pub fn jsa_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?; 
     let sweep = JsaBatchRange {
         period: (period_start, period_end, period_step),
     };
 
-    // Calculate dimensions with robust range expansion
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
@@ -1104,20 +1104,20 @@ pub fn jsa_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("size overflow"))?;
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let (combos, _, _) = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            // Map batch kernels to regular kernels for JSA
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1129,11 +1129,11 @@ pub fn jsa_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // For single-parameter indicator JSA:
+    
     dict.set_item(
         "periods",
         combos
@@ -1218,9 +1218,9 @@ pub fn jsa_cuda_many_series_one_param_dev_py(
     Ok(JsaDeviceArrayF32Py::from_handle_rust(handle))
 }
 
-// Note: jsa_batch_with_metadata_py is no longer needed since jsa_batch_py now returns metadata in the dictionary
 
-// Note: jsa_batch_2d_py is no longer needed since jsa_batch_py now returns a 2D array in the dictionary
+
+
 
 #[cfg(feature = "python")]
 #[pyclass(name = "JsaStream")]
@@ -1246,13 +1246,13 @@ impl JsaStreamPy {
     }
 }
 
-// ================== WASM Bindings ==================
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// ================== Safe API (1 allocation) ==================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn jsa_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
@@ -1261,16 +1261,16 @@ pub fn jsa_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = JsaInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer (using inline function like ALMA)
+    
     jsa_into(&input, &mut output).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Batch Processing with Metadata ==================
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct JsaBatchConfig {
@@ -1314,7 +1314,7 @@ pub fn jsa_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Alternative simple batch API for debugging
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = jsa_batch_simple)]
 pub fn jsa_batch_simple(
@@ -1327,21 +1327,21 @@ pub fn jsa_batch_simple(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     jsa_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn jsa_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
@@ -1349,7 +1349,7 @@ pub fn jsa_alloc(len: usize) -> *mut f64 {
 #[wasm_bindgen]
 pub fn jsa_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
-        // Free allocated memory
+        
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
         }
@@ -1395,7 +1395,7 @@ pub fn jsa_into_wasm(
     }
 }
 
-// optional for compat
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 #[deprecated(note = "use jsa_into")]
@@ -1408,7 +1408,7 @@ pub fn jsa_fast(
     jsa_into_wasm(in_ptr, out_ptr, len, period)
 }
 
-// ================== Batch Processing Fast API ==================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn jsa_batch_into(
@@ -1429,16 +1429,16 @@ pub fn jsa_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Calculate output size
+        
         let combos = expand_grid(&sweep)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total_size = rows * len;
 
-        // Get output slice
+        
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Compute batch - always use false for parallel in WASM
+        
         jsa_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1446,7 +1446,7 @@ pub fn jsa_batch_into(
     }
 }
 
-// ==================== PYTHON MODULE REGISTRATION ====================
+
 #[cfg(feature = "python")]
 pub fn register_jsa_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
@@ -1498,12 +1498,12 @@ impl JsaDeviceArrayF32Py {
                 .as_raw() as usize
         };
         d.set_item("data", (ptr, false))?;
-        // Producer stream is synchronized before returning the handle
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    // No Python-exposed constructor from raw handle; use Rust-only helper below.
+    
 
     fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
 
@@ -1518,7 +1518,7 @@ impl JsaDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Validate dl_device hint against the allocation device.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1538,10 +1538,10 @@ impl JsaDeviceArrayF32Py {
             }
         }
 
-        // Ignore stream; producer synchronizes before returning the handle.
+        
         let _ = stream;
 
-        // Move DeviceBuffer into DLPack so the consumer owns it.
+        
         let buf = self
             .buf
             .take()
@@ -1745,7 +1745,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_jsa_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1753,7 +1753,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_periods = vec![2, 5, 10, 14, 20, 30, 50, 100, 200];
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
@@ -1768,16 +1768,16 @@ mod tests {
                 );
                 let output = jsa_with_kernel(&input, kernel)?;
 
-                // Check every value for poison patterns
+                
                 for (i, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
+                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1785,7 +1785,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1793,7 +1793,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1807,7 +1807,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_jsa_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1870,7 +1870,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1878,19 +1878,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            // Test with comprehensive period ranges
+            
             let output = JsaBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(2, 200, 3) // Wide range: 2 to 200 with step 3
+                .period_range(2, 200, 3) 
                 .apply_candles(&c, source)?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1899,7 +1899,7 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1907,7 +1907,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1915,7 +1915,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1925,7 +1925,7 @@ mod tests {
             }
         }
 
-        // Also test edge cases with very small and very large periods
+        
         let edge_case_ranges = vec![(2, 5, 1), (190, 200, 2), (50, 100, 10)];
         for (start, end, step) in edge_case_ranges {
             let output = JsaBatchBuilder::new()
@@ -1957,7 +1957,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1972,7 +1972,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test strategy: period from 1 to 100, data length from period to 400
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1989,17 +1989,17 @@ mod tests {
             };
             let input = JsaInput::from_slice(&data, params);
 
-            // Test with specified kernel
+            
             let JsaOutput { values: out } = jsa_with_kernel(&input, kernel).unwrap();
 
-            // Use scalar as reference for cross-kernel validation
+            
             let JsaOutput { values: ref_out } = jsa_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Find first valid index
+            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_period = first_valid + period;
 
-            // Property 1: Verify warmup period - all values before warmup should be NaN
+            
             for i in 0..warmup_period.min(data.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2010,13 +2010,13 @@ mod tests {
                 );
             }
 
-            // Property 2: Verify JSA formula for valid outputs
-            // JSA formula: out[i] = (data[i] + data[i - period]) * 0.5
+            
+            
             for i in warmup_period..data.len() {
                 let expected = (data[i] + data[i - period]) * 0.5;
                 let actual = out[i];
 
-                // Allow small numerical error for floating point
+                
                 prop_assert!(
                     (actual - expected).abs() < 1e-9,
                     "[{}] Formula verification failed at index {}: expected {}, got {}, diff = {}",
@@ -2028,7 +2028,7 @@ mod tests {
                 );
             }
 
-            // Property 3: Output bounds - result should be within min/max of the two values being averaged
+            
             for i in warmup_period..data.len() {
                 let val1 = data[i];
                 let val2 = data[i - period];
@@ -2047,18 +2047,18 @@ mod tests {
                 );
             }
 
-            // Property 4: Cross-kernel consistency
-            // Only test against scalar reference if we're not already testing scalar
+            
+            
             if kernel != Kernel::Scalar {
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
                     if y.is_nan() && r.is_nan() {
-                        continue; // Both NaN is fine
+                        continue; 
                     }
 
-                    // Check bit-exact equality for non-NaN values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     prop_assert!(
@@ -2074,7 +2074,7 @@ mod tests {
                 }
             }
 
-            // Property 5: Constant data should produce the same constant
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) && !data.is_empty() {
                 let constant = data[first_valid];
                 for i in warmup_period..data.len() {
@@ -2089,12 +2089,12 @@ mod tests {
                 }
             }
 
-            // Property 6: Monotonic increasing data - outputs should also be monotonic
+            
             let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-12);
             if is_monotonic_inc && warmup_period + 1 < data.len() {
                 for i in (warmup_period + 1)..data.len() {
-                    // For monotonic increasing data, JSA output should also be increasing
-                    // Since we're averaging current with past, and both sequences are increasing
+                    
+                    
                     prop_assert!(
                         out[i] >= out[i - 1] - 1e-9,
                         "[{}] Monotonic test failed at index {}: {} < {}",
@@ -2106,7 +2106,7 @@ mod tests {
                 }
             }
 
-            // Property 7: Period = 1 special case - averaging consecutive values
+            
             if period == 1 && warmup_period < data.len() {
                 for i in warmup_period..data.len() {
                     let expected = (data[i] + data[i - 1]) * 0.5;
@@ -2122,17 +2122,17 @@ mod tests {
                 }
             }
 
-            // Property 8: Check for poison values in debug mode
+            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in out.iter().enumerate() {
                     if val.is_nan() {
-                        continue; // NaN is expected in warmup
+                        continue; 
                     }
 
                     let bits = val.to_bits();
 
-                    // Check for common poison patterns
+                    
                     prop_assert!(
                         bits != 0x11111111_11111111,
                         "[{}] Found alloc_with_nan_prefix poison at index {}",
@@ -2160,35 +2160,35 @@ mod tests {
         Ok(())
     }
 
-    // Generate property test variants for each kernel
+    
     #[cfg(feature = "proptest")]
     generate_all_jsa_tests!(check_jsa_property);
 
     #[test]
     fn test_jsa_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a non-trivial input with a NaN warmup prefix and finite tail
+        
         let mut data = Vec::with_capacity(256);
         for _ in 0..8 {
             data.push(f64::NAN);
         }
         for i in 0..248u64 {
-            // mildly varying values to exercise the kernel
+            
             let x = (i as f64).sin() * 3.14159 + (i as f64) * 0.01;
             data.push(x);
         }
 
         let input = JsaInput::from_slice(&data, JsaParams::default());
 
-        // Baseline via Vec-returning API
+        
         let base = jsa(&input)?.values;
 
-        // Preallocate output buffer for into()
+        
         let mut out = vec![0.0; data.len()];
         jsa_into(&input, &mut out)?;
 
         assert_eq!(base.len(), out.len(), "lengths must match");
 
-        // Compare position-wise (NaN == NaN allowed). Use exact equality for finite values.
+        
         for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
             let both_nan = a.is_nan() && b.is_nan();
             assert!(both_nan || a == b, "mismatch at idx {}: {} vs {}", i, a, b);

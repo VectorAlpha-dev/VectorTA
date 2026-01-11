@@ -75,7 +75,7 @@ pub struct CudaCoppock {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaCoppockPolicy,
-    // debug logging once per instance when BENCH_DEBUG=1
+    
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
@@ -208,7 +208,7 @@ impl CudaCoppock {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn coppock_batch_dev(
         &self,
         price: &[f32],
@@ -223,14 +223,14 @@ impl CudaCoppock {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCoppockError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand grid (mirrors CPU expand_grid semantics)
+        
         let (shorts, longs, ma_periods) = expand_grid(sweep)?;
         let rows = ma_periods.len();
         if rows == 0 {
             return Err(CudaCoppockError::InvalidInput("no parameter combos".into()));
         }
 
-        // Validate warmups
+        
         for ((&s, &l), &m) in shorts.iter().zip(longs.iter()).zip(ma_periods.iter()) {
             let (s_u, l_u, m_u) = (s as usize, l as usize, m as usize);
             if s_u == 0 || l_u == 0 || m_u == 0 || s_u > len || l_u > len || m_u > len {
@@ -247,7 +247,7 @@ impl CudaCoppock {
             }
         }
 
-        // Guard large allocations with a will_fit check (using checked arithmetic)
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let prices_bytes = len
@@ -274,7 +274,7 @@ impl CudaCoppock {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        // Device buffers (price + precomputed reciprocals shared across rows)
+        
         let d_price = DeviceBuffer::from_slice(price)?;
         let mut inv = vec![0f32; len];
         for i in 0..len {
@@ -282,7 +282,7 @@ impl CudaCoppock {
         }
         let d_inv = DeviceBuffer::from_slice(&inv)?;
 
-        // Heuristic for single-launch feasibility
+        
         let bytes_params = rows
             .checked_mul(3usize)
             .and_then(|v| v.checked_mul(elem_i32))
@@ -300,7 +300,7 @@ impl CudaCoppock {
         };
 
         if fits_single {
-            // Single launch path
+            
             let d_s = DeviceBuffer::from_slice(&shorts)?;
             let d_l = DeviceBuffer::from_slice(&longs)?;
             let d_m = DeviceBuffer::from_slice(&ma_periods)?;
@@ -327,7 +327,7 @@ impl CudaCoppock {
             });
         }
 
-        // Chunked path: try to stream directly into a full device buffer
+        
         let try_out: Result<DeviceBuffer<f32>, _> =
             unsafe { DeviceBuffer::uninitialized(rows * len) };
         if let Ok(mut d_out_full) = try_out {
@@ -366,7 +366,7 @@ impl CudaCoppock {
             });
         }
 
-        // Allocate final output on device once; stream chunks directly into it
+        
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }?;
         let mut start = 0usize;
         let max_chunk = 65_535usize;
@@ -388,7 +388,7 @@ impl CudaCoppock {
                 &mut d_out,
                 start * len,
             )?;
-            // Kernel wrote into the final device buffer at the correct offset
+            
             start += chunk;
         }
         Ok(DeviceArrayF32Coppock {
@@ -423,7 +423,7 @@ impl CudaCoppock {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
-        // 2D: grid.x over time, grid.y over combos (row-major output)
+        
         if block_x == 0 {
             return Err(CudaCoppockError::InvalidPolicy("block_x must be > 0"));
         }
@@ -441,7 +441,7 @@ impl CudaCoppock {
             let mut l_ptr = d_long.as_device_ptr().as_raw();
             let mut m_ptr = d_ma.as_device_ptr().as_raw();
             let mut n_i = n_combos as i32;
-            // Offset output pointer to stream results into final device buffer
+            
             let base = d_out.as_device_ptr();
             let off = base.add(out_offset_elems);
             let mut out_ptr = off.as_raw();
@@ -461,7 +461,7 @@ impl CudaCoppock {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn coppock_many_series_one_param_time_major_dev(
         &self,
         price_tm: &[f32],
@@ -484,7 +484,7 @@ impl CudaCoppock {
             return Err(CudaCoppockError::InvalidInput("invalid periods".into()));
         }
 
-        // Per-series first_valid
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -529,7 +529,7 @@ impl CudaCoppock {
         self.will_fit(required, headroom)?;
 
         let d_price = DeviceBuffer::from_slice(price_tm)?;
-        // Precompute reciprocals for time-major buffer
+        
         let mut inv_tm = vec![0f32; cols * rows];
         for idx in 0..inv_tm.len() {
             inv_tm[idx] = 1.0f32 / price_tm[idx];
@@ -710,14 +710,14 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<(Vec<i32>, Vec<i32>, Vec<i32>), 
     Ok((shorts, longs, mas))
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // number of (short,long,ma) combos
+    const PARAM_SWEEP: usize = 250; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -759,7 +759,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCoppock::new(0).expect("cuda coppock");
         let price = gen_series(ONE_SERIES_LEN);
-        // Rough sweep around defaults
+        
         let sweep = CoppockBatchRange {
             short: (8, 18, 2),
             long: (20, 30, 2),

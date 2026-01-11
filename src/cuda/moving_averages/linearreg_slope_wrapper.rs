@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// ---------------- Kernel policy (simple 1D for both paths) ----------------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -194,7 +194,7 @@ impl CudaLinearregSlope {
         }
     }
 
-    // ---------------- VRAM helpers ----------------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -251,7 +251,7 @@ impl CudaLinearregSlope {
         Ok(())
     }
 
-    // ---------------- Input prep (batch) ----------------
+    
 
     #[inline]
     fn expand_periods(sweep: &LinearRegSlopeBatchRange) -> Result<Vec<usize>, CudaLinearregSlopeError> {
@@ -277,7 +277,7 @@ impl CudaLinearregSlope {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -355,7 +355,7 @@ impl CudaLinearregSlope {
             }
 
             let pf = period as f64;
-            let x_sum = pf * (pf + 1.0) * 0.5; // x=1..period
+            let x_sum = pf * (pf + 1.0) * 0.5; 
             let x2_sum = pf * (pf + 1.0) * (2.0 * pf + 1.0) / 6.0;
             let denom = pf * x2_sum - x_sum * x_sum;
             let denom_inv = 1.0 / denom;
@@ -693,7 +693,7 @@ impl CudaLinearregSlope {
         Ok((nrows, len, combos))
     }
 
-    // ---------------- Many-series one param ----------------
+    
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,
@@ -873,7 +873,7 @@ impl CudaLinearregSlope {
     }
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

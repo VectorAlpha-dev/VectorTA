@@ -1,16 +1,16 @@
-// CUDA Ehlers PMA variant coverage via explicit policy selection
 
-use my_project::indicators::moving_averages::ehlers_pma::{
+
+use vector_ta::indicators::moving_averages::ehlers_pma::{
     ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput, EhlersPmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::ehlers_pma_wrapper::{
+use vector_ta::cuda::moving_averages::ehlers_pma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaEhlersPma, CudaEhlersPmaPolicy,
     ManySeriesKernelPolicy,
 };
@@ -108,7 +108,7 @@ fn compare_many_series(policy: CudaEhlersPmaPolicy, cols: usize, rows: usize) {
         return;
     }
     let tm = gen_time_major_f64(cols, rows);
-    // CPU baseline
+    
     let mut cpu_predict_tm = vec![f64::NAN; cols * rows];
     let mut cpu_trigger_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {

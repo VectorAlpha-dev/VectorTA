@@ -1,16 +1,16 @@
-// Integration tests for CUDA UMA kernels
 
-use my_project::indicators::moving_averages::uma::{
+
+use vector_ta::indicators::moving_averages::uma::{
     uma_batch_with_kernel, UmaBatchRange, UmaBuilder, UmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaUma;
+use vector_ta::cuda::moving_averages::CudaUma;
 
 #[test]
 fn cuda_feature_off_noop() {
@@ -45,7 +45,7 @@ fn uma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         smooth_length: (2, 4, 1),
     };
 
-    // Match CUDA input domain (FP32) before computing CPU reference.
+    
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
     let prices_cpu: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
@@ -69,7 +69,7 @@ fn uma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_host)
         .expect("copy cuda uma batch result to host");
 
-    // GPU is FP32 and (by default) built with `--use_fast_math`; compare to f64 scalar with a mixed tolerance.
+    
     let (atol, rtol) = (1.5e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;
@@ -130,7 +130,7 @@ fn uma_cuda_one_series_no_volume_matches_cpu() -> Result<(), Box<dyn std::error:
         smooth_length: (3, 3, 0),
     };
 
-    // Match CUDA input domain (FP32) before computing CPU reference.
+    
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let prices_cpu: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
 
@@ -152,7 +152,7 @@ fn uma_cuda_one_series_no_volume_matches_cpu() -> Result<(), Box<dyn std::error:
         .copy_to(&mut gpu_host)
         .expect("copy cuda uma batch result");
 
-    // No-volume path uses RSI MF and is more numerically sensitive in FP32.
+    
     let (atol, rtol) = (1.5e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;
@@ -213,7 +213,7 @@ fn uma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // Match CUDA input domain (FP32) before computing CPU reference.
+    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let volumes_tm_f32: Vec<f32> = volumes_tm.iter().map(|&v| v as f32).collect();
     let prices_tm_cpu: Vec<f64> = prices_tm_f32.iter().map(|&v| v as f64).collect();
@@ -326,7 +326,7 @@ fn uma_cuda_many_series_one_param_no_volume_matches_cpu() -> Result<(), Box<dyn 
         }
     }
 
-    // Match CUDA input domain (FP32) before computing CPU reference.
+    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let prices_tm_cpu: Vec<f64> = prices_tm_f32.iter().map(|&v| v as f64).collect();
 

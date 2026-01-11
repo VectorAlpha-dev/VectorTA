@@ -1,5 +1,5 @@
-// CUDA kernels for the SuperSmoother filter.
-// Optimized: register rolling state, FMA, prefix-only NaN fill, pointer-stride time-major.
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,14 +12,14 @@
 #define SUPERSMOOTHER_NAN (__int_as_float(0x7fffffff))
 #endif
 
-// Optional: define SS_FAST_MATH to use faster but slightly less accurate intrinsics.
+
 static __device__ __forceinline__ void supersmoother_coeffs(float period, float* a, float* b, float* c) {
     const float PI = 3.14159265358979323846f;
     const float SQRT2 = 1.41421356237f;
     const float factor = (SQRT2 * PI) / period;
 
 #ifdef SS_FAST_MATH
-    // Approximate path (enable with -DSS_FAST_MATH); faster but less accurate
+    
     const float a_val = __expf(-factor);
     const float b_val = 2.0f * a_val * __cosf(factor);
 #else
@@ -46,7 +46,7 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
     const int period = periods[combo];
     float* __restrict__ row_out = out + combo * series_len;
 
-    // Validate early; if invalid, write full-row NaNs (preserve original behavior) and return.
+    
     if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
         for (int i = 0; i < series_len; ++i) row_out[i] = SUPERSMOOTHER_NAN;
         return;
@@ -64,15 +64,15 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
         return;
     }
 
-    // Prefix-only NaN fill: [0, warm)
+    
     for (int i = 0; i < warm; ++i) row_out[i] = SUPERSMOOTHER_NAN;
 
-    // Coefficients
+    
     float a, b, c;
     supersmoother_coeffs((float)period, &a, &b, &c);
     const float a_sq = a * a;
 
-    // Seeds
+    
     float y_im2 = prices[warm];
     row_out[warm] = y_im2;
 
@@ -81,13 +81,13 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
     float y_im1 = prices[warm + 1];
     row_out[warm + 1] = y_im1;
 
-    // Main recurrence using register rolling state and FMA
-    // y[i] = c*(x[i] + x[i-1]) + b*y[i-1] - (a^2)*y[i-2]
+    
+    
 #pragma unroll 1
     for (int idx = warm + 2; idx < series_len; ++idx) {
         const float x_i    = prices[idx];
         const float x_im1  = prices[idx - 1];
-        // Two FMAs: t = fmaf(b, y_im1, -a_sq*y_im2); y = fmaf(c, (x_i + x_im1), t);
+        
         const float t  = fmaf(b, y_im1, -a_sq * y_im2);
         const float yi = fmaf(c, (x_i + x_im1), t);
         row_out[idx] = yi;
@@ -96,22 +96,22 @@ extern "C" __global__ void supersmoother_batch_f32(const float* __restrict__ pri
     }
 }
 
-// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
-// per iteration via an inclusive scan over the 2x2 affine state update:
-//
-//   y[i] = c*(x[i] + x[i-1]) + b*y[i-1] - a^2*y[i-2]
-//
-// State is s[i] = [y[i], y[i-1]] and:
-//   s[i] = M*s[i-1] + [u[i], 0]
-//   M = [[b, -a^2],
-//        [1,   0 ]]
-//   u[i] = c*(x[i] + x[i-1])
-//
-// - blockDim.x must be exactly 32
-// - outputs:
-//   - [0, warm) = NaN where warm = first_valid + period - 1
-//   - y[warm] = x[warm], y[warm+1] = x[warm+1]
-//   - i >= warm+2 computed by recurrence
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __restrict__ prices,
                                                             const int* __restrict__ periods,
                                                             int series_len,
@@ -151,32 +151,32 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
         return;
     }
 
-    // Prefix-only NaN fill: [0, warm)
+    
     for (int i = lane; i < warm; i += 32) row_out[i] = SUPERSMOOTHER_NAN;
 
-    // Seeds
+    
     if (lane == 0) {
         row_out[warm] = prices[warm];
         if (warm + 1 < series_len) row_out[warm + 1] = prices[warm + 1];
     }
     if (warm + 1 >= series_len) return;
 
-    // Coefficients
+    
     float a, b, c;
     supersmoother_coeffs((float)period, &a, &b, &c);
     const float a_sq = a * a;
 
-    // Previous state at t0-1 = warm+1
+    
     float s0_prev = 0.0f;
     float s1_prev = 0.0f;
     if (lane == 0) {
-        s1_prev = prices[warm];     // y_{t0-2}
-        s0_prev = prices[warm + 1]; // y_{t0-1}
+        s1_prev = prices[warm];     
+        s0_prev = prices[warm + 1]; 
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
 
-    // Constant state-transition matrix M
+    
     const float m00 = b;
     const float m01 = -a_sq;
     const float m10 = 1.0f;
@@ -196,8 +196,8 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
             u = c * (x0 + x1);
         }
 
-        // Each lane starts with its step transform: (P, v), where
-        // P = M and v = [u, 0]. For inactive lanes, use identity.
+        
+        
         float p00 = valid ? m00 : 1.0f;
         float p01 = valid ? m01 : 0.0f;
         float p10 = valid ? m10 : 0.0f;
@@ -205,7 +205,7 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
         float v0  = valid ? u   : 0.0f;
         float v1  = 0.0f;
 
-        // Inclusive scan over composed transforms: (P_cur, v_cur) ∘ (P_prev, v_prev)
+        
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float p00_prev = __shfl_up_sync(mask, p00, offset);
@@ -231,7 +231,7 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
             }
         }
 
-        // Apply prefix transform to previous state s_prev
+        
         const float y0 = fmaf(p00, s0_prev, fmaf(p01, s1_prev, v0));
         const float y1 = fmaf(p10, s0_prev, fmaf(p11, s1_prev, v1));
 
@@ -247,7 +247,7 @@ extern "C" __global__ void supersmoother_batch_warp_scan_f32(const float* __rest
 }
 
 extern "C" __global__ void supersmoother_many_series_one_param_f32(
-    const float* __restrict__ prices_tm,   // time-major: [row][series]
+    const float* __restrict__ prices_tm,   
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
@@ -257,7 +257,7 @@ extern "C" __global__ void supersmoother_many_series_one_param_f32(
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    // Validate early; if invalid, write full-column NaNs and return.
+    
     if (period <= 0 || period > series_len) {
         for (int row = 0; row < series_len; ++row) out_tm[row * num_series + series] = SUPERSMOOTHER_NAN;
         return;
@@ -281,20 +281,20 @@ extern "C" __global__ void supersmoother_many_series_one_param_f32(
         return;
     }
 
-    // Column pointers with stride iteration to reduce per-iteration index math
+    
     const int stride = num_series;
     const float* __restrict__ px = prices_tm + series;
     float*       __restrict__ py = out_tm    + series;
 
-    // Prefix-only NaN fill: rows [0, warm)
+    
     for (int row = 0; row < warm; ++row) py[row * stride] = SUPERSMOOTHER_NAN;
 
-    // Coefficients
+    
     float a, b, c;
     supersmoother_coeffs((float)period, &a, &b, &c);
     const float a_sq = a * a;
 
-    // Seeds (time-major access)
+    
     float y_im2 = px[warm * stride];
     py[warm * stride] = y_im2;
 
@@ -303,7 +303,7 @@ extern "C" __global__ void supersmoother_many_series_one_param_f32(
     float y_im1 = px[(warm + 1) * stride];
     py[(warm + 1) * stride] = y_im1;
 
-    // Main recurrence; keep state in registers; row-wise coalesced across the warp
+    
 #pragma unroll 1
     for (int row = warm + 2; row < series_len; ++row) {
         const float x_i   = px[row * stride];

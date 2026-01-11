@@ -1,19 +1,19 @@
-// CUDA integration tests for Bollinger Bands (SMA/stddev path).
 
-use my_project::indicators::bollinger_bands::{
+
+use vector_ta::indicators::bollinger_bands::{
     bollinger_bands_batch_with_kernel, BollingerBandsBatchRange,
 };
-use my_project::indicators::bollinger_bands::{
+use vector_ta::indicators::bollinger_bands::{
     bollinger_bands_with_kernel, BollingerBandsInput, BollingerBandsParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaBollingerBands;
+use vector_ta::cuda::CudaBollingerBands;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -129,7 +129,7 @@ fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    // CPU baseline per series using scalar function
+    
     let mut cpu_up_tm = vec![f64::NAN; cols * rows];
     let mut cpu_mid_tm = vec![f64::NAN; cols * rows];
     let mut cpu_lo_tm = vec![f64::NAN; cols * rows];

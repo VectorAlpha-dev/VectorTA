@@ -16,7 +16,7 @@ use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{CopyDestination, DeviceBuffer};
-// PATCH 1: imports for pinned/async transfers and mem info
+
 use cust::memory::mem_get_info;
 use cust::memory::{AsyncCopyDestination, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};

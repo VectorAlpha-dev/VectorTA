@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -45,12 +45,12 @@ test('KVO accuracy', () => {
     const close = testData.close;
     const volume = testData.volume;
     
-    // Using default parameters: short_period=2, long_period=5
+    
     const result = wasm.kvo_js(high, low, close, volume, 2, 5);
     
     assert.strictEqual(result.length, close.length, 'Result length should match input length');
     
-    // Check last 5 values match expected from Rust tests
+    
     const expectedLastFive = [
         -246.42698280402647,
         530.8651474164992,
@@ -69,7 +69,7 @@ test('KVO with default parameters', () => {
     const close = testData.close;
     const volume = testData.volume;
     
-    // Test with default values (short=2, long=5)
+    
     const result = wasm.kvo_js(high, low, close, volume, 2, 5);
     assert(result && typeof result.length === 'number', 'Result should have a length property');
     assert.strictEqual(result.length, close.length, 'Result length should match input length');
@@ -140,7 +140,7 @@ test('KVO NaN handling', () => {
     const result = wasm.kvo_js(high, low, close, volume, 2, 5);
     assert.strictEqual(result.length, close.length, 'Result length should match input length');
     
-    // Check that we have expected number of NaN values at the beginning
+    
     let nanCount = 0;
     for (let i = 0; i < result.length; i++) {
         if (isNaN(result[i])) {
@@ -150,17 +150,17 @@ test('KVO NaN handling', () => {
         }
     }
     
-    // KVO has a warmup period based on first valid data
+    
     assert(nanCount > 0, 'Should have NaN values during warmup period');
 });
 
 test('KVO batch processing', () => {
-    const high = testData.high.slice(0, 100); // Use smaller dataset for speed
+    const high = testData.high.slice(0, 100); 
     const low = testData.low.slice(0, 100);
     const close = testData.close.slice(0, 100);
     const volume = testData.volume.slice(0, 100);
     
-    // Test batch with single parameter set
+    
     const config = {
         short_period_range: [2, 2, 0],
         long_period_range: [5, 5, 0]
@@ -173,7 +173,7 @@ test('KVO batch processing', () => {
     assert.strictEqual(result.rows, 1, 'Should have 1 row for single parameter set');
     assert.strictEqual(result.cols, 100, 'Should have 100 columns');
     
-    // Compare with single calculation
+    
     const singleResult = wasm.kvo_js(high, low, close, volume, 2, 5);
     assertArrayClose(
         result.values, 
@@ -184,25 +184,25 @@ test('KVO batch processing', () => {
 });
 
 test('KVO batch with multiple parameters', () => {
-    const high = testData.high.slice(0, 50); // Use smaller dataset for speed
+    const high = testData.high.slice(0, 50); 
     const low = testData.low.slice(0, 50);
     const close = testData.close.slice(0, 50);
     const volume = testData.volume.slice(0, 50);
     
-    // Multiple parameter combinations
+    
     const config = {
-        short_period_range: [2, 3, 1],    // 2, 3
-        long_period_range: [5, 6, 1]      // 5, 6
+        short_period_range: [2, 3, 1],    
+        long_period_range: [5, 6, 1]      
     };
     
     const result = wasm.kvo_batch(high, low, close, volume, config);
     
-    // Should have 2 * 2 = 4 combinations
+    
     assert.strictEqual(result.rows, 4, 'Should have 4 parameter combinations');
     assert.strictEqual(result.cols, 50, 'Should have 50 columns');
     assert.strictEqual(result.values.length, 200, 'Should have 4 * 50 = 200 values');
     
-    // Check first combination matches single calculation
+    
     const firstRow = result.values.slice(0, 50);
     const singleResult = wasm.kvo_js(high, low, close, volume, 2, 5);
     
@@ -215,16 +215,16 @@ test('KVO memory allocation/deallocation', () => {
     
     assert(ptr !== 0, 'Allocated pointer should not be null');
     
-    // Free the memory
+    
     wasm.kvo_free(ptr, len);
     
-    // Test multiple allocations
+    
     const ptrs = [];
     for (let i = 0; i < 10; i++) {
         ptrs.push(wasm.kvo_alloc(100));
     }
     
-    // Free all
+    
     ptrs.forEach(p => wasm.kvo_free(p, 100));
 });
 
@@ -235,7 +235,7 @@ test('KVO fast API (kvo_into)', () => {
     const volume = testData.volume.slice(0, 100);
     const len = high.length;
     
-    // Allocate memory for all inputs and output
+    
     const highPtr = wasm.kvo_alloc(len);
     const lowPtr = wasm.kvo_alloc(len);
     const closePtr = wasm.kvo_alloc(len);
@@ -243,7 +243,7 @@ test('KVO fast API (kvo_into)', () => {
     const outPtr = wasm.kvo_alloc(len);
     
     try {
-        // Create views into WASM memory and copy data
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
@@ -254,7 +254,7 @@ test('KVO fast API (kvo_into)', () => {
         closeMem.set(new Float64Array(close));
         volumeMem.set(new Float64Array(volume));
         
-        // Call fast API with pointers
+        
         wasm.kvo_into(
             highPtr,
             lowPtr,
@@ -266,11 +266,11 @@ test('KVO fast API (kvo_into)', () => {
             5
         );
         
-        // Read results from WASM memory
+        
         const memory = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
         const result = Array.from(memory);
         
-        // Compare with safe API
+        
         const expected = wasm.kvo_js(high, low, close, volume, 2, 5);
         assertArrayClose(result, expected, 1e-14, 'Fast API should match safe API');
         
@@ -289,20 +289,20 @@ test('KVO batch metadata verification', () => {
     const close = testData.close.slice(0, 50);
     const volume = testData.volume.slice(0, 50);
     
-    // Test with multiple parameter combinations
+    
     const config = {
-        short_period_range: [2, 4, 1],  // 2, 3, 4
-        long_period_range: [5, 7, 2]     // 5, 7 (skip 6 due to step=2)
+        short_period_range: [2, 4, 1],  
+        long_period_range: [5, 7, 2]     
     };
     
     const result = wasm.kvo_batch(high, low, close, volume, config);
     
-    // Should have 3 * 2 = 6 combinations
+    
     assert.strictEqual(result.rows, 6, 'Should have 6 parameter combinations');
     assert.strictEqual(result.cols, 50, 'Should have 50 columns');
     assert.strictEqual(result.combos.length, 6, 'Should have 6 combo entries');
     
-    // Verify parameter combinations
+    
     const expectedCombos = [
         { short_period: 2, long_period: 5 },
         { short_period: 2, long_period: 7 },
@@ -333,7 +333,7 @@ test('KVO batch edge cases', () => {
     const close = new Float64Array(size);
     const volume = new Float64Array(size);
     
-    // Initialize with simple values
+    
     for (let i = 0; i < size; i++) {
         high[i] = 100 + i;
         low[i] = 95 + i;
@@ -341,7 +341,7 @@ test('KVO batch edge cases', () => {
         volume[i] = 1000 + i * 10;
     }
     
-    // Test 1: Single combination (step = 0)
+    
     const singleConfig = {
         short_period_range: [2, 2, 0],
         long_period_range: [5, 5, 0]
@@ -350,9 +350,9 @@ test('KVO batch edge cases', () => {
     assert.strictEqual(singleResult.rows, 1, 'Single combo should have 1 row');
     assert.strictEqual(singleResult.combos.length, 1, 'Single combo should have 1 entry');
     
-    // Test 2: Step larger than range
+    
     const largeStepConfig = {
-        short_period_range: [2, 3, 10],  // Step > range
+        short_period_range: [2, 3, 10],  
         long_period_range: [5, 6, 10]
     };
     const largeStepResult = wasm.kvo_batch(high, low, close, volume, largeStepConfig);
@@ -360,7 +360,7 @@ test('KVO batch edge cases', () => {
     assert.strictEqual(largeStepResult.combos[0].short_period, 2, 'Should use start value');
     assert.strictEqual(largeStepResult.combos[0].long_period, 5, 'Should use start value');
     
-    // Test 3: All NaN input
+    
     const allNaN = new Float64Array(size).fill(NaN);
     assert.throws(
         () => wasm.kvo_batch(allNaN, allNaN, allNaN, allNaN, singleConfig),
@@ -376,13 +376,13 @@ test('KVO zero-copy batch API (kvo_batch_into)', () => {
     const volume = testData.volume.slice(0, 50);
     const len = high.length;
     
-    // Calculate expected output size
-    const shortStart = 2, shortEnd = 3, shortStep = 1;  // 2 values
-    const longStart = 5, longEnd = 6, longStep = 1;     // 2 values
-    const rows = 2 * 2;  // 4 combinations
+    
+    const shortStart = 2, shortEnd = 3, shortStep = 1;  
+    const longStart = 5, longEnd = 6, longStep = 1;     
+    const rows = 2 * 2;  
     const totalSize = rows * len;
     
-    // Allocate memory for inputs and output
+    
     const highPtr = wasm.kvo_alloc(len);
     const lowPtr = wasm.kvo_alloc(len);
     const closePtr = wasm.kvo_alloc(len);
@@ -390,7 +390,7 @@ test('KVO zero-copy batch API (kvo_batch_into)', () => {
     const outPtr = wasm.kvo_alloc(totalSize);
     
     try {
-        // Copy data to WASM memory
+        
         const highMem = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowMem = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const closeMem = new Float64Array(wasm.__wasm.memory.buffer, closePtr, len);
@@ -401,7 +401,7 @@ test('KVO zero-copy batch API (kvo_batch_into)', () => {
         closeMem.set(new Float64Array(close));
         volumeMem.set(new Float64Array(volume));
         
-        // Call batch API
+        
         const actualRows = wasm.kvo_batch_into(
             highPtr, lowPtr, closePtr, volumePtr,
             outPtr, len,
@@ -411,11 +411,11 @@ test('KVO zero-copy batch API (kvo_batch_into)', () => {
         
         assert.strictEqual(actualRows, rows, 'Should return correct number of rows');
         
-        // Read results
+        
         const resultMem = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
         const result = Array.from(resultMem);
         
-        // Compare first row with single calculation
+        
         const firstRow = result.slice(0, len);
         const expected = wasm.kvo_js(high, low, close, volume, 2, 5);
         assertArrayClose(firstRow, expected, 1e-10, 'First batch row should match single calc');
@@ -430,24 +430,24 @@ test('KVO zero-copy batch API (kvo_batch_into)', () => {
 });
 
 test('KVO memory management', () => {
-    // Test multiple allocations and deallocations
+    
     const sizes = [100, 1000, 10000];
     const ptrs = [];
     
-    // Allocate multiple buffers
+    
     for (const size of sizes) {
         const ptr = wasm.kvo_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         ptrs.push({ ptr, size });
         
-        // Write test pattern
+        
         const mem = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             mem[i] = i * 1.5;
         }
     }
     
-    // Verify patterns before freeing
+    
     for (const { ptr, size } of ptrs) {
         const mem = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
@@ -455,12 +455,12 @@ test('KVO memory management', () => {
         }
     }
     
-    // Free all buffers
+    
     for (const { ptr, size } of ptrs) {
         wasm.kvo_free(ptr, size);
     }
     
-    // Test large allocation
+    
     const largeSize = 1000000;
     const largePtr = wasm.kvo_alloc(largeSize);
     assert(largePtr !== 0, 'Failed to allocate large buffer');
@@ -468,7 +468,7 @@ test('KVO memory management', () => {
 });
 
 test('KVO SIMD consistency verification', () => {
-    // Test various input sizes to verify SIMD produces same results
+    
     const testCases = [
         { size: 10 },
         { size: 100 },
@@ -483,7 +483,7 @@ test('KVO SIMD consistency verification', () => {
         const close = new Float64Array(size);
         const volume = new Float64Array(size);
         
-        // Generate synthetic data
+        
         for (let i = 0; i < size; i++) {
             const base = 100 + Math.sin(i * 0.1) * 10;
             high[i] = base + Math.random() * 2;
@@ -492,22 +492,22 @@ test('KVO SIMD consistency verification', () => {
             volume[i] = 1000 + Math.random() * 500;
         }
         
-        // Calculate with default kernel (auto-detect SIMD)
+        
         const result = wasm.kvo_js(high, low, close, volume, 2, 5);
         
-        // Basic sanity checks
+        
         assert.strictEqual(result.length, size, `Result length mismatch for size ${size}`);
         
-        // Check warmup period (first_valid_idx + 1 = index 1)
+        
         assert(isNaN(result[0]), `Expected NaN at warmup index 0 for size ${size}`);
         assert(!isNaN(result[1]), `Expected valid value at index 1 for size ${size}`);
         
-        // Verify reasonable values after warmup
+        
         let hasValidValues = false;
         for (let i = 1; i < result.length; i++) {
             if (!isNaN(result[i])) {
                 hasValidValues = true;
-                // KVO can produce large values but should be finite
+                
                 assert(isFinite(result[i]), `Non-finite value at index ${i} for size ${size}`);
             }
         }
@@ -522,7 +522,7 @@ test('KVO warmup period verification', () => {
     const close = new Float64Array(size);
     const volume = new Float64Array(size);
     
-    // Test 1: Clean data (no NaN)
+    
     for (let i = 0; i < size; i++) {
         high[i] = 100 + i;
         low[i] = 95 + i;
@@ -532,12 +532,12 @@ test('KVO warmup period verification', () => {
     
     const result = wasm.kvo_js(high, low, close, volume, 2, 5);
     
-    // KVO warmup = first_valid_idx + 1
-    // With clean data, first_valid_idx = 0, so warmup ends at index 1
+    
+    
     assert(isNaN(result[0]), 'First value should be NaN during warmup');
     assert(!isNaN(result[1]), 'Second value should be valid after warmup');
     
-    // Test 2: With NaN at beginning
+    
     for (let i = 0; i < 5; i++) {
         high[i] = NaN;
         low[i] = NaN;
@@ -547,7 +547,7 @@ test('KVO warmup period verification', () => {
     
     const resultNaN = wasm.kvo_js(high, low, close, volume, 2, 5);
     
-    // first_valid_idx = 5, so warmup ends at index 6
+    
     for (let i = 0; i < 6; i++) {
         assert(isNaN(resultNaN[i]), `Expected NaN at index ${i} during warmup with NaN input`);
     }

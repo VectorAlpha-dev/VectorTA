@@ -1,17 +1,17 @@
-// CUDA kernels for TTM Squeeze — optimized O(N) sliding windows, FP32 + compensation.
-//
-// One-series × many-params (batch): each block processes one parameter combo (row).
-// A single thread per block performs the sequential time scan; other threads prefill NaNs.
-//
-// Many-series × one-param (time-major): each block.y is a series; one thread performs the scan.
-//
-// Semantics preserved:
-// - Warmup index = first_valid + length - 1.
-// - Before warmup: write NaN for both momentum and squeeze.
-// - Squeeze levels via squared-compare (no sqrt).
-// - Momentum = yhat_last from OLS over window with y = close - avg( (highest+lowest)/2 , SMA(close) ).
-// - NaN handling: if any (high/low/close) or TR in window is non-finite -> write NaN for that i.
-//   (Seeds require the first L points to be finite, matching the original).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -34,10 +34,10 @@
 
 static __device__ __forceinline__ bool is_finite_f(float x) { return isfinite(x); }
 
-// Compensated FP32 summation (Kahan–Babuška–Neumaier).
-// Accurate enough for long windows without resorting to fp64.
+
+
 struct NeumaierSumF {
-    float s, c; // sum and compensation
+    float s, c; 
     __device__ __forceinline__ void reset() { s = 0.f; c = 0.f; }
     __device__ __forceinline__ void add(float x) {
         float t = s + x;
@@ -48,9 +48,9 @@ struct NeumaierSumF {
     __device__ __forceinline__ float val() const { return s + c; }
 };
 
-// Lightweight deque for sliding-window extrema (indices).
+
 struct DequeI {
-    int *buf; int cap; int head; int tail; // circular
+    int *buf; int cap; int head; int tail; 
     __device__ __forceinline__ DequeI(int* p, int c): buf(p), cap(c), head(0), tail(0) {}
     __device__ __forceinline__ bool empty() const { return head == tail; }
     __device__ __forceinline__ int  size()  const { int d = tail - head; return (d >= 0) ? d : d + cap; }
@@ -61,7 +61,7 @@ struct DequeI {
     __device__ __forceinline__ void push_back(int v) { buf[tail] = v; tail = (tail + 1 == cap) ? 0 : tail + 1; }
 };
 
-// True range at index i (Wilder)
+
 static __device__ __forceinline__ float true_range_idx_f32(
     int i, const float* __restrict__ high, const float* __restrict__ low, const float* __restrict__ close
 ){
@@ -75,23 +75,23 @@ static __device__ __forceinline__ float true_range_idx_f32(
     return fmaxf(fmaxf(tr1, tr2), tr3);
 }
 
-// =========================== One series × many params ===========================
+
 extern "C" __global__ void ttm_squeeze_batch_f32(
-    // Inputs (one series)
+    
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
-    // Per-combo params
+    
     const int*   __restrict__ length_arr,
     const float* __restrict__ bb_mult_arr,
     const float* __restrict__ kc_high_arr,
     const float* __restrict__ kc_mid_arr,
     const float* __restrict__ kc_low_arr,
-    // Shared
+    
     int series_len,
     int n_combos,
     int first_valid,
-    // Outputs (row-major): momentum, squeeze
+    
     float* __restrict__ out_momentum,
     float* __restrict__ out_squeeze
 ) {
@@ -117,7 +117,7 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         return;
     }
 
-    // Seed finiteness at head (match original). If invalid, the whole row is NaN.
+    
     __shared__ int seed_ok_i;
     if (threadIdx.x == 0) {
         bool seed_ok = true;
@@ -132,15 +132,15 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         return;
     }
 
-    // Prefill only the warmup prefix; the scan below writes every index >= warm.
+    
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out_momentum[base + i] = TTM_QNAN_F;
         out_squeeze[base + i]  = TTM_QNAN_F;
     }
     __syncthreads();
-    if (threadIdx.x != 0) return; // one scanning thread per block
+    if (threadIdx.x != 0) return; 
 
-    // Precompute constants for OLS with x = 0..L-1 (all FP32, no FP64)
+    
     const float n    = (float)L;
     const float invL = 1.0f / n;
     const float sx   = 0.5f * n * (n - 1.0f);
@@ -153,27 +153,27 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     const float km_sq = kc_mid_arr[combo]  * kc_mid_arr[combo];
     const float kl_sq = kc_low_arr[combo]  * kc_low_arr[combo];
 
-    // Dynamic shared memory layout per block (capacity = L for this combo).
+    
     extern __shared__ unsigned char __ttm_smem[];
     int   *dq_max_buf = (int*)  (__ttm_smem);
     int   *dq_min_buf = dq_max_buf + L;
     float *ring_c     = (float*)(dq_min_buf + L);
     float *ring_tr    = ring_c     + L;
-    unsigned char *v_in = (unsigned char*)(ring_tr + L); // validity for (h,l,c) at index
-    unsigned char *v_tr = v_in + L;                      // validity for TR at index
+    unsigned char *v_in = (unsigned char*)(ring_tr + L); 
+    unsigned char *v_tr = v_in + L;                      
 
     DequeI dq_max(dq_max_buf, L);
     DequeI dq_min(dq_min_buf, L);
 
-    // Build initial window [start..warm]
+    
     const int start0 = warm - L + 1;
     NeumaierSumF sumc;  sumc.reset();
     NeumaierSumF sumc2; sumc2.reset();
     NeumaierSumF sumtr; sumtr.reset();
-    float sumxc = 0.0f; // Σ k * c_k for k=0..L-1 in current window
+    float sumxc = 0.0f; 
 
-    int bad_in_window = 0; // non-finite high/low/close count in window
-    int bad_tr_window = 0; // non-finite TR count in window
+    int bad_in_window = 0; 
+    int bad_tr_window = 0; 
 
     for (int k = 0; k < L; ++k) {
         const int idx = start0 + k;
@@ -188,7 +188,7 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         ring_c[k] = c;
         if (fin) { sumc.add(c); sumc2.add(c * c); sumxc = fmaf((float)k, c, sumxc); }
 
-        // true range for this bar
+        
         const float tr = true_range_idx_f32(idx, high, low, close);
         const unsigned char ftr = (unsigned char)is_finite_f(tr);
         v_tr[k] = ftr;
@@ -196,31 +196,31 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         ring_tr[k] = tr;
         if (ftr) sumtr.add(tr);
 
-        // update deques for extrema
+        
         while (!dq_max.empty() && high[dq_max.back()] <= h) dq_max.pop_back();
         dq_max.push_back(idx);
         while (!dq_min.empty() && low[dq_min.back()] >= l) dq_min.pop_back();
         dq_min.push_back(idx);
     }
 
-    // ring head points to the oldest element position
+    
     int ring_head = 0;
 
-    // Compute at warm
+    
     if (bad_in_window == 0 && bad_tr_window == 0) {
         const float mean = sumc.val() * invL;
         const float var  = fmaxf(sumc2.val() * invL - mean * mean, 0.0f);
         const float dkc  = sumtr.val() * invL;
         const float dkc2 = dkc * dkc;
 
-        // Squeeze classification
+        
         const float bbv = bb_sq * var;
         const float t_low  = kl_sq * dkc2;
         const float t_mid  = km_sq * dkc2;
         const float t_high = kh_sq * dkc2;
         out_squeeze[base + warm] = (bbv > t_low) ? 0.0f : ((bbv <= t_high) ? 3.0f : ((bbv <= t_mid) ? 2.0f : 1.0f));
 
-        // Momentum via OLS
+        
         const float highest = high[dq_max.front()];
         const float lowest  = low [dq_min.front()];
         const float midpoint = 0.5f * (highest + lowest);
@@ -236,17 +236,17 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         out_momentum[base + warm] = TTM_QNAN_F;
     }
 
-    // Main scan i = warm+1 .. series_len-1
+    
     for (int i = warm + 1; i < series_len; ++i) {
         const int idx_new = i;
         const int idx_old = i - L;
-        const int slot    = ring_head; // overwrite oldest
+        const int slot    = ring_head; 
 
-        // Pop expired indices from deques
+        
         while (!dq_max.empty() && dq_max.front() <= idx_old) dq_max.pop_front();
         while (!dq_min.empty() && dq_min.front() <= idx_old) dq_min.pop_front();
 
-        // New values
+        
         const float h_new = high[idx_new];
         const float l_new = low [idx_new];
         const float c_new = close[idx_new];
@@ -255,22 +255,22 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         const float tr_new = true_range_idx_f32(idx_new, high, low, close);
         const unsigned char ftr_new = (unsigned char)is_finite_f(tr_new);
 
-        // Old values leaving window
+        
         const float c_old = ring_c[slot];
         const float tr_old = ring_tr[slot];
         const unsigned char fin_old = v_in[slot];
         const unsigned char ftr_old = v_tr[slot];
 
-        // Maintain NaN counters
+        
         bad_in_window += (int)!fin_new - (int)!fin_old;
         bad_tr_window += (int)!ftr_new - (int)!ftr_old;
 
-        // Update running sums (compensated). Treat non-finite as zero contributions.
+        
         const float sumc_before = sumc.val();
         if (fin_old) { sumc.add(-c_old); sumc2.add(-(c_old * c_old)); }
         if (fin_new) { sumc.add( c_new); sumc2.add(  c_new * c_new ); }
 
-        // Σ k c_k update: sumxc' = sumxc - (sumc_prev - c_old_if_fin) + (L-1)*c_new_if_fin
+        
         float adj_old = (fin_old ? c_old : 0.0f);
         float adj_new = (fin_new ? c_new : 0.0f);
         sumxc = fmaf(-1.0f, (sumc_before - adj_old), sumxc);
@@ -279,12 +279,12 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         if (ftr_old) sumtr.add(-tr_old);
         if (ftr_new) sumtr.add( tr_new);
 
-        // Overwrite ring slot and validity
+        
         ring_c[slot] = c_new; v_in[slot] = fin_new;
         ring_tr[slot] = tr_new; v_tr[slot] = ftr_new;
         ring_head = (ring_head + 1 == L) ? 0 : ring_head + 1;
 
-        // Push new index into deques (maintain monotonicity)
+        
         while (!dq_max.empty() && high[dq_max.back()] <= h_new) dq_max.pop_back();
         dq_max.push_back(idx_new);
         while (!dq_min.empty() && low[dq_min.back()] >= l_new) dq_min.pop_back();
@@ -319,12 +319,12 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     }
 }
 
-// ====================== Many series × one param (time-major) ======================
+
 extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int*   __restrict__ first_valids, // per series
+    const int*   __restrict__ first_valids, 
     int num_series,
     int series_len,
     int length,
@@ -338,9 +338,9 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     const int s   = blockIdx.y;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_series) return;
-    if (tid != 0) return; // one scanning thread per series
+    if (tid != 0) return; 
 
-    // Output accessors (time-major pointers for series s)
+    
     float* mo = out_momentum_tm + s;
     float* sq = out_squeeze_tm + s;
     auto fill_all_nan = [&]() {
@@ -362,13 +362,13 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         return;
     }
 
-    // Prefill only warmup prefix; the scan below writes every index >= warm.
+    
     for (int t = 0; t < warm; ++t) {
         mo[t * num_series] = TTM_QNAN_F;
         sq[t * num_series] = TTM_QNAN_F;
     }
 
-    // Accessors (time-major layout)
+    
     auto H = [&](int t){ return high_tm[(size_t)t * num_series + s]; };
     auto Lw= [&](int t){ return  low_tm[(size_t)t * num_series + s]; };
     auto C = [&](int t){ return close_tm[(size_t)t * num_series + s]; };
@@ -382,7 +382,7 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         return fmaxf(fmaxf(tr1, tr2), tr3);
     };
 
-    // FP32 constants
+    
     const float n    = (float)L;
     const float invL = 1.0f / n;
     const float sx   = 0.5f * n * (n - 1.0f);
@@ -395,7 +395,7 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     const float km_sq = kc_mid  * kc_mid;
     const float kl_sq = kc_low  * kc_low;
 
-    // Dynamic shared memory (capacity = L)
+    
     extern __shared__ unsigned char __ttm_smem[];
     int   *dq_max_buf = (int*)  (__ttm_smem);
     int   *dq_min_buf = dq_max_buf + L;
@@ -407,11 +407,11 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     DequeI dq_max(dq_max_buf, L);
     DequeI dq_min(dq_min_buf, L);
 
-    // Prefilled warmup prefix above; nothing else required before warm.
+    
 
-    // Seed first L finiteness like original
+    
     bool seed_ok = true;
-    // Seed over first full window [fv .. fv+L-1]
+    
     for (int j = fv; j < fv + L && j < series_len; ++j) {
         float ch = H(j), cl = Lw(j), cc = C(j);
         if (!is_finite_f(ch) || !is_finite_f(cl) || !is_finite_f(cc)) { seed_ok = false; break; }
@@ -421,7 +421,7 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         return;
     }
 
-    // Build initial window at warm
+    
     const int start0 = warm - L + 1;
     NeumaierSumF sumc;  sumc.reset();
     NeumaierSumF sumc2; sumc2.reset();
@@ -452,10 +452,10 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     }
     int ring_head = 0;
 
-    // Write at warm
+    
     if (bad_in_window == 0 && bad_tr_window == 0) {
         const float mean = sumc.val() * invL;
-        const float var  = fmaxf(sumc.val() * invL * mean * 0.f /*dummy to keep compilers happy*/, 0.f); // placeholder no-op
+        const float var  = fmaxf(sumc.val() * invL * mean * 0.f /*dummy to keep compilers happy*/, 0.f); 
         (void)var;
 
         const float highest = H(dq_max.front());

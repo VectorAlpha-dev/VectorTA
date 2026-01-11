@@ -1,15 +1,15 @@
-// CUDA tests for Nadaraya–Watson Envelope
 
-use my_project::indicators::nadaraya_watson_envelope::{
+
+use vector_ta::indicators::nadaraya_watson_envelope::{
     nadaraya_watson_envelope_batch_with_kernel, nadaraya_watson_envelope_with_kernel,
     NweBatchRange, NweInput, NweParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaNwe};
+use vector_ta::cuda::{cuda_available, CudaNwe};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -62,7 +62,7 @@ fn nwe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.upper.buf.copy_to(&mut upper_gpu).expect("copy upper");
     pair.lower.buf.copy_to(&mut lower_gpu).expect("copy lower");
 
-    let tol = 2e-3; // FP32 tolerance; MAE smoothing relaxes small error
+    let tol = 2e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values_upper[idx];
         let b = upper_gpu[idx] as f64;
@@ -96,8 +96,8 @@ fn nwe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 6usize; // series
-    let rows = 2048usize; // len
+    let cols = 6usize; 
+    let rows = 2048usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 12)..rows {
@@ -112,7 +112,7 @@ fn nwe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         lookback: Some(200),
     };
 
-    // CPU reference (per series)
+    
     let mut upper_cpu = vec![f64::NAN; cols * rows];
     let mut lower_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {

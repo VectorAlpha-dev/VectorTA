@@ -7,7 +7,7 @@ import assert from 'node:assert';
 import { loadTestData, EXPECTED_OUTPUTS, assertArrayClose, assertClose } from './test_utils.js';
 import { compareWithRust } from './rust-comparison.js';
 
-// Import the WASM module
+
 import * as wasm from '../../pkg/my_project.js';
 
 test.describe('MAC-Z WASM Binding Tests', () => {
@@ -21,18 +21,18 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         const close = testData.close;
         const volume = testData.volume || null;
         
-        // Test with minimum required params (defaults)
+        
         const result = wasm.macz_js(
             close,
-            20,  // fast_length
-            30,  // slow_length  
-            10,  // signal_length
-            20,  // lengthz
-            20,  // length_stdev
-            2.0, // a
-            -1.0, // b
-            false, // use_lag
-            0.02  // gamma
+            20,  
+            30,  
+            10,  
+            20,  
+            20,  
+            2.0, 
+            -1.0, 
+            false, 
+            0.02  
         );
         
         assert.strictEqual(result.length, close.length, "Result length should match input");
@@ -58,7 +58,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         
         assert.strictEqual(result.length, close.length, "Result length should match input");
         
-        // Check last 5 values match expected with tight tolerance
+        
         const last5 = result.slice(-5);
         assertArrayClose(last5, expected.last5Values, 1e-9, "MAC-Z last 5 values mismatch");
     });
@@ -66,18 +66,18 @@ test.describe('MAC-Z WASM Binding Tests', () => {
     test('MAC-Z default candles - check_macz_default_candles', () => {
         const close = testData.close;
         
-        // Test with default parameters  
+        
         const result = wasm.macz_js(
             close,
-            20,  // fast_length
-            30,  // slow_length
-            10,  // signal_length
-            20,  // lengthz
-            20,  // length_stdev
-            2.0, // a
-            -1.0, // b
-            false, // use_lag
-            0.02  // gamma
+            20,  
+            30,  
+            10,  
+            20,  
+            20,  
+            2.0, 
+            -1.0, 
+            false, 
+            0.02  
         );
         
         assert.strictEqual(result.length, close.length, "Result length should match input");
@@ -89,7 +89,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         assert.throws(
             () => wasm.macz_js(
                 inputData,
-                0,  // Invalid fast_length
+                0,  
                 30,
                 10,
                 20,
@@ -111,7 +111,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
             () => wasm.macz_js(
                 smallData,
                 20,
-                100,  // slow_length exceeds data length
+                100,  
                 10,
                 20,
                 20,
@@ -170,7 +170,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
     test('MAC-Z invalid A error - check_macz_invalid_a', () => {
         const data = new Float64Array(Array(60).fill(0).map((_, i) => i % 3 + 1.0));
         
-        // A > 2.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -179,7 +179,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 10,
                 20,
                 20,
-                3.0,  // Invalid A
+                3.0,  
                 -1.0,
                 false,
                 0.02
@@ -188,7 +188,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
             "Should throw error for A > 2.0"
         );
         
-        // A < -2.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -197,7 +197,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 10,
                 20,
                 20,
-                -3.0,  // Invalid A
+                -3.0,  
                 -1.0,
                 false,
                 0.02
@@ -210,7 +210,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
     test('MAC-Z invalid B error - check_macz_invalid_b', () => {
         const data = new Float64Array(Array(60).fill(0).map((_, i) => i % 3 + 1.0));
         
-        // B > 2.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -220,7 +220,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 20,
                 20,
                 2.0,
-                3.0,  // Invalid B
+                3.0,  
                 false,
                 0.02
             ),
@@ -228,7 +228,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
             "Should throw error for B > 2.0"
         );
         
-        // B < -2.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -238,7 +238,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 20,
                 20,
                 2.0,
-                -3.0,  // Invalid B
+                -3.0,  
                 false,
                 0.02
             ),
@@ -250,7 +250,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
     test('MAC-Z invalid gamma error - check_macz_invalid_gamma', () => {
         const data = new Float64Array(Array(60).fill(0).map((_, i) => i % 3 + 1.0));
         
-        // Gamma >= 1.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -262,13 +262,13 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 2.0,
                 -1.0,
                 false,
-                1.5  // Invalid gamma
+                1.5  
             ),
             /Invalid gamma/i,
             "Should throw error for gamma >= 1.0"
         );
         
-        // Gamma < 0.0
+        
         assert.throws(
             () => wasm.macz_js(
                 data,
@@ -280,7 +280,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 2.0,
                 -1.0,
                 false,
-                -0.1  // Invalid gamma
+                -0.1  
             ),
             /Invalid gamma/i,
             "Should throw error for gamma < 0.0"
@@ -307,7 +307,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         
         assert.strictEqual(result.length, close.length, "Result length should match input");
         
-        // After warmup period, no NaN values should exist
+        
         const warmup = expected.warmupPeriod;
         if (result.length > warmup) {
             for (let i = warmup; i < result.length; i++) {
@@ -315,7 +315,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
             }
         }
         
-        // First warmup values should be NaN
+        
         for (let i = 0; i < warmup; i++) {
             assert.ok(isNaN(result[i]), `Expected NaN at index ${i} in warmup period`);
         }
@@ -347,32 +347,32 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         const expected = EXPECTED_OUTPUTS.macz;
         const volume = testData.volume;
         
-        // Test batch with default parameters only
+        
         const batchResult = wasm.macz_batch(
             close,
-            volume,  // pass actual volume so we can compare with Rust reference
-            [12, 12, 0],  // fast_length_range
-            [25, 25, 0],  // slow_length_range
-            [9, 9, 0],  // signal_length_range
-            [20, 20, 0],  // lengthz_range
-            [25, 25, 0],  // length_stdev_range
-            [1.0, 1.0, 0.0],  // a_range
-            [1.0, 1.0, 0.0],  // b_range
-            [false, false, false],  // use_lag_range
-            [0.02, 0.02, 0.0]  // gamma_range
+            volume,  
+            [12, 12, 0],  
+            [25, 25, 0],  
+            [9, 9, 0],  
+            [20, 20, 0],  
+            [25, 25, 0],  
+            [1.0, 1.0, 0.0],  
+            [1.0, 1.0, 0.0],  
+            [false, false, false],  
+            [0.02, 0.02, 0.0]  
         );
         
-        // Verify structure
+        
         assert.ok(batchResult.values, "Should have values array");
         assert.ok(batchResult.fast_lengths, "Should have fast_lengths array");
         assert.ok(batchResult.slow_lengths, "Should have slow_lengths array");
         assert.ok(batchResult.signal_lengths, "Should have signal_lengths array");
         
-        // Should have 1 combination (default params)
+        
         assert.strictEqual(batchResult.values.length, 1, "Should have 1 parameter combination");
         assert.strictEqual(batchResult.values[0].length, close.length, "Result length should match input");
         
-        // Extract the single row and check against Rust reference
+        
         const defaultRow = batchResult.values[0];
         await compareWithRust('macz', defaultRow, 'close', expected.defaultParams, 1e-8);
     });
@@ -381,11 +381,11 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         const close = testData.close;
         const params = EXPECTED_OUTPUTS.macz.defaultParams;
         
-        // Allocate output buffer
+        
         const outputPtr = wasm.allocate_f64_array(close.length);
         
         try {
-            // Call zero-copy version
+            
             wasm.macz(
                 close,
                 outputPtr,
@@ -400,12 +400,12 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 params.gamma
             );
             
-            // Read results
+            
             const result = wasm.read_f64_array(outputPtr, close.length);
             
             assert.strictEqual(result.length, close.length, "Result length should match input");
             
-            // Verify last 5 values
+            
             const last5 = result.slice(-5);
             assertArrayClose(
                 last5,
@@ -414,45 +414,45 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 "MAC-Z zero-copy last 5 values"
             );
         } finally {
-            // Clean up
+            
             wasm.deallocate_f64_array(outputPtr);
         }
     });
     
     test('MAC-Z batch zero-copy API', () => {
         const close = testData.close;
-        const numCombinations = 1;  // Single combination for default params
+        const numCombinations = 1;  
         
-        // Allocate output matrix
+        
         const outputPtr = wasm.allocate_f64_matrix(numCombinations, close.length);
         
         try {
-            // Call batch zero-copy version
+            
             const numResults = wasm.macz_batch_zero_copy(
                 close,
-                null,  // volume
+                null,  
                 outputPtr,
-                [12, 12, 0],  // fast_length_range
-                [25, 25, 0],  // slow_length_range
-                [9, 9, 0],  // signal_length_range
-                [20, 20, 0],  // lengthz_range
-                [25, 25, 0],  // length_stdev_range
-                [1.0, 1.0, 0.0],  // a_range
-                [1.0, 1.0, 0.0],  // b_range
-                [false, false, false],  // use_lag_range
-                [0.02, 0.02, 0.0]  // gamma_range
+                [12, 12, 0],  
+                [25, 25, 0],  
+                [9, 9, 0],  
+                [20, 20, 0],  
+                [25, 25, 0],  
+                [1.0, 1.0, 0.0],  
+                [1.0, 1.0, 0.0],  
+                [false, false, false],  
+                [0.02, 0.02, 0.0]  
             );
             
             assert.strictEqual(numResults, numCombinations, "Should return correct number of combinations");
             
-            // Read results
+            
             const result = wasm.read_f64_matrix(outputPtr, numCombinations, close.length);
             
-            // Verify structure
+            
             assert.strictEqual(result.length, numCombinations, "Should have correct number of rows");
             assert.strictEqual(result[0].length, close.length, "Each row should match input length");
             
-            // Check last 5 values of default params
+            
             const last5 = result[0].slice(-5);
             assertArrayClose(
                 last5,
@@ -461,7 +461,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
                 "MAC-Z batch zero-copy last 5 values"
             );
         } finally {
-            // Clean up
+            
             wasm.deallocate_f64_matrix(outputPtr);
         }
     });
@@ -471,8 +471,8 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         const volume = testData.volume || new Float64Array(close.length).fill(1000.0);
         const params = EXPECTED_OUTPUTS.macz.defaultParams;
         
-        // Note: WASM binding for macz_js doesn't support volume directly
-        // This test verifies the calculation runs with simulated uniform volume
+        
+        
         const result = wasm.macz_js(
             close,
             params.fast_length,
@@ -488,7 +488,7 @@ test.describe('MAC-Z WASM Binding Tests', () => {
         
         assert.strictEqual(result.length, close.length, "Result length should match input");
         
-        // Verify no all-NaN result
+        
         const hasValidValues = result.some(v => !isNaN(v));
         assert.ok(hasValidValues, "Result should not be all NaN");
     });

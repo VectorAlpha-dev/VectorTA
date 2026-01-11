@@ -2055,7 +2055,7 @@ impl DecOscDeviceArrayF32Py {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Producing stream is synchronized before return; omit 'stream' per CAI v3.
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2072,8 +2072,8 @@ impl DecOscDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2095,7 +2095,7 @@ impl DecOscDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let inner = self
             .inner
             .take()
@@ -2160,7 +2160,7 @@ pub fn dec_osc_into(
         let kernel = Kernel::Auto;
 
         if in_ptr == out_ptr as *const f64 {
-            // CRITICAL: Aliasing check
+            
             let mut temp = vec![0.0; len];
             dec_osc_into_slice(&mut temp, &input, kernel)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

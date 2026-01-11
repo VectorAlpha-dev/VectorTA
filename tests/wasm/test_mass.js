@@ -18,11 +18,11 @@ import {
 } from './test_utils.js';
 const { describe, it } = test;
 
-// Get __dirname equivalent in ES modules
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Import the WASM module
+
 import * as talib from '../../pkg/my_project.js';
 
 describe('Mass Index', () => {
@@ -47,7 +47,7 @@ describe('Mass Index', () => {
         
         assert.strictEqual(result.length, testData.high.length);
         
-        // Check last 5 values match expected
+        
         const lastFive = result.slice(-5);
         assertArrayClose(
             lastFive,
@@ -98,16 +98,16 @@ describe('Mass Index', () => {
         
         assert.strictEqual(result.length, testData.high.length);
         
-        // Check warmup period has NaN values
+        
         const warmup = expected.warmupPeriod;
         for (let i = 0; i < warmup; i++) {
             assert.ok(isNaN(result[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // After warmup should have valid values
+        
         assert.ok(!isNaN(result[warmup]), `Expected valid value at index ${warmup} (first valid index)`);
         
-        // After index 240, no NaN values should exist
+        
         if (result.length > 240) {
             for (let i = 240; i < result.length; i++) {
                 assert.ok(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
@@ -128,23 +128,23 @@ describe('Mass Index', () => {
         const low = testData.low.slice(0, 100);
         
         const config = {
-            period_range: [5, 15, 5]  // 5, 10, 15
+            period_range: [5, 15, 5]  
         };
         
         const result = talib.mass_batch(high, low, config);
         
-        // Verify metadata structure
+        
         assert.strictEqual(result.rows, 3, 'Should have 3 rows');
         assert.strictEqual(result.cols, 100, 'Should have 100 columns');
         assert.strictEqual(result.values.length, 300, 'Should have 300 values total');
         assert.strictEqual(result.combos.length, 3, 'Should have 3 parameter combinations');
         
-        // Verify parameter combinations
+        
         assert.strictEqual(result.combos[0].period, 5, 'First combo period should be 5');
         assert.strictEqual(result.combos[1].period, 10, 'Second combo period should be 10');
         assert.strictEqual(result.combos[2].period, 15, 'Third combo period should be 15');
         
-        // Check each row matches individual calculations
+        
         const periods = [5, 10, 15];
         periods.forEach((period, row) => {
             const single = talib.mass_js(high, low, period);
@@ -166,7 +166,7 @@ describe('Mass Index', () => {
         const low = testData.low.slice(0, 30);
         
         const config = {
-            period_range: [3, 7, 2]  // 3, 5, 7
+            period_range: [3, 7, 2]  
         };
         
         const result = talib.mass_batch(high, low, config);
@@ -179,18 +179,18 @@ describe('Mass Index', () => {
             'Should have correct period values'
         );
         
-        // Verify warmup periods for each row
+        
         result.combos.forEach((combo, row) => {
             const warmup = 16 + combo.period - 1;
             const rowStart = row * 30;
             const rowData = result.values.slice(rowStart, rowStart + 30);
             
-            // Check warmup has NaN
+            
             for (let i = 0; i < Math.min(warmup, 30); i++) {
                 assert.ok(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${combo.period}`);
             }
             
-            // Check after warmup has values
+            
             if (warmup < 30) {
                 assert.ok(!isNaN(rowData[warmup]), `Expected valid value after warmup for period ${combo.period}`);
             }
@@ -202,29 +202,29 @@ describe('Mass Index', () => {
         const low = testData.low.slice(0, 100);
         const len = high.length;
         
-        // Allocate output buffer
+        
         const outPtr = talib.mass_alloc(len);
         
         try {
-            // Calculate using safe API for comparison
+            
             const expected = talib.mass_js(high, low, 5);
             
-            // Allocate input buffers
+            
             const highPtr = talib.mass_alloc(len);
             const lowPtr = talib.mass_alloc(len);
             
-            // Copy data to WASM memory
+            
             const wasmMemory = new Float64Array(talib.__wasm.memory.buffer);
             wasmMemory.set(high, highPtr / 8);
             wasmMemory.set(low, lowPtr / 8);
             
-            // Calculate using fast API
+            
             talib.mass_into(highPtr, lowPtr, outPtr, len, 5);
             
-            // Read result
+            
             const result = new Float64Array(talib.__wasm.memory.buffer, outPtr, len);
             
-            // Compare results
+            
             assertArrayClose(
                 Array.from(result),
                 expected,
@@ -232,7 +232,7 @@ describe('Mass Index', () => {
                 "Fast API should match safe API"
             );
             
-            // Test in-place operation (output overwrites high)
+            
             talib.mass_into(highPtr, lowPtr, highPtr, len, 5);
             const inPlaceResult = new Float64Array(talib.__wasm.memory.buffer, highPtr, len);
             
@@ -243,31 +243,31 @@ describe('Mass Index', () => {
                 "In-place operation should match expected"
             );
             
-            // Free input buffers
+            
             talib.mass_free(highPtr, len);
             talib.mass_free(lowPtr, len);
             
         } finally {
-            // Always free output buffer
+            
             talib.mass_free(outPtr, len);
         }
     });
     
     it('should handle zero-copy error cases', () => {
-        // Test null pointer
+        
         assert.throws(() => {
             talib.mass_into(0, 0, 0, 10, 5);
         }, /null pointer/, 'Should throw for null pointer');
         
-        // Test invalid parameters with allocated memory
+        
         const ptr = talib.mass_alloc(10);
         try {
-            // Invalid period
+            
             assert.throws(() => {
                 talib.mass_into(ptr, ptr, ptr, 10, 0);
             }, /Invalid period/, 'Should throw for invalid period');
             
-            // Period exceeds length
+            
             assert.throws(() => {
                 talib.mass_into(ptr, ptr, ptr, 10, 20);
             }, /Invalid period/, 'Should throw when period exceeds length');
@@ -277,25 +277,25 @@ describe('Mass Index', () => {
     });
     
     it('should handle zero-copy memory management', () => {
-        // Allocate and free multiple times to ensure no leaks
+        
         const sizes = [100, 1000, 10000];
         
         for (const size of sizes) {
             const ptr = talib.mass_alloc(size);
             assert.ok(ptr !== 0, `Failed to allocate ${size} elements`);
             
-            // Write pattern to verify memory
+            
             const memView = new Float64Array(talib.__wasm.memory.buffer, ptr, size);
             for (let i = 0; i < Math.min(10, size); i++) {
                 memView[i] = i * 1.5;
             }
             
-            // Verify pattern
+            
             for (let i = 0; i < Math.min(10, size); i++) {
                 assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
             }
             
-            // Free memory
+            
             talib.mass_free(ptr, size);
         }
     });
@@ -305,22 +305,22 @@ describe('Mass Index', () => {
         const low = testData.low.slice(0, 50);
         const len = high.length;
         
-        // Calculate expected rows
-        const periodStart = 5, periodEnd = 10, periodStep = 5;
-        const expectedRows = 2; // periods 5 and 10
         
-        // Allocate buffers
+        const periodStart = 5, periodEnd = 10, periodStep = 5;
+        const expectedRows = 2; 
+        
+        
         const highPtr = talib.mass_alloc(len);
         const lowPtr = talib.mass_alloc(len);
         const outPtr = talib.mass_alloc(len * expectedRows);
         
         try {
-            // Copy data to WASM memory
+            
             const wasmMemory = new Float64Array(talib.__wasm.memory.buffer);
             wasmMemory.set(high, highPtr / 8);
             wasmMemory.set(low, lowPtr / 8);
             
-            // Run batch calculation
+            
             const rows = talib.mass_batch_into(
                 highPtr, lowPtr, outPtr, len,
                 periodStart, periodEnd, periodStep
@@ -328,10 +328,10 @@ describe('Mass Index', () => {
             
             assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
             
-            // Read and verify results
+            
             const results = new Float64Array(talib.__wasm.memory.buffer, outPtr, len * rows);
             
-            // Verify against individual calculations
+            
             const periods = [5, 10];
             periods.forEach((period, row) => {
                 const expected = talib.mass_js(high, low, period);
@@ -354,24 +354,24 @@ describe('Mass Index', () => {
     });
     
     it('should support WASM streaming API', () => {
-        // Create a streaming instance
+        
         const stream = new talib.MassStreamWasm(5);
         
-        // Test data
+        
         const highData = testData.high.slice(0, 50);
         const lowData = testData.low.slice(0, 50);
         
-        // Calculate batch for comparison
+        
         const batchResult = talib.mass_js(highData, lowData, 5);
         
-        // Stream calculation
+        
         const streamResults = [];
         for (let i = 0; i < highData.length; i++) {
             const result = stream.update(highData[i], lowData[i]);
             streamResults.push(result !== null && result !== undefined ? result : NaN);
         }
         
-        // Compare results after warmup (should match after index 19)
+        
         const warmup = EXPECTED_OUTPUTS.mass.warmupPeriod;
         for (let i = warmup; i < streamResults.length; i++) {
             assertClose(
@@ -390,8 +390,8 @@ describe('Mass Index', () => {
     });
     
     it('should verify SIMD128 consistency', () => {
-        // This test verifies SIMD128 produces same results as scalar
-        // It runs automatically when SIMD128 is enabled
+        
+        
         const testCases = [
             { size: 25, period: 3 },
             { size: 100, period: 5 },
@@ -400,7 +400,7 @@ describe('Mass Index', () => {
         ];
         
         for (const testCase of testCases) {
-            // Generate test data
+            
             const high = new Float64Array(testCase.size);
             const low = new Float64Array(testCase.size);
             for (let i = 0; i < testCase.size; i++) {
@@ -412,16 +412,16 @@ describe('Mass Index', () => {
             
             const result = talib.mass_js(high, low, testCase.period);
             
-            // Basic sanity checks
+            
             assert.strictEqual(result.length, high.length);
             
-            // Check warmup period
+            
             const warmup = 16 + testCase.period - 1;
             for (let i = 0; i < Math.min(warmup, result.length); i++) {
                 assert.ok(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}, period=${testCase.period}`);
             }
             
-            // Check values exist after warmup
+            
             let sumAfterWarmup = 0;
             let countAfterWarmup = 0;
             for (let i = warmup; i < result.length; i++) {
@@ -430,7 +430,7 @@ describe('Mass Index', () => {
                 countAfterWarmup++;
             }
             
-            // Verify reasonable values (Mass Index typically ranges from 0 to 2*period)
+            
             if (countAfterWarmup > 0) {
                 const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
                 assert.ok(avgAfterWarmup > 0, `Average Mass Index should be positive, got ${avgAfterWarmup}`);
@@ -444,7 +444,7 @@ describe('Mass Index', () => {
                                         11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
         const low = high.map(h => h * 0.9);
         
-        // Single value sweep
+        
         const singleBatch = talib.mass_batch(high, low, {
             period_range: [3, 3, 1]
         });
@@ -453,12 +453,12 @@ describe('Mass Index', () => {
         assert.strictEqual(singleBatch.combos.length, 1);
         assert.strictEqual(singleBatch.combos[0].period, 3);
         
-        // Step larger than range
+        
         const largeBatch = talib.mass_batch(high, low, {
-            period_range: [3, 5, 10]  // Step larger than range
+            period_range: [3, 5, 10]  
         });
         
-        // Should only have period=3
+        
         assert.strictEqual(largeBatch.values.length, 20);
         assert.strictEqual(largeBatch.combos.length, 1);
         assert.strictEqual(largeBatch.combos[0].period, 3);

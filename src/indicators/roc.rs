@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// --- Data Types ---
+
 
 #[derive(Debug, Clone)]
 pub enum RocData<'a> {
@@ -122,7 +122,7 @@ impl<'a> RocInput<'a> {
     }
 }
 
-// --- Builder/Stream/Batch Structs ---
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct RocBuilder {
@@ -1138,7 +1138,7 @@ impl RocDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (row_stride, itemsize))?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Stream omitted: kernels synchronize before returning
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1160,7 +1160,7 @@ impl RocDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1183,7 +1183,7 @@ impl RocDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let inner = self
             .inner
             .take()
@@ -1199,7 +1199,7 @@ impl RocDeviceArrayF32Py {
     }
 }
 
-// --- WASM Bindings ---
+
 
 /// Write ROC values directly to output slice - no allocations
 #[inline]
@@ -1274,7 +1274,7 @@ pub fn roc_into(
         let input = RocInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing - use temporary buffer
+            
             let mut temp = vec![0.0; len];
             roc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1289,7 +1289,7 @@ pub fn roc_into(
     }
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1387,7 +1387,7 @@ pub fn roc_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// --- Tests ---
+
 
 #[cfg(test)]
 mod tests {
@@ -1398,23 +1398,23 @@ mod tests {
 
     #[test]
     fn test_roc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV dataset for parity with other ROC tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let params = RocParams { period: Some(10) };
         let input = RocInput::from_candles(&candles, "close", params);
 
-        // Baseline via Vec-returning API (Auto -> Scalar for ROC)
+        
         let baseline = roc(&input)?.values;
 
-        // Into-API output buffer
+        
         let mut out = vec![0.0; candles.close.len()];
         roc_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // NaN == NaN; otherwise exact equality (identical code path)
+        
         for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12);
             assert!(
@@ -1636,19 +1636,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            RocParams::default(),            // period: 9
-            RocParams { period: Some(2) },   // minimum viable
-            RocParams { period: Some(5) },   // small
-            RocParams { period: Some(7) },   // small
-            RocParams { period: Some(9) },   // small
-            RocParams { period: Some(14) },  // medium
-            RocParams { period: Some(20) },  // medium
-            RocParams { period: Some(30) },  // medium
-            RocParams { period: Some(50) },  // large
-            RocParams { period: Some(100) }, // large
-            RocParams { period: Some(200) }, // very large
+            RocParams::default(),            
+            RocParams { period: Some(2) },   
+            RocParams { period: Some(5) },   
+            RocParams { period: Some(7) },   
+            RocParams { period: Some(9) },   
+            RocParams { period: Some(14) },  
+            RocParams { period: Some(20) },  
+            RocParams { period: Some(30) },  
+            RocParams { period: Some(50) },  
+            RocParams { period: Some(100) }, 
+            RocParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1657,12 +1657,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1709,7 +1709,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_roc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1718,10 +1718,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate diverse test data
+        
         let strat = (2usize..=100).prop_flat_map(|period| {
             prop_oneof![
-                // Normal random data
+                
                 (
                     prop::collection::vec(
                         (1f64..1e6f64)
@@ -1730,31 +1730,31 @@ mod tests {
                     ),
                     Just(period),
                 ),
-                // Data with some constant sequences
+                
                 (
                     prop::collection::vec(
                         prop_oneof![
                             (1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                            Just(100.0), // Constant value
+                            Just(100.0), 
                         ],
                         period..400,
                     ),
                     Just(period),
                 ),
-                // Monotonic increasing data
+                
                 (
                     (100f64..10000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
-                        let len = period + (400 - period) / 2; // Average length
+                        let len = period + (400 - period) / 2; 
                         (0..len)
                             .map(|i| start + (i as f64) * step)
                             .collect::<Vec<_>>()
                     }),
                     Just(period),
                 ),
-                // Monotonic decreasing data
+                
                 (
                     (10000f64..100000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
-                        let len = period + (400 - period) / 2; // Average length
+                        let len = period + (400 - period) / 2; 
                         (0..len)
                             .map(|i| start - (i as f64) * step)
                             .collect::<Vec<_>>()
@@ -1773,10 +1773,10 @@ mod tests {
             let RocOutput { values: out } = roc_with_kernel(&input, kernel)?;
             let RocOutput { values: ref_out } = roc_with_kernel(&input, Kernel::Scalar)?;
 
-            // Check output length matches input
+            
             prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-            // Check warmup period - first 'period' values should be NaN
+            
             for i in 0..period {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1786,20 +1786,20 @@ mod tests {
                 );
             }
 
-            // Check mathematical correctness after warmup
+            
             for i in period..data.len() {
                 let current = data[i];
                 let previous = data[i - period];
                 let roc_val = out[i];
 
-                // Expected ROC calculation
+                
                 let expected_roc = if previous == 0.0 || previous.is_nan() {
                     0.0
                 } else {
                     ((current / previous) - 1.0) * 100.0
                 };
 
-                // Verify calculation correctness
+                
                 if !roc_val.is_nan() {
                     prop_assert!(
 							(roc_val - expected_roc).abs() < 1e-9,
@@ -1807,7 +1807,7 @@ mod tests {
 							i, roc_val, expected_roc, current, previous
 						);
 
-                    // Sign properties
+                    
                     if current > previous && previous > 0.0 {
                         prop_assert!(
 								roc_val > -1e-9,
@@ -1832,7 +1832,7 @@ mod tests {
                 }
             }
 
-            // Check constant data property
+            
             let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
             if is_constant && data.len() > period {
                 for i in period..data.len() {
@@ -1847,12 +1847,12 @@ mod tests {
                 }
             }
 
-            // Check monotonic properties
+            
             let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
             let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
             if is_monotonic_increasing && !is_constant {
-                // For strictly increasing data, ROC should be positive
+                
                 for i in period..data.len() {
                     if !out[i].is_nan() && data[i] > data[i - period] {
                         prop_assert!(
@@ -1866,7 +1866,7 @@ mod tests {
             }
 
             if is_monotonic_decreasing && !is_constant {
-                // For strictly decreasing data, ROC should be negative
+                
                 for i in period..data.len() {
                     if !out[i].is_nan() && data[i] < data[i - period] {
                         prop_assert!(
@@ -1879,7 +1879,7 @@ mod tests {
                 }
             }
 
-            // Verify kernel consistency
+            
             prop_assert_eq!(out.len(), ref_out.len(), "Kernel output length mismatch");
 
             for i in 0..out.len() {
@@ -1907,7 +1907,7 @@ mod tests {
                 }
             }
 
-            // Check for poison values in debug builds
+            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in out.iter().enumerate() {
@@ -1987,7 +1987,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let output = RocBatchBuilder::new()
-            .period_static(10) // Use period=10 to match expected values
+            .period_static(10) 
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
@@ -2022,15 +2022,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (9, 9, 0),    // Single period (edge case)
-            (14, 21, 7),  // Week-based periods
-            (10, 50, 10), // Decade periods
+            (2, 10, 2),   
+            (5, 25, 5),   
+            (30, 60, 15), 
+            (2, 5, 1),    
+            (9, 9, 0),    
+            (14, 21, 7),  
+            (10, 50, 10), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2049,7 +2049,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2102,7 +2102,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {

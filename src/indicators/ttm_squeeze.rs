@@ -137,7 +137,7 @@ impl<'a> TtmSqueezeInput<'a> {
     }
 }
 
-// Builder pattern for ergonomic API
+
 #[derive(Debug, Clone)]
 pub struct TtmSqueezeBuilder {
     length: Option<usize>,
@@ -367,10 +367,10 @@ pub fn ttm_squeeze_with_kernel(
     input: &TtmSqueezeInput,
     kernel: Kernel,
 ) -> Result<TtmSqueezeOutput, TtmSqueezeError> {
-    // Validate parameters
+    
     validate_params(&input.params)?;
 
-    // Extract data
+    
     let (high, low, close) = match &input.data {
         TtmSqueezeData::Candles { candles } => {
             if candles.close.is_empty() {
@@ -407,7 +407,7 @@ pub fn ttm_squeeze_with_kernel(
         });
     }
 
-    // Find first valid index
+    
     let first = close
         .iter()
         .position(|&x| !x.is_nan())
@@ -421,7 +421,7 @@ pub fn ttm_squeeze_with_kernel(
 
     let warmup = first + length - 1;
 
-    // Check for classic kernel conditions (default parameters)
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -434,7 +434,7 @@ pub fn ttm_squeeze_with_kernel(
         && kc_mult_mid == 1.5
         && kc_mult_low == 2.0
     {
-        // Use optimized classic kernel for default parameters
+        
         let mut momentum = alloc_with_nan_prefix(len, warmup);
         let mut squeeze = alloc_with_nan_prefix(len, warmup);
 
@@ -458,7 +458,7 @@ pub fn ttm_squeeze_with_kernel(
         return Ok(TtmSqueezeOutput { momentum, squeeze });
     }
 
-    // Calculate SMA for BB and KC basis (same value)
+    
     let sma_params = SmaParams {
         period: Some(length),
     };
@@ -467,7 +467,7 @@ pub fn ttm_squeeze_with_kernel(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let sma_values = sma_result.values;
 
-    // Calculate True Range with warm prefix only
+    
     let mut tr = alloc_with_nan_prefix(len, first);
     for i in first..len {
         tr[i] = if i == first {
@@ -481,7 +481,7 @@ pub fn ttm_squeeze_with_kernel(
         };
     }
 
-    // Calculate TR SMA for Keltner Channel deviation
+    
     let tr_sma_params = SmaParams {
         period: Some(length),
     };
@@ -490,11 +490,11 @@ pub fn ttm_squeeze_with_kernel(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let dev_kc = tr_sma_result.values;
 
-    // Allocate outputs with NaN warm prefix only
+    
     let mut squeeze = alloc_with_nan_prefix(len, warmup);
     let mut momentum = alloc_with_nan_prefix(len, warmup);
 
-    // Main loop: compute BB/KC bands on-the-fly without temp arrays
+    
     for i in warmup..len {
         let m = sma_values[i];
         let dkc = dev_kc[i];
@@ -502,7 +502,7 @@ pub fn ttm_squeeze_with_kernel(
             continue;
         }
 
-        // Calculate standard deviation for Bollinger Bands
+        
         let start = i + 1 - length;
         let mut sum = 0.0;
         let mut cnt = 0usize;
@@ -521,7 +521,7 @@ pub fn ttm_squeeze_with_kernel(
             let bb_upper = m + bb_mult * std;
             let bb_lower = m - bb_mult * std;
 
-            // Calculate Keltner Channels
+            
             let kc_upper_low = m + dkc * kc_mult_low;
             let kc_lower_low = m - dkc * kc_mult_low;
             let kc_upper_mid = m + dkc * kc_mult_mid;
@@ -529,23 +529,23 @@ pub fn ttm_squeeze_with_kernel(
             let kc_upper_high = m + dkc * kc_mult_high;
             let kc_lower_high = m - dkc * kc_mult_high;
 
-            // Determine squeeze state
+            
             let no_sqz = bb_lower < kc_lower_low || bb_upper > kc_upper_low;
             squeeze[i] = if no_sqz {
-                0.0 // NoSqz
+                0.0 
             } else if bb_lower >= kc_lower_high || bb_upper <= kc_upper_high {
-                3.0 // HighSqz
+                3.0 
             } else if bb_lower >= kc_lower_mid || bb_upper <= kc_upper_mid {
-                2.0 // MidSqz
+                2.0 
             } else {
-                1.0 // LowSqz
+                1.0 
             };
         }
 
-        // Calculate momentum: linreg(close - avg(avg(highest, lowest), sma(close)))
-        // Following PineScript formula exactly
+        
+        
 
-        // Find highest high and lowest low over the period
+        
         let mut highest = f64::NEG_INFINITY;
         let mut lowest = f64::INFINITY;
         let mut has_valid = false;
@@ -559,12 +559,12 @@ pub fn ttm_squeeze_with_kernel(
         }
 
         if has_valid {
-            // midpoint = average of highest and lowest
+            
             let midpoint = (highest + lowest) * 0.5;
-            // Average of midpoint and close SMA
+            
             let avg = (midpoint + m) * 0.5;
 
-            // Linear regression on close - avg
+            
             let mut sx = 0.0;
             let mut sy = 0.0;
             let mut sxy = 0.0;
@@ -603,10 +603,10 @@ pub fn ttm_squeeze_into_slices(
     input: &TtmSqueezeInput,
     kernel: Kernel,
 ) -> Result<(), TtmSqueezeError> {
-    // Validate parameters
+    
     validate_params(&input.params)?;
 
-    // Extract data
+    
     let (high, low, close) = match &input.data {
         TtmSqueezeData::Candles { candles } => {
             (&candles.high[..], &candles.low[..], &candles.close[..])
@@ -653,13 +653,13 @@ pub fn ttm_squeeze_into_slices(
 
     let warmup = first + length - 1;
 
-    // Initialize with NaN for warmup period
+    
     for i in 0..warmup {
         dst_momentum[i] = f64::NAN;
         dst_squeeze[i] = f64::NAN;
     }
 
-    // Calculate SMA for basis
+    
     let sma_params = SmaParams {
         period: Some(length),
     };
@@ -668,7 +668,7 @@ pub fn ttm_squeeze_into_slices(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let sma_values = sma_result.values;
 
-    // Calculate True Range
+    
     let mut tr_values = alloc_with_nan_prefix(len, first);
     for i in first..len {
         tr_values[i] = if i == first {
@@ -686,7 +686,7 @@ pub fn ttm_squeeze_into_slices(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let dev_kc = tr_sma_result.values;
 
-    // Calculate squeeze states
+    
     for i in warmup..len {
         let m = sma_values[i];
         let dev_kc_val = dev_kc[i];
@@ -696,7 +696,7 @@ pub fn ttm_squeeze_into_slices(
             continue;
         }
 
-        // Calculate standard deviation for BB
+        
         let start = i + 1 - length;
         let mut sum = 0.0;
         let mut count = 0;
@@ -742,11 +742,11 @@ pub fn ttm_squeeze_into_slices(
         };
     }
 
-    // Calculate momentum
+    
     for end_idx in warmup..len {
         let start_idx = end_idx + 1 - length;
 
-        // Find highest high and lowest low over the period
+        
         let mut highest = f64::NEG_INFINITY;
         let mut lowest = f64::INFINITY;
         let mut has_valid = false;
@@ -764,11 +764,11 @@ pub fn ttm_squeeze_into_slices(
             continue;
         }
 
-        // midpoint = average of highest and lowest
+        
         let midpoint = (highest + lowest) * 0.5;
         let avg = (midpoint + sma_values[end_idx]) / 2.0;
 
-        // Linear regression on close - avg
+        
         let mut sum_x = 0.0;
         let mut sum_y = 0.0;
         let mut sum_xy = 0.0;
@@ -816,7 +816,7 @@ pub fn ttm_squeeze_into(
     ttm_squeeze_into_slices(dst_momentum, dst_squeeze, input, kernel)
 }
 
-// --------- internal helper: monotonic deque over (idx, val)
+
 #[derive(Debug, Clone)]
 struct MonoDeque {
     idx: Vec<usize>,
@@ -860,7 +860,7 @@ impl MonoDeque {
         self.val[self.head]
     }
 
-    // Evict all entries with idx < min_idx
+    
     #[inline(always)]
     fn expire(&mut self, min_idx: usize) {
         while self.len > 0 {
@@ -876,7 +876,7 @@ impl MonoDeque {
         }
     }
 
-    // Push new (idx, value), discarding dominated tail
+    
     #[inline(always)]
     fn push(&mut self, idx: usize, value: f64) {
         while self.len > 0 {
@@ -886,7 +886,7 @@ impl MonoDeque {
                 self.tail - 1
             };
             let back_val = self.val[back_pos];
-            // For max: keep strictly decreasing; for min: keep strictly increasing
+            
             let ok = if self.is_max {
                 back_val >= value
             } else {
@@ -908,46 +908,46 @@ impl MonoDeque {
     }
 }
 
-// ---------------- O(1) streaming kernel ----------------
+
 #[derive(Debug, Clone)]
 pub struct TtmSqueezeStream {
     params: TtmSqueezeParams,
 
-    // ring buffers (close + TR are used for rolling sums; hi/lo kept for compatibility/reset)
+    
     hi: Vec<f64>,
     lo: Vec<f64>,
     cl: Vec<f64>,
     tr: Vec<f64>,
 
-    head: usize,  // next write position in rings
-    filled: bool, // window full?
-    t: usize,     // absolute tick index (monotonic, 0..)
+    head: usize,  
+    filled: bool, 
+    t: usize,     
 
-    // rolling aggregates for BB/KC and LinReg
-    sum0: f64,   // Σ close
-    sum1: f64,   // Σ (r * close) with r in [0..n-1], oldest..newest
-    sumsq: f64,  // Σ close^2
-    tr_sum: f64, // Σ TR
+    
+    sum0: f64,   
+    sum1: f64,   
+    sumsq: f64,  
+    tr_sum: f64, 
 
-    // previous close (for TR of the next bar)
+    
     prev_close: Option<f64>,
 
-    // precomputed constants for length n
+    
     n: usize,
     n_f64: f64,
     inv_n: f64,
     sx: f64,
     sx2: f64,
-    inv_den: f64, // 1 / (n*sx2 - sx*sx)
+    inv_den: f64, 
     half_nm1: f64,
 
-    // squared multipliers to avoid sqrt per tick
+    
     bb_sq: f64,
     kc_low_sq: f64,
     kc_mid_sq: f64,
     kc_high_sq: f64,
 
-    // monotonic deques for highest(high, n) / lowest(low, n)
+    
     max_q: MonoDeque,
     min_q: MonoDeque,
 }
@@ -962,16 +962,16 @@ impl TtmSqueezeStream {
             });
         }
 
-        // Precompute constants for closed-form linreg on x = 0..n-1
+        
         let n_f64 = n as f64;
         let inv_n = 1.0 / n_f64;
         let sx = 0.5 * n_f64 * (n_f64 - 1.0);
         let sx2 = (n_f64 - 1.0) * n_f64 * (2.0 * n_f64 - 1.0) / 6.0;
         let den = n_f64 * sx2 - sx * sx;
-        let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 }; // guard n==1
+        let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 }; 
         let half_nm1 = 0.5 * (n_f64 - 1.0);
 
-        // Pre-square multipliers (sqrt-free comparisons)
+        
         let bb = params.bb_mult.unwrap_or(2.0);
         let kc_hi = params.kc_mult_high.unwrap_or(1.0);
         let kc_md = params.kc_mult_mid.unwrap_or(1.5);
@@ -1019,7 +1019,7 @@ impl TtmSqueezeStream {
         let n = self.n;
         let pos = self.head;
 
-        // --- compute TR for this bar ---
+        
         let tr_new = match self.prev_close {
             Some(pc) => {
                 let hl = high - low;
@@ -1040,33 +1040,33 @@ impl TtmSqueezeStream {
             None => high - low,
         };
 
-        // --- expire (only when window is already full) ---
+        
         if self.filled {
-            // After inserting index t, the valid window is [t-n+1 .. t]
+            
             let min_idx = self.t + 1 - n;
             self.max_q.expire(min_idx);
             self.min_q.expire(min_idx);
         }
 
-        // --- push into deques ---
+        
         self.max_q.push(self.t, high);
         self.min_q.push(self.t, low);
 
-        // --- rolling aggregates ---
+        
         let old_c = self.cl[pos];
         let old_tr = self.tr[pos];
 
-        // write rings
+        
         self.hi[pos] = high;
         self.lo[pos] = low;
         self.cl[pos] = close;
         self.tr[pos] = tr_new;
 
         if !self.filled {
-            // seeding [0 .. n-1]
+            
             self.sum0 += close;
             self.sumsq = close.mul_add(close, self.sumsq);
-            self.sum1 += (self.t as f64) * close; // r = 0..n-1 while filling
+            self.sum1 += (self.t as f64) * close; 
             self.tr_sum += tr_new;
 
             self.prev_close = Some(close);
@@ -1077,23 +1077,23 @@ impl TtmSqueezeStream {
                 return None;
             }
 
-            // first full window reached
+            
             self.filled = true;
             return Some(self.emit());
         }
 
-        // rolling step (window already full)
+        
         let sum0_old = self.sum0;
 
-        // Σclose, Σclose²
+        
         self.sum0 += close - old_c;
         self.sumsq = close.mul_add(close, self.sumsq - old_c * old_c);
 
-        // Σ(r*close) with r in [0..n-1]
-        // shift weights by -1, drop oldest, add newest with weight (n-1)
+        
+        
         self.sum1 = self.sum1 - sum0_old + old_c + (self.n_f64 - 1.0) * close;
 
-        // ΣTR
+        
         self.tr_sum += tr_new - old_tr;
 
         self.prev_close = Some(close);
@@ -1105,32 +1105,32 @@ impl TtmSqueezeStream {
 
     #[inline]
     fn emit(&self) -> (f64, f64) {
-        // BB variance and KC width (SMA(TR))
+        
         let m = self.sum0 * self.inv_n;
-        let var = (-m).mul_add(m, self.sumsq * self.inv_n); // E[c^2] - m^2
+        let var = (-m).mul_add(m, self.sumsq * self.inv_n); 
         let var_pos = if var > 0.0 { var } else { 0.0 };
 
         let dkc = self.tr_sum * self.inv_n;
         let dkc2 = dkc * dkc;
 
-        // sqrt-free squeeze state via squared compares
+        
         let bbv = self.bb_sq * var_pos;
         let t_low = self.kc_low_sq * dkc2;
         let t_mid = self.kc_mid_sq * dkc2;
         let t_hi = self.kc_high_sq * dkc2;
 
         let sqz = if bbv > t_low {
-            0.0 // NoSqz
+            0.0 
         } else if bbv <= t_hi {
-            3.0 // HighSqz
+            3.0 
         } else if bbv <= t_mid {
-            2.0 // MidSqz
+            2.0 
         } else {
-            1.0 // LowSqz
+            1.0 
         };
 
-        // Momentum = linreg(close - avg(avg(highest, lowest), m), n, 0)
-        // highest/lowest from deques (always present once filled)
+        
+        
         let highest = if self.max_q.is_empty() {
             f64::NAN
         } else {
@@ -1145,9 +1145,9 @@ impl TtmSqueezeStream {
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
 
-        // Closed-form linreg over x=0..n-1
-        // slope = (n*sxy - sx*sy)/den, intercept at x=0 = sy/n - slope*(sx/n)
-        // value at x=n-1 => intercept + slope*(n-1)
+        
+        
+        
         let sy = self.sum0 - avg * self.n_f64;
         let sxy = self.sum1 - avg * self.sx;
 
@@ -1183,7 +1183,7 @@ impl TtmSqueezeStream {
     }
 }
 
-// ==================== CLASSIC KERNEL ====================
+
 /// Optimized classic kernel for TTM Squeeze with default parameters
 /// Inlines SMA calculations and standard deviation computation for maximum performance
 #[inline(always)]
@@ -1206,40 +1206,40 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         return Ok(());
     }
 
-    // Precompute constants for closed-form linear regression on x = 0..n-1
+    
     let n = length as f64;
     let sx = 0.5 * n * (n - 1.0);
     let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
-    let den = n * sx2 - sx * sx; // > 0 for n >= 2
-    let inv_den = 1.0 / den; // hoist division
+    let den = n * sx2 - sx * sx; 
+    let inv_den = 1.0 / den; 
     let inv_n = 1.0 / n;
     let half_nm1 = 0.5 * (n - 1.0);
 
-    // Rolling buffers and sums for close and TR
+    
     let mut cbuf = vec![0.0f64; length];
     let mut trbuf = vec![0.0f64; length];
     let mut cpos = 0usize;
     let mut trpos = 0usize;
 
-    let mut sum0 = 0.0f64; // Σ close
-    let mut sum1 = 0.0f64; // Σ (r * close), r=0..n-1
-    let mut sumsq = 0.0f64; // Σ close^2
-    let mut tr_sum = 0.0f64; // Σ TR
+    let mut sum0 = 0.0f64; 
+    let mut sum1 = 0.0f64; 
+    let mut sumsq = 0.0f64; 
+    let mut tr_sum = 0.0f64; 
 
-    // Monotonic deques for highest/lowest indices over window
+    
     let cap = length;
     let mut max_q = vec![0usize; cap];
     let mut min_q = vec![0usize; cap];
     let (mut max_head, mut max_tail, mut max_len) = (0usize, 0usize, 0usize);
     let (mut min_head, mut min_tail, mut min_len) = (0usize, 0usize, 0usize);
 
-    // Precompute constant squared multipliers to avoid sqrt and extra muls
+    
     let bb_sq = bb_mult * bb_mult;
     let kc_low_sq = kc_mult_low * kc_mult_low;
     let kc_mid_sq = kc_mult_mid * kc_mult_mid;
     let kc_high_sq = kc_mult_high * kc_mult_high;
 
-    // Seed initial window [first..=warmup]
+    
     {
         let mut r = 0usize;
         let mut i = first;
@@ -1250,7 +1250,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             sumsq = c.mul_add(c, sumsq);
             sum1 += (r as f64) * c;
 
-            // True Range
+            
             let tr_val = if i == first {
                 *high.get_unchecked(i) - *low.get_unchecked(i)
             } else {
@@ -1275,7 +1275,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             *trbuf.get_unchecked_mut(trpos) = tr_val;
             tr_sum += tr_val;
 
-            // Push into max deque (highs)
+            
             while max_len > 0 {
                 let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                 let back_idx = *max_q.get_unchecked(back_pos);
@@ -1292,7 +1292,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             }
             max_len += 1;
 
-            // Push into min deque (lows)
+            
             while min_len > 0 {
                 let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                 let back_idx = *min_q.get_unchecked(back_pos);
@@ -1322,7 +1322,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         }
     }
 
-    // Compute outputs at warmup
+    
     {
         let m = sum0 * inv_n;
         let var = (-m).mul_add(m, sumsq * inv_n);
@@ -1330,29 +1330,29 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let dkc = tr_sum * inv_n;
         let dkc2 = dkc * dkc;
 
-        // Compare without sqrt: bb_mult*std <= kc_mult*dkc  <=>  bb_sq*var <= kc_sq*dkc^2
+        
         let bbv = bb_sq * var_pos;
         let t_low = kc_low_sq * dkc2;
         let t_mid = kc_mid_sq * dkc2;
         let t_high = kc_high_sq * dkc2;
 
         *squeeze.get_unchecked_mut(warmup) = if bbv > t_low {
-            0.0 // NoSqz
+            0.0 
         } else if bbv <= t_high {
-            3.0 // HighSqz
+            3.0 
         } else if bbv <= t_mid {
-            2.0 // MidSqz
+            2.0 
         } else {
-            1.0 // LowSqz
+            1.0 
         };
 
-        // Highest/lowest from deques
+        
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
         let lowest = *low.get_unchecked(lo_idx);
 
-        // Momentum via closed-form linear regression
+        
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
         let sy = sum0 - avg * n;
@@ -1361,12 +1361,12 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         *momentum.get_unchecked_mut(warmup) = sy * inv_n + slope * half_nm1;
     }
 
-    // Main loop
+    
     let mut i = warmup + 1;
     while i < len {
         let start_idx = i + 1 - length;
 
-        // Evict expired indices from deques
+        
         while max_len > 0 {
             let front_idx = *max_q.get_unchecked(max_head);
             if front_idx >= start_idx {
@@ -1390,7 +1390,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             min_len -= 1;
         }
 
-        // Push new index into deques
+        
         while max_len > 0 {
             let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
             let back_idx = *max_q.get_unchecked(back_pos);
@@ -1423,7 +1423,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         }
         min_len += 1;
 
-        // Rolling updates for close sums
+        
         let old = *cbuf.get_unchecked(cpos);
         let new = *close.get_unchecked(i);
         let sum0_old = sum0;
@@ -1436,7 +1436,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             cpos = 0;
         }
 
-        // Rolling update for TR SMA
+        
         let old_tr = *trbuf.get_unchecked(trpos);
         let pc = *close.get_unchecked(i - 1);
         let hi_i = *high.get_unchecked(i);
@@ -1452,7 +1452,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             trpos = 0;
         }
 
-        // BB/KC
+        
         let m = sum0 * inv_n;
         let var = (-m).mul_add(m, sumsq * inv_n);
         let var_pos = if var > 0.0 { var } else { 0.0 };
@@ -1472,13 +1472,13 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             1.0
         };
 
-        // Highest/lowest for momentum from deques
+        
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
         let lowest = *low.get_unchecked(lo_idx);
 
-        // LinReg on (close - avg(avg(highest, lowest), m))
+        
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
         let sy = sum0 - avg * n;
@@ -1492,7 +1492,7 @@ pub unsafe fn ttm_squeeze_scalar_classic(
     Ok(())
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 

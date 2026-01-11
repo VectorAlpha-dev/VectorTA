@@ -1,15 +1,15 @@
-// CUDA integration tests for Squeeze Momentum Indicator
 
-use my_project::indicators::squeeze_momentum::{
+
+use vector_ta::indicators::squeeze_momentum::{
     squeeze_momentum_batch_with_kernel, squeeze_momentum_with_kernel, SqueezeMomentumBatchRange,
     SqueezeMomentumBuilder, SqueezeMomentumData, SqueezeMomentumInput, SqueezeMomentumParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaSqueezeMomentum};
+use vector_ta::cuda::{cuda_available, CudaSqueezeMomentum};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -75,14 +75,14 @@ fn squeeze_momentum_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::E
     let mut si_g = vec![0f32; si_dev.len()];
     si_dev.buf.copy_to(&mut si_g)?;
 
-    let tol = 2e-3; // allow some FP32 drift
+    let tol = 2e-3; 
     for idx in 0..cpu.rows * cpu.cols {
         if !approx_eq(cpu.squeeze[idx], sq_g[idx] as f64, 1e-6) {
             eprintln!(
                 "First squeeze mismatch at {}: cpu={} gpu={}",
                 idx, cpu.squeeze[idx], sq_g[idx]
             );
-            // Dump a small window for debugging
+            
             let start = idx.saturating_sub(5);
             let end = (idx + 6).min(cpu.rows * cpu.cols);
             for k in start..end {
@@ -141,7 +141,7 @@ fn squeeze_momentum_cuda_many_series_one_param_matches_cpu(
     let lkc = 20usize;
     let mkc = 1.5f64;
 
-    // CPU baseline (per series)
+    
     let mut sq_cpu = vec![f64::NAN; cols * rows];
     let mut mo_cpu = vec![f64::NAN; cols * rows];
     let mut si_cpu = vec![f64::NAN; cols * rows];
@@ -177,7 +177,7 @@ fn squeeze_momentum_cuda_many_series_one_param_matches_cpu(
         }
     }
 
-    // GPU path
+    
     let h32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let c32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

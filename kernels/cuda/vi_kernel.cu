@@ -1,8 +1,8 @@
-// CUDA kernels for Vortex Indicator (VI)
-//
-// Computes VI+ and VI- given prefix sums of True Range (TR), VM+ (vp), and VM- (vm).
-// Warmup/NaN semantics match the scalar path: indices [0, warm) are NaN where
-// warm = first_valid + period - 1. Arithmetic in FP32 for throughput.
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -21,20 +21,20 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// --- Batch: one series × many params ---
-// Inputs are prefix sums over time for a single series.
+
+
 extern "C" __global__ void vi_batch_f32(
-    const float* __restrict__ pfx_tr,   // len = series_len (time-major 1D)
-    const float* __restrict__ pfx_vp,   // len = series_len
-    const float* __restrict__ pfx_vm,   // len = series_len
-    const int*   __restrict__ periods,  // len = n_rows
+    const float* __restrict__ pfx_tr,   
+    const float* __restrict__ pfx_vp,   
+    const float* __restrict__ pfx_vm,   
+    const int*   __restrict__ periods,  
     int series_len,
     int n_rows,
     int first_valid,
-    float* __restrict__ out_plus,       // len = n_rows * series_len (row-major)
-    float* __restrict__ out_minus       // len = n_rows * series_len (row-major)
+    float* __restrict__ out_plus,       
+    float* __restrict__ out_minus       
 ) {
-    // Preferred launch: 2D grid (time tiles in X, rows in Y).
+    
     if (gridDim.y > 1) {
         const int t   = (int)(blockIdx.x * blockDim.x + threadIdx.x);
         const int row = (int)blockIdx.y;
@@ -76,7 +76,7 @@ extern "C" __global__ void vi_batch_f32(
         return;
     }
 
-    // Fallback: 1D grid over all output elements (supports very large n_rows).
+    
     const size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x + (size_t)threadIdx.x;
     const size_t total = (size_t)n_rows * (size_t)series_len;
     if (tid >= total) {
@@ -117,15 +117,15 @@ extern "C" __global__ void vi_batch_f32(
     out_minus[tid] = (pfx_vm[t] - vm_prev) * inv;
 }
 
-// --- Many series × one param (time-major) ---
-// Inputs are prefix sums laid out time-major: idx = row * num_series + series
+
+
 extern "C" __global__ void vi_many_series_one_param_f32(
     const float* __restrict__ pfx_tr_tm,
     const float* __restrict__ pfx_vp_tm,
     const float* __restrict__ pfx_vm_tm,
-    const int*   __restrict__ first_valids, // len = num_series
+    const int*   __restrict__ first_valids, 
     int num_series,
-    int series_len, // rows (time)
+    int series_len, 
     int period,
     float* __restrict__ plus_tm,
     float* __restrict__ minus_tm

@@ -21,11 +21,11 @@ use crate::cuda::moving_averages::ema_wrapper::{
     BatchKernelPolicy as EmaBatchKernelPolicy, CudaEmaPolicy as EmaCudaPolicy,
     ManySeriesKernelPolicy as EmaManySeriesKernelPolicy,
 };
-// (deduped)
+
 use crate::cuda::moving_averages::CudaSmaError;
 use crate::indicators::moving_averages::sma::{SmaBatchRange, SmaParams};
 use crate::indicators::ppo::{PpoBatchRange, PpoParams};
-// (deduped)
+
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
@@ -73,7 +73,7 @@ pub struct DeviceArrayF32Ppo {
 
 struct EmaSurfacesF32 {
     out: DeviceBuffer<f32>,
-    // Kept alive until the stream completes.
+    
     _periods: DeviceBuffer<i32>,
 }
 
@@ -130,7 +130,7 @@ pub struct CudaPpo {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaPpoPolicy,
-    // Cache MA helpers so PPO batch EMA doesn't re-JIT/recreate contexts every call.
+    
     ema: CudaEma,
     sma: CudaSma,
 }
@@ -165,8 +165,8 @@ impl CudaPpo {
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // PPO batch EMA fallback uses EMA “surfaces” + elementwise PPO; PPO is sensitive
-        // to EMA drift, so keep EMA batch on the conservative sequential path.
+        
+        
         let mut ema_policy = EmaCudaPolicy::default();
         ema_policy.batch = EmaBatchKernelPolicy::Plain { block_x: 16 };
         ema_policy.many_series = EmaManySeriesKernelPolicy::Auto;
@@ -309,11 +309,11 @@ impl CudaPpo {
             .get_function("ema_batch_f64_to_f32")
             .map_err(|_| CudaPpoError::MissingKernelSymbol { name: "ema_batch_f64_to_f32" })?;
 
-        // PPO parity: use FP64-internal EMA surfaces (written as f32) and keep performance
-        // reasonable for large sweeps by using the warp-cooperative path (block_x >= 32).
+        
+        
         let block_x = 32u32;
 
-        // Chunk grid.x across device limits
+        
         let device = Device::get_device(self.device_id)?;
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)?
@@ -359,7 +359,7 @@ impl CudaPpo {
         &self.policy
     }
 
-    // --------------- Batch (one series × many params) ---------------
+    
     pub fn ppo_batch_dev(
         &self,
         data_f32: &[f32],
@@ -378,7 +378,7 @@ impl CudaPpo {
             return Err(CudaPpoError::InvalidInput("empty fast/slow sweep".into()));
         }
 
-        // Materialize combos in canonical order (fast outer × slow inner)
+        
         let combos: Vec<PpoParams> = expand_grid(sweep);
         let rows = combos.len();
         if rows == 0 {
@@ -387,7 +387,7 @@ impl CudaPpo {
 
         let ma_mode = ma_mode_from(&sweep.ma_type)?;
 
-        // Guard big allocations with a will_fit check (checked arithmetic)
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let elem_f64 = std::mem::size_of::<f64>();
@@ -398,7 +398,7 @@ impl CudaPpo {
             .checked_mul(2usize)
             .and_then(|v| v.checked_mul(elem_i32))
             .ok_or_else(|| CudaPpoError::InvalidInput("params bytes overflow".into()))?;
-        // Worst‑case prefix buffer (SMA path): len+1 FP64
+        
         let prefix_bytes = (len + 1)
             .checked_mul(elem_f64)
             .ok_or_else(|| CudaPpoError::InvalidInput("prefix bytes overflow".into()))?;
@@ -408,7 +408,7 @@ impl CudaPpo {
         let out_bytes = out_elems
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaPpoError::InvalidInput("output bytes overflow".into()))?;
-        // EMA fallback builds (nf+ns) EMA “surfaces” (row-major) and then computes PPO elementwise.
+        
         let surfaces_elems = (nf + ns)
             .checked_mul(len)
             .ok_or_else(|| CudaPpoError::InvalidInput("surfaces elems overflow".into()))?;
@@ -432,7 +432,7 @@ impl CudaPpo {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        // Period arrays aligned with 'combos'
+        
         let mut fasts_i32 = Vec::with_capacity(rows);
         let mut slows_i32 = Vec::with_capacity(rows);
         for p in &combos {
@@ -440,26 +440,26 @@ impl CudaPpo {
             slows_i32.push(p.slow_period.unwrap() as i32);
         }
 
-        // Copy inputs once
+        
         let d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_f32)?;
         let d_fasts: DeviceBuffer<i32> = DeviceBuffer::from_slice(&fasts_i32)?;
         let d_slows: DeviceBuffer<i32> = DeviceBuffer::from_slice(&slows_i32)?;
 
-        // Output buffer: [rows × len], row‑major
+        
         let out_elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaPpoError::InvalidInput("rows*len overflow for d_out".into()))?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
-        // First finite sample index for warmup/prefix
+        
         let first_valid = data_f32
             .iter()
             .position(|v| v.is_finite())
             .unwrap_or(0) as i32;
 
         match ma_mode {
-            // SMA path: single FP64 prefix sum + direct kernel (no MA surfaces)
+            
             0 => {
                 let prefix = prefix_sum_one_series_f64(data_f32, first_valid);
                 let d_prefix: DeviceBuffer<f64> = DeviceBuffer::from_slice(&prefix)?;
@@ -476,10 +476,10 @@ impl CudaPpo {
                     &mut d_out,
                 )?;
             }
-            // EMA path: warp-cooperative kernel (no MA surfaces)
+            
             1 => {
-                // Warp-cooperative EMA kernel is currently unstable on some systems/drivers.
-                // Default to the MA-surface fallback unless explicitly enabled.
+                
+                
                 let warp_coop_enabled = match std::env::var("PPO_EMA_WARP_COOP") {
                     Ok(v) => v == "1" || v.eq_ignore_ascii_case("true"),
                     Err(_) => false,
@@ -500,7 +500,7 @@ impl CudaPpo {
                         .is_ok();
                 }
 
-                // Fallback: build EMA surfaces and use elementwise PPO
+                
                 if !used_warp_coop {
                     let fast_periods: Vec<i32> = axis_vals(fs, fe, fstep)
                         .into_iter()
@@ -563,7 +563,7 @@ impl CudaPpo {
             _ => unreachable!(),
         }
 
-        // Ensure all work on the internal stream is visible to consumers
+        
         self.synchronize()?;
 
         Ok((
@@ -614,7 +614,7 @@ impl CudaPpo {
         };
         let gx = grid_x.max(1);
 
-        // Chunk grid.y across combos
+        
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let gy = count as u32;
             self.validate_launch(gx, gy, 1, block_x, 1, 1)?;
@@ -648,7 +648,7 @@ impl CudaPpo {
         Ok(())
     }
 
-    // --------------- Many-series × one-param (time-major) ---------------
+    
     pub fn ppo_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -672,7 +672,7 @@ impl CudaPpo {
         let slow = params.slow_period.unwrap_or(26) as i32;
         let ma_mode = ma_mode_from(params.ma_type.as_deref().unwrap_or("sma"))?;
 
-        // Guard big allocations with a will_fit check
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let elem_f64 = std::mem::size_of::<f64>();
@@ -701,10 +701,10 @@ impl CudaPpo {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        // Copy input once
+        
         let d_prices_tm: DeviceBuffer<f32> = DeviceBuffer::from_slice(data_tm_f32)?;
 
-        // first_valids per series (time-major layout)
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -717,7 +717,7 @@ impl CudaPpo {
         }
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
 
-        // SMA needs time-major per-series prefix sums; EMA ignores this buffer.
+        
         let d_prefix_tm: DeviceBuffer<f64> = if ma_mode == 0 {
             let prefix = prefix_sum_time_major_f64(data_tm_f32, cols, rows, &first_valids)?;
             DeviceBuffer::from_slice(&prefix)?
@@ -725,12 +725,12 @@ impl CudaPpo {
             DeviceBuffer::from_slice(&[0.0f64])?
         };
 
-        // Output
+        
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        // Direct kernel (handles both SMA and EMA paths). If it fails (e.g., run-time
-        // JIT constraint), fall back to building MA surfaces + elementwise PPO.
+        
+        
         let attempted = self.launch_many_series_kernel(
             &d_prices_tm,
             &d_prefix_tm,
@@ -747,7 +747,7 @@ impl CudaPpo {
                 "[ppo] direct many-series kernel failed ({}); falling back to MA surfaces",
                 err
             );
-            // Build MA surfaces
+            
             match ma_mode {
                 0 => {
                     let sma = &self.sma;
@@ -765,7 +765,7 @@ impl CudaPpo {
                         .sma_multi_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pslow,
                         )?;
-                    // Launch elementwise PPO kernel
+                    
                     let func = self
                         .module
                         .get_function(
@@ -819,7 +819,7 @@ impl CudaPpo {
                         .ema_many_series_one_param_time_major_dev(
                             data_tm_f32, cols, rows, &pslow,
                         )?;
-                    // Elementwise PPO kernel
+                    
                     let func = self
                         .module
                         .get_function(
@@ -897,7 +897,7 @@ impl CudaPpo {
 
         let (tx, ty) = match self.policy.many_series {
             ManySeriesKernelPolicy::Tiled2D { tx, ty } if tx > 0 && ty > 0 => (tx, ty),
-            _ => (128u32, 1u32), // wide in time; let y expand as needed below
+            _ => (128u32, 1u32), 
         };
         if tx == 0 || ty == 0 {
             return Err(CudaPpoError::InvalidPolicy("tx, ty must be > 0"));
@@ -957,7 +957,7 @@ impl CudaPpo {
                 name: "ppo_batch_ema_manyparams_f32",
             })?;
 
-        // Choose a warp-friendly block size (>=32 and multiple of 32)
+        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x >= 32 => block_x,
             _ => 256u32,
@@ -970,7 +970,7 @@ impl CudaPpo {
         let warps_per_block = (block_x / 32) as usize;
         let combos_per_block = warps_per_block * 32;
 
-        // chunk across grid.y limit (≤ 65,535)
+        
         let total = n_combos as usize;
         let max_rows_per_launch = combos_per_block * 65_535usize;
         let mut start = 0usize;
@@ -1007,7 +1007,7 @@ impl CudaPpo {
     }
 }
 
-// ---------------- Helpers ----------------
+
 
 fn expand_grid(range: &PpoBatchRange) -> Vec<PpoParams> {
     fn axis_u((start, end, step): (usize, usize, usize)) -> Vec<usize> {
@@ -1057,7 +1057,7 @@ fn div_ceil_u32(a: u32, b: u32) -> u32 {
     (a + b - 1) / b
 }
 
-// Host prefix sums in f64 for robust SMA windows (single series)
+
 #[inline]
 fn prefix_sum_one_series_f64(data: &[f32], first_valid: i32) -> Vec<f64> {
     let len = data.len();
@@ -1074,7 +1074,7 @@ fn prefix_sum_one_series_f64(data: &[f32], first_valid: i32) -> Vec<f64> {
     ps
 }
 
-// Time‑major per‑series prefix sums in f64 (rows×cols)
+
 #[inline]
 fn prefix_sum_time_major_f64(
     data_tm: &[f32],
@@ -1154,16 +1154,16 @@ fn axis_len(start: usize, end: usize, step: usize) -> usize {
     axis_vals(start, end, step).len()
 }
 
-// ---------------- Bench profiles ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
-    const SERIES_LEN: usize = 1_000_000; // 1m
+    const SERIES_LEN: usize = 1_000_000; 
     const FAST_SWEEP: usize = 25;
     const SLOW_SWEEP: usize = 10;
     const MANY_COLS: usize = 250;
-    const MANY_ROWS: usize = 1_000_000; // 1m per series (large)
+    const MANY_ROWS: usize = 1_000_000; 
 
     fn gen_prices(n: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; n];
@@ -1186,14 +1186,14 @@ pub mod benches {
 
     fn bytes_one_series_many() -> usize {
         let len = SERIES_LEN;
-        let combos = FAST_SWEEP * SLOW_SWEEP; // fast×slow grid
+        let combos = FAST_SWEEP * SLOW_SWEEP; 
         len * 4 + (len + 1) * 8 + combos * 2 * 4 + combos * len * 4 + 64 * 1024 * 1024
     }
     fn bytes_one_series_many_ema() -> usize {
         let len = SERIES_LEN;
         let nf = FAST_SWEEP;
         let ns = SLOW_SWEEP;
-        let combos = nf * ns; // fastxslow grid
+        let combos = nf * ns; 
         let out_bytes = combos * len * 4;
         let surfaces_bytes = (nf + ns) * len * 4;
         len * 4 + combos * 2 * 4 + out_bytes + surfaces_bytes + 64 * 1024 * 1024
@@ -1224,7 +1224,7 @@ pub mod benches {
                     self.first_valid,
                     &self.d_fasts,
                     &self.d_slows,
-                    0, // SMA
+                    0, 
                     self.n_combos,
                     &mut self.d_out,
                 )
@@ -1365,7 +1365,7 @@ pub mod benches {
                     self.rows,
                     self.fast,
                     self.slow,
-                    1, // EMA
+                    1, 
                     &mut self.d_out_tm,
                 )
                 .expect("ppo many-series ema launch");

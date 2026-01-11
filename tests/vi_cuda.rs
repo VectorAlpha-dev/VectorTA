@@ -1,16 +1,16 @@
-// Integration tests for CUDA VI kernels
 
-use my_project::indicators::vi::{
+
+use vector_ta::indicators::vi::{
     vi_batch_with_kernel, vi_with_kernel, ViBatchRange, ViInput, ViParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::vi_wrapper::CudaVi;
+use vector_ta::cuda::vi_wrapper::CudaVi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -88,8 +88,8 @@ fn vi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         eprintln!("[vi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; // series count
-    let rows = 8192usize; // time length
+    let cols = 16usize; 
+    let rows = 8192usize; 
     let mut high_tm = vec![f64::NAN; rows * cols];
     let mut low_tm = vec![f64::NAN; rows * cols];
     let mut close_tm = vec![f64::NAN; rows * cols];
@@ -104,7 +104,7 @@ fn vi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 14usize;
 
-    // CPU baseline per series (time-major → column-wise scalar calls)
+    
     let mut plus_cpu_tm = vec![f64::NAN; rows * cols];
     let mut minus_cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {

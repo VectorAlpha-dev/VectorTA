@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-// raw driver symbol to opt-in >48KB dynamic shared memory per block
+
 use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as CUfuncAttr};
 
 #[derive(Debug, Error)]
@@ -55,10 +55,10 @@ pub enum CudaSinwmaError {
     NotImplemented,
 }
 
-// Note: We keep returning DeviceArrayF32 for API parity with other wrappers.
 
-// Kernel policy (mirrors ALMA/CWMA). We only implement 1D-plain variants,
-// but expose the enums for parity and future growth.
+
+
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
     One,
@@ -268,7 +268,7 @@ impl CudaSinwma {
             }
             v
         } else {
-            // reversed bounds supported
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -337,11 +337,11 @@ impl CudaSinwma {
         Ok((combos, first_valid, series_len, max_period))
     }
 
-    // ======== Helpers for tiled kernels ========
+    
 
     #[inline]
     fn dynamic_smem_bytes(period: usize, block_x: u32) -> usize {
-        // floats needed = (2*period - 1) for weights+halo + block_x for the tile
+        
         (2usize.saturating_mul(period).saturating_sub(1) + block_x as usize)
             * std::mem::size_of::<f32>()
     }
@@ -352,7 +352,7 @@ impl CudaSinwma {
         period: usize,
         prefer: Option<u32>,
     ) -> Result<(u32, usize), CudaSinwmaError> {
-        // Candidates from large to small; always warp-multiples.
+        
         let mut candidates = [512u32, 384, 256, 192, 128, 96, 64, 48, 32];
         if let Some(px) = prefer {
             if !candidates.contains(&px) {
@@ -366,7 +366,7 @@ impl CudaSinwma {
             }
         }
 
-        // Guard by device thread-per-block limit
+        
         let device = Device::get_device(self.device_id).map_err(|e| CudaSinwmaError::Cuda(e))?;
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
@@ -387,7 +387,7 @@ impl CudaSinwma {
                 return Ok((bx, need));
             }
         }
-        // As a last resort, derive a minimal bx that fits
+        
         let probe_bx = 64u32.min(max_threads);
         let avail = func
             .available_dynamic_shared_memory_per_block(
@@ -418,11 +418,11 @@ impl CudaSinwma {
         func: &mut Function,
         dynamic_smem: usize,
     ) -> Result<(), CudaSinwmaError> {
-        // Prefer shared carve-out and 4-byte bank size for f32 traffic
+        
         func.set_cache_config(CacheConfig::PreferShared)?;
         func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)?;
 
-        // Opt-in to >48KB if requested; non-fatal on failure
+        
         unsafe {
             let raw = func.to_raw();
             let rc = cuFuncSetAttribute(
@@ -430,7 +430,7 @@ impl CudaSinwma {
                 CUfuncAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 dynamic_smem as i32,
             );
-            let _ = rc; // ignore non-success; launch may still succeed if within 48KB
+            let _ = rc; 
         }
         Ok(())
     }
@@ -465,7 +465,7 @@ impl CudaSinwma {
             .get_function("sinwma_batch_f32")
             .map_err(|_| CudaSinwmaError::MissingKernelSymbol { name: "sinwma_batch_f32" })?;
 
-        // Auto-choose a block size that fits dynamic shared memory for worst-case period
+        
         let prefer = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => Some(block_x),
             _ => None,
@@ -530,7 +530,7 @@ impl CudaSinwma {
             .checked_add(periods_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety margin
+        let headroom = 64 * 1024 * 1024; 
         Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
@@ -764,7 +764,7 @@ impl CudaSinwma {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; // 32MB cushion
+        let headroom = 32 * 1024 * 1024; 
         Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
@@ -861,7 +861,7 @@ impl CudaSinwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

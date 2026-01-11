@@ -1,11 +1,11 @@
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaAtr;
+use vector_ta::cuda::CudaAtr;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -54,8 +54,8 @@ fn atr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (high, low) = synth_hlc_from_close(&close);
 
-    let sweep = my_project::indicators::atr::AtrBatchRange { length: (4, 64, 5) };
-    let cpu = my_project::indicators::atr::atr_batch_with_kernel(
+    let sweep = vector_ta::indicators::atr::AtrBatchRange { length: (4, 64, 5) };
+    let cpu = vector_ta::indicators::atr::atr_batch_with_kernel(
         &high,
         &low,
         &close,
@@ -99,8 +99,8 @@ fn atr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 2048usize; // length
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -123,7 +123,7 @@ fn atr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
 
     let period = 14usize;
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -134,7 +134,7 @@ fn atr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             l[t] = low_tm[t * cols + s];
             c[t] = close_tm[t * cols + s];
         }
-        let out = my_project::indicators::atr::AtrBuilder::new()
+        let out = vector_ta::indicators::atr::AtrBuilder::new()
             .length(period)
             .apply_slices(&h, &l, &c)?;
         for t in 0..rows {

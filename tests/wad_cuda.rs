@@ -1,9 +1,9 @@
-use my_project::indicators::wad::{wad, WadInput};
+use vector_ta::indicators::wad::{wad, WadInput};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaWad};
+use vector_ta::cuda::{cuda_available, CudaWad};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

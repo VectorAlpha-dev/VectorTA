@@ -143,7 +143,7 @@ impl CudaCfo {
         &self.policy
     }
 
-    // ---------- One-series × many-params ----------
+    
 
     pub fn cfo_batch_dev(
         &self,
@@ -154,10 +154,10 @@ impl CudaCfo {
         let len = data_f32.len();
         let n_combos = periods.len();
 
-        // Build f64 prefixes over [first_valid..)
+        
         let (ps, pw) = build_prefixes_from_first(data_f32, first_valid);
 
-        // VRAM: data + prefixes (2*f64 arrays) + params + out + headroom
+        
         let bytes_data = len.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
         let bytes_prefix = (len + 1).checked_mul(std::mem::size_of::<f64>()).and_then(|b| b.checked_mul(2)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
         let bytes_params = n_combos.checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
@@ -187,7 +187,7 @@ impl CudaCfo {
             &mut d_out,
         )?;
 
-        // synchronize producing stream to simplify CAI interop
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -222,11 +222,11 @@ impl CudaCfo {
             _ => 256,
         };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
-        // Launch in grid.y chunks to respect 65_535 limit
+        
         for (start, count) in grid_y_chunks(n_combos as usize) {
             let grid: GridSize = (grid_x.max(1), count as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            // Optional validation against device limits
+            
             let dev = Device::get_device(self.device_id)?;
             let max_gx = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
             let max_gy = dev.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)? as u32;
@@ -261,7 +261,7 @@ impl CudaCfo {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
 
     pub fn cfo_many_series_one_param_time_major_dev(
         &self,
@@ -273,10 +273,10 @@ impl CudaCfo {
         let (first_valids, period, scalar) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // Build time-major f64 prefixes P/Q per series
+        
         let (ps_tm, pw_tm) = build_prefixes_time_major(data_tm_f32, cols, rows, &first_valids);
 
-        // VRAM estimate
+        
         let elems = cols.checked_mul(rows).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
         let bytes_data = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
         let bytes_prefix = (elems + 1).checked_mul(std::mem::size_of::<f64>()).and_then(|b| b.checked_mul(2)).ok_or(CudaCfoError::InvalidInput("size overflow".into()))?;
@@ -335,7 +335,7 @@ impl CudaCfo {
             .get_function("cfo_many_series_one_param_time_major_f32")
             .map_err(|_| CudaCfoError::MissingKernelSymbol { name: "cfo_many_series_one_param_time_major_f32" })?;
 
-        // Original mapping: stride over time (x), grid.y enumerates series
+        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -370,7 +370,7 @@ impl CudaCfo {
         Ok(())
     }
 
-    // ----- Prep helpers -----
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -462,7 +462,7 @@ impl CudaCfo {
     }
 }
 
-// ---- Prefix builders (f64) ----
+
 fn build_prefixes_from_first(data: &[f32], first_valid: usize) -> (Vec<f64>, Vec<f64>) {
     let len = data.len();
     let mut ps = vec![0.0f64; len + 1];
@@ -513,7 +513,7 @@ fn build_prefixes_time_major(
     (ps, pw)
 }
 
-// ---- Grid expand (mirror indicator) ----
+
 
 fn expand_grid(r: &CfoBatchRange) -> Result<Vec<CfoParams>, CudaCfoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaCfoError> {
@@ -567,7 +567,7 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
     YChunks { n, launched: 0 }
 }
 
-// ---------- Benches ----------
+
 
 pub mod benches {
     use super::*;
@@ -575,14 +575,14 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; // vary periods only
+    const PARAM_SWEEP: usize = 250; 
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // include ~2x f64 prefix
+        
         let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * std::mem::size_of::<f64>();
         in_bytes + out_bytes + prefix_bytes + 64 * 1024 * 1024
     }

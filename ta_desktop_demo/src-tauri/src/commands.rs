@@ -44,7 +44,7 @@ fn default_ma_source() -> String {
 #[derive(Debug, Serialize)]
 pub enum OptimizationModeResolved {
     Grid,
-    // CmaEs can be added later
+    
 }
 
 #[derive(Debug, Serialize)]
@@ -498,7 +498,7 @@ fn eval_double_ma_metrics(
         let f = fast[i] as f64;
         let s = slow[i] as f64;
         if !f.is_finite() || !s.is_finite() {
-            // Treat warmup/invalid as zero return; do not change signal.
+            
             count += 1;
             let delta = 0.0 - mean;
             mean += delta / count as f64;
@@ -511,7 +511,7 @@ fn eval_double_ma_metrics(
         let price_prev = prices[i - 1];
         let price_cur = prices[i];
         if !price_prev.is_finite() || !price_cur.is_finite() {
-            // Zero return, but update signal to match CPU semantics.
+            
             prev_signal = signal;
             count += 1;
             let delta = 0.0 - mean;

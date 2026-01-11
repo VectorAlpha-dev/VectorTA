@@ -165,7 +165,7 @@ impl NviBuilder {
 
 #[derive(Debug, Clone)]
 pub struct NviStream {
-    // Hot-path state kept as plain scalars to avoid Option unwraps.
+    
     prev_close: f64,
     prev_volume: f64,
     nvi_val: f64,
@@ -176,9 +176,9 @@ impl NviStream {
     #[inline]
     pub fn try_new() -> Result<Self, NviError> {
         Ok(Self {
-            prev_close: 0.0,  // initialized on the first valid sample
-            prev_volume: 0.0, // initialized on the first valid sample
-            nvi_val: 1000.0,  // StockCharts/Fosback convention
+            prev_close: 0.0,  
+            prev_volume: 0.0, 
+            nvi_val: 1000.0,  
             started: false,
         })
     }
@@ -192,7 +192,7 @@ impl NviStream {
     /// We avoid FMA or (1.0 + pct) * nvi to keep batch/stream parity.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        // Warmup: wait for the first finite pair, publish initial 1000.0
+        
         if !self.started {
             if close.is_nan() || volume.is_nan() {
                 return None;
@@ -203,15 +203,15 @@ impl NviStream {
             return Some(self.nvi_val);
         }
 
-        // Hot path
+        
         let mut nvi = self.nvi_val;
         if volume < self.prev_volume {
-            // Keep identical operation ordering for bit-for-bit parity
+            
             let pct = (close - self.prev_close) / self.prev_close;
             nvi += nvi * pct;
         }
 
-        // Advance state
+        
         self.nvi_val = nvi;
         self.prev_close = close;
         self.prev_volume = volume;
@@ -222,9 +222,9 @@ impl NviStream {
 
 #[derive(Clone, Debug)]
 pub struct NviBatchOutput {
-    pub values: Vec<f64>, // flattened 1 × cols
-    pub rows: usize,      // 1
-    pub cols: usize,      // data length
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[inline]
@@ -277,8 +277,8 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    // Prefer AVX2 over AVX512 in Auto: AVX512 often downclocks and can underperform for this kernel.
-    // Allow explicit Avx512 selection via API.
+    
+    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
         chosen = Kernel::Avx2;
@@ -383,7 +383,7 @@ pub fn nvi_into_slice(
         }
     }
 
-    // Fill warmup period with NaN
+    
     for v in &mut dst[..first] {
         *v = f64::NAN;
     }
@@ -392,7 +392,7 @@ pub fn nvi_into_slice(
 }
 
 pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [f64]) {
-    // Optimized scalar kernel: single pass, no bounds checks inside the loop.
+    
     debug_assert!(
         close.len() == volume.len() && volume.len() == out.len(),
         "Input slices must all have the same length."
@@ -403,7 +403,7 @@ pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
         return;
     }
 
-    // Start NVI at first valid index
+    
     let mut nvi_val = 1000.0;
 
     unsafe {
@@ -411,27 +411,27 @@ pub fn nvi_scalar(close: &[f64], volume: &[f64], first_valid: usize, out: &mut [
         let vol_ptr = volume.as_ptr();
         let out_ptr = out.as_mut_ptr();
 
-        // Initialize first valid cell (prefix NaNs are managed by caller)
+        
         *out_ptr.add(first_valid) = nvi_val;
 
-        // Early exit if there's no next bar
+        
         let mut i = first_valid + 1;
         if i >= len {
             return;
         }
 
-        // Previous bar state (kept in registers)
+        
         let mut prev_close = *close_ptr.add(i - 1);
         let mut prev_volume = *vol_ptr.add(i - 1);
 
-        // Tight pointer loop with no bound checks inside
+        
         while i < len {
             let c = *close_ptr.add(i);
             let v = *vol_ptr.add(i);
 
-            // Only adjust NVI if volume decreased
+            
             if v < prev_volume {
-                // Keep exact arithmetic as in streaming path (no FMA) to satisfy 1e-9 checks
+                
                 let pct = (c - prev_close) / prev_close;
                 nvi_val += nvi_val * pct;
             }
@@ -457,37 +457,37 @@ pub unsafe fn nvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
     let vol_ptr = volume.as_ptr();
     let out_ptr = out.as_mut_ptr();
 
-    // Start value
+    
     let mut nvi_val = 1000.0;
     *out_ptr.add(first_valid) = nvi_val;
 
-    // Nothing more to do?
+    
     let mut i = first_valid + 1;
     if i >= len {
         return;
     }
 
-    // Process 4 steps per block: compute pct in parallel, apply sequentially
+    
     while i + 3 < len {
-        let curr_c = _mm256_loadu_pd(close_ptr.add(i) as *const f64); // [c[i..i+3]]
-        let prev_c = _mm256_loadu_pd(close_ptr.add(i - 1) as *const f64); // [c[i-1..i+2]]
+        let curr_c = _mm256_loadu_pd(close_ptr.add(i) as *const f64); 
+        let prev_c = _mm256_loadu_pd(close_ptr.add(i - 1) as *const f64); 
 
-        let curr_v = _mm256_loadu_pd(vol_ptr.add(i) as *const f64); // [v[i..i+3]]
-        let prev_v = _mm256_loadu_pd(vol_ptr.add(i - 1) as *const f64); // [v[i-1..i+2]]
+        let curr_v = _mm256_loadu_pd(vol_ptr.add(i) as *const f64); 
+        let prev_v = _mm256_loadu_pd(vol_ptr.add(i - 1) as *const f64); 
 
-        // pct = (curr - prev) / prev
+        
         let delta = _mm256_sub_pd(curr_c, prev_c);
         let pct_raw = _mm256_div_pd(delta, prev_c);
 
-        // mask lanes where volume decreased (curr_v < prev_v); else pct = 0.0
+        
         let mask = _mm256_cmp_pd(curr_v, prev_v, _CMP_LT_OQ);
         let pct_masked = _mm256_and_pd(pct_raw, mask);
 
-        // Spill pcts to stack and apply in-order to preserve scalar rounding
+        
         let mut pcts: [f64; 4] = [0.0; 4];
         _mm256_storeu_pd(pcts.as_mut_ptr(), pct_masked);
 
-        // Sequential updates for exact parity with scalar/streaming path
+        
         nvi_val += nvi_val * pcts[0];
         *out_ptr.add(i) = nvi_val;
 
@@ -503,7 +503,7 @@ pub unsafe fn nvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, out: &
         i += 4;
     }
 
-    // Handle the tail (0..=3 items) scalar, identical semantics
+    
     while i < len {
         let c = *close_ptr.add(i);
         let v = *vol_ptr.add(i);
@@ -538,23 +538,23 @@ pub unsafe fn nvi_avx512(close: &[f64], volume: &[f64], first_valid: usize, out:
     }
 
     while i + 7 < len {
-        let curr_c = _mm512_loadu_pd(close_ptr.add(i) as *const f64); // [c[i..i+7]]
-        let prev_c = _mm512_loadu_pd(close_ptr.add(i - 1) as *const f64); // [c[i-1..i+6]]
+        let curr_c = _mm512_loadu_pd(close_ptr.add(i) as *const f64); 
+        let prev_c = _mm512_loadu_pd(close_ptr.add(i - 1) as *const f64); 
 
-        let curr_v = _mm512_loadu_pd(vol_ptr.add(i) as *const f64); // [v[i..i+7]]
-        let prev_v = _mm512_loadu_pd(vol_ptr.add(i - 1) as *const f64); // [v[i-1..i+6]]
+        let curr_v = _mm512_loadu_pd(vol_ptr.add(i) as *const f64); 
+        let prev_v = _mm512_loadu_pd(vol_ptr.add(i - 1) as *const f64); 
 
         let delta = _mm512_sub_pd(curr_c, prev_c);
         let pct_raw = _mm512_div_pd(delta, prev_c);
 
-        // maskz: if curr_v < prev_v keep pct_raw, else 0.0
+        
         let m = _mm512_cmp_pd_mask(curr_v, prev_v, _CMP_LT_OQ);
         let pct_masked = _mm512_maskz_mov_pd(m, pct_raw);
 
         let mut pcts: [f64; 8] = [0.0; 8];
         _mm512_storeu_pd(pcts.as_mut_ptr(), pct_masked);
 
-        // Apply sequentially to preserve scalar parity
+        
         nvi_val += nvi_val * pcts[0];
         *out_ptr.add(i) = nvi_val;
         nvi_val += nvi_val * pcts[1];
@@ -633,18 +633,18 @@ pub fn nvi_batch_with_kernel(
         });
     }
 
-    // 1×N matrix, prefill warm prefix with NaN without copying the rest.
+    
     let mut buf_mu = make_uninit_matrix(1, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &[first]);
 
-    // Convert to &mut [f64] without copy.
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Compute into row 0.
+    
     let chosen = match k {
-        Kernel::Auto => detect_best_batch_kernel(), // maps to Scalar/Avx2/Avx512 row kernels
+        Kernel::Auto => detect_best_batch_kernel(), 
         other if other.is_batch() => other,
         other => return Err(NviError::InvalidKernelForBatch(other)),
     };
@@ -652,14 +652,14 @@ pub fn nvi_batch_with_kernel(
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => nvi_row_scalar(close, volume, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => nvi_row_scalar(close, volume, first, out), // stubbed
+            Kernel::Avx2 | Kernel::Avx2Batch => nvi_row_scalar(close, volume, first, out), 
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => nvi_row_scalar(close, volume, first, out), // stubbed
+            Kernel::Avx512 | Kernel::Avx512Batch => nvi_row_scalar(close, volume, first, out), 
             _ => unreachable!(),
         }
     }
 
-    // Reclaim Vec<f64> without copy.
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -677,7 +677,7 @@ pub fn nvi_batch_with_kernel(
 #[inline(always)]
 unsafe fn nvi_row_scalar(close: &[f64], volume: &[f64], first: usize, row_out_flat: &mut [f64]) {
     let len = close.len();
-    let out = &mut row_out_flat[..len]; // single row
+    let out = &mut row_out_flat[..len]; 
     let mut nvi_val = 1000.0;
     out[first] = nvi_val;
 
@@ -793,14 +793,14 @@ mod tests {
         let batch_output = nvi_with_kernel(&input, kernel)?.values;
         let mut stream = NviStream::try_new()?;
 
-        // Find first valid index for proper comparison
+        
         let first_valid = close
             .iter()
             .zip(volume.iter())
             .position(|(&c, &v)| !c.is_nan() && !v.is_nan())
             .unwrap_or(0);
 
-        // Use alloc_with_nan_prefix for zero-copy allocation
+        
         let mut stream_values = alloc_with_nan_prefix(close.len(), first_valid);
 
         for (i, (&c, &v)) in close.iter().zip(volume.iter()).enumerate() {
@@ -837,8 +837,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Since NVI has no parameters, we test with different data scenarios
-        // Test with default candles data
+        
+        
         let test_scenarios = vec![
             ("default_candles", NviInput::with_default_candles(&candles)),
             (
@@ -864,12 +864,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -904,7 +904,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(test)]
@@ -915,79 +915,79 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Since NVI has no parameters, we focus on generating various price and volume scenarios
+        
         let strat = (50usize..=500)
             .prop_flat_map(|len| {
                 (
-                    // Generate realistic price data
+                    
                     prop::collection::vec(
                         prop::strategy::Union::new(vec![
-                            (0.001f64..0.1f64).boxed(), // Very small prices
-                            (10f64..10000f64).boxed(),  // Normal prices
-                            (1e6f64..1e8f64).boxed(),   // Very large prices
+                            (0.001f64..0.1f64).boxed(), 
+                            (10f64..10000f64).boxed(),  
+                            (1e6f64..1e8f64).boxed(),   
                         ])
                         .prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    // Generate realistic volume data
+                    
                     prop::collection::vec(
                         prop::strategy::Union::new(vec![
-                            (100f64..1000f64).boxed(), // Small volume
-                            (1000f64..1e6f64).boxed(), // Normal volume
-                            (1e6f64..1e9f64).boxed(),  // Large volume
+                            (100f64..1000f64).boxed(), 
+                            (1000f64..1e6f64).boxed(), 
+                            (1e6f64..1e9f64).boxed(),  
                         ])
                         .prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    // Scenario selector for different volume patterns
+                    
                     0usize..=7,
                 )
             })
             .prop_map(|(mut prices, mut volumes, scenario)| {
-                // Create different test scenarios
+                
                 match scenario {
                     0 => {
-                        // Random realistic data (already generated)
+                        
                     }
                     1 => {
-                        // Constant volume - NVI should never change from 1000.0
+                        
                         let const_vol = volumes[0];
                         volumes.iter_mut().for_each(|v| *v = const_vol);
                     }
                     2 => {
-                        // Always decreasing volume - NVI should track all price changes
+                        
                         volumes.sort_by(|a, b| b.partial_cmp(a).unwrap());
                     }
                     3 => {
-                        // Always increasing volume - NVI should stay at 1000.0
+                        
                         volumes.sort_by(|a, b| a.partial_cmp(b).unwrap());
                     }
                     4 => {
-                        // Alternating volume - predictable pattern
+                        
                         for i in 0..volumes.len() {
                             volumes[i] = if i % 2 == 0 { 1000.0 } else { 500.0 };
                         }
                     }
                     5 => {
-                        // Constant prices with varying volume
+                        
                         let const_price = prices[0];
                         prices.iter_mut().for_each(|p| *p = const_price);
                     }
                     6 => {
-                        // Trending prices with random volume
+                        
                         let start = prices[0];
-                        let trend = 0.01f64; // 1% per bar
+                        let trend = 0.01f64; 
                         for i in 0..prices.len() {
                             prices[i] = start * (1.0 + trend).powi(i as i32);
                         }
                     }
                     7 => {
-                        // Oscillating prices with decreasing volume trend
+                        
                         let base = prices[0];
                         for i in 0..prices.len() {
                             prices[i] = base * (1.0 + 0.1 * ((i as f64 * 0.5).sin()));
                         }
-                        // Add decreasing trend to volume
+                        
                         for i in 0..volumes.len() {
                             volumes[i] *= (1.0 - (i as f64 / volumes.len() as f64) * 0.5);
                         }
@@ -1001,13 +1001,13 @@ mod tests {
             .run(&strat, |(close_data, volume_data, scenario)| {
                 let input = NviInput::from_slices(&close_data, &volume_data, NviParams);
 
-                // Test with the specified kernel
+                
                 let NviOutput { values: out } = nvi_with_kernel(&input, kernel)?;
 
-                // Also get scalar reference for kernel consistency check
+                
                 let NviOutput { values: ref_out } = nvi_with_kernel(&input, Kernel::Scalar)?;
 
-                // Find first valid index
+                
                 let first_valid = close_data
                     .iter()
                     .zip(volume_data.iter())
@@ -1015,10 +1015,10 @@ mod tests {
                     .unwrap_or(close_data.len());
 
                 if first_valid >= close_data.len() {
-                    return Ok(()); // No valid data
+                    return Ok(()); 
                 }
 
-                // Property 1: NVI should start at 1000.0 at first valid index
+                
                 prop_assert!(
                     (out[first_valid] - 1000.0).abs() < 1e-9,
                     "NVI should start at 1000.0, got {} at index {} (scenario {})",
@@ -1027,7 +1027,7 @@ mod tests {
                     scenario
                 );
 
-                // Property 2 & 3: NVI only changes when volume decreases
+                
                 let mut prev_nvi = 1000.0;
                 let mut prev_close = close_data[first_valid];
                 let mut prev_volume = volume_data[first_valid];
@@ -1038,7 +1038,7 @@ mod tests {
                     let curr_nvi = out[i];
 
                     if curr_volume < prev_volume {
-                        // Property 2: NVI should change based on price change
+                        
                         let expected_pct = (curr_close - prev_close) / prev_close;
                         let expected_nvi = prev_nvi + prev_nvi * expected_pct;
 
@@ -1051,7 +1051,7 @@ mod tests {
 							prev_volume, curr_volume
 						);
                     } else {
-                        // Property 3: NVI should stay constant when volume doesn't decrease
+                        
                         prop_assert!(
 							(curr_nvi - prev_nvi).abs() < 1e-9,
 							"NVI should not change when volume doesn't decrease at index {} (scenario {}): \
@@ -1065,7 +1065,7 @@ mod tests {
                     prev_volume = curr_volume;
                 }
 
-                // Property 4: Kernel consistency - all kernels should produce identical results
+                
                 for i in first_valid..close_data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1093,10 +1093,10 @@ mod tests {
                     }
                 }
 
-                // Property 5: Special case validations based on scenario
+                
                 match scenario {
                     1 => {
-                        // Constant volume - NVI should never change from 1000.0
+                        
                         for i in (first_valid + 1)..out.len() {
                             prop_assert!(
 								(out[i] - 1000.0).abs() < 1e-9,
@@ -1106,7 +1106,7 @@ mod tests {
                         }
                     }
                     3 => {
-                        // Always increasing volume - NVI should stay at 1000.0
+                        
                         for i in (first_valid + 1)..out.len() {
                             prop_assert!(
 								(out[i] - 1000.0).abs() < 1e-9,
@@ -1116,13 +1116,13 @@ mod tests {
                         }
                     }
                     5 => {
-                        // Constant prices - NVI should remain constant (no price change means pct_change = 0)
-                        // NVI stays at whatever value it has reached based on volume changes
+                        
+                        
                         if first_valid + 1 < out.len() {
-                            let mut expected_nvi = out[first_valid]; // Start with initial NVI value (1000.0)
+                            let mut expected_nvi = out[first_valid]; 
                             for i in (first_valid + 1)..out.len() {
-                                // With constant prices, pct_change is always 0, so NVI doesn't change
-                                // regardless of volume changes
+                                
+                                
                                 prop_assert!(
 									(out[i] - expected_nvi).abs() < 1e-9,
 									"NVI should stay constant at {} with constant prices, got {} at index {}",
@@ -1134,7 +1134,7 @@ mod tests {
                     _ => {}
                 }
 
-                // Property 6: Streaming should match batch processing
+                
                 let mut stream = NviStream::try_new()?;
                 for i in 0..close_data.len() {
                     if let Some(stream_val) = stream.update(close_data[i], volume_data[i]) {
@@ -1185,26 +1185,26 @@ mod tests {
 
     #[test]
     fn test_nvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct small but non-trivial synthetic data with a NaN warmup
+        
         let len = 256usize;
         let mut close = vec![f64::NAN; len];
         let mut volume = vec![f64::NAN; len];
 
-        // First valid index at 5
+        
         for i in 5..len {
             let t = (i - 5) as f64;
-            // Mildly trending + oscillating close
+            
             close[i] = 100.0 + 0.05 * t + (0.01 * t).sin();
-            // Volume wiggles to trigger both decreases and increases
+            
             volume[i] = 2000.0 + ((i as i64 % 7) as f64 - 3.0) * 40.0;
         }
 
         let input = NviInput::from_slices(&close, &volume, NviParams);
 
-        // Baseline via Vec-returning API
+        
         let baseline = nvi(&input)?.values;
 
-        // Into API writes directly without allocation
+        
         let mut out = vec![0.0; len];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1212,7 +1212,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, emulate parity using the slice API used by the wasm entrypoint
+            
             nvi_into_slice(&mut out, &close, &volume, Kernel::Auto)?;
         }
 
@@ -1283,13 +1283,13 @@ pub fn nvi_batch_py<'py>(
     let volume_slice = volume.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
 
-    // Allocate NumPy buffer once and fill without extra copies.
+    
     let rows = 1usize;
     let cols = close_slice.len();
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute inside GIL-free region. Prefill warm prefix manually since we hold f64, not MaybeUninit.
+    
     py.allow_threads(|| -> Result<(), NviError> {
         if close_slice.len() != volume_slice.len() {
             return Err(NviError::MismatchedLength {
@@ -1314,12 +1314,12 @@ pub fn nvi_batch_py<'py>(
                 valid: cols - first,
             });
         }
-        // Warm prefix NaNs for row 0 only.
+        
         for v in &mut out_slice[..first] {
             *v = f64::NAN;
         }
 
-        // Row compute.
+        
         unsafe { nvi_row_scalar(close_slice, volume_slice, first, out_slice) };
         Ok(())
     })
@@ -1359,9 +1359,9 @@ pub fn nvi_into(
         let close = std::slice::from_raw_parts(close_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
 
-        // Check for aliasing with either input pointer
+        
         if close_ptr == out_ptr as *const f64 || volume_ptr == out_ptr as *const f64 {
-            // Handle aliasing by using a temporary buffer
+            
             let mut temp = vec![0.0; len];
             nvi_into_slice(&mut temp, close, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1409,7 +1409,7 @@ pub fn nvi_batch_into(
     unsafe {
         let close = std::slice::from_raw_parts(close_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
-        let out = std::slice::from_raw_parts_mut(out_ptr, len); // 1×len
+        let out = std::slice::from_raw_parts_mut(out_ptr, len); 
 
         if close.len() != volume.len() {
             return Err(JsValue::from_str("Length mismatch"));
@@ -1423,16 +1423,16 @@ pub fn nvi_batch_into(
             return Err(JsValue::from_str("Not enough valid data"));
         }
 
-        // Warm prefix NaNs then compute row.
+        
         for v in &mut out[..first] {
             *v = f64::NAN;
         }
         nvi_row_scalar(close, volume, first, out);
-        Ok(1) // rows
+        Ok(1) 
     }
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

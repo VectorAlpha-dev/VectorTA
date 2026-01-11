@@ -148,7 +148,7 @@ impl CudaWad {
         }
     }
 
-    // -------- Utilities --------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -213,7 +213,7 @@ impl CudaWad {
         Ok(())
     }
 
-    // -------- Batch (one-series × many-params) --------
+    
     fn prepare_batch_inputs(
         high: &[f32],
         low: &[f32],
@@ -246,7 +246,7 @@ impl CudaWad {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWadError> {
-        // Grid-stride batch kernel: choose a robust grid/block for occupancy
+        
         let func = self
             .module
             .get_function("wad_batch_f32")
@@ -290,7 +290,7 @@ impl CudaWad {
     ) -> Result<DeviceArrayF32, CudaWadError> {
         let series_len = Self::prepare_batch_inputs(high, low, close)?;
 
-        // VRAM check: 3 inputs + output (with overflow checks)
+        
         let required_cells_inputs = 3usize
             .checked_mul(series_len)
             .ok_or_else(|| CudaWadError::InvalidInput("size overflow".into()))?;
@@ -298,21 +298,21 @@ impl CudaWad {
             .checked_mul(series_len)
             .ok_or_else(|| CudaWadError::InvalidInput("size overflow".into()))?;
         let required = (required_cells_inputs + required_cells_output) * std::mem::size_of::<f32>();
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit(required, headroom)?;
 
-        // Upload inputs asynchronously
+        
         let d_high  = unsafe { DeviceBuffer::from_slice_async(high,  &self.stream) }?;
         let d_low   = unsafe { DeviceBuffer::from_slice_async(low,   &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
 
-        // Output buffer
+        
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
         }?;
 
         if n_combos > 1 {
-            // Compute once then broadcast to all rows (WAD rows are identical)
+            
             let mut d_row: DeviceBuffer<f32> = unsafe {
                 DeviceBuffer::uninitialized_async(series_len, &self.stream)
             }?;
@@ -320,11 +320,11 @@ impl CudaWad {
             self.launch_compute_single_row(&d_high, &d_low, &d_close, series_len, &mut d_row)?;
             self.launch_broadcast_row(&d_row, series_len, n_combos, &mut d_out)?;
         } else {
-            // Regular batch kernel (grid-stride over combos)
+            
             self.launch_batch_kernel(&d_high, &d_low, &d_close, series_len, n_combos, &mut d_out)?;
         }
 
-        // Ensure completion before returning
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
     }
@@ -335,7 +335,7 @@ impl CudaWad {
         low: &[f32],
         close: &[f32],
     ) -> Result<DeviceArrayF32, CudaWadError> {
-        // WAD has no parameters; batch rows=1 for parity
+        
         self.run_batch(high, low, close, 1)
     }
 
@@ -363,7 +363,7 @@ impl CudaWad {
         Ok((arr.rows, arr.cols))
     }
 
-    // Back-compat convenience used by existing tests
+    
     pub fn wad_series_dev(
         &self,
         high: &[f32],
@@ -373,7 +373,7 @@ impl CudaWad {
         self.wad_batch_dev(high, low, close)
     }
 
-    // Back-compat: original API expected length on success
+    
     pub fn wad_into_host_f32(
         &self,
         high: &[f32],
@@ -385,7 +385,7 @@ impl CudaWad {
         Ok(cols)
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
     fn prepare_many_series_inputs(
         high_tm: &[f32],
         low_tm: &[f32],
@@ -424,7 +424,7 @@ impl CudaWad {
             .get_function("wad_many_series_one_param_f32")
             .map_err(|_| CudaWadError::MissingKernelSymbol { name: "wad_many_series_one_param_f32" })?;
 
-        // Many-series: one thread per series; grid-stride over series with robust defaults
+        
         let block_x = self.default_block_x("WAD_MS_BLOCK_X", 256);
         let grid_x = self.choose_grid_1d(cols, block_x)?;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -456,7 +456,7 @@ impl CudaWad {
         Ok(())
     }
 
-    // ----- Helpers: device SM count and launch heuristics -----
+    
     #[inline]
     fn sm_count(&self) -> Result<u32, CudaWadError> {
         let dev = Device::get_device(self.device_id)?;
@@ -484,7 +484,7 @@ impl CudaWad {
         Ok(need.max(1).min(target_blocks.max(1)))
     }
 
-    // ----- Optional helpers: compute-once + broadcast for WAD -----
+    
     fn launch_compute_single_row(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -535,7 +535,7 @@ impl CudaWad {
             .checked_mul(n_combos)
             .ok_or_else(|| CudaWadError::InvalidInput("overflow in broadcast size".into()))?;
 
-        // Reuse the main batch block size default; no indicator-specific extra env knob.
+        
         let block_x = self.default_block_x("WAD_BLOCK_X", 256);
         let grid_x = self.choose_grid_1d(total, block_x)?;
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -587,7 +587,7 @@ impl CudaWad {
     }
 }
 
-// ---------- Bench profiles ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

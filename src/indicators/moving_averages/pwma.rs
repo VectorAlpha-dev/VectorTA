@@ -255,13 +255,13 @@ fn pwma_prepare<'a>(
     (
         // data
         &'a [f64],
-        // weights
+        
         Vec<f64>,
-        // period
+        
         usize,
-        // first
+        
         usize,
-        // chosen
+        
         Kernel,
     ),
     PwmaError,
@@ -312,7 +312,7 @@ fn pwma_compute_into(
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => pwma_avx512(data, weights, period, first, out),
 
-            // Fallbacks when AVX code is not compiled in:
+            
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 pwma_scalar(data, weights, period, first, out)
@@ -347,7 +347,7 @@ pub fn pwma_into(input: &PwmaInput, out: &mut [f64]) -> Result<(), PwmaError> {
         return Err(PwmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
     }
 
-    // Prefill warmup prefix using the canonical quiet-NaN pattern.
+    
     let warmup_end = first + period - 1;
     let end = warmup_end.min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -355,7 +355,7 @@ pub fn pwma_into(input: &PwmaInput, out: &mut [f64]) -> Result<(), PwmaError> {
         *v = qnan;
     }
 
-    // Compute directly into the provided buffer
+    
     pwma_compute_into(data, &weights, period, first, chosen, out);
 
     Ok(())
@@ -367,15 +367,15 @@ pub fn pwma_into(input: &PwmaInput, out: &mut [f64]) -> Result<(), PwmaError> {
 pub fn pwma_into_slice(dst: &mut [f64], input: &PwmaInput, kern: Kernel) -> Result<(), PwmaError> {
     let (data, weights, period, first, chosen) = pwma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(PwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
 
-    // Compute PWMA values directly into dst
+    
     pwma_compute_into(data, &weights, period, first, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -403,7 +403,7 @@ pub fn pwma_scalar(data: &[f64], weights: &[f64], period: usize, first: usize, o
             let start = i + 1 - period;
             let d_ptr = d_base.add(start);
 
-            // 4-lane unrolled scalar dot for ILP (low overhead for small periods).
+            
             let mut s0 = 0.0f64;
             let mut s1 = 0.0f64;
             let mut s2 = 0.0f64;
@@ -445,10 +445,10 @@ pub fn pwma_scalar(data: &[f64], weights: &[f64], period: usize, first: usize, o
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn pwma_avx512(data: &[f64], weights: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Prefer AVX-512VL (256-bit EVEX path) on CPUs that support it. On many
-    // modern CPUs (including AMD Zen 4/5), 512-bit ops are split into 256-bit
-    // micro-ops, so a 256-bit dual-accumulator VL path can match or beat the
-    // full 512-bit path without potential frequency side-effects.
+    
+    
+    
+    
     if cfg!(target_feature = "avx512vl") || std::is_x86_feature_detected!("avx512vl") {
         unsafe { pwma_avx512_vl(data, weights, period, first, out) }
     } else if period <= 32 {
@@ -468,9 +468,9 @@ unsafe fn pwma_avx512_vl(
     first: usize,
     out: &mut [f64],
 ) {
-    // 256-bit EVEX path with AVX512VL: dual accumulators, masked tail
+    
     let len = data.len();
-    let vecs = period / 4; // 4 doubles per 256-bit vector
+    let vecs = period / 4; 
     let tail = period % 4;
     let tail_mask: __mmask8 = match tail {
         0 => 0,
@@ -483,7 +483,7 @@ unsafe fn pwma_avx512_vl(
         let mut acc0 = _mm256_setzero_pd();
         let mut acc1 = _mm256_setzero_pd();
 
-        // pairs of 256-bit vectors (8 doubles per iteration)
+        
         let pairs = vecs / 2;
         for p in 0..pairs {
             let base = p * 8;
@@ -496,7 +496,7 @@ unsafe fn pwma_avx512_vl(
             acc1 = _mm256_fmadd_pd(d1, w1, acc1);
         }
 
-        // odd leftover vector
+        
         if (vecs & 1) != 0 {
             let base = pairs * 8;
             let d = _mm256_loadu_pd(data.as_ptr().add(start + base));
@@ -504,14 +504,14 @@ unsafe fn pwma_avx512_vl(
             acc0 = _mm256_fmadd_pd(d, w, acc0);
         }
 
-        // masked tail via AVX512VL
+        
         if tail_mask != 0 {
             let d = _mm256_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + vecs * 4));
             let w = _mm256_maskz_loadu_pd(tail_mask, weights.as_ptr().add(vecs * 4));
             acc0 = _mm256_fmadd_pd(d, w, acc0);
         }
 
-        // horizontal reduce
+        
         let acc = _mm256_add_pd(acc0, acc1);
         let low128 = _mm256_castpd256_pd128(acc);
         let high128 = _mm256_extractf128_pd(acc, 1);
@@ -536,17 +536,17 @@ pub unsafe fn pwma_avx2(
     out: &mut [f64],
 ) {
     let len = data.len();
-    let vecs = period / 4; // AVX2 processes 4 doubles per vector
+    let vecs = period / 4; 
     let tail = period % 4;
 
     for i in (first + period - 1)..len {
         let start = i + 1 - period;
 
-        // Two accumulators to improve ILP
+        
         let mut acc0 = _mm256_setzero_pd();
         let mut acc1 = _mm256_setzero_pd();
 
-        // Process pairs of vectors (8 doubles per iteration)
+        
         let pairs = vecs / 2;
         for p in 0..pairs {
             let base = p * 8;
@@ -559,7 +559,7 @@ pub unsafe fn pwma_avx2(
             acc1 = _mm256_fmadd_pd(d1, w1, acc1);
         }
 
-        // If an odd 256-bit chunk remains, fold it into acc0
+        
         if (vecs & 1) != 0 {
             let base = pairs * 8;
             let d = _mm256_loadu_pd(data.as_ptr().add(start + base));
@@ -567,7 +567,7 @@ pub unsafe fn pwma_avx2(
             acc0 = _mm256_fmadd_pd(d, w, acc0);
         }
 
-        // Sum accumulators and horizontally reduce
+        
         let acc = _mm256_add_pd(acc0, acc1);
         let low128 = _mm256_castpd256_pd128(acc);
         let high128 = _mm256_extractf128_pd(acc, 1);
@@ -575,13 +575,13 @@ pub unsafe fn pwma_avx2(
         let high64 = _mm_unpackhi_pd(sum128, sum128);
         let mut total = _mm_cvtsd_f64(_mm_add_sd(sum128, high64));
 
-        // Scalar tail
+        
         for t in 0..tail {
             let idx = vecs * 4 + t;
             total = (*data.get_unchecked(start + idx)).mul_add(*weights.get_unchecked(idx), total);
         }
 
-        // Streaming store to avoid cache pollution for large outputs
+        
         _mm_stream_sd(out.as_mut_ptr().add(i), _mm_set_sd(total));
     }
 
@@ -602,7 +602,7 @@ pub unsafe fn pwma_avx512_short(
     let tail = period % 8;
     let len = data.len();
 
-    // Create tail mask for AVX512 masked operations
+    
     let tail_mask: __mmask8 = if tail > 0 {
         ((1u8 << tail) - 1) as __mmask8
     } else {
@@ -613,28 +613,28 @@ pub unsafe fn pwma_avx512_short(
         let start = i + 1 - period;
         let mut acc = _mm512_setzero_pd();
 
-        // Process all full vectors
+        
         for v in 0..vecs {
             let d = _mm512_loadu_pd(data.as_ptr().add(start + v * 8));
             let w = _mm512_loadu_pd(weights.as_ptr().add(v * 8));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Process tail with AVX512 masking
+        
         if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(vecs * 8));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Use optimized horizontal reduction intrinsic
+        
         let total = _mm512_reduce_add_pd(acc);
 
-        // Use stream store to avoid cache pollution
+        
         _mm_stream_sd(out.as_mut_ptr().add(i), _mm_set_sd(total));
     }
 
-    // Ensure all stream stores are committed
+    
     _mm_sfence();
 }
 
@@ -652,7 +652,7 @@ pub unsafe fn pwma_avx512_long(
     let full_vecs = period / 8;
     let tail = period % 8;
 
-    // Create tail mask
+    
     let tail_mask: __mmask8 = if tail > 0 {
         ((1u8 << tail) - 1) as __mmask8
     } else {
@@ -662,18 +662,18 @@ pub unsafe fn pwma_avx512_long(
     for i in (first + period - 1)..len {
         let start = i + 1 - period;
 
-        // Use 4 accumulators for maximum ILP with AVX512's 32 registers
+        
         let mut acc0 = _mm512_setzero_pd();
         let mut acc1 = _mm512_setzero_pd();
         let mut acc2 = _mm512_setzero_pd();
         let mut acc3 = _mm512_setzero_pd();
 
-        // Prefetch next window's data
+        
         if i + 1 < len {
             _mm_prefetch(data.as_ptr().add(start + period) as *const i8, _MM_HINT_T0);
         }
 
-        // Process vectors in groups of 4 for better ILP
+        
         let quads = full_vecs / 4;
         let remaining = full_vecs % 4;
 
@@ -695,7 +695,7 @@ pub unsafe fn pwma_avx512_long(
             acc3 = _mm512_fmadd_pd(d3, w3, acc3);
         }
 
-        // Process remaining vectors
+        
         let base = quads * 4 * 8;
         match remaining {
             3 => {
@@ -725,39 +725,39 @@ pub unsafe fn pwma_avx512_long(
             _ => {}
         }
 
-        // Process tail with masking
+        
         if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + full_vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, weights.as_ptr().add(full_vecs * 8));
             acc0 = _mm512_fmadd_pd(d, w, acc0);
         }
 
-        // Combine all accumulators
+        
         let acc = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
 
-        // Use optimized horizontal reduction intrinsic
+        
         let total = _mm512_reduce_add_pd(acc);
 
-        // Use stream store to avoid cache pollution
+        
         _mm_stream_sd(out.as_mut_ptr().add(i), _mm_set_sd(total));
     }
 
-    // Ensure all stream stores are committed
+    
     _mm_sfence();
 }
 
 /// Streaming kernel: Pascal cascade. Exact once warm (no per-tap multiplies).
 #[derive(Debug, Clone)]
 pub struct PwmaStream {
-    period: usize, // window length (m)
-    n: usize,      // m - 1
-    // Per-stage "previous input" for the n cascaded [1, 1] stages.
-    // prev[0] holds previous x_t      (stage 0)
-    // prev[i] holds previous out_(i-1) (stage i)
+    period: usize, 
+    n: usize,      
+    
+    
+    
     prev: Vec<f64>,
-    // Number of samples seen so far (used for warmup gating)
+    
     seen: usize,
-    // Normalization factor = 2^{-n} (precomputed once)
+    
     norm: f64,
 }
 
@@ -772,11 +772,11 @@ impl PwmaStream {
         }
         let n = period.saturating_sub(1);
 
-        // Normalization by 2^n (exact power-of-two scaling).
+        
         let norm = fast_pow2_neg_i32(n as i32);
 
-        // Initialize per-stage memories with NaN so the cascade naturally
-        // suppresses output until warm (seen >= n).
+        
+        
         let mut prev = Vec::with_capacity(n);
         prev.resize(n, f64::NAN);
 
@@ -793,15 +793,15 @@ impl PwmaStream {
     /// (after `period - 1` updates). Before that, returns `None`.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // Fast path for period == 1 (n == 0): PWMA is the sample itself.
+        
         if self.n == 0 {
             return Some(x);
         }
 
-        // Addition-only Pascal cascade:
-        //   a_0 = x_t
-        //   for i = 0..n-1:
-        //       a_{i+1} = a_i + prev[i];  prev[i] <- a_i
+        
+        
+        
+        
         let mut a = x;
         for p in &mut self.prev {
             let out = a + *p;
@@ -809,31 +809,31 @@ impl PwmaStream {
             a = out;
         }
 
-        // Warmup gating: produce output only after n samples observed.
+        
         if self.seen < self.n {
             self.seen += 1;
             return None;
         }
 
-        // Normalize once per sample.
+        
         Some(a * self.norm)
     }
 }
 
 #[inline(always)]
 fn fast_pow2_neg_i32(e: i32) -> f64 {
-    // Returns 2^{-e}. Handles normal & subnormal ranges; falls back if out-of-range.
+    
     if (0..=1023).contains(&e) {
-        // Normal: exponent = 1023 - e, mantissa = 0
+        
         let bits = ((1023 - e) as u64) << 52;
         f64::from_bits(bits)
     } else if (1024..=1074).contains(&e) {
-        // Subnormal: exponent=0, set appropriate mantissa bit.
-        let s = e - 1023; // 1..=51
+        
+        let s = e - 1023; 
         let mant = 1u64 << (52 - s as u32);
         f64::from_bits(mant)
     } else {
-        // Very large e – safe fallback (rare for PWMA periods)
+        
         (2.0f64).powi(-e)
     }
 }
@@ -920,7 +920,7 @@ pub fn expand_grid(r: &PwmaBatchRange) -> Vec<PwmaParams> {
             if step == 0 { return vec![start]; }
             return (start..=end).step_by(step).collect();
         }
-        // reversed bounds supported
+        
         let mut v = Vec::new();
         if step == 0 { v.push(start); return v; }
         let mut cur = start;
@@ -1020,19 +1020,19 @@ fn pwma_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // guard rows*cols overflow
+    
     let _rows_x_cols = rows
         .checked_mul(cols)
         .ok_or(PwmaError::InvalidRange { start: rows, end: cols, step: 0 })?;
-    let mut raw = make_uninit_matrix(rows, cols); // Vec<MaybeUninit<f64>>
-    init_matrix_prefixes(&mut raw, cols, &warm); // write NaN prefixes
+    let mut raw = make_uninit_matrix(rows, cols); 
+    init_matrix_prefixes(&mut raw, cols, &warm); 
 
-    // --- closure that fills a single row -------------------------------------
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = weights.as_ptr().add(row * max_p);
 
-        // reinterpret this row as &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1046,7 +1046,7 @@ fn pwma_batch_inner(
         }
     };
 
-    // --- run the rows in parallel or serial ----------------------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1067,7 +1067,7 @@ fn pwma_batch_inner(
         }
     }
 
-    // --- convert to fully-initialised Vec<f64> without UB --------------------
+    
     use core::mem::ManuallyDrop;
     let mut guard = ManuallyDrop::new(raw);
     let ptr = guard.as_mut_ptr() as *mut f64;
@@ -1107,7 +1107,7 @@ fn pwma_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Ensure caller provided output slice matches rows*cols
+    
     if let Some(expected) = rows.checked_mul(cols) {
         if out.len() != expected {
             return Err(PwmaError::OutputLengthMismatch { expected, got: out.len() });
@@ -1116,7 +1116,7 @@ fn pwma_batch_inner_into(
         return Err(PwmaError::InvalidRange { start: rows, end: cols, step: 0 });
     }
 
-    // Pre-compute all weights
+    
     let rows_x_max = rows
         .checked_mul(max_p)
         .ok_or(PwmaError::InvalidRange { start: rows, end: max_p, step: 0 })?;
@@ -1135,14 +1135,14 @@ fn pwma_batch_inner_into(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // SAFETY: We're reinterpreting the output slice as MaybeUninit
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // Closure that fills a single row
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = weights.as_ptr().add(row * max_p);
@@ -1201,7 +1201,7 @@ unsafe fn pwma_row_scalar(
         let start = i + 1 - period;
         let d_ptr = d_base.add(start);
 
-        // 8-lane unrolled scalar dot for ILP
+        
         let mut s0 = 0.0f64;
         let mut s1 = 0.0f64;
         let mut s2 = 0.0f64;
@@ -1266,7 +1266,7 @@ unsafe fn pwma_row_avx2(
     w_ptr: *const f64,
     out: &mut [f64],
 ) {
-    // Create a slice from the weight pointer for pwma_avx2
+    
     let weights = std::slice::from_raw_parts(w_ptr, period);
     pwma_avx2(data, weights, period, first, out);
 }
@@ -1302,7 +1302,7 @@ unsafe fn pwma_row_avx512_short(
     let vecs = period / 8;
     let tail = period % 8;
 
-    // Create tail mask for AVX512 masked operations
+    
     let tail_mask: __mmask8 = if tail > 0 {
         ((1u8 << tail) - 1) as __mmask8
     } else {
@@ -1313,21 +1313,21 @@ unsafe fn pwma_row_avx512_short(
         let start = i + 1 - period;
         let mut acc = _mm512_setzero_pd();
 
-        // Process full 512-bit vectors
+        
         for v in 0..vecs {
             let d = _mm512_loadu_pd(data.as_ptr().add(start + v * 8));
             let w = _mm512_loadu_pd(w_ptr.add(v * 8));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Process tail with AVX512 masking
+        
         if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(vecs * 8));
             acc = _mm512_fmadd_pd(d, w, acc);
         }
 
-        // Use optimized horizontal reduction intrinsic
+        
         let total = _mm512_reduce_add_pd(acc);
 
         out[i] = total;
@@ -1348,7 +1348,7 @@ unsafe fn pwma_row_avx512_long(
     let full_vecs = period / 8;
     let tail = period % 8;
 
-    // Create tail mask
+    
     let tail_mask: __mmask8 = if tail > 0 {
         ((1u8 << tail) - 1) as __mmask8
     } else {
@@ -1358,18 +1358,18 @@ unsafe fn pwma_row_avx512_long(
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
 
-        // Use 4 accumulators for maximum ILP
+        
         let mut acc0 = _mm512_setzero_pd();
         let mut acc1 = _mm512_setzero_pd();
         let mut acc2 = _mm512_setzero_pd();
         let mut acc3 = _mm512_setzero_pd();
 
-        // Prefetch next window's data
+        
         if i + 1 < data.len() {
             _mm_prefetch(data.as_ptr().add(start + period) as *const i8, _MM_HINT_T0);
         }
 
-        // Process vectors in groups of 4 for better ILP
+        
         let quads = full_vecs / 4;
         let remaining = full_vecs % 4;
 
@@ -1391,7 +1391,7 @@ unsafe fn pwma_row_avx512_long(
             acc3 = _mm512_fmadd_pd(d3, w3, acc3);
         }
 
-        // Process remaining vectors
+        
         let base = quads * 4 * 8;
         match remaining {
             3 => {
@@ -1421,17 +1421,17 @@ unsafe fn pwma_row_avx512_long(
             _ => {}
         }
 
-        // Process tail with masking
+        
         if tail_mask != 0 {
             let d = _mm512_maskz_loadu_pd(tail_mask, data.as_ptr().add(start + full_vecs * 8));
             let w = _mm512_maskz_loadu_pd(tail_mask, w_ptr.add(full_vecs * 8));
             acc0 = _mm512_fmadd_pd(d, w, acc0);
         }
 
-        // Combine all accumulators
+        
         let acc = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
 
-        // Use optimized horizontal reduction intrinsic
+        
         let total = _mm512_reduce_add_pd(acc);
 
         out[i] = total;
@@ -1476,7 +1476,7 @@ fn combination_f64(n: usize, r: usize) -> f64 {
     result
 }
 
-// ---- Tests (macro parity, batch tests, kernel detection) ----
+
 
 #[cfg(test)]
 mod tests {
@@ -1666,7 +1666,7 @@ mod tests {
             }
         }
     }
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_pwma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1674,34 +1674,34 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations
-        // PWMA typically uses smaller periods than other MAs
+        
+        
         let test_cases = vec![
-            PwmaParams { period: Some(5) },  // default
-            PwmaParams { period: Some(3) },  // minimum practical
-            PwmaParams { period: Some(10) }, // medium
-            PwmaParams { period: Some(15) }, // larger
-            PwmaParams { period: Some(7) },  // different value
-            PwmaParams { period: Some(20) }, // large for PWMA
-            PwmaParams { period: Some(2) },  // very small
-            PwmaParams { period: Some(12) }, // another medium
-            PwmaParams { period: None },     // None value (use default)
+            PwmaParams { period: Some(5) },  
+            PwmaParams { period: Some(3) },  
+            PwmaParams { period: Some(10) }, 
+            PwmaParams { period: Some(15) }, 
+            PwmaParams { period: Some(7) },  
+            PwmaParams { period: Some(20) }, 
+            PwmaParams { period: Some(2) },  
+            PwmaParams { period: Some(12) }, 
+            PwmaParams { period: None },     
         ];
 
         for params in test_cases {
             let input = PwmaInput::from_candles(&candles, "close", params);
             let output = pwma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1710,7 +1710,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1719,7 +1719,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1733,7 +1733,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_pwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1747,25 +1747,25 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Load real market data for realistic testing
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_data = &candles.close;
 
-        // Strategy: test various parameter combinations with real data slices
-        // PWMA typically uses smaller periods due to Pascal coefficient growth
+        
+        
         let strat = (
-            2usize..=30, // period (PWMA typically uses smaller periods)
-            0usize..close_data.len().saturating_sub(200), // starting index
-            100usize..=200, // length of data slice to use
+            2usize..=30, 
+            0usize..close_data.len().saturating_sub(200), 
+            100usize..=200, 
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(period, start_idx, slice_len)| {
-                // Ensure we have valid slice bounds
+                
                 let end_idx = (start_idx + slice_len).min(close_data.len());
                 if end_idx <= start_idx || end_idx - start_idx < period + 10 {
-                    return Ok(()); // Skip invalid combinations
+                    return Ok(()); 
                 }
 
                 let data_slice = &close_data[start_idx..end_idx];
@@ -1774,24 +1774,24 @@ mod tests {
                 };
                 let input = PwmaInput::from_slice(data_slice, params);
 
-                // Test the specified kernel
+                
                 let result = pwma_with_kernel(&input, kernel);
 
-                // Also compute with scalar kernel for reference
+                
                 let scalar_result = pwma_with_kernel(&input, Kernel::Scalar);
 
-                // Both should succeed or fail together
+                
                 match (result, scalar_result) {
                     (Ok(PwmaOutput { values: out }), Ok(PwmaOutput { values: ref_out })) => {
-                        // Verify output length
+                        
                         prop_assert_eq!(out.len(), data_slice.len());
                         prop_assert_eq!(ref_out.len(), data_slice.len());
 
-                        // Find first non-NaN value
+                        
                         let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
                         let expected_warmup = first + period - 1;
 
-                        // Check NaN pattern during warmup
+                        
                         for i in 0..expected_warmup {
                             prop_assert!(
                                 out[i].is_nan(),
@@ -1801,10 +1801,10 @@ mod tests {
                             );
                         }
 
-                        // Test Pascal weight properties
+                        
                         let weights = pascal_weights(period).unwrap();
 
-                        // Verify weights sum to 1.0 (already normalized)
+                        
                         let weight_sum: f64 = weights.iter().sum();
                         prop_assert!(
                             (weight_sum - 1.0).abs() < 1e-10,
@@ -1812,7 +1812,7 @@ mod tests {
                             weight_sum
                         );
 
-                        // Verify symmetry of Pascal weights
+                        
                         for i in 0..period / 2 {
                             let diff = (weights[i] - weights[period - 1 - i]).abs();
                             prop_assert!(
@@ -1825,16 +1825,16 @@ mod tests {
                             );
                         }
 
-                        // Test specific properties for valid outputs
+                        
                         for i in expected_warmup..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            // Both should be valid
+                            
                             prop_assert!(!y.is_nan(), "Unexpected NaN at index {}", i);
                             prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
 
-                            // Kernel consistency check
+                            
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
 
@@ -1850,7 +1850,7 @@ mod tests {
                                 continue;
                             }
 
-                            // ULP difference check for floating-point precision
+                            
                             let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                             prop_assert!(
                                 (y - r).abs() <= 1e-9 || ulp_diff <= 5,
@@ -1861,7 +1861,7 @@ mod tests {
                                 ulp_diff
                             );
 
-                            // Output bounds check - PWMA output should be within window bounds
+                            
                             if i >= period - 1 {
                                 let window_start = i + 1 - period;
                                 let window = &data_slice[window_start..=i];
@@ -1869,7 +1869,7 @@ mod tests {
                                 let max_val =
                                     window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-                                // PWMA is a weighted average, so it must be within min/max
+                                
                                 prop_assert!(
                                     y >= min_val - 1e-9 && y <= max_val + 1e-9,
                                     "PWMA value {} outside window bounds [{}, {}] at index {}",
@@ -1881,7 +1881,7 @@ mod tests {
                             }
                         }
 
-                        // Test constant data property
+                        
                         let const_data = vec![42.0; period + 10];
                         let const_input = PwmaInput::from_slice(&const_data, params);
                         if let Ok(PwmaOutput { values: const_out }) =
@@ -1899,7 +1899,7 @@ mod tests {
                         }
                     }
                     (Err(e1), Err(e2)) => {
-                        // Both kernels should fail with similar errors
+                        
                         prop_assert_eq!(
                             std::mem::discriminant(&e1),
                             std::mem::discriminant(&e2),
@@ -1964,7 +1964,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1972,19 +1972,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
-        // PWMA typically uses smaller periods, so adjust ranges accordingly
+        
+        
         let batch_configs = vec![
-            // Original test case
-            (3, 10, 1), // Comprehensive small range
-            // Edge cases
-            (5, 5, 0),   // Single parameter (default)
-            (2, 8, 2),   // Very small periods
-            (10, 20, 5), // Medium periods for PWMA
-            (4, 12, 4),  // Different step
-            (3, 15, 3),  // Wider range
-            (6, 18, 6),  // Different pattern
-            (2, 10, 1),  // Full small range
+            
+            (3, 10, 1), 
+            
+            (5, 5, 0),   
+            (2, 8, 2),   
+            (10, 20, 5), 
+            (4, 12, 4),  
+            (3, 15, 3),  
+            (6, 18, 6),  
+            (2, 10, 1),  
         ];
 
         for (p_start, p_end, p_step) in batch_configs {
@@ -1993,9 +1993,9 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2005,7 +2005,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -2014,7 +2014,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -2023,7 +2023,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -2037,7 +2037,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2048,21 +2048,21 @@ mod tests {
 
     #[test]
     fn test_pwma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253usize {
-            // gentle trend + periodic component
+            
             let x = (i as f64 * 0.07).sin() * 2.5 + (i as f64) * 0.01 + 100.0;
             data.push(x);
         }
 
         let input = PwmaInput::from_slice(&data, PwmaParams::default());
 
-        // Baseline via the Vec-returning API
+        
         let baseline = pwma(&input)?;
 
-        // Preallocate output buffer and compute via the new into API
+        
         let mut out = vec![0.0; data.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2070,12 +2070,12 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native pwma_into is not available; fall back to slice variant
+            
             pwma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.values.len(), out.len());
-        // NaN-aware equality check (prefer exact equality for finite values)
+        
         for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
             let both_nan = a.is_nan() && b.is_nan();
             assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");
@@ -2251,7 +2251,7 @@ pub fn pwma_cuda_many_series_one_param_dev_py(
     make_pwma_device_array_py(device_id, inner)
 }
 
-// ---------------- PWMA Python device handle (CAI v3 + DLPack) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Pwma", unsendable)]
 pub struct PwmaDeviceArrayF32Py {

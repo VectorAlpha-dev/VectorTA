@@ -244,7 +244,7 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         other => other,
     };
 
-    // Calculate warmup period with proper handling of leading NaNs
+    
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let warmup_period = first + length;
     let mut up = alloc_with_nan_prefix(len, warmup_period);
@@ -265,7 +265,7 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         }
     }
 
-    // Re-mask warmup period after kernel computation
+    
     let warm = warmup_period.min(len);
     for v in &mut up[..warm] {
         *v = f64::NAN;
@@ -309,7 +309,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         "Slice lengths must match"
     );
 
-    // Precompute scale = 100 / length
+    
     let scale_100 = 100.0 / (length as f64);
 
     #[inline(always)]
@@ -320,16 +320,16 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
 
     #[inline(always)]
     fn aroon_percent(dist: usize, scale_100: f64) -> f64 {
-        // Clamp to [0, 100] to avoid tiny negative values from FP rounding when `dist == length`.
+        
         let v = 100.0 - (dist as f64) * scale_100;
         v.max(0.0)
     }
 
-    // Fast path: if all inputs are finite, avoid per-step invalid window bookkeeping
-    // (which otherwise forces extra "leave" loads and bit checks each iteration).
-    //
-    // This preserves outputs exactly for the all-finite case and falls back to the
-    // NaN-aware implementation when needed.
+    
+    
+    
+    
+    
     let mut all_finite = true;
     unsafe {
         let hp = high.as_ptr();
@@ -351,9 +351,9 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             let up_ptr = up.as_mut_ptr();
             let dn_ptr = down.as_mut_ptr();
 
-            // No outputs when `length >= len` (matches the original control flow).
+            
             if length < len {
-                // Initialize at i = length, window [0..=length].
+                
                 let i0 = length;
                 let mut maxi = 0usize;
                 let mut mini = 0usize;
@@ -378,14 +378,14 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 *up_ptr.add(i0) = aroon_percent(i0 - maxi, scale_100);
                 *dn_ptr.add(i0) = aroon_percent(i0 - mini, scale_100);
 
-                // Main loop.
+                
                 let mut i = i0 + 1;
                 while i < len {
                     let start = i - length;
                     let h = *hp.add(i);
                     let l = *lp.add(i);
 
-                    // Highest high
+                    
                     if maxi < start {
                         maxi = start;
                         max = *hp.add(maxi);
@@ -403,7 +403,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                         max = h;
                     }
 
-                    // Lowest low
+                    
                     if mini < start {
                         mini = start;
                         min = *lp.add(mini);
@@ -432,12 +432,12 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         return;
     }
 
-    // Match Tulip-style O(1) amortized max/min maintenance without allocating.
-    //
-    // Window is `[i-length..=i]` (length+1 samples). Tie rules preserve the earliest
-    // extreme (strict comparisons), matching the historical scalar scan behavior.
-    //
-    // If any (high, low) pair in the window is non-finite, output NaN for both.
+    
+    
+    
+    
+    
+    
     let window = length + 1;
     let mut invalid_count: usize = 0;
 
@@ -492,7 +492,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             }
             have_extremes = true;
         } else {
-            // Highest high
+            
             if maxi < start {
                 maxi = start;
                 max = high[maxi];
@@ -508,7 +508,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 max = h;
             }
 
-            // Lowest low
+            
             if mini < start {
                 mini = start;
                 min = low[mini];
@@ -667,7 +667,7 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             }
 
             if !invalid {
-                // Scalar tail and finiteness check
+                
                 while j < window {
                     let h = *base_h.add(j);
                     let l = *base_l.add(j);
@@ -694,7 +694,7 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                // Compute distances from end of window and use FMA form
+                
                 let dist_hi = length - best_h_off;
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
@@ -847,7 +847,7 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                // Compute distances from end of window and use FMA form
+                
                 let dist_hi = length - best_h_off;
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
@@ -896,21 +896,21 @@ pub unsafe fn aroon_avx512_long(
 /// Streaming: O(1) amortized via monotonic deques; strict >/< tie rules (earlier extreme wins).
 #[derive(Debug)]
 pub struct AroonStream {
-    length: usize,   // N
-    buf_size: usize, // N + 1 (window width)
-    head: usize,     // ring write index for flags
-    count: usize,    // how many bars we've seen, capped at buf_size
-    t: usize,        // absolute tick index (0-based)
-    scale_100: f64,  // precomputed 100.0 / N
+    length: usize,   
+    buf_size: usize, 
+    head: usize,     
+    count: usize,    
+    t: usize,        
+    scale_100: f64,  
 
-    // Keep a ring of "invalid" flags so we can know in O(1) if the window contains NaN/Inf:
-    // 0 = finite pair, 1 = invalid pair
+    
+    
     flags: Vec<u8>,
     invalid_count: usize,
 
-    // Monotonic deques: store (value, index) pairs.
-    // maxq: decreasing by value → front is highest high in window
-    // minq: increasing by value → front is lowest low in window
+    
+    
+    
     maxq: VecDeque<(f64, usize)>,
     minq: VecDeque<(f64, usize)>,
 }
@@ -958,7 +958,7 @@ impl AroonStream {
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
         let i = self.t;
 
-        // If the window is already full, evict the oldest flag from the rolling invalid count.
+        
         if self.count == self.buf_size {
             let old = self.flags[self.head] as usize;
             self.invalid_count -= old;
@@ -966,11 +966,11 @@ impl AroonStream {
             self.count += 1;
         }
 
-        // New flag for this pair: 1 if either is non-finite, else 0
+        
         let invalid = !(high.is_finite() && low.is_finite());
         let new_flag = invalid as u8;
 
-        // Write flag into ring and advance head (branch instead of modulo to avoid /)
+        
         self.flags[self.head] = new_flag;
         self.invalid_count += new_flag as usize;
         self.head += 1;
@@ -978,8 +978,8 @@ impl AroonStream {
             self.head = 0;
         }
 
-        // Evict outdated indices from fronts (anything strictly before i - length)
-        // Window is [i - length, i], size = length + 1
+        
+        
         let earliest = i.saturating_sub(self.length);
         while let Some(&(_, idx)) = self.maxq.front() {
             if idx < earliest {
@@ -996,9 +996,9 @@ impl AroonStream {
             }
         }
 
-        // Push the new samples into monotonic deques (strict comparisons preserve tie rules: earlier wins)
+        
         if !invalid {
-            // For highs: keep deque values strictly decreasing (older equal kept → earlier extreme wins)
+            
             while let Some(&(v, _)) = self.maxq.back() {
                 if high > v {
                     self.maxq.pop_back();
@@ -1008,7 +1008,7 @@ impl AroonStream {
             }
             self.maxq.push_back((high, i));
 
-            // For lows: keep deque values strictly increasing (older equal kept)
+            
             while let Some(&(v, _)) = self.minq.back() {
                 if low < v {
                     self.minq.pop_back();
@@ -1019,7 +1019,7 @@ impl AroonStream {
             self.minq.push_back((low, i));
         }
 
-        // Ready to produce?
+        
         let out = if self.count == self.buf_size && self.invalid_count == 0 {
             debug_assert!(self.maxq.front().is_some() && self.minq.front().is_some());
             let max_idx = self.maxq.front().unwrap().1;
@@ -1035,7 +1035,7 @@ impl AroonStream {
             None
         };
 
-        // Advance absolute index
+        
         self.t = i + 1;
         out
     }
@@ -1239,20 +1239,20 @@ fn aroon_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    // Step 1: Allocate uninitialized matrices
+    
     let mut buf_up_mu = make_uninit_matrix(rows, cols);
     let mut buf_down_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: `first` already computed above
+    
 
-    // Step 3: Calculate warmup periods for each row (honoring leading NaNs)
+    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first.saturating_add(c.length.unwrap())).collect();
 
-    // Step 4: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_up_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut buf_down_mu, cols, &warmup_periods);
 
-    // Step 4: Convert to mutable slices for computation
+    
     let mut buf_up_guard = ManuallyDrop::new(buf_up_mu);
     let mut buf_down_guard = ManuallyDrop::new(buf_down_mu);
     let up: &mut [f64] = unsafe {
@@ -1265,10 +1265,10 @@ fn aroon_batch_inner(
         )
     };
 
-    // Step 5: Perform batch computation into the buffers
+    
     aroon_batch_inner_into(high, low, sweep, kern, parallel, up, down)?;
 
-    // Step 6: Re-mask warmup periods after computation
+    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         let warm_end = (row_start + warmup).min(row_start + cols);
@@ -1278,7 +1278,7 @@ fn aroon_batch_inner(
         }
     }
 
-    // Step 7: Reclaim as Vec<f64>
+    
     let up_values = unsafe {
         Vec::from_raw_parts(
             buf_up_guard.as_mut_ptr() as *mut f64,
@@ -1337,7 +1337,7 @@ fn aroon_batch_inner_into(
             end: sweep.length.1,
             step: sweep.length.2,
         })?;
-    // Validate output buffer sizes
+    
     if out_up.len() != expected || out_down.len() != expected {
         return Err(AroonError::OutputLengthMismatch {
             expected,
@@ -1345,13 +1345,13 @@ fn aroon_batch_inner_into(
         });
     }
 
-    // Find first valid pair for leading NaN handling
+    
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
 
-    // Calculate warmup periods for each row (honoring leading NaNs)
+    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 
-    // Initialize NaN prefixes for each row in the provided buffers
+    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
@@ -1401,7 +1401,7 @@ fn aroon_batch_inner_into(
         }
     }
 
-    // Re-mask warmup periods after computation
+    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         let warm_end = (row_start + warmup).min(row_start + cols);
@@ -1414,7 +1414,7 @@ fn aroon_batch_inner_into(
     Ok(combos)
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "aroon_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, length_range, device_id=0))]
@@ -1888,32 +1888,32 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            AroonParams::default(),            // length: 14
-            AroonParams { length: Some(1) },   // minimum length
-            AroonParams { length: Some(2) },   // very small length
-            AroonParams { length: Some(5) },   // small length
-            AroonParams { length: Some(10) },  // medium length
-            AroonParams { length: Some(20) },  // medium length
-            AroonParams { length: Some(50) },  // large length
-            AroonParams { length: Some(100) }, // very large length
-            AroonParams { length: Some(200) }, // extra large length
+            AroonParams::default(),            
+            AroonParams { length: Some(1) },   
+            AroonParams { length: Some(2) },   
+            AroonParams { length: Some(5) },   
+            AroonParams { length: Some(10) },  
+            AroonParams { length: Some(20) },  
+            AroonParams { length: Some(50) },  
+            AroonParams { length: Some(100) }, 
+            AroonParams { length: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = AroonInput::from_candles(&candles, params.clone());
             let output = aroon_with_kernel(&input, kernel)?;
 
-            // Check aroon_up values
+            
             for (i, &val) in output.aroon_up.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1954,15 +1954,15 @@ mod tests {
                 }
             }
 
-            // Check aroon_down values
+            
             for (i, &val) in output.aroon_down.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2012,7 +2012,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2024,11 +2024,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: generate length and OHLC data
+        
         let strat = (1usize..=100).prop_flat_map(|length| {
             (
                 prop::collection::vec(
-                    // Generate OHLC bars with realistic constraints
+                    
                     (-1e6f64..1e6f64)
                         .prop_filter("finite", |x| x.is_finite())
                         .prop_flat_map(|base| {
@@ -2064,23 +2064,23 @@ mod tests {
                     aroon_down: ref_down,
                 } = aroon_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output structure
+                
                 prop_assert_eq!(out_up.len(), highs.len());
                 prop_assert_eq!(out_down.len(), lows.len());
 
-                // Property 2: Warmup period (first `length` values are NaN)
+                
                 for i in 0..length.min(out_up.len()) {
                     prop_assert!(out_up[i].is_nan());
                     prop_assert!(out_down[i].is_nan());
                 }
 
-                // Property 3: Valid values after warmup
+                
                 for i in length..out_up.len() {
                     prop_assert!(!out_up[i].is_nan());
                     prop_assert!(!out_down[i].is_nan());
                 }
 
-                // Property 4: Range bounds [0, 100]
+                
                 for i in length..out_up.len() {
                     prop_assert!(
                         out_up[i] >= 0.0 && out_up[i] <= 100.0,
@@ -2096,10 +2096,10 @@ mod tests {
                     );
                 }
 
-                // Property 5: Mathematical formula verification
-                // Spot check a few calculated values
+                
+                
                 for i in length..out_up.len().min(length + 5) {
-                    // Find the position of highest high in window
+                    
                     let window_start = i - length;
                     let mut max_val = highs[window_start];
                     let mut max_idx = window_start;
@@ -2140,13 +2140,13 @@ mod tests {
                     );
                 }
 
-                // Property 6: Edge case - length = 1
+                
                 if length == 1 {
-                    // With length=1, the window size is actually 2 (indices [i-1, i])
-                    // The value depends on whether current bar's high/low is strictly greater/less
-                    // than the previous bar
+                    
+                    
+                    
                     for i in 1..out_up.len().min(10) {
-                        // Aroon values with length=1 can only be 0 or 100
+                        
                         prop_assert!(
                             out_up[i] == 0.0 || out_up[i] == 100.0,
                             "With length=1, aroon_up must be exactly 0 or 100, got {} at {}",
@@ -2160,9 +2160,9 @@ mod tests {
                             i
                         );
 
-                        // Additional check: verify the logic
+                        
                         if i > 0 && i < highs.len() {
-                            // If current high > previous high, aroon_up should be 100
+                            
                             if highs[i] > highs[i - 1] {
                                 prop_assert_eq!(
                                     out_up[i],
@@ -2174,7 +2174,7 @@ mod tests {
                                     highs[i - 1]
                                 );
                             }
-                            // If current low < previous low, aroon_down should be 100
+                            
                             if lows[i] < lows[i - 1] {
                                 prop_assert_eq!(
                                     out_down[i],
@@ -2190,13 +2190,13 @@ mod tests {
                     }
                 }
 
-                // Property 7: Constant data behavior
+                
                 let is_constant = highs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && lows.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if is_constant && length > 1 {
-                    // With constant prices, all positions are equally "recent"
-                    // Aroon should decay to 0 as we get past the initial period
+                    
+                    
                     for i in (length * 2).min(out_up.len())..(length * 3).min(out_up.len()) {
                         prop_assert!(
                             out_up[i] <= 100.0 / length as f64 + 1e-9,
@@ -2213,7 +2213,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Cross-kernel validation
+                
                 prop_assert_eq!(out_up.len(), ref_up.len());
                 prop_assert_eq!(out_down.len(), ref_down.len());
 
@@ -2223,7 +2223,7 @@ mod tests {
                     let y_down = out_down[i];
                     let r_down = ref_down[i];
 
-                    // Check NaN/finite consistency
+                    
                     if !y_up.is_finite() || !r_up.is_finite() {
                         prop_assert_eq!(y_up.to_bits(), r_up.to_bits());
                     } else {
@@ -2253,12 +2253,12 @@ mod tests {
                     }
                 }
 
-                // Property 9: Monotonicity - Aroon decreases as distance from extreme increases
-                // Test a few windows to verify this property
+                
+                
                 for i in (length + 10)..(out_up.len().min(length + 15)) {
                     let window_start = i - length;
 
-                    // Find position of highest high
+                    
                     let mut max_idx = window_start;
                     for j in (window_start + 1)..=i {
                         if highs[j] > highs[max_idx] {
@@ -2266,9 +2266,9 @@ mod tests {
                         }
                     }
 
-                    // If the high is getting older (further from current), Aroon up should decrease
+                    
                     if i + 1 < out_up.len() && max_idx < i {
-                        // Next window: if same high is still max but now older
+                        
                         let next_window_start = i + 1 - length;
                         let mut next_max_idx = next_window_start;
                         for j in (next_window_start + 1)..=i + 1 {
@@ -2277,7 +2277,7 @@ mod tests {
                             }
                         }
 
-                        // If the same extreme is still the max but older, Aroon should decrease
+                        
                         if next_max_idx == max_idx {
                             prop_assert!(
                                 out_up[i + 1] <= out_up[i] + 1e-9,
@@ -2289,7 +2289,7 @@ mod tests {
                     }
                 }
 
-                // Property 10: High/Low relationship integrity
+                
                 for i in 0..highs.len() {
                     prop_assert!(
                         highs[i] >= lows[i],
@@ -2300,7 +2300,7 @@ mod tests {
                     );
                 }
 
-                // Property 11: Poison value detection (debug mode only)
+                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out_up.iter().enumerate() {
@@ -2384,7 +2384,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_aroon_tests!(check_aroon_property);
 
-    // Test that AllValuesNaN error is properly emitted
+    
     fn check_aroon_all_nan_error(
         test_name: &str,
         kernel: Kernel,
@@ -2406,7 +2406,7 @@ mod tests {
         Ok(())
     }
 
-    // Test that leading NaNs are properly handled in warmup calculation
+    
     fn check_aroon_leading_nan_warmup(
         test_name: &str,
         kernel: Kernel,
@@ -2426,7 +2426,7 @@ mod tests {
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon_with_kernel(&input, kernel)?;
 
-        // First 5 values are NaN (leading) + 3 for length = 8 warmup period
+        
         for i in 0..8 {
             assert!(
                 result.aroon_up[i].is_nan(),
@@ -2442,7 +2442,7 @@ mod tests {
             );
         }
 
-        // Values after warmup should be valid
+        
         for i in 8..high.len() {
             assert!(
                 !result.aroon_up[i].is_nan(),
@@ -2459,7 +2459,7 @@ mod tests {
         Ok(())
     }
 
-    // Test that NaN within window produces NaN output
+    
     fn check_aroon_nan_in_window(
         test_name: &str,
         kernel: Kernel,
@@ -2486,9 +2486,9 @@ mod tests {
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon_with_kernel(&input, kernel)?;
 
-        // When NaN is at index 5, it affects outputs at indices 3, 4, 5, 6, 7, 8
-        // (window size is length+1=4, so NaN affects 4 positions: 5-3 through 5)
-        // Actually window affects positions 5 through 8 (where the NaN is in the window)
+        
+        
+        
         for i in 5..=8 {
             if i < result.aroon_up.len() {
                 assert!(
@@ -2506,7 +2506,7 @@ mod tests {
             }
         }
 
-        // Position 9 should be valid (NaN no longer in window)
+        
         if result.aroon_up.len() > 9 {
             assert!(
                 !result.aroon_up[9].is_nan(),
@@ -2521,7 +2521,7 @@ mod tests {
         Ok(())
     }
 
-    // Test that streaming handles NaN in window correctly
+    
     fn check_aroon_streaming_nan_window(
         test_name: &str,
         kernel: Kernel,
@@ -2530,25 +2530,25 @@ mod tests {
 
         let mut stream = AroonStream::try_new(AroonParams { length: Some(3) })?;
 
-        // Feed some valid data
-        assert_eq!(stream.update(100.0, 90.0), None); // Not enough data yet
-        assert_eq!(stream.update(110.0, 95.0), None); // Not enough data yet
-        assert_eq!(stream.update(105.0, 92.0), None); // Not enough data yet
+        
+        assert_eq!(stream.update(100.0, 90.0), None); 
+        assert_eq!(stream.update(110.0, 95.0), None); 
+        assert_eq!(stream.update(105.0, 92.0), None); 
 
-        // Now we have length+1=4 values, should get a result
+        
         let result = stream.update(115.0, 98.0);
         assert!(result.is_some(), "Expected Some result after 4 values");
 
-        // Feed a NaN
+        
         let result_with_nan = stream.update(f64::NAN, 100.0);
         assert_eq!(result_with_nan, None, "Expected None when NaN is in window");
 
-        // Continue feeding data, should still get None while NaN is in window
+        
         assert_eq!(stream.update(120.0, 105.0), None);
         assert_eq!(stream.update(125.0, 108.0), None);
         assert_eq!(stream.update(130.0, 110.0), None);
 
-        // After length+1=4 values total, NaN should be out of window
+        
         let result_after_nan = stream.update(135.0, 112.0);
         assert!(
             result_after_nan.is_some(),
@@ -2589,18 +2589,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (length_start, length_end, length_step)
-            (1, 10, 1),     // Small lengths, every value
-            (2, 20, 2),     // Small to medium, even values
-            (5, 50, 5),     // Medium range, step 5
-            (10, 100, 10),  // Medium to large, step 10
-            (14, 14, 0),    // Static default length
-            (50, 200, 50),  // Large lengths only
-            (1, 5, 1),      // Very small lengths only
-            (100, 200, 50), // Very large lengths
-            (3, 30, 3),     // Multiples of 3
+            
+            (1, 10, 1),     
+            (2, 20, 2),     
+            (5, 50, 5),     
+            (10, 100, 10),  
+            (14, 14, 0),    
+            (50, 200, 50),  
+            (1, 5, 1),      
+            (100, 200, 50), 
+            (3, 30, 3),     
         ];
 
         for (cfg_idx, &(l_start, l_end, l_step)) in test_configs.iter().enumerate() {
@@ -2609,7 +2609,7 @@ mod tests {
                 .length_range(l_start, l_end, l_step)
                 .apply_candles(&c)?;
 
-            // Check aroon_up values
+            
             for (idx, &val) in output.up.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2620,7 +2620,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2667,7 +2667,7 @@ mod tests {
                 }
             }
 
-            // Check aroon_down values
+            
             for (idx, &val) in output.down.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2678,7 +2678,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2734,7 +2734,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2760,17 +2760,17 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    // Parity test: native into() matches Vec-returning API exactly (NaN == NaN)
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_aroon_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a small-but-nontrivial input with leading NaNs to exercise warmup handling
+        
         let len = 256usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
-        // 8 leading NaNs
+        
         for _ in 0..8 { high.push(f64::NAN); low.push(f64::NAN); }
-        // Deterministic synthetic data
+        
         for i in 8..len {
             let base = 100.0 + (i as f64) * 0.017;
             high.push(base + 0.75 + (i as f64).sin() * 0.01);
@@ -2779,10 +2779,10 @@ mod tests {
 
         let input = AroonInput::from_slices_hl(&high, &low, AroonParams::default());
 
-        // Baseline via existing API
+        
         let baseline = aroon(&input)?;
 
-        // Preallocated outputs for into-API
+        
         let mut up = vec![0.0; len];
         let mut down = vec![0.0; len];
         aroon_into(&input, &mut up, &mut down)?;
@@ -2909,7 +2909,7 @@ pub fn aroon_py<'py>(
     };
     let input = AroonInput::from_slices_hl(h, l, params);
 
-    // compute in Rust, then move Vecs zero-copy into NumPy
+    
     let out = py
         .allow_threads(|| aroon_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

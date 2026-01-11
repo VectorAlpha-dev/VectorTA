@@ -24,14 +24,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -49,12 +49,12 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         
         assert.strictEqual(result.length, data.length, 'Result length should match input length');
         
-        // Check warmup period ((period-1)*3 = 6 for period=3)
+        
         for (let i = 0; i < 6; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN during warmup`);
         }
         
-        // Check that remaining values are not NaN
+        
         for (let i = 6; i < result.length; i++) {
             assert(!isNaN(result[i]), `Index ${i} should not be NaN after warmup`);
         }
@@ -85,14 +85,14 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     test('error handling - invalid period', () => {
         const data = new Float64Array([1, 2, 3, 4, 5]);
         
-        // Period exceeds data length
+        
         assert.throws(
             () => wasm.tema_js(data, 6),
             /Invalid period/,
             'Should throw error when period exceeds data length'
         );
         
-        // Period is zero
+        
         assert.throws(
             () => wasm.tema_js(data, 0),
             /Invalid period/,
@@ -101,7 +101,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
     
     test('error handling - not enough valid data', () => {
-        // First 8 values are NaN, only 2 valid values, but need period 9
+        
         const data = new Float64Array([NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1, 2]);
         const period = 9;
         
@@ -118,8 +118,8 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         
         const result = wasm.tema_js(data, period);
         
-        // First valid index is 2, TEMA warmup is (period-1)*3 = 3
-        // So first valid output is at index 2+3 = 5
+        
+        
         for (let i = 0; i < 5; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN`);
         }
@@ -133,7 +133,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const period = 9;
         
         const result = wasm.tema_js(close, period);
-        // Match Rust unit test tolerance (<= 1e-9)
+        
         await compareWithRust('tema', result, 'close', { period }, 1e-9);
     });
     
@@ -147,16 +147,16 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const maxPeriod = 15;
         const stepPeriod = 2;
         
-        // Use the deprecated API for backward compatibility test
+        
         const values = wasm.tema_batch_js(data, minPeriod, maxPeriod, stepPeriod);
         
-        // Create metadata manually since metadata_js was removed
+        
         const metadata = [];
         for (let p = minPeriod; p <= maxPeriod; p += stepPeriod) {
             metadata.push(p);
         }
         
-        // Expected periods: 5, 7, 9, 11, 13, 15
+        
         const expectedPeriods = [];
         for (let p = minPeriod; p <= maxPeriod; p += stepPeriod) {
             expectedPeriods.push(p);
@@ -168,12 +168,12 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         assert.strictEqual(metadata.length, rows, 'Metadata length should match number of periods');
         assert.strictEqual(values.length, rows * cols, 'Values array size should be rows*cols');
         
-        // Verify each row matches individual calculation
+        
         for (let i = 0; i < expectedPeriods.length; i++) {
             const period = expectedPeriods[i];
             const individual = wasm.tema_js(data, period);
             
-            // Extract row from batch result
+            
             const row = new Float64Array(cols);
             for (let j = 0; j < cols; j++) {
                 row[j] = values[i * cols + j];
@@ -189,18 +189,18 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             data[i] = i + 1;
         }
         
-        // Test different periods
+        
         const periods = [3, 5, 7, 9];
         for (const period of periods) {
             const result = wasm.tema_js(data, period);
             const warmup = (period - 1) * 3;
             
-            // Check warmup period
+            
             for (let i = 0; i < warmup; i++) {
                 assert(isNaN(result[i]), `Period ${period}: Index ${i} should be NaN`);
             }
             
-            // Check values after warmup
+            
             for (let i = warmup; i < result.length; i++) {
                 assert(!isNaN(result[i]), `Period ${period}: Index ${i} should not be NaN`);
             }
@@ -208,15 +208,15 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
     
     test('edge cases', () => {
-        // Period equals data length
+        
         const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         const result = wasm.tema_js(data, 10);
         
-        // All but possibly last value should be NaN
-        // Warmup is (10-1)*3 = 27, which exceeds data length
+        
+        
         assertAllNaN(result, 'All values should be NaN when warmup exceeds data length');
         
-        // Period 1 returns input as-is
+        
         const data2 = new Float64Array([1, 2, 3]);
         const result2 = wasm.tema_js(data2, 1);
         assertArrayClose(result2, data2, 1e-10, 'Period 1 should return input as-is');
@@ -236,7 +236,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         assert.strictEqual(result.length, data.length, 'Result length should match input');
         assert(elapsed < 1000, `Should process 100k elements in under 1 second, took ${elapsed}ms`);
         
-        // Verify warmup period
+        
         const warmup = (period - 1) * 3;
         for (let i = 0; i < warmup; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN`);
@@ -260,7 +260,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         
         const result = wasm.tema_js(close, expected.defaultParams.period);
         
-        // Check last 5 values match expected
+        
         const last5 = result.slice(-5);
         assertArrayClose(
             last5,
@@ -269,7 +269,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             "TEMA last 5 values mismatch"
         );
         
-        // Verify warmup period
+        
         const warmup = expected.warmupPeriod;
         for (let i = 0; i < warmup; i++) {
             assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
@@ -280,12 +280,12 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
     
     test('batch metadata structure', () => {
-        // Test with the new ergonomic API (need at least 15 data points for period 15)
+        
         const result = wasm.tema_batch(new Float64Array(20), {
             period_range: [5, 15, 2]
         });
         
-        // Should have periods: 5, 7, 9, 11, 13, 15
+        
         const expectedPeriods = [5, 7, 9, 11, 13, 15];
         assert.strictEqual(result.combos.length, expectedPeriods.length);
         
@@ -300,7 +300,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             data[i] = Math.sin(i * 0.1) * 10 + 50;
         }
         
-        // Single period (step = 0)
+        
         const singleBatch = wasm.tema_batch_js(data, 9, 9, 0);
         const singleCalc = wasm.tema_js(data, 9);
         
@@ -317,7 +317,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const values = wasm.tema_batch_js(data, 3, 7, 2);
         const periods = [3, 5, 7];
         
-        // Check each period has correct warmup
+        
         for (let row = 0; row < periods.length; row++) {
             const period = periods[row];
             const warmup = (period - 1) * 3;
@@ -334,7 +334,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
     
     test('very small dataset', () => {
-        // Test with minimum size for different periods
+        
         for (const period of [1, 2, 3, 4, 5]) {
             const data = new Float64Array(period);
             for (let i = 0; i < period; i++) {
@@ -342,11 +342,11 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             }
             
             if (period === 1) {
-                // Period 1 should work and return input
+                
                 const result = wasm.tema_js(data, period);
                 assertArrayClose(result, data, 1e-10, 'Period 1 should return input');
             } else {
-                // Should work but may have all NaN
+                
                 const result = wasm.tema_js(data, period);
                 assert.strictEqual(result.length, data.length);
                 
@@ -358,7 +358,7 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         }
     });
 
-    // New API tests
+    
     test('TEMA zero-copy API', () => {
         const data = new Float64Array(100);
         for (let i = 0; i < 100; i++) {
@@ -366,35 +366,35 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         }
         const period = 14;
 
-        // Allocate buffer
+        
         const ptr = wasm.tema_alloc(data.length);
         assert(ptr !== 0, 'Failed to allocate memory');
 
         try {
-            // Create view into WASM memory
+            
             const memView = new Float64Array(
                 wasm.__wasm.memory.buffer,
                 ptr,
                 data.length
             );
 
-            // Copy data into WASM memory
+            
             memView.set(data);
 
-            // Compute TEMA in-place
+            
             wasm.tema_into(ptr, ptr, data.length, period);
 
-            // Verify results match regular API
+            
             const regularResult = wasm.tema_js(data, period);
             for (let i = 0; i < data.length; i++) {
                 if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                    continue; // Both NaN is OK
+                    continue; 
                 }
                 assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                        `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
             }
         } finally {
-            // Always free memory
+            
             wasm.tema_free(ptr, data.length);
         }
     });
@@ -403,27 +403,27 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
         const close = new Float64Array(testData.close.slice(0, 50));
         
         const result = wasm.tema_batch(close, {
-            period_range: [5, 15, 5]  // 5, 10, 15
+            period_range: [5, 15, 5]  
         });
 
-        // Check structure
+        
         assert(result.values, 'Should have values array');
         assert(result.combos, 'Should have combos array');
         assert(typeof result.rows === 'number', 'Should have rows count');
         assert(typeof result.cols === 'number', 'Should have cols count');
 
-        // Check dimensions
+        
         assert.strictEqual(result.rows, 3);
         assert.strictEqual(result.cols, 50);
         assert.strictEqual(result.combos.length, 3);
         assert.strictEqual(result.values.length, 150);
 
-        // Check combos structure
+        
         assert.strictEqual(result.combos[0].period, 5);
         assert.strictEqual(result.combos[1].period, 10);
         assert.strictEqual(result.combos[2].period, 15);
 
-        // Verify against individual calculations
+        
         for (let i = 0; i < result.combos.length; i++) {
             const period = result.combos[i].period;
             const individual = wasm.tema_js(close, period);
@@ -439,20 +439,20 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             data[i] = Math.random() * 100;
         }
 
-        const periods = { start: 5, end: 15, step: 5 }; // 3 periods
+        const periods = { start: 5, end: 15, step: 5 }; 
         const numCombos = 3;
         const totalSize = numCombos * data.length;
 
-        // Allocate input and output buffers
+        
         const inPtr = wasm.tema_alloc(data.length);
         const outPtr = wasm.tema_alloc(totalSize);
 
         try {
-            // Copy input data
+            
             const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
             inView.set(data);
 
-            // Run batch computation
+            
             const rows = wasm.tema_batch_into(
                 inPtr, outPtr, data.length,
                 periods.start, periods.end, periods.step
@@ -460,10 +460,10 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
 
             assert.strictEqual(rows, numCombos, 'Should return correct number of rows');
 
-            // Verify results
+            
             const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
             
-            // Compare with ergonomic API
+            
             const ergonomicResult = wasm.tema_batch(data, {
                 period_range: [periods.start, periods.end, periods.step]
             });
@@ -485,10 +485,10 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
             wasm.tema_into(0, 0, 10, 9);
         }, /null pointer/i);
 
-        // Test with allocated memory but invalid parameters
+        
         const ptr = wasm.tema_alloc(10);
         try {
-            // Invalid period
+            
             assert.throws(() => {
                 wasm.tema_into(ptr, ptr, 10, 0);
             }, /Invalid period/);
@@ -498,25 +498,25 @@ test.describe('TEMA (Triple Exponential Moving Average)', () => {
     });
 
     test('TEMA batch memory leak prevention', () => {
-        // Allocate and free multiple times to ensure no leaks
+        
         const sizes = [100, 1000, 10000];
         
         for (const size of sizes) {
             const ptr = wasm.tema_alloc(size);
             assert(ptr !== 0, `Failed to allocate ${size} elements`);
             
-            // Write pattern to verify memory
+            
             const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
             for (let i = 0; i < Math.min(10, size); i++) {
                 memView[i] = i * 1.5;
             }
             
-            // Verify pattern
+            
             for (let i = 0; i < Math.min(10, size); i++) {
                 assert.strictEqual(memView[i], i * 1.5, `Memory at ${i} should match pattern`);
             }
             
-            // Free memory
+            
             wasm.tema_free(ptr, size);
         }
     });

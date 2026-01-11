@@ -1,16 +1,16 @@
-// Integration tests for CUDA ADOSC kernels
 
-use my_project::indicators::adosc::{
+
+use vector_ta::indicators::adosc::{
     adosc_batch_with_kernel, AdoscBatchRange, AdoscInput, AdoscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaAdosc;
+use vector_ta::cuda::CudaAdosc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -72,7 +72,7 @@ fn adosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-3; // f32 EMA recurrence tolerance
+    let tol = 2e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -117,7 +117,7 @@ fn adosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let short = 5usize;
     let long = 21usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![0.0f64; rows * cols];
     for s in 0..cols {
         let mut h = vec![0.0f64; rows];
@@ -136,7 +136,7 @@ fn adosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             long_period: Some(long),
         };
         let input = AdoscInput::from_slices(&h, &l, &c, &v, params);
-        let out = my_project::indicators::adosc::adosc(&input)?.values;
+        let out = vector_ta::indicators::adosc::adosc(&input)?.values;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out[t];
         }

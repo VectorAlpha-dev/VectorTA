@@ -3,18 +3,18 @@ use std::process::Command;
 use std::path::PathBuf;
 
 fn main() {
-    // Avoid Cargo's default "rerun if any file in the package changes" behavior,
-    // which requires scanning the entire repo and can fail on Windows if any
-    // directory/file is ACL-restricted (os error 5). Keep rebuild triggers narrow.
+    
+    
+    
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=kernels/cuda");
     println!("cargo:rerun-if-changed=kernels/ptx");
 
-    // When the crate feature `cuda` is enabled, stage prebuilt PTX into OUT_DIR so
-    // dependents don't need nvcc/CUDA Toolkit installed just to build the crate.
-    //
-    // Maintainers can opt-in to nvcc compilation by enabling `cuda-build-ptx`.
-    // Cargo exposes active features to build.rs via env vars like CARGO_FEATURE_*.
+    
+    
+    
+    
+    
     if env::var("CARGO_FEATURE_CUDA").is_ok() {
         if env::var("CARGO_FEATURE_CUDA_BUILD_PTX").is_ok() {
             compile_cuda_kernels();
@@ -23,9 +23,9 @@ fn main() {
         }
     }
 
-    // Detect whether we're running on a nightly toolchain and expose a cfg flag.
-    // This lets the library enable nightly-only features (AVX512, portable_simd)
-    // only when the compiler actually supports them.
+    
+    
+    
     if is_nightly() {
         println!("cargo:rustc-cfg=rustc_is_nightly");
     }
@@ -99,7 +99,7 @@ Enable `--features cuda-build-ptx` to compile PTX with nvcc.",
 
 fn compile_cuda_kernels() {
     println!("cargo:rerun-if-changed=kernels/cuda");
-    // Re-run on environment changes that affect CUDA build behavior
+    
     println!("cargo:rerun-if-env-changed=CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=CUDA_ARCHS");
     println!("cargo:rerun-if-env-changed=CUDA_FILTER");
@@ -109,13 +109,13 @@ fn compile_cuda_kernels() {
     println!("cargo:rerun-if-env-changed=CUDA_DEBUG");
     println!("cargo:rerun-if-env-changed=CUDA_FAST_MATH");
     println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILD_PTX_DIR");
-    // Placeholder PTX on fail is disabled for focused CUDA development.
+    
 
     let cuda_path = find_cuda_path();
-    // No runtime linkage to cudart is required; PTX is JIT-loaded at runtime.
-    // Leave link directives out to avoid coupling to a specific toolkit layout.
+    
+    
 
-    // Existing helpers
+    
     compile_alma_kernel(&cuda_path);
     compile_cwma_kernel(&cuda_path);
     compile_epma_kernel(&cuda_path);
@@ -131,8 +131,8 @@ fn compile_cuda_kernels() {
     compile_supersmoother_3_pole_kernel(&cuda_path);
     compile_wto_kernel(&cuda_path);
 
-    // Additional kernels required by wrappers under feature `cuda`
-    // Moving averages (broad set)
+    
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/buff_averages_kernel.cu",
@@ -243,7 +243,7 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/linearreg_intercept_kernel.cu",
         "linearreg_intercept_kernel.ptx",
     );
-    // Linear Regression Slope
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/linearreg_slope_kernel.cu",
@@ -384,13 +384,13 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/vidya_kernel.cu",
         "vidya_kernel.ptx",
     );
-    // VWMACD (Volume-Weighted MACD)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/vwmacd_kernel.cu",
         "vwmacd_kernel.ptx",
     );
-    // AVSL (Anti-Volume Stop Loss)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/avsl_kernel.cu",
@@ -421,26 +421,26 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/otto_kernel.cu",
         "otto_kernel.ptx",
     );
-    // MAB
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/mab_kernel.cu",
         "mab_kernel.ptx",
     );
-    // RSMK
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/rsmk_kernel.cu",
         "rsmk_kernel.ptx",
     );
-    // Mean Absolute Deviation
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/mean_ad_kernel.cu",
         "mean_ad_kernel.ptx",
     );
 
-    // MAC-Z (ZVWAP + MACD/Stddev composite)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/macz_kernel.cu",
@@ -451,14 +451,14 @@ fn compile_cuda_kernels() {
         "kernels/cuda/moving_averages/qstick_kernel.cu",
         "qstick_kernel.ptx",
     );
-    // OTT (composite indicator; kernels consume either MA or compute VAR inline)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/moving_averages/ott_kernel.cu",
         "ott_kernel.ptx",
     );
 
-    // Non-MA
+    
     compile_kernel(&cuda_path, "kernels/cuda/wad_kernel.cu", "wad_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/var_kernel.cu", "var_kernel.ptx");
     compile_kernel(
@@ -506,28 +506,28 @@ fn compile_cuda_kernels() {
         "kernels/cuda/oscillators/rsx_kernel.cu",
         "rsx_kernel.ptx",
     );
-    // SRSI
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/srsi_kernel.cu",
         "srsi_kernel.ptx",
     );
-    // VOSC (Volume Oscillator)
+    
     compile_kernel(&cuda_path, "kernels/cuda/vosc_kernel.cu", "vosc_kernel.ptx");
-    // SafeZoneStop (trend stop indicator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/safezonestop_kernel.cu",
         "safezonestop_kernel.ptx",
     );
-    // ROCR (Rate of Change Ratio)
+    
     compile_kernel(&cuda_path, "kernels/cuda/rocr_kernel.cu", "rocr_kernel.ptx");
     compile_kernel(
         &cuda_path,
         "kernels/cuda/nadaraya_watson_envelope_kernel.cu",
         "nadaraya_watson_envelope_kernel.ptx",
     );
-    // MFI (oscillator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/mfi_kernel.cu",
@@ -603,7 +603,7 @@ fn compile_cuda_kernels() {
         "kernels/cuda/oscillators/reverse_rsi_kernel.cu",
         "reverse_rsi_kernel.ptx",
     );
-    // RSI (Relative Strength Index)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/rsi_kernel.cu",
@@ -654,19 +654,19 @@ fn compile_cuda_kernels() {
         "kernels/cuda/oscillators/dec_osc_kernel.cu",
         "dec_osc_kernel.ptx",
     );
-    // Fisher Transform (oscillator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/fisher_kernel.cu",
         "fisher_kernel.ptx",
     );
-    // IFT RSI (oscillator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/ift_rsi_kernel.cu",
         "ift_rsi_kernel.ptx",
     );
-    // Ultimate Oscillator
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/oscillators/ultosc_kernel.cu",
@@ -723,19 +723,19 @@ fn compile_cuda_kernels() {
         "kernels/cuda/alphatrend_kernel.cu",
         "alphatrend_kernel.ptx",
     );
-    // Price transforms
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/medprice_kernel.cu",
         "medprice_kernel.ptx",
     );
-    // Band-Pass
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/bandpass_kernel.cu",
         "bandpass_kernel.ptx",
     );
-    // Aroon (trend indicator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/aroon_kernel.cu",
@@ -749,13 +749,13 @@ fn compile_cuda_kernels() {
     compile_kernel(&cuda_path, "kernels/cuda/voss_kernel.cu", "voss_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/cksp_kernel.cu", "cksp_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/emd_kernel.cu", "emd_kernel.ptx");
-    // MinMax (local extrema)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/minmax_kernel.cu",
         "minmax_kernel.ptx",
     );
-    // Additional top-level kernels
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/bollinger_bands_width_kernel.cu",
@@ -782,7 +782,7 @@ fn compile_cuda_kernels() {
         "kernels/cuda/oscillators/kvo_kernel.cu",
         "kvo_kernel.ptx",
     );
-    // NATR
+    
     compile_kernel(&cuda_path, "kernels/cuda/natr_kernel.cu", "natr_kernel.ptx");
     compile_kernel(
         &cuda_path,
@@ -794,19 +794,19 @@ fn compile_cuda_kernels() {
         "kernels/cuda/net_myrsi_kernel.cu",
         "net_myrsi_kernel.ptx",
     );
-    // Percentile Nearest Rank
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/percentile_nearest_rank_kernel.cu",
         "percentile_nearest_rank_kernel.ptx",
     );
-    // PRB (Polynomial Regression Bands)
+    
     compile_kernel(&cuda_path, "kernels/cuda/prb_kernel.cu", "prb_kernel.ptx");
-    // VI (Vortex Indicator)
+    
     compile_kernel(&cuda_path, "kernels/cuda/vi_kernel.cu", "vi_kernel.ptx");
-    // VPCI (Volume Price Confirmation Index)
+    
     compile_kernel(&cuda_path, "kernels/cuda/vpci_kernel.cu", "vpci_kernel.ptx");
-    // Mod God Mode (composite oscillator)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/mod_god_mode_kernel.cu",
@@ -828,53 +828,53 @@ fn compile_cuda_kernels() {
         "kernels/cuda/fvg_trailing_stop_kernel.cu",
         "fvg_trailing_stop_kernel.ptx",
     );
-    // TTM Trend
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/ttm_trend_kernel.cu",
         "ttm_trend_kernel.ptx",
     );
-    // NVI
+    
     compile_kernel(&cuda_path, "kernels/cuda/nvi_kernel.cu", "nvi_kernel.ptx");
-    // PVI
+    
     compile_kernel(&cuda_path, "kernels/cuda/pvi_kernel.cu", "pvi_kernel.ptx");
-    // VPT
+    
     compile_kernel(&cuda_path, "kernels/cuda/vpt_kernel.cu", "vpt_kernel.ptx");
-    // SuperTrend
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/supertrend_kernel.cu",
         "supertrend_kernel.ptx",
     );
-    // Medium Absolute Deviation (MEDIUM_AD)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/medium_ad_kernel.cu",
         "medium_ad_kernel.ptx",
     );
-    // DI (+DI/-DI)
+    
     compile_kernel(&cuda_path, "kernels/cuda/di_kernel.cu", "di_kernel.ptx");
-    // ATR
+    
     compile_kernel(&cuda_path, "kernels/cuda/atr_kernel.cu", "atr_kernel.ptx");
-    // Chande (Chandelier Exit)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/chande_kernel.cu",
         "chande_kernel.ptx",
     );
-    // CVI (Chaikin's Volatility)
+    
     compile_kernel(&cuda_path, "kernels/cuda/cvi_kernel.cu", "cvi_kernel.ptx");
-    // DVDIQQE
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/dvdiqqe_kernel.cu",
         "dvdiqqe_kernel.ptx",
     );
-    // ER (Kaufman Efficiency Ratio)
+    
     compile_kernel(&cuda_path, "kernels/cuda/er_kernel.cu", "er_kernel.ptx");
-    // PFE (Polarized Fractal Efficiency)
+    
     compile_kernel(&cuda_path, "kernels/cuda/pfe_kernel.cu", "pfe_kernel.ptx");
-    // Keltner (combine kernel)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/keltner_kernel.cu",
@@ -894,57 +894,57 @@ fn compile_cuda_kernels() {
     );
     compile_kernel(&cuda_path, "kernels/cuda/dx_kernel.cu", "dx_kernel.ptx");
     compile_kernel(&cuda_path, "kernels/cuda/eri_kernel.cu", "eri_kernel.ptx");
-    // OBV (On-Balance Volume)
+    
     compile_kernel(&cuda_path, "kernels/cuda/obv_kernel.cu", "obv_kernel.ptx");
-    // HalfTrend indicator
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/halftrend_kernel.cu",
         "halftrend_kernel.ptx",
     );
-    // Pivot indicator
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/pivot_kernel.cu",
         "pivot_kernel.ptx",
     );
-    // Ulcer Index (UI)
+    
     compile_kernel(&cuda_path, "kernels/cuda/ui_kernel.cu", "ui_kernel.ptx");
-    // StdDev (rolling standard deviation)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/stddev_kernel.cu",
         "stddev_kernel.ptx",
     );
-    // Donchian Channels (upper/middle/lower)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/donchian_kernel.cu",
         "donchian_kernel.ptx",
     );
-    // Trend/strength
+    
     compile_kernel(&cuda_path, "kernels/cuda/adxr_kernel.cu", "adxr_kernel.ptx");
-    // Correlation (high vs low)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/correl_hl_kernel.cu",
         "correl_hl_kernel.ptx",
     );
-    // Elder's Force Index (EFI)
+    
     compile_kernel(&cuda_path, "kernels/cuda/efi_kernel.cu", "efi_kernel.ptx");
-    // Market Facilitation Index (marketefi)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/marketefi_kernel.cu",
         "marketefi_kernel.ptx",
     );
-    // Kurtosis (excess kurtosis)
+    
     compile_kernel(
         &cuda_path,
         "kernels/cuda/kurtosis_kernel.cu",
         "kurtosis_kernel.ptx",
     );
-    // Low Pass Channel (LPC)
+    
     compile_kernel(&cuda_path, "kernels/cuda/lpc_kernel.cu", "lpc_kernel.ptx");
 }
 
@@ -956,11 +956,11 @@ fn find_cuda_path() -> String {
                 use std::fs;
                 let base = "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA";
                 if let Ok(entries) = fs::read_dir(base) {
-                    // Pick highest version directory (e.g., v13.0 preferred over v12.3)
+                    
                     let mut best: Option<(u32, u32, String)> = None;
                     for e in entries.flatten() {
                         if let Ok(name) = e.file_name().into_string() {
-                            // Expect names like "v13.0", "v12.3"
+                            
                             if let Some(stripped) = name.strip_prefix('v') {
                                 let mut it = stripped.split('.');
                                 let major = it.next().and_then(|s| s.parse::<u32>().ok());
@@ -984,7 +984,7 @@ fn find_cuda_path() -> String {
                         return path;
                     }
                 }
-                // Fallback to a reasonable default if discovery fails
+                
                 "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0".to_string()
             } else {
                 "/usr/local/cuda".to_string()
@@ -1104,7 +1104,7 @@ fn compile_wto_kernel(cuda_path: &str) {
 fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
     use std::process::Command;
 
-    // Allow overriding the kernels root directory
+    
     let src_path = if let Ok(root) = env::var("CUDA_KERNEL_DIR") {
         let root = root.trim_end_matches(['/', '\\']);
         let prefix = "kernels/cuda/";
@@ -1119,7 +1119,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     println!("cargo:rerun-if-changed={}", src_path);
 
-    // Optional filter: only compile kernels whose path contains any of these substrings
+    
     if let Ok(filt) = env::var("CUDA_FILTER") {
         let mut any = false;
         for tok in filt.split(|c: char| c == ',' || c.is_ascii_whitespace()) {
@@ -1131,7 +1131,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         }
         if !any {
             eprintln!("Skipping {} due to CUDA_FILTER", rel_src);
-            // Emit a tiny placeholder PTX so include_str! still succeeds for other wrappers.
+            
             let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
             let ptx_path = out_dir.join(ptx_name);
             let placeholder = 
@@ -1149,7 +1149,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         );
     }
 
-    // Resolve nvcc: NVCC env var wins; else cuda_path/bin/nvcc; else rely on PATH
+    
     let nvcc = if let Ok(nvcc_env) = env::var("NVCC") {
         nvcc_env
     } else if cfg!(target_os = "windows") {
@@ -1162,15 +1162,15 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     let mut cmd = Command::new(&nvcc);
 
-    // Arch selection: first non-empty from CUDA_ARCHS, else CUDA_ARCH, else default compute_89
+    
     fn normalize_arch(s: &str) -> String {
         let t = s.trim();
         if t.is_empty() {
             return String::new();
         }
-        // Accept forms: 89, 8.9, sm_89, compute_89
+        
         if t.starts_with("sm_") {
-            // Prefer compute_XX for -ptx
+            
             return t.replacen("sm_", "compute_", 1);
         }
         if t.starts_with("compute_") {
@@ -1180,7 +1180,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         if digits.len() >= 2 {
             return format!("compute_{}{}", &digits[0..1], &digits[1..2]);
         }
-        // Fallback: as-is
+        
         t.to_string()
     }
 
@@ -1213,7 +1213,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         "-O3",
     ]);
 
-    // CUDA_FAST_MATH=1 adds fast math; =0 disables
+    
     match env::var("CUDA_FAST_MATH").as_deref() {
         Ok("0") => {}
         _ => {
@@ -1221,13 +1221,13 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         }
     }
 
-    // Debug line info when requested
+    
     if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
         cmd.arg("-lineinfo");
     }
 
-    // No per‑indicator compile‑time overrides. HMA fast paths are now enabled
-    // by kernel defaults or internal heuristics; see kernels/cuda/moving_averages/hma_kernel.cu.
+    
+    
 
     cmd.args(&[
         "-arch",
@@ -1237,7 +1237,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         &src_path,
     ]);
 
-    // Extra NVCC_ARGS passthrough
+    
     if let Ok(extra) = env::var("NVCC_ARGS") {
         for tok in extra.split_whitespace() {
             if !tok.is_empty() {
@@ -1259,7 +1259,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
 
     let mut output = cmd.output().expect("Failed to execute nvcc");
 
-    // If arch unsupported, retry with compute_80
+    
     if !output.status.success() {
         let out_s = String::from_utf8_lossy(&output.stdout);
         let err_s = String::from_utf8_lossy(&output.stderr);
@@ -1286,7 +1286,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
             if env::var("CUDA_DEBUG").ok().as_deref() == Some("1") {
                 cmd2.arg("-lineinfo");
             }
-            // No per‑indicator overrides in fallback path either.
+            
             cmd2.args(&[
                 "-arch",
                 "compute_80",
@@ -1318,7 +1318,7 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
 
-        // Placeholder PTX emission removed (focus on strict CUDA builds).
+        
 
         if cfg!(target_os = "windows")
             && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'")
@@ -1338,8 +1338,8 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         ptx_path.display()
     );
 
-    // Optional: copy compiled PTX into a committed "prebuilt" directory in the repo.
-    // This is intended for maintainers, not for normal builds.
+    
+    
     if let Ok(prebuild_dir) = env::var("VECTOR_TA_PREBUILD_PTX_DIR") {
         let prebuild_dir = PathBuf::from(prebuild_dir);
         std::fs::create_dir_all(&prebuild_dir).expect("create VECTOR_TA_PREBUILD_PTX_DIR");
@@ -1391,4 +1391,4 @@ fn find_vs_installation() -> Result<String, ()> {
     Err(())
 }
 
-// Note: kept intentionally strict; no placeholder PTX emission path.
+

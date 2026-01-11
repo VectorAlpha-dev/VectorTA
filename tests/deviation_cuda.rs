@@ -1,13 +1,13 @@
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
-use my_project::indicators::deviation::{
+use vector_ta::indicators::deviation::{
     deviation_batch_with_kernel, DeviationBatchRange, DeviationBuilder, DeviationParams,
 };
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaDeviation};
+use vector_ta::cuda::{cuda_available, CudaDeviation};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -107,7 +107,7 @@ fn deviation_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         devtype: Some(0),
     };
 
-    // CPU reference per column
+    
     let mut cpu = vec![f32::NAN; rows * cols];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

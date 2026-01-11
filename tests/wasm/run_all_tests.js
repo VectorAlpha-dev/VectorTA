@@ -28,8 +28,8 @@ function checkWasmBuilt() {
 }
 
 function installDependencies() {
-    // Offline-friendly: test_utils.js no longer needs external deps.
-    // Skip npm install to avoid network requirements in CI/agent runs.
+    
+    
     const nodeModulesPath = path.join(__dirname, 'node_modules');
     if (!fs.existsSync(nodeModulesPath)) {
         console.log('[wasm-tests] Skipping npm install (no external deps required)');
@@ -46,7 +46,7 @@ async function runTests() {
     console.log('Running WASM binding tests...');
     const startTime = Date.now();
     
-    // Get all test files
+    
     const testDir = __dirname;
     const testFiles = fs.readdirSync(testDir)
         .filter(f => f.startsWith('test_') && f.endsWith('.js'))
@@ -54,55 +54,55 @@ async function runTests() {
     
     console.log(`Found ${testFiles.length} test files`);
     
-    // Build test command
+    
     const args = process.argv.slice(2);
     let cmd = 'node --experimental-wasm-modules --test';
     
-    // Add verbose flag if requested
+    
     if (args.includes('--verbose') || args.includes('-v')) {
         cmd += ' --test-reporter=spec';
     } else {
         cmd += ' --test-reporter=dot';
     }
     
-    // Filter by pattern if provided
+    
     const pattern = args.find(arg => !arg.startsWith('-'));
     if (pattern) {
-        // Check if it's a specific test file
+        
         const testFile = `test_${pattern}.js`;
         if (testFiles.includes(testFile)) {
             cmd += ` "${path.join(testDir, testFile)}"`;
             console.log(`Running specific test file: ${testFile}`);
         } else {
-            // Use as pattern
+            
             cmd += ` --test-name-pattern="${pattern}"`;
             cmd += ' ' + testFiles.map(f => `"${path.join(testDir, f)}"`).join(' ');
             console.log(`Running tests matching pattern: ${pattern}`);
         }
     } else {
-        // Run all test files (with proper quoting for paths with spaces)
+        
         cmd += ' ' + testFiles.map(f => `"${path.join(testDir, f)}"`).join(' ');
     }
     
     try {
-        // For better stability with concurrent cargo builds, run tests in smaller batches
-        const batchSize = 5; // Run 5 test files at a time
+        
+        const batchSize = 5; 
         const testFilePaths = testFiles.map(f => path.join(testDir, f));
         
         if (pattern && testFiles.includes(`test_${pattern}.js`)) {
-            // Single file case
+            
             execSync(cmd, { stdio: 'inherit' });
         } else if (testFilePaths.length <= batchSize) {
-            // Small number of tests, run all at once
+            
             execSync(cmd, { stdio: 'inherit' });
         } else {
-            // Run tests in batches
+            
             for (let i = 0; i < testFilePaths.length; i += batchSize) {
                 const batch = testFilePaths.slice(i, i + batchSize);
                 const batchCmd = `node --experimental-wasm-modules --test ${args.includes('--verbose') || args.includes('-v') ? '--test-reporter=spec' : '--test-reporter=dot'} ${batch.map(f => `"${f}"`).join(' ')}`;
                 
                 if (i > 0) {
-                    process.stdout.write('\n'); // Add newline between batches
+                    process.stdout.write('\n'); 
                 }
                 
                 execSync(batchCmd, { stdio: 'inherit' });

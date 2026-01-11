@@ -288,8 +288,8 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + 1);
     let chosen = match kernel {
-        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
-        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -356,7 +356,7 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         return Err(KvoError::EmptyInputData);
     }
 
-    // Validate output buffer length matches input length
+    
     if out.len() != high.len() {
         return Err(KvoError::OutputLengthMismatch {
             expected: high.len(),
@@ -390,8 +390,8 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
     }
 
     let chosen = match kernel {
-        // SIMD kernels are currently stubs (they call the scalar implementation). Avoid
-        // runtime detection overhead for `Kernel::Auto` on the single-series API.
+        
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -434,7 +434,7 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         }
     }
 
-    // Fill warmup period with NaN
+    
     for v in &mut out[..=first_valid_idx] {
         *v = f64::NAN;
     }
@@ -471,18 +471,18 @@ pub unsafe fn kvo_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // Precompute EMA alphas
+    
     let short_alpha = 2.0 / (short_period as f64 + 1.0);
     let long_alpha = 2.0 / (long_period as f64 + 1.0);
 
-    // Raw pointers to elide bounds checks in the hot loop
+    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
     let vp = volume.as_ptr();
     let outp = out.as_mut_ptr();
 
-    // Seed state from the first valid bar
+    
     let mut trend: i32 = -1;
     let mut cm: f64 = 0.0;
 
@@ -490,25 +490,25 @@ pub unsafe fn kvo_scalar(
         *hp.add(first_valid_idx) + *lp.add(first_valid_idx) + *cp.add(first_valid_idx);
     let mut prev_dm = *hp.add(first_valid_idx) - *lp.add(first_valid_idx);
 
-    // EMA state
+    
     let mut short_ema = 0.0f64;
     let mut long_ema = 0.0f64;
 
-    // Main pass
+    
     let mut i = first_valid_idx + 1;
     let len = high.len();
     while i < len {
-        // Loads
+        
         let h = *hp.add(i);
         let l = *lp.add(i);
         let c = *cp.add(i);
         let v = *vp.add(i);
 
-        // Aggregates
+        
         let hlc = h + l + c;
         let dm = h - l;
 
-        // Trend + CM update
+        
         if hlc > prev_hlc && trend != 1 {
             trend = 1;
             cm = prev_dm;
@@ -518,12 +518,12 @@ pub unsafe fn kvo_scalar(
         }
         cm += dm;
 
-        // Volume force
+        
         let temp = ((dm / cm) * 2.0 - 1.0).abs();
         let sign = if trend == 1 { 1.0 } else { -1.0 };
         let vf = v * temp * 100.0 * sign;
 
-        // EMA updates
+        
         if i == first_valid_idx + 1 {
             short_ema = vf;
             long_ema = vf;
@@ -532,10 +532,10 @@ pub unsafe fn kvo_scalar(
             long_ema += (vf - long_ema) * long_alpha;
         }
 
-        // Store
+        
         *outp.add(i) = short_ema - long_ema;
 
-        // Advance state
+        
         prev_hlc = hlc;
         prev_dm = dm;
         i += 1;
@@ -888,7 +888,7 @@ pub fn kvo_batch_into_slice(
     kern: Kernel,
     parallel: bool,
 ) -> Result<Vec<KvoParams>, KvoError> {
-    // Validate that all input slices have the same length
+    
     let len = high.len();
     if low.len() != len || close.len() != len || volume.len() != len {
         return Err(KvoError::OutputLengthMismatch {
@@ -897,7 +897,7 @@ pub fn kvo_batch_into_slice(
         });
     }
 
-    // Calculate expected output size
+    
     let combos = expand_grid(sweep)?;
     let expected_size = combos
         .len()
@@ -932,10 +932,10 @@ fn kvo_batch_inner(
     let cols = high.len();
     let rows = combos.len();
 
-    // 1) allocate rows×cols uninit
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2) init NaN warmup using first+1 per row, same as before
+    
     let first = high
         .iter()
         .zip(low)
@@ -946,12 +946,12 @@ fn kvo_batch_inner(
     let warm: Vec<usize> = combos.iter().map(|_| first + 1).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // 3) expose &mut [f64] view to write into in-place
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // 4) write rows directly into the same allocation
+    
     let simd = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -959,7 +959,7 @@ fn kvo_batch_inner(
     let combos_back =
         kvo_batch_inner_into(high, low, close, volume, sweep, simd, parallel, out_slice)?;
 
-    // 5) reclaim as Vec<f64> without copying
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1108,30 +1108,30 @@ unsafe fn kvo_row_avx512_long(
     )
 }
 
-// Decision: Streaming kernel tightened; semantics preserved (O(1)).
-// Caches sign and reduces branches; warmup behavior unchanged.
+
+
 #[derive(Debug, Clone)]
 pub struct KvoStream {
-    // periods & smoothing
+    
     short_period: usize,
     long_period: usize,
     short_alpha: f64,
     long_alpha: f64,
 
-    // rolling state
+    
     prev_hlc: f64,
     prev_dm: f64,
     cm: f64,
-    trend: i32, // 1 = up, 0 = down (init -1 before we know)
-    sign: f64,  // +1.0 for up, -1.0 for down (cached)
+    trend: i32, 
+    sign: f64,  
 
-    // EMA state
+    
     short_ema: f64,
     long_ema: f64,
 
-    // warmup flags
-    first: bool,  // waiting for seed of prev_hlc/prev_dm
-    seeded: bool, // EMA seeded with first vf
+    
+    first: bool,  
+    seeded: bool, 
 }
 
 impl KvoStream {
@@ -1152,8 +1152,8 @@ impl KvoStream {
             prev_hlc: 0.0,
             prev_dm: 0.0,
             cm: 0.0,
-            trend: -1,  // unknown at start
-            sign: -1.0, // matches trend = -1 default (tie -> -1)
+            trend: -1,  
+            sign: -1.0, 
             short_ema: 0.0,
             long_ema: 0.0,
             first: true,
@@ -1163,7 +1163,7 @@ impl KvoStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
-        // First bar: seed prev_* and wait for the next bar to start producing values
+        
         if self.first {
             self.prev_hlc = high + low + close;
             self.prev_dm = high - low;
@@ -1171,31 +1171,31 @@ impl KvoStream {
             return None;
         }
 
-        // Compute current aggregates
+        
         let hlc = high + low + close;
         let dm = high - low;
 
-        // Trend & CM update (minimize branches, semantics unchanged)
+        
         if hlc > self.prev_hlc {
             if self.trend != 1 {
                 self.trend = 1;
-                self.cm = self.prev_dm; // reset on flip
+                self.cm = self.prev_dm; 
                 self.sign = 1.0;
             }
         } else if hlc < self.prev_hlc {
             if self.trend != 0 {
                 self.trend = 0;
-                self.cm = self.prev_dm; // reset on flip
+                self.cm = self.prev_dm; 
                 self.sign = -1.0;
             }
         }
         self.cm += dm;
 
-        // Volume Force (VF): VF = V * | 2*(dm/cm) - 1 | * 100 * sign
+        
         let temp = ((dm / self.cm) * 2.0 - 1.0).abs();
         let vf = volume * temp * 100.0 * self.sign;
 
-        // EMA updates
+        
         if !self.seeded {
             self.short_ema = vf;
             self.long_ema = vf;
@@ -1205,7 +1205,7 @@ impl KvoStream {
             self.long_ema += (vf - self.long_ema) * self.long_alpha;
         }
 
-        // advance state
+        
         self.prev_hlc = hlc;
         self.prev_dm = dm;
 
@@ -1440,7 +1440,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            KvoParams::default(), // short_period: 2, long_period: 5
+            KvoParams::default(), 
             KvoParams {
                 short_period: Some(1),
                 long_period: Some(1),
@@ -1493,12 +1493,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_kvo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1559,30 +1559,30 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic OHLCV data
-        let strat = (2usize..=10, 5usize..=20) // (short_period, long_period)
+        
+        let strat = (2usize..=10, 5usize..=20) 
             .prop_flat_map(|(short, long)| {
                 (
-                    // Generate data length between 50 and 500 points
+                    
                     prop::collection::vec(
                         (
-                            // Generate realistic OHLC prices
+                            
                             (100.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                            0.01f64..0.1f64, // volatility factor
-                            // Volume between 100 and 1M
+                            0.01f64..0.1f64, 
+                            
                             (100.0f64..1_000_000.0f64)
                                 .prop_filter("positive", |x| *x > 0.0 && x.is_finite()),
                         ),
                         50..=500,
                     ),
                     Just(short),
-                    Just(long.max(short)), // Ensure long >= short
+                    Just(long.max(short)), 
                 )
             });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(price_data, short_period, long_period)| {
-                // Generate OHLCV data from price seeds
+                
                 let mut high = Vec::with_capacity(price_data.len());
                 let mut low = Vec::with_capacity(price_data.len());
                 let mut close = Vec::with_capacity(price_data.len());
@@ -1592,7 +1592,7 @@ mod tests {
                     let range = base_price * volatility;
                     let h = base_price + range * 0.5;
                     let l = base_price - range * 0.5;
-                    let c = l + (h - l) * 0.6; // Close slightly above middle
+                    let c = l + (h - l) * 0.6; 
 
                     high.push(h);
                     low.push(l);
@@ -1600,18 +1600,18 @@ mod tests {
                     volume.push(*vol);
                 }
 
-                // Create input
+                
                 let params = KvoParams {
                     short_period: Some(short_period),
                     long_period: Some(long_period),
                 };
                 let input = KvoInput::from_slices(&high, &low, &close, &volume, params.clone());
 
-                // Calculate with specified kernel and scalar reference
+                
                 let result = kvo_with_kernel(&input, kernel)?;
                 let reference = kvo_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Kernel consistency - results should match between kernels
+                
                 for i in 0..result.values.len() {
                     let val = result.values[i];
                     let ref_val = reference.values[i];
@@ -1644,7 +1644,7 @@ mod tests {
                     }
                 }
 
-                // Find first valid index (all inputs are non-NaN)
+                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -1655,8 +1655,8 @@ mod tests {
                     })
                     .unwrap_or(0);
 
-                // Property 2: Warmup period - NaN values only before first_valid_idx + 1
-                // KVO needs at least 2 data points to start calculating (outputs start at first_valid_idx + 1)
+                
+                
                 for i in 0..result.values.len() {
                     if i < first_valid_idx + 1 {
                         prop_assert!(
@@ -1669,7 +1669,7 @@ mod tests {
                     }
                 }
 
-                // Property 3: After warmup, all values should be finite (no NaN)
+                
                 if result.values.len() > first_valid_idx + 1 {
                     for i in (first_valid_idx + 1)..result.values.len() {
                         prop_assert!(
@@ -1682,14 +1682,14 @@ mod tests {
                     }
                 }
 
-                // Property 4: For constant prices and volumes, oscillator should converge to near zero
+                
                 let all_same_price = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_same_volume = volume.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if all_same_price && all_same_volume && result.values.len() > 100 {
-                    // After sufficient data points, oscillator should be near zero
+                    
                     let last_values = &result.values[result.values.len() - 10..];
                     for val in last_values {
                         if val.is_finite() {
@@ -1703,8 +1703,8 @@ mod tests {
                     }
                 }
 
-                // Property 5: Short EMA period effect - shorter period = more responsive
-                // When short_period is very small (1-2), oscillator should be more volatile
+                
+                
                 if short_period <= 2 && result.values.len() > first_valid_idx + 20 {
                     let valid_values: Vec<f64> = result.values[(first_valid_idx + 2)..]
                         .iter()
@@ -1713,7 +1713,7 @@ mod tests {
                         .collect();
 
                     if valid_values.len() > 10 {
-                        // Calculate standard deviation of changes
+                        
                         let changes: Vec<f64> = valid_values
                             .windows(2)
                             .map(|w| (w[1] - w[0]).abs())
@@ -1721,7 +1721,7 @@ mod tests {
 
                         let avg_change = changes.iter().sum::<f64>() / changes.len() as f64;
 
-                        // With very short period, expect some movement (not stuck at zero)
+                        
                         if !all_same_price {
                             prop_assert!(
                                 avg_change > 1e-12,
@@ -1733,10 +1733,10 @@ mod tests {
                     }
                 }
 
-                // Property 6: Trend detection - verify clear trends affect oscillator direction
-                // Check if we have a clear uptrend or downtrend in the data
+                
+                
                 if result.values.len() > first_valid_idx + 20 {
-                    // Calculate HLC trend over the last 20 points (if available)
+                    
                     let trend_start = result.values.len().saturating_sub(20);
                     let trend_end = result.values.len();
 
@@ -1746,22 +1746,22 @@ mod tests {
                             hlc_values.push(high[i] + low[i] + close[i]);
                         }
 
-                        // Check if we have a clear trend (most values increasing or decreasing)
+                        
                         let mut up_moves = 0;
                         let mut down_moves = 0;
                         for window in hlc_values.windows(2) {
                             if window[1] > window[0] * 1.001 {
-                                // 0.1% threshold
+                                
                                 up_moves += 1;
                             } else if window[1] < window[0] * 0.999 {
                                 down_moves += 1;
                             }
                         }
 
-                        // If we have a strong trend with good volume, check oscillator direction
+                        
                         let avg_volume = volume[trend_start..trend_end].iter().sum::<f64>() / 20.0;
                         if avg_volume > 1000.0 {
-                            // Get the last few oscillator values
+                            
                             let last_oscillator_values =
                                 &result.values[trend_end.saturating_sub(5)..trend_end];
                             let avg_oscillator = last_oscillator_values
@@ -1770,18 +1770,18 @@ mod tests {
                                 .sum::<f64>()
                                 / last_oscillator_values.len() as f64;
 
-                            // Strong uptrend should produce positive oscillator (eventually)
+                            
                             if up_moves > 15 && down_moves < 3 {
                                 prop_assert!(
-									avg_oscillator > -100.0,  // Very loose - just shouldn't be strongly negative
+									avg_oscillator > -100.0,  
 									"[{}] Strong uptrend should not produce strongly negative oscillator: {}",
 									test_name, avg_oscillator
 								);
                             }
-                            // Strong downtrend should produce negative oscillator (eventually)
+                            
                             else if down_moves > 15 && up_moves < 3 {
                                 prop_assert!(
-									avg_oscillator < 100.0,  // Very loose - just shouldn't be strongly positive
+									avg_oscillator < 100.0,  
 									"[{}] Strong downtrend should not produce strongly positive oscillator: {}",
 									test_name, avg_oscillator
 								);
@@ -1790,7 +1790,7 @@ mod tests {
                     }
                 }
 
-                // Property 7: Parameter relationship - long_period >= short_period
+                
                 prop_assert!(
                     long_period >= short_period,
                     "[{}] Long period {} should be >= short period {}",
@@ -1799,20 +1799,20 @@ mod tests {
                     short_period
                 );
 
-                // Property 8: Volume impact - zero or very small volume should produce smaller oscillator values
-                // Create a test case with very small volume
+                
+                
                 let mut small_vol = volume.clone();
                 for v in &mut small_vol {
-                    *v *= 1e-10; // Make volume extremely small
+                    *v *= 1e-10; 
                 }
 
                 let small_vol_input =
                     KvoInput::from_slices(&high, &low, &close, &small_vol, params.clone());
                 if let Ok(small_vol_result) = kvo_with_kernel(&small_vol_input, kernel) {
-                    // Compare magnitudes - small volume should produce smaller oscillator values
+                    
                     for i in (first_valid_idx + 1)..result.values.len() {
                         if result.values[i].is_finite() && small_vol_result.values[i].is_finite() {
-                            // Small volume oscillator should be much smaller in magnitude
+                            
                             prop_assert!(
 								small_vol_result.values[i].abs() <= result.values[i].abs() * 1e-8 + 1e-10,
 								"[{}] Small volume should produce smaller oscillator at idx {}: {} vs {}",
@@ -1822,11 +1822,11 @@ mod tests {
                     }
                 }
 
-                // Property 9: Volume Force calculation bounds
-                // The volume force formula includes (dm/cm * 2.0 - 1.0).abs() which should be bounded
-                // When cm > 0, this expression should be in range [0, 1] after abs()
+                
+                
+                
                 if result.values.len() > first_valid_idx + 10 {
-                    // Manually check a few volume force calculations
+                    
                     let mut cm = 0.0;
                     let mut trend = -1;
                     let mut prev_hlc =
@@ -1836,7 +1836,7 @@ mod tests {
                         let hlc = high[i] + low[i] + close[i];
                         let dm = high[i] - low[i];
 
-                        // Update trend and cm as in the actual implementation
+                        
                         if hlc > prev_hlc && trend != 1 {
                             trend = 1;
                             cm = high[i - 1] - low[i - 1];
@@ -1846,12 +1846,12 @@ mod tests {
                         }
                         cm += dm;
 
-                        // Check the volume force component bounds
+                        
                         if cm > 1e-10 {
-                            // Avoid division by very small numbers
+                            
                             let vf_component = (dm / cm * 2.0 - 1.0).abs();
                             prop_assert!(
-								vf_component <= 1.0 + 1e-9,  // Allow small numerical error
+								vf_component <= 1.0 + 1e-9,  
 								"[{}] Volume force component out of bounds at idx {}: {} (dm={}, cm={})",
 								test_name, i, vf_component, dm, cm
 							);
@@ -1940,16 +1940,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step)
-            (1, 5, 1, 2, 10, 2),    // Small periods
-            (2, 10, 2, 5, 20, 5),   // Medium periods
-            (5, 25, 5, 10, 50, 10), // Large periods
-            (1, 3, 1, 1, 5, 1),     // Dense small range
-            (10, 20, 2, 20, 40, 4), // Mid-range dense
-            (2, 2, 0, 5, 50, 5),    // Static short, varying long
-            (1, 10, 1, 20, 20, 0),  // Varying short, static long
+            
+            (1, 5, 1, 2, 10, 2),    
+            (2, 10, 2, 5, 20, 5),   
+            (5, 25, 5, 10, 50, 10), 
+            (1, 3, 1, 1, 5, 1),     
+            (10, 20, 2, 20, 40, 4), 
+            (2, 2, 0, 5, 50, 5),    
+            (1, 10, 1, 20, 20, 0),  
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -1971,7 +1971,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2027,7 +2027,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2056,7 +2056,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_kvo_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Deterministic OHLCV with high >= close >= low and positive volumes
+        
         let len = 512usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -2068,7 +2068,7 @@ mod tests {
             let spread = 0.5 + ((i % 7) as f64) * 0.03;
             let lo = base - spread;
             let hi = base + spread;
-            let frac = ((i % 97) as f64) / 96.0; // [0,1]
+            let frac = ((i % 97) as f64) / 96.0; 
             let cl = lo + (hi - lo) * frac;
             let vol = 1_000.0 + ((i * 37) % 10_000) as f64;
 
@@ -2080,10 +2080,10 @@ mod tests {
 
         let input = KvoInput::from_slices(&high, &low, &close, &volume, KvoParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = kvo(&input)?.values;
 
-        // Preallocate and compute via new no-allocation API
+        
         let mut out = vec![0.0; len];
         kvo_into(&input, &mut out)?;
 
@@ -2185,7 +2185,7 @@ pub fn kvo_batch_py<'py>(
     let c = close.as_slice()?;
     let v = volume.as_slice()?;
 
-    // grid + shape
+    
     let sweep = KvoBatchRange {
         short_period: short_range,
         long_period: long_range,
@@ -2195,14 +2195,14 @@ pub fn kvo_batch_py<'py>(
     let rows = combos.len();
     let cols = h.len();
 
-    // pre-allocate the exact target buffer in NumPy
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
     let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_flat: &mut [f64] = unsafe { arr.as_slice_mut()? };
 
-    let kern = validate_kernel(kernel, true)?; // expect batch-ish
+    let kern = validate_kernel(kernel, true)?; 
     let simd = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -2233,7 +2233,7 @@ pub fn kvo_batch_py<'py>(
     Ok(dict)
 }
 
-// ----------------------------- PYTHON CUDA BINDINGS -----------------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kvo_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, volume_f32, short_range, long_range, device_id=0))]

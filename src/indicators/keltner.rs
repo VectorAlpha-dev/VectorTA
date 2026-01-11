@@ -50,7 +50,7 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-// CUDA Python interop types for device arrays
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::keltner_wrapper::CudaKeltner;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -62,7 +62,7 @@ use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-// Input & data types
+
 
 #[derive(Debug, Clone)]
 pub enum KeltnerData<'a> {
@@ -237,7 +237,7 @@ impl KeltnerBuilder {
     }
 }
 
-// Error handling
+
 
 #[derive(Debug, Error)]
 pub enum KeltnerError {
@@ -261,7 +261,7 @@ pub enum KeltnerError {
     MaError(String),
 }
 
-// Core indicator API
+
 
 #[inline]
 pub fn keltner(input: &KeltnerInput) -> Result<KeltnerOutput, KeltnerError> {
@@ -515,7 +515,7 @@ pub fn keltner_into_slice(
         }
     }
 
-    // Fill warmup with NaN
+    
     let warm = first + period - 1;
     for i in 0..warm {
         upper_dst[i] = f64::NAN;
@@ -526,7 +526,7 @@ pub fn keltner_into_slice(
     Ok(())
 }
 
-// Scalar calculation (core logic)
+
 
 #[inline]
 /// Classic kernel - optimized loop-jammed implementation for SMA
@@ -549,7 +549,7 @@ pub fn keltner_scalar_classic_sma(
         return;
     }
 
-    // --- ATR Calculation (inline) ---
+    
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
     let mut rma = f64::NAN;
@@ -577,16 +577,16 @@ pub fn keltner_scalar_classic_sma(
         }
     }
 
-    // --- SMA Calculation (inline) ---
+    
     let mut sum = 0.0;
 
-    // Initialize SMA
+    
     for j in 0..period {
         sum += source[first + j];
     }
     let mut sma_val = sum / period as f64;
 
-    // First valid Keltner point
+    
     if warm < len {
         middle[warm] = sma_val;
         let atr_v = atr_values[warm];
@@ -596,13 +596,13 @@ pub fn keltner_scalar_classic_sma(
         }
     }
 
-    // Rolling window for remaining values
+    
     for i in (warm + 1)..len {
-        // Update SMA
+        
         sum += source[i] - source[i - period];
         sma_val = sum / period as f64;
 
-        // Calculate Keltner bands
+        
         middle[i] = sma_val;
         let atr_v = atr_values[i];
         if !atr_v.is_nan() {
@@ -632,7 +632,7 @@ pub fn keltner_scalar_classic_ema(
         return;
     }
 
-    // --- ATR Calculation (inline) ---
+    
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
     let mut rma = f64::NAN;
@@ -660,18 +660,18 @@ pub fn keltner_scalar_classic_ema(
         }
     }
 
-    // --- EMA Calculation (inline) ---
+    
     let ema_alpha = 2.0 / (period as f64 + 1.0);
     let ema_alpha_1 = 1.0 - ema_alpha;
 
-    // Initialize EMA with SMA
+    
     let mut sum = 0.0;
     for j in 0..period {
         sum += source[first + j];
     }
     let mut ema_val = sum / period as f64;
 
-    // First valid Keltner point
+    
     if warm < len {
         middle[warm] = ema_val;
         let atr_v = atr_values[warm];
@@ -681,12 +681,12 @@ pub fn keltner_scalar_classic_ema(
         }
     }
 
-    // EMA updates for remaining values
+    
     for i in (warm + 1)..len {
-        // Update EMA
+        
         ema_val = ema_alpha * source[i] + ema_alpha_1 * ema_val;
 
-        // Calculate Keltner bands
+        
         middle[i] = ema_val;
         let atr_v = atr_values[i];
         if !atr_v.is_nan() {
@@ -710,24 +710,24 @@ pub fn keltner_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    // Fast path: fully loop-jammed EMA/SMA + ATR (Wilder RMA) with no extra allocations.
-    // Fallback for other MA types retains allocation-based path for feature parity.
+    
+    
     let len = close.len();
     let warm = first + period - 1;
     if warm >= len {
         return;
     }
 
-    // ---- ATR init (Wilder RMA) ----
+    
     let pf = period as f64;
     let rma_alpha = 1.0 / pf;
 
-    // Compute initial ATR over the first `period` TRs and roll to `warm`.
+    
     let mut atr: f64;
     unsafe {
-        // i = 0
+        
         atr = *high.get_unchecked(0) - *low.get_unchecked(0);
-        // i = 1..period-1
+        
         let mut i = 1usize;
         while i < period {
             let hi = *high.get_unchecked(i);
@@ -739,9 +739,9 @@ pub fn keltner_scalar(
             atr += hl.max(hc).max(lc);
             i += 1;
         }
-        atr /= pf; // initial RMA at index period-1
+        atr /= pf; 
 
-        // Step ATR forward to warm index
+        
         let mut k = period;
         while k <= warm {
             let hi = *high.get_unchecked(k);
@@ -758,7 +758,7 @@ pub fn keltner_scalar(
 
     let m = multiplier;
 
-    // ---- EMA path ----
+    
     if ma_type.eq_ignore_ascii_case("ema") {
         let mut ema: f64 = 0.0;
         unsafe {
@@ -779,7 +779,7 @@ pub fn keltner_scalar(
         unsafe {
             let mut i = warm + 1;
             while i < len {
-                // ATR update
+                
                 let hi = *high.get_unchecked(i);
                 let lo = *low.get_unchecked(i);
                 let pc = *close.get_unchecked(i - 1);
@@ -789,11 +789,11 @@ pub fn keltner_scalar(
                 let tr = hl.max(hc).max(lc);
                 atr = (tr - atr).mul_add(rma_alpha, atr);
 
-                // EMA update
+                
                 let xi = *source.get_unchecked(i);
                 ema = (xi - ema).mul_add(ema_alpha, ema);
 
-                // Bands
+                
                 middle[i] = ema;
                 upper[i] = m.mul_add(atr, ema);
                 lower[i] = (-m).mul_add(atr, ema);
@@ -803,7 +803,7 @@ pub fn keltner_scalar(
         return;
     }
 
-    // ---- SMA path ----
+    
     if ma_type.eq_ignore_ascii_case("sma") {
         let mut sum: f64 = 0.0;
         unsafe {
@@ -821,7 +821,7 @@ pub fn keltner_scalar(
         unsafe {
             let mut i = warm + 1;
             while i < len {
-                // ATR update
+                
                 let hi = *high.get_unchecked(i);
                 let lo = *low.get_unchecked(i);
                 let pc = *close.get_unchecked(i - 1);
@@ -831,7 +831,7 @@ pub fn keltner_scalar(
                 let tr = hl.max(hc).max(lc);
                 atr = (tr - atr).mul_add(rma_alpha, atr);
 
-                // SMA rolling update
+                
                 let new_x = *source.get_unchecked(i);
                 let old_x = *source.get_unchecked(i - period);
                 sum += new_x - old_x;
@@ -846,7 +846,7 @@ pub fn keltner_scalar(
         return;
     }
 
-    // ---- Fallback (non-EMA/SMA): preserve original behavior ----
+    
     let mut atr = crate::utilities::helpers::alloc_with_nan_prefix(len, warm);
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
@@ -923,7 +923,7 @@ pub fn keltner_scalar(
     }
 }
 
-// AVX2 stub
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -945,7 +945,7 @@ pub fn keltner_avx2(
     )
 }
 
-// AVX512 stub
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -1017,7 +1017,7 @@ pub unsafe fn keltner_avx512_long(
     )
 }
 
-// Row/batch/parallel support
+
 
 #[inline(always)]
 pub fn keltner_row_scalar(
@@ -1033,7 +1033,7 @@ pub fn keltner_row_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    // Use the optimized scalar kernel for all MA types to avoid per-row temporaries
+    
     keltner_scalar(
         high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower,
     );
@@ -1119,7 +1119,7 @@ pub unsafe fn keltner_row_avx512_long(
     )
 }
 
-// Batch support
+
 
 #[derive(Clone, Debug)]
 pub struct KeltnerBatchRange {
@@ -1340,8 +1340,8 @@ pub fn keltner_batch_with_kernel(
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
     let kernel = match k {
         Kernel::Auto => {
-            // AVX-512 batch kernels can downclock and regress vs AVX2 on many CPUs. Prefer AVX2
-            // when Auto is requested and AVX-512 would otherwise be selected.
+            
+            
             let best = detect_best_batch_kernel();
             if best == Kernel::Avx512Batch { Kernel::Avx2Batch } else { best }
         }
@@ -1420,7 +1420,7 @@ fn keltner_batch_inner(
             step: "rows*cols".into(),
         })?;
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1435,7 +1435,7 @@ fn keltner_batch_inner(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Allocate uninitialized matrices and initialize NaN prefixes
+    
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
@@ -1444,7 +1444,7 @@ fn keltner_batch_inner(
     init_matrix_prefixes(&mut middle_mu, cols, &warm);
     init_matrix_prefixes(&mut lower_mu, cols, &warm);
 
-    // Convert to mutable slices
+    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut middle_guard = core::mem::ManuallyDrop::new(middle_mu);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
@@ -1459,7 +1459,7 @@ fn keltner_batch_inner(
         core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len())
     };
 
-    // Precompute True Range once and reuse across rows (row-specific optimization)
+    
     let mut tr: Vec<f64> = vec![0.0; cols];
     unsafe {
         let mut i = 0usize;
@@ -1480,7 +1480,7 @@ fn keltner_batch_inner(
         }
     }
 
-    // Precompute prefix sums lazily only for SMA rows to avoid overhead for EMA
+    
     let ps: Option<Vec<f64>> = if ma_type.unwrap_or("ema").eq_ignore_ascii_case("sma") {
         let mut buf = vec![0.0; cols + 1];
         unsafe {
@@ -1510,7 +1510,7 @@ fn keltner_batch_inner(
         let pf = period as f64;
         let alpha_rma = 1.0 / pf;
 
-        // Initialize ATR over first `period` TRs and roll to warm
+        
         let mut atr = 0.0f64;
         unsafe {
             let mut j = 0usize;
@@ -1530,7 +1530,7 @@ fn keltner_batch_inner(
         }
 
         if ma.eq_ignore_ascii_case("ema") {
-            // EMA init over source[first..first+period]
+            
             let mut acc = 0.0f64;
             unsafe {
                 let mut j = 0usize;
@@ -1550,13 +1550,13 @@ fn keltner_batch_inner(
             unsafe {
                 let mut i = row_warm + 1;
                 while i < cols {
-                    // ATR update from precomputed TR
+                    
                     let tri = *tr.get_unchecked(i);
                     atr = (tri - atr).mul_add(alpha_rma, atr);
-                    // EMA update
+                    
                     let xi = *source.get_unchecked(i);
                     ema = (xi - ema).mul_add(alpha_ema, ema);
-                    // Bands
+                    
                     *mid.get_unchecked_mut(i) = ema;
                     *up.get_unchecked_mut(i) = mult.mul_add(atr, ema);
                     *low_out.get_unchecked_mut(i) = (-mult).mul_add(atr, ema);
@@ -1565,7 +1565,7 @@ fn keltner_batch_inner(
             }
         } else if ma.eq_ignore_ascii_case("sma") {
             let ps = ps.as_ref().expect("prefix sums computed for SMA");
-            // SMA via shared prefix sums of source
+            
             let start = row_warm + 1 - period;
             let end = row_warm + 1;
             let mut sm = unsafe { (*ps.get_unchecked(end) - *ps.get_unchecked(start)) / pf };
@@ -1589,7 +1589,7 @@ fn keltner_batch_inner(
                 }
             }
         } else {
-            // Fallback: reuse existing per-row scalar implementation for uncommon MA types
+            
             keltner_row_scalar(
                 high, low, close, source, period, mult, ma, first, up, mid, low_out,
             );
@@ -1625,7 +1625,7 @@ fn keltner_batch_inner(
             do_row(row, u, m, l);
         }
     }
-    // Convert back to Vec
+    
     let upper = unsafe {
         let ptr = upper_guard.as_mut_ptr() as *mut f64;
         let len = upper_guard.len();
@@ -1660,41 +1660,41 @@ fn keltner_batch_inner(
     })
 }
 
-// Streaming mode
+
 
 #[derive(Debug, Clone)]
 pub struct KeltnerStream {
     period: usize,
-    rcp_period: f64, // 1 / period
+    rcp_period: f64, 
     multiplier: f64,
 
-    // MA impl
+    
     ma_impl: MaImpl,
 
-    // ATR (Wilder RMA)
-    atr: f64,       // valid after seeding
-    atr_sum: f64,   // used only during warmup seeding
-    rma_alpha: f64, // 1 / period
+    
+    atr: f64,       
+    atr_sum: f64,   
+    rma_alpha: f64, 
 
-    // book-keeping
+    
     count: usize,
     prev_close: f64,
 }
 
 #[derive(Debug, Clone)]
 enum MaImpl {
-    // EMA seeded with an exact SMA of the first `period` samples
+    
     Ema {
-        alpha: f64,    // 2 / (n + 1)
-        value: f64,    // current EMA
-        seed_sum: f64, // sum of first n values, only used during warmup
+        alpha: f64,    
+        value: f64,    
+        seed_sum: f64, 
     },
-    // True O(1) SMA via ring-buffer
+    
     Sma {
         buffer: Vec<f64>,
         sum: f64,
         idx: usize,
-        filled: bool, // becomes true exactly at count == period
+        filled: bool, 
     },
 }
 
@@ -1722,7 +1722,7 @@ impl KeltnerStream {
                 filled: false,
             }
         } else {
-            // default to EMA semantics
+            
             MaImpl::Ema {
                 alpha: 2.0 / (pf + 1.0),
                 value: 0.0,
@@ -1751,8 +1751,8 @@ impl KeltnerStream {
         close: f64,
         source: f64,
     ) -> Option<(f64, f64, f64)> {
-        // --- TR (True Range) ---
-        // matches batch kernel: TR = max(high-low, |high-prev_close|, |low-prev_close|)
+        
+        
         let tr = if self.count == 0 {
             high - low
         } else {
@@ -1765,12 +1765,12 @@ impl KeltnerStream {
         self.prev_close = close;
         self.count += 1;
 
-        // --- Warmup: accumulate seeds, no output ---
+        
         if self.count < self.period {
-            // seed ATR sum
+            
             self.atr_sum += tr;
 
-            // seed MA
+            
             match &mut self.ma_impl {
                 MaImpl::Ema { seed_sum, .. } => {
                     *seed_sum += source;
@@ -1786,17 +1786,17 @@ impl KeltnerStream {
             return None;
         }
 
-        // --- First valid output at exactly count == period ---
+        
         if self.count == self.period {
-            // finalize ATR seed using the first `period` TRs
+            
             self.atr = (self.atr_sum + tr) * self.rcp_period;
 
-            // seed MA -> exact SMA of first `period` samples
+            
             let mid = match &mut self.ma_impl {
                 MaImpl::Ema {
                     value, seed_sum, ..
                 } => {
-                    *seed_sum += source; // include current
+                    *seed_sum += source; 
                     *value = *seed_sum * self.rcp_period;
                     *value
                 }
@@ -1806,7 +1806,7 @@ impl KeltnerStream {
                     idx,
                     filled,
                 } => {
-                    *sum += source; // include current
+                    *sum += source; 
                     buffer[*idx] = source;
                     *idx = (*idx + 1) % self.period;
                     *filled = true;
@@ -1819,11 +1819,11 @@ impl KeltnerStream {
             return Some((up, mid, lo));
         }
 
-        // --- Steady-state O(1) updates ---
-        // ATR (Wilder RMA): atr = (tr - atr) * alpha + atr
+        
+        
         self.atr = (tr - self.atr).mul_add(self.rma_alpha, self.atr);
 
-        // MA update
+        
         let mid = match &mut self.ma_impl {
             MaImpl::Ema { alpha, value, .. } => {
                 *value = (source - *value).mul_add(*alpha, *value);
@@ -2021,7 +2021,7 @@ mod tests {
             let hi = candles.high[i];
             let lo = candles.low[i];
             let cl = candles.close[i];
-            let src = candles.close[i]; // using "close" as the MA source for streaming
+            let src = candles.close[i]; 
             match stream.update(hi, lo, cl, src) {
                 Some((up, mid, low)) => {
                     upper_stream.push(up);
@@ -2068,71 +2068,71 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            KeltnerParams::default(), // period: 20, multiplier: 2.0, ma_type: "ema"
+            KeltnerParams::default(), 
             KeltnerParams {
                 period: Some(2),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, // minimum period
+            }, 
             KeltnerParams {
                 period: Some(5),
                 multiplier: Some(0.5),
                 ma_type: Some("ema".to_string()),
-            }, // small period, small multiplier
+            }, 
             KeltnerParams {
                 period: Some(10),
                 multiplier: Some(1.5),
                 ma_type: Some("sma".to_string()),
-            }, // medium period with SMA
+            }, 
             KeltnerParams {
                 period: Some(20),
                 multiplier: Some(3.0),
                 ma_type: Some("ema".to_string()),
-            }, // default period, large multiplier
+            }, 
             KeltnerParams {
                 period: Some(50),
                 multiplier: Some(2.5),
                 ma_type: Some("sma".to_string()),
-            }, // large period
+            }, 
             KeltnerParams {
                 period: Some(100),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, // very large period
+            }, 
             KeltnerParams {
                 period: Some(14),
                 multiplier: Some(2.0),
                 ma_type: Some("sma".to_string()),
-            }, // common period with SMA
+            }, 
             KeltnerParams {
                 period: Some(7),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, // week period
+            }, 
             KeltnerParams {
                 period: Some(21),
                 multiplier: Some(1.5),
                 ma_type: Some("ema".to_string()),
-            }, // 3-week period
+            }, 
             KeltnerParams {
                 period: Some(30),
                 multiplier: Some(2.0),
                 ma_type: Some("sma".to_string()),
-            }, // month period
+            }, 
             KeltnerParams {
                 period: Some(3),
                 multiplier: Some(0.75),
                 ma_type: Some("ema".to_string()),
-            }, // very small period
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = KeltnerInput::from_candles(&candles, "close", params.clone());
             let output = keltner_with_kernel(&input, kernel)?;
 
-            // Check all three output bands
+            
             for (band_name, band_values) in [
                 ("upper", &output.upper_band),
                 ("middle", &output.middle_band),
@@ -2140,12 +2140,12 @@ mod tests {
             ] {
                 for (i, &val) in band_values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; // NaN values are expected during warmup
+                        continue; 
                     }
 
                     let bits = val.to_bits();
 
-                    // Check all three poison patterns
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2190,7 +2190,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_keltner_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -2219,16 +2219,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, multiplier_start, multiplier_end, multiplier_step)
-            (2, 10, 2, 0.5, 2.5, 0.5), // Small periods with various multipliers
-            (5, 25, 5, 1.0, 3.0, 1.0), // Medium periods
-            (30, 60, 15, 2.0, 2.0, 0.0), // Large periods, static multiplier
-            (2, 5, 1, 1.5, 2.5, 0.25), // Dense small range
-            (10, 30, 10, 0.75, 2.25, 0.75), // Common trading periods
-            (14, 21, 7, 1.0, 2.0, 0.5), // Week-based periods
-            (20, 20, 0, 0.5, 3.0, 0.5), // Static period, varying multipliers
+            
+            (2, 10, 2, 0.5, 2.5, 0.5), 
+            (5, 25, 5, 1.0, 3.0, 1.0), 
+            (30, 60, 15, 2.0, 2.0, 0.0), 
+            (2, 5, 1, 1.5, 2.5, 0.25), 
+            (10, 30, 10, 0.75, 2.25, 0.75), 
+            (14, 21, 7, 1.0, 2.0, 0.5), 
+            (20, 20, 0, 0.5, 3.0, 0.5), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in
@@ -2240,7 +2240,7 @@ mod tests {
                 .multiplier_range(m_start, m_end, m_step)
                 .apply_candles(&c, "close")?;
 
-            // Check all three output bands
+            
             for (band_name, band_values) in [
                 ("upper", &output.upper_band),
                 ("middle", &output.middle_band),
@@ -2256,7 +2256,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2314,7 +2314,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Simplified unified strategy for all test scenarios
+        
         let strat = (
             2usize..=50,
             50usize..500,
@@ -2327,19 +2327,19 @@ mod tests {
                 let mut low = Vec::with_capacity(len);
                 let mut close = Vec::with_capacity(len);
 
-                // Use a simple deterministic RNG based on the seed
+                
                 let mut rng_state = seed;
                 let mut next_random = || -> f64 {
-                    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223); // LCG
+                    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223); 
                     (rng_state as f64) / (u64::MAX as f64)
                 };
 
                 match scenario {
                     0 => {
-                        // Random OHLC data
+                        
                         let mut prev_close = 100.0;
                         for _ in 0..len {
-                            let volatility = 0.01 + next_random() * 0.04; // 0.01..0.05
+                            let volatility = 0.01 + next_random() * 0.04; 
                             let change = -volatility + next_random() * (2.0 * volatility);
                             let new_close = (prev_close * (1.0 + change)).max(0.1f64);
                             let high_val = new_close * (1.0 + next_random() * volatility);
@@ -2352,7 +2352,7 @@ mod tests {
                         }
                     }
                     1 => {
-                        // Uptrend
+                        
                         let start = 100.0;
                         for i in 0..len {
                             let base = start * (1.0 + 0.01 * i as f64);
@@ -2363,7 +2363,7 @@ mod tests {
                         }
                     }
                     2 => {
-                        // Downtrend
+                        
                         let start = 100.0;
                         for i in 0..len {
                             let base = start * (1.0 - 0.005 * i as f64).max(10.0);
@@ -2374,7 +2374,7 @@ mod tests {
                         }
                     }
                     3 => {
-                        // Volatile
+                        
                         let mut price = 100.0;
                         for i in 0..len {
                             let volatility = 0.1 * (1.0 + (i as f64 * 0.1).sin());
@@ -2392,14 +2392,14 @@ mod tests {
                         }
                     }
                     4 => {
-                        // Constant price (same high, low, close)
+                        
                         let constant_price = 50.0;
                         high = vec![constant_price; len];
                         low = vec![constant_price; len];
                         close = vec![constant_price; len];
                     }
                     _ => {
-                        // Real-world-like
+                        
                         let mut price = 1000.0;
                         let mut momentum = 0.0;
 
@@ -2419,14 +2419,14 @@ mod tests {
                     }
                 }
 
-                // Randomly select MA type
+                
                 let ma_type = if next_random() > 0.5 { "ema" } else { "sma" };
                 (high, low, close, period, multiplier, ma_type.to_string())
             });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(high, low, close, period, multiplier, ma_type)| {
-				// Use close as source for testing
+				
 				let source = close.clone();
 
 				let params = KeltnerParams {
@@ -2439,12 +2439,12 @@ mod tests {
 				let result = keltner_with_kernel(&input, kernel).unwrap();
 				let scalar_result = keltner_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Check output lengths
+				
 				prop_assert_eq!(result.upper_band.len(), close.len());
 				prop_assert_eq!(result.middle_band.len(), close.len());
 				prop_assert_eq!(result.lower_band.len(), close.len());
 
-				// Check warmup period (first period-1 values should be NaN)
+				
 				let warmup = period - 1;
 				for i in 0..warmup.min(close.len()) {
 					prop_assert!(
@@ -2461,7 +2461,7 @@ mod tests {
 					);
 				}
 
-				// Check valid values after warmup
+				
 				for i in warmup..close.len() {
 					let upper = result.upper_band[i];
 					let middle = result.middle_band[i];
@@ -2471,12 +2471,12 @@ mod tests {
 					let scalar_middle = scalar_result.middle_band[i];
 					let scalar_lower = scalar_result.lower_band[i];
 
-					// Skip if any value is NaN
+					
 					if upper.is_nan() || middle.is_nan() || lower.is_nan() {
 						continue;
 					}
 
-					// Property 1: Band relationships must hold
+					
 					prop_assert!(
 						upper >= middle - 1e-10,
 						"Upper band {} must be >= middle band {} at index {}", upper, middle, i
@@ -2486,16 +2486,16 @@ mod tests {
 						"Middle band {} must be >= lower band {} at index {}", middle, lower, i
 					);
 
-					// Property 2: Spread must be positive
+					
 					let spread = upper - lower;
 					prop_assert!(
 						spread >= -1e-10,
 						"Spread {} must be positive at index {}", spread, i
 					);
 
-					// Property 2b: Spread consistency between kernels (validates ATR calculation)
+					
 					if i >= warmup + period {
-						// Compare with scalar result to ensure consistency
+						
 						let scalar_spread = scalar_upper - scalar_lower;
 						if scalar_spread > 0.0 && spread > 0.0 {
 							let ratio = spread / scalar_spread;
@@ -2506,12 +2506,12 @@ mod tests {
 						}
 					}
 
-					// Property 3: Middle band should be within reasonable price range
+					
 					let window_start = i.saturating_sub(period - 1);
 					let window_high = high[window_start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 					let window_low = low[window_start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
 
-					// Middle band should be within the general price range (with some tolerance for MA calculations)
+					
 					prop_assert!(
 						middle <= window_high * 1.05 + 1.0,
 						"Middle band {} exceeds window high {} at index {}", middle, window_high, i
@@ -2521,7 +2521,7 @@ mod tests {
 						"Middle band {} below window low {} at index {}", middle, window_low, i
 					);
 
-					// Property 4: Kernel consistency check
+					
 					let tolerance = 1e-9;
 					prop_assert!(
 						(upper - scalar_upper).abs() <= tolerance,
@@ -2539,7 +2539,7 @@ mod tests {
 						i, lower, scalar_lower, (lower - scalar_lower).abs()
 					);
 
-					// Property 5: Check for poison values
+					
 					#[cfg(debug_assertions)]
 					{
 						let upper_bits = upper.to_bits();
@@ -2566,21 +2566,21 @@ mod tests {
 						);
 					}
 
-					// Property 6: For truly constant prices (high=low=close), bands should converge
-					// Check if all values in the window are identical
+					
+					
 					let all_same = high[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               low[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               close[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
-					// Also check if high == low == close (truly constant price, no spread)
+					
 					let no_spread = high[window_start..=i].iter()
 						.zip(low[window_start..=i].iter())
 						.zip(close[window_start..=i].iter())
 						.all(|((h, l), c)| (h - l).abs() < 1e-10 && (h - c).abs() < 1e-10);
 
 					if all_same && no_spread && i >= warmup + period * 3 {
-						// For truly constant prices with no spread, ATR should eventually become 0
-						// and bands should converge to be very close (extra time for EMA stabilization)
+						
+						
 						let band_spread = upper - lower;
 						prop_assert!(
 							band_spread < 0.01 || band_spread < middle * 0.001,
@@ -2661,7 +2661,7 @@ mod tests {
     fn test_keltner_into_matches_api() {
         use crate::utilities::data_loader::Candles;
 
-        // Build a small but non-trivial synthetic OHLC series
+        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -2693,7 +2693,7 @@ mod tests {
         let candles = Candles::new(ts, open, high, low, close, volume);
         let input = KeltnerInput::from_candles(&candles, "close", KeltnerParams::default());
 
-        // Baseline via Vec-returning API
+        
         let base = keltner(&input).expect("keltner baseline failed");
 
         let len = candles.close.len();
@@ -2701,7 +2701,7 @@ mod tests {
         let mut mid = vec![0.0; len];
         let mut lo = vec![0.0; len];
 
-        // Into API (no allocation)
+        
         keltner_into(&input, &mut up, &mut mid, &mut lo).expect("keltner_into failed");
 
         assert_eq!(base.upper_band.len(), up.len());
@@ -2738,7 +2738,7 @@ mod tests {
     }
 }
 
-// Python bindings
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct KeltnerDeviceArrayF32 {

@@ -86,8 +86,8 @@ impl DeviceKstPair {
     }
 }
 
-// Packed parameter buffer held alive across the kernel launch; contains device pointers to
-// each parameter segment inside a single DeviceBuffer<i32>.
+
+
 struct PackedParamPtrs {
     _buf: DeviceBuffer<i32>,
     s1: u64,
@@ -107,7 +107,7 @@ pub struct CudaKst {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaKstPolicy,
-    // Device properties
+    
     sm_count: i32,
 }
 
@@ -133,7 +133,7 @@ impl CudaKst {
             }
         };
 
-        // SM count for launch shaping
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
             .map_err(CudaKstError::Cuda)? as i32;
@@ -205,7 +205,7 @@ impl CudaKst {
         }
     }
 
-    // -------- Launch shaping and async copy helpers (performance) --------
+    
 
     #[inline]
     fn launch_shape_1d(&self, n_items: usize, block_policy: Option<u32>) -> (GridSize, BlockSize) {
@@ -214,12 +214,12 @@ impl CudaKst {
             None => 256,
         };
         let grid_for_data = ((n_items as u32) + block_x - 1) / block_x;
-        let target = (self.sm_count.max(1) as u32) * 32; // ~32 blocks/SM
+        let target = (self.sm_count.max(1) as u32) * 32; 
         let grid_x = std::cmp::min(grid_for_data.max(1), target.max(1));
         ((grid_x, 1, 1).into(), (block_x, 1, 1).into())
     }
 
-    const PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+    const PIN_THRESHOLD_BYTES: usize = 1 << 20; 
 
     #[inline]
     fn copy_f32_to_device_async(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaKstError> {
@@ -242,8 +242,8 @@ impl CudaKst {
         }
     }
 
-    // NOTE: This cannot be declared inside impl in stable Rust if referenced in the impl's methods.
-    // Keep it at module scope to avoid self-referential issues.
+    
+    
 
     fn pack_params_async(&self, combos: &[KstParams]) -> Result<PackedParamPtrs, CudaKstError> {
         let rows = combos.len();
@@ -300,7 +300,7 @@ impl CudaKst {
         })
     }
 
-    // ------------- Batch (one series Ã— many params) -----------------
+    
 
     fn expand_grid(range: &KstBatchRange) -> Vec<KstParams> {
         fn axis(t: (usize, usize, usize)) -> Vec<usize> {
@@ -403,7 +403,7 @@ impl CudaKst {
             .find(|&i| !prices[i].is_nan())
             .ok_or_else(|| CudaKstError::InvalidInput("all values are NaN".into()))?;
 
-        // Validate: need at least warm_sig samples available
+        
         let mut max_warm_line = 0usize;
         let mut max_sig = 0usize;
         for c in &combos {
@@ -452,9 +452,9 @@ impl CudaKst {
             ))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Prices: use pinned H->D path when large
+        
         let d_prices: DeviceBuffer<f32> = self.copy_f32_to_device_async(prices)?;
-        // Pack all parameter arrays into one pinned transfer
+        
         let packed = self.pack_params_async(&combos)?;
 
         let out_len = rows
@@ -573,7 +573,7 @@ impl CudaKst {
         Ok(())
     }
 
-    // ------------- Many series Ã— one param (time-major) -----------------
+    
     pub fn kst_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -601,7 +601,7 @@ impl CudaKst {
         let r4 = params.roc_period4.unwrap_or(30);
         let sig = params.signal_period.unwrap_or(9);
 
-        // First-valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -762,26 +762,26 @@ impl CudaKst {
     }
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 125; // keep memory reasonable (2 outputs)
+    const PARAM_SWEEP: usize = 125; 
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * 4;
-        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4 * 2; // line + signal
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4 * 2; 
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
         let in_bytes = elems * 4;
-        let out_bytes = elems * 4 * 2; // line + signal
+        let out_bytes = elems * 4 * 2; 
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 

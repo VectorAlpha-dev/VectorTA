@@ -48,7 +48,7 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// Input handling (AsRef)
+
 impl<'a> AsRef<[f64]> for TrendFlexInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -59,7 +59,7 @@ impl<'a> AsRef<[f64]> for TrendFlexInput<'a> {
     }
 }
 
-// Input/Output/Param types
+
 #[derive(Debug, Clone)]
 pub enum TrendFlexData<'a> {
     Candles {
@@ -92,7 +92,7 @@ pub struct TrendFlexInput<'a> {
     pub params: TrendFlexParams,
 }
 
-// Python CUDA handle for TrendFlex: keeps CUDA context alive and exposes CAI v3 + DLPack
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyo3::prelude::pyclass(module = "ta_indicators.cuda", name = "TrendFlexDeviceArrayF32", unsendable)]
 pub struct TrendFlexDeviceArrayF32Py {
@@ -443,9 +443,9 @@ pub fn trendflex_into(input: &TrendFlexInput, out: &mut [f64]) -> Result<(), Tre
     trendflex_into_slice(out, input, Kernel::Auto)
 }
 
-// In-place scalar kernel that writes directly into output slice
-// Streaming, loop-jammed implementation: computes super smoother, rolling window, and
-// normalization in one pass using a ring buffer (no temporary ssf vector).
+
+
+
 #[inline]
 unsafe fn trendflex_scalar_into(
     data: &[f64],
@@ -459,7 +459,7 @@ unsafe fn trendflex_scalar_into(
     let len = data.len();
     let warm = first_valid + period;
 
-    // Ensure warmup prefix is NaN
+    
     for i in 0..warm.min(out.len()) {
         out[i] = f64::NAN;
     }
@@ -468,14 +468,14 @@ unsafe fn trendflex_scalar_into(
         return Ok(());
     }
 
-    // Ehlers Super Smoother coefficients
+    
     let a = (-1.414_f64 * PI / ss_period as f64).exp();
     let a_sq = a * a;
     let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
-    // EasyLanguage has c1*(x+x[-1])/2; our c = c1/2
+    
     let c = (1.0 + a_sq - b) * 0.5;
 
-    // Work on tail starting at first_valid
+    
     let m = len - first_valid;
     if m < period {
         return Ok(());
@@ -489,16 +489,16 @@ unsafe fn trendflex_scalar_into(
 
     let x = &data[first_valid..];
 
-    // Seeds for the IIR recurrence: y0=x0, y1=x1 (same as previous implementation)
+    
     let mut prev2 = x[0];
     let mut prev1 = if m > 1 { x[1] } else { x[0] };
 
-    // Ring buffer for last `period` SSF values + rolling sum
+    
     let mut ring = vec![0.0f64; period];
     let mut head = 0usize;
     let mut sum = 0.0f64;
 
-    // Seed ring with the first one or two values
+    
     ring[head] = prev2;
     sum += prev2;
     head = (head + 1) % period;
@@ -512,10 +512,10 @@ unsafe fn trendflex_scalar_into(
     let inv_tp = 1.0 / tp_f;
     let mut ms_prev = 0.0f64;
 
-    // Fill phase: generate SSF values until we have `period` samples in the ring
+    
     let mut i = 2usize;
     while i < m && i < period {
-        // cur = c*(x[i] + x[i-1]) + b*prev1 - a_sq*prev2
+        
         let cur = (-a_sq).mul_add(prev2, b.mul_add(prev1, c * (x[i] + x[i - 1])));
         prev2 = prev1;
         prev1 = cur;
@@ -526,21 +526,21 @@ unsafe fn trendflex_scalar_into(
         i += 1;
     }
 
-    // Main loop: SSF + rolling update + volatility + write
+    
     while i < m {
-        // Compute next SSF sample
+        
         let cur = (-a_sq).mul_add(prev2, b.mul_add(prev1, c * (x[i] + x[i - 1])));
         prev2 = prev1;
         prev1 = cur;
 
-        // Sliding mean difference against window sum
+        
         let my_sum = (tp_f * cur - sum) * inv_tp;
 
-        // ms_current = 0.04*my_sum^2 + 0.96*ms_prev
+        
         let ms_current = 0.04f64.mul_add(my_sum * my_sum, 0.96f64 * ms_prev);
         ms_prev = ms_current;
 
-        // Normalized output
+        
         let out_val = if ms_current != 0.0 {
             my_sum / ms_current.sqrt()
         } else {
@@ -548,7 +548,7 @@ unsafe fn trendflex_scalar_into(
         };
         out[first_valid + i] = out_val;
 
-        // Update ring/rolling sum
+        
         let old = ring[head];
         sum += cur - old;
         ring[head] = cur;
@@ -560,7 +560,7 @@ unsafe fn trendflex_scalar_into(
     Ok(())
 }
 
-// AVX2 implementation (micro-SIMD)
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2,fma")]
@@ -583,13 +583,13 @@ unsafe fn trendflex_avx2_into(
         return Ok(());
     }
 
-    // Super smoother coefficients
+    
     let a = (-1.414_f64 * PI / ss_period as f64).exp();
     let a_sq = a * a;
     let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
     let c = (1.0 + a_sq - b) * 0.5;
 
-    // Helper to compute a single series in a streaming fashion with a ring buffer
+    
     #[inline(always)]
     unsafe fn run_series_avx2(
         x: &[f64],
@@ -606,11 +606,11 @@ unsafe fn trendflex_avx2_into(
         }
         let mut prev2 = x[0];
         let mut prev1 = if n > 1 { x[1] } else { x[0] };
-        // initialize ring buffer and rolling sum
+        
         let mut ring = vec![0.0f64; period];
         let mut sum = 0.0f64;
         let mut head = 0usize;
-        // seed first entries
+        
         ring[head] = prev2;
         sum += prev2;
         head = (head + 1) % period;
@@ -624,7 +624,7 @@ unsafe fn trendflex_avx2_into(
         let inv_tp = 1.0 / tp_f;
         let mut ms_prev = 0.0f64;
 
-        // fill until we have period samples
+        
         let mut i = 2usize;
         while i < n && i < period {
             let cur = c * (x[i] + x[i - 1]) + b * prev1 - a_sq * prev2;
@@ -635,7 +635,7 @@ unsafe fn trendflex_avx2_into(
             head = (head + 1) % period;
             i += 1;
         }
-        // main loop: produce outputs
+        
         while i < n {
             _mm_prefetch(x.as_ptr().add(i + 16).cast(), _MM_HINT_T0);
             let cur = c * (x[i] + x[i - 1]) + b * prev1 - a_sq * prev2;
@@ -643,7 +643,7 @@ unsafe fn trendflex_avx2_into(
             prev1 = cur;
 
             let my_sum = (tp_f * cur - sum) * inv_tp;
-            // ms_current = 0.04*my_sum*my_sum + 0.96*ms_prev
+            
             let v = _mm_set_sd(my_sum);
             let sq = _mm_mul_sd(v, v);
             let s04 = _mm_mul_sd(_mm_set_sd(0.04), sq);
@@ -659,13 +659,13 @@ unsafe fn trendflex_avx2_into(
             } else {
                 0.0
             };
-            // non-temporal store
+            
             _mm_stream_sd(
                 out.get_unchecked_mut(out_off + i) as *mut f64,
                 _mm_set_sd(out_val),
             );
 
-            // update rolling sum and ring
+            
             let old = ring[head];
             sum += cur - old;
             ring[head] = cur;
@@ -680,7 +680,7 @@ unsafe fn trendflex_avx2_into(
         return Ok(());
     }
 
-    // Tail-only case
+    
     let m = len - first_valid;
     if m < period {
         return Ok(());
@@ -696,7 +696,7 @@ unsafe fn trendflex_avx2_into(
     Ok(())
 }
 
-// AVX512 stub
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
@@ -724,7 +724,7 @@ unsafe fn trendflex_avx512_into(
     let b = 2.0 * a * (1.414_f64 * PI / ss_period as f64).cos();
     let c = (1.0 + a_sq - b) * 0.5;
 
-    // Streaming series with ring buffer and non-temporal stores
+    
     #[inline(always)]
     unsafe fn run_series_avx512(
         x: &[f64],
@@ -748,7 +748,7 @@ unsafe fn trendflex_avx512_into(
         let mut ring = vec![0.0f64; period];
         let mut sum = 0.0f64;
         let mut head = 0usize;
-        // seed first two entries
+        
         *ring.get_unchecked_mut(head) = prev2;
         sum += prev2;
         head += 1;
@@ -782,21 +782,21 @@ unsafe fn trendflex_avx512_into(
             }
             i += 1;
         }
-        // Heuristics
+        
         let use_stream = n >= 131072;
         let use_unroll = n >= 262144;
-        // Unroll by 2 for better ILP (only on very large series)
+        
         if use_unroll {
             while i + 1 < n {
                 _mm_prefetch(x.as_ptr().add(i + 32).cast(), _MM_HINT_T0);
-                // --- iteration i ---
+                
                 let cur0 =
                     c * (*x.get_unchecked(i) + *x.get_unchecked(i - 1)) + b * prev1 - a_sq * prev2;
                 prev2 = prev1;
                 prev1 = cur0;
 
                 let my_sum0 = (tp_f * cur0 - sum) * inv_tp;
-                // ms0 = 0.04*my_sum^2 + 0.96*ms_prev
+                
                 let v0 = _mm_set_sd(my_sum0);
                 let sq0 = _mm_mul_sd(v0, v0);
                 let ms0 = _mm_fmadd_sd(
@@ -829,7 +829,7 @@ unsafe fn trendflex_avx512_into(
                     head = 0;
                 }
 
-                // --- iteration i+1 ---
+                
                 let cur1 =
                     c * (*x.get_unchecked(i + 1) + *x.get_unchecked(i)) + b * prev1 - a_sq * prev2;
                 prev2 = prev1;
@@ -871,7 +871,7 @@ unsafe fn trendflex_avx512_into(
                 i += 2;
             }
         }
-        // leftover or non-unrolled path
+        
         while i < n {
             _mm_prefetch(x.as_ptr().add(i + 32).cast(), _MM_HINT_T0);
             let cur =
@@ -936,7 +936,7 @@ unsafe fn trendflex_avx512_into(
     Ok(())
 }
 
-// AVX512 short stub
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 unsafe fn trendflex_avx512_short_into(
@@ -949,7 +949,7 @@ unsafe fn trendflex_avx512_short_into(
     trendflex_scalar_into(data, period, ss_period, first_valid, out)
 }
 
-// AVX512 long stub
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 unsafe fn trendflex_avx512_long_into(
@@ -962,37 +962,37 @@ unsafe fn trendflex_avx512_long_into(
     trendflex_scalar_into(data, period, ss_period, first_valid, out)
 }
 
-// Streaming implementation
-// Decision: Streaming uses O(1) state with Ehlers 2‑pole SSF; matches batch warmup.
+
+
 #[derive(Debug, Clone)]
 pub struct TrendFlexStream {
-    // configuration
+    
     period: usize,
     ss_period: usize,
 
-    // IIR coefficients for Ehlers Super Smoother
+    
     a: f64,
     a_sq: f64,
     b: f64,
     c: f64,
 
-    // rolling window over last `period` SSF values
+    
     buf: Vec<f64>,
     sum: f64,
     head: usize,
 
-    // IIR state: y[n-1], y[n-2], and last raw x[n-1]
+    
     prev1_ssf: f64,
     prev2_ssf: f64,
     last_raw: f64,
 
-    // number of SSF samples produced so far
+    
     n_ssf: usize,
 
-    // volatility smoother state
+    
     ms_prev: f64,
 
-    // cached constants
+    
     inv_p: f64,
 }
 
@@ -1002,7 +1002,7 @@ impl TrendFlexStream {
         if period == 0 {
             return Err(TrendFlexError::ZeroTrendFlexPeriod { period });
         }
-        // choose smoother period as round(period/2)
+        
         let ss_period = ((period as f64) / 2.0).round() as usize;
         if ss_period == 0 {
             return Err(TrendFlexError::SmootherPeriodExceedsData {
@@ -1011,7 +1011,7 @@ impl TrendFlexStream {
             });
         }
 
-        // Ehlers Super Smoother coefficients
+        
         use std::f64::consts::PI;
         let a = (-1.414_f64 * PI / (ss_period as f64)).exp();
         let a_sq = a * a;
@@ -1040,12 +1040,12 @@ impl TrendFlexStream {
     /// O(1) update. Returns Some(value) once the rolling window is full, None during warmup.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // Seed #1: y0 = x0
+        
         if self.n_ssf == 0 {
             self.prev2_ssf = x;
             self.last_raw = x;
 
-            // seed ring with y0
+            
             self.buf[self.head] = x;
             self.sum += x;
             self.head = if self.period > 1 { 1 } else { 0 };
@@ -1053,7 +1053,7 @@ impl TrendFlexStream {
             return None;
         }
 
-        // Seed #2: y1 = x1
+        
         if self.n_ssf == 1 {
             self.prev1_ssf = x;
             self.last_raw = x;
@@ -1063,7 +1063,7 @@ impl TrendFlexStream {
                 self.sum += x;
                 self.head = (self.head + 1) % self.period;
             } else {
-                // period == 1: reuse buf[0]
+                
                 self.buf[0] = x;
                 self.sum = x;
             }
@@ -1071,21 +1071,21 @@ impl TrendFlexStream {
             return None;
         }
 
-        // Main recurrence (Ehlers 2-pole Super Smoother)
-        // y = c*(x + x_prev) + b*y[n-1] - a^2*y[n-2]
+        
+        
         let cur = (-self.a_sq).mul_add(
             self.prev2_ssf,
             self.b.mul_add(self.prev1_ssf, self.c * (x + self.last_raw)),
         );
 
-        // mean difference against rolling window sum (previous window; excludes `cur`)
+        
         let tp_cur_minus_sum = (self.period as f64).mul_add(cur, -self.sum);
         let my_sum = self.inv_p * tp_cur_minus_sum;
 
-        // Decide if we will emit this tick (warmup complete after this sample)
+        
         let will_emit = self.n_ssf + 1 > self.period;
 
-        // Volatility smoother and normalized output (only once warmup complete)
+        
         let out_val = if will_emit {
             let sq = my_sum * my_sum;
             let ms_current = 0.04f64.mul_add(sq, 0.96f64 * self.ms_prev);
@@ -1099,7 +1099,7 @@ impl TrendFlexStream {
             0.0
         };
 
-        // Slide window and states
+        
         let old = self.buf[self.head];
         self.sum += cur - old;
         self.buf[self.head] = cur;
@@ -1118,7 +1118,7 @@ impl TrendFlexStream {
     }
 }
 
-// Batch functions for direct buffer writing
+
 #[inline(always)]
 pub fn trendflex_batch_inner_into(
     data: &[f64],
@@ -1159,20 +1159,20 @@ pub fn trendflex_batch_inner_into(
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    // Initialize output buffer with NaN prefixes
+    
     for (row, &warmup) in warm.iter().enumerate() {
         let start = row * cols;
         let end = start + warmup;
         out[start..end].fill(f64::NAN);
     }
 
-    // Resolve Auto kernel to actual kernel
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    // Helper that fills one row
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
@@ -1194,7 +1194,7 @@ pub fn trendflex_batch_inner_into(
         }
     };
 
-    // Run every row, writing directly into output buffer
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1219,7 +1219,7 @@ pub fn trendflex_batch_inner_into(
     Ok(combos)
 }
 
-// Batch grid
+
 #[derive(Clone, Debug)]
 pub struct TrendFlexBatchRange {
     pub period: (usize, usize, usize),
@@ -1287,7 +1287,7 @@ pub fn trendflex_batch_with_kernel(
     sweep: &TrendFlexBatchRange,
     k: Kernel,
 ) -> Result<TrendFlexBatchOutput, TrendFlexError> {
-    // Mirror ALMA policy: error on explicit non-batch kernels
+    
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
@@ -1336,7 +1336,7 @@ fn expand_grid(r: &TrendFlexBatchRange) -> Result<Vec<TrendFlexParams>, TrendFle
             if v.is_empty() { return Err(TrendFlexError::InvalidRange { start, end, step }); }
             return Ok(v);
         }
-        // reversed bounds supported
+        
         let mut v = Vec::new();
         let mut cur = start;
         while cur >= end {
@@ -1358,7 +1358,7 @@ fn expand_grid(r: &TrendFlexBatchRange) -> Result<Vec<TrendFlexParams>, TrendFle
 
 #[inline(always)]
 pub fn expand_grid_trendflex(r: &TrendFlexBatchRange) -> Vec<TrendFlexParams> {
-    // Keep external signature stable for CUDA wrapper; fall back to empty on error.
+    
     expand_grid(r).unwrap_or_default()
 }
 
@@ -1415,28 +1415,28 @@ fn trendflex_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Guard multiplication overflow (rows * cols)
+    
     rows.checked_mul(cols).ok_or(TrendFlexError::DimensionsOverflow { rows, cols })?;
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     let mut raw = make_uninit_matrix(rows, cols);
 
-    // 2. write NaN prefixes for each row *before* any heavy work starts
+    
     unsafe {
         init_matrix_prefixes(&mut raw, cols, &warm);
     }
 
-    // Resolve Auto kernel to actual kernel
+    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    // 3. helper that fills **one row**; receives &mut [MaybeUninit<f64>]
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Cast this single row to &mut [f64] so the existing row helpers work
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1458,7 +1458,7 @@ fn trendflex_batch_inner(
         }
     };
 
-    // 4. run every row, writing directly into `raw`
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1479,7 +1479,7 @@ fn trendflex_batch_inner(
         }
     }
 
-    // 5. all elements are now initialised → convert to Vec<f64> using ManuallyDrop + from_raw_parts
+    
     use core::mem::ManuallyDrop;
     let mut guard = ManuallyDrop::new(raw);
     let values: Vec<f64> = unsafe {
@@ -1498,12 +1498,12 @@ fn trendflex_batch_inner(
     })
 }
 
-// Row functions -- AVX variants are just stubs to scalar
+
 #[inline(always)]
 unsafe fn trendflex_row_scalar(data: &[f64], first: usize, period: usize, out_row: &mut [f64]) {
     let ss_period = ((period as f64) / 2.0).round() as usize;
     let _ = trendflex_scalar_into(data, period, ss_period, first, out_row);
-    // NaN prefixes per-row are already set by init_matrix_prefixes before this call.
+    
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1518,7 +1518,7 @@ unsafe fn trendflex_row_avx512(data: &[f64], first: usize, period: usize, out_ro
     let _ = trendflex_avx512_into(data, period, ss_period, first, out_row);
 }
 
-// Test coverage -- use alma.rs style macros and patterns
+
 
 #[cfg(test)]
 mod tests {
@@ -1761,7 +1761,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_trendflex_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1769,7 +1769,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_periods = vec![5, 10, 20, 30, 50, 80, 100, 150];
 
         for &period in &test_periods {
@@ -1778,26 +1778,26 @@ mod tests {
             };
             let input = TrendFlexInput::from_candles(&candles, "close", params);
 
-            // Skip if we don't have enough data for this period
+            
             if candles.close.len() < period {
                 continue;
             }
 
             let output = match trendflex_with_kernel(&input, kernel) {
                 Ok(o) => o,
-                Err(_) => continue, // Skip if this period causes an error
+                Err(_) => continue, 
             };
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1805,7 +1805,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1813,7 +1813,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1826,7 +1826,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_trendflex_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1861,14 +1861,14 @@ mod tests {
                 );
                 let output = trendflex_with_kernel(&input, kernel)?;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(output.values.len(), data.len(), "Output length mismatch");
 
-                // Find first non-NaN value in data
+                
                 let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first + period;
 
-                // Property 2: Warmup period - values before warmup should be NaN
+                
                 for i in 0..warmup.min(data.len()) {
                     prop_assert!(
                         output.values[i].is_nan(),
@@ -1878,7 +1878,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: Finite values after warmup
+                
                 for i in warmup..output.values.len() {
                     prop_assert!(
                         output.values[i].is_finite(),
@@ -1888,8 +1888,8 @@ mod tests {
                     );
                 }
 
-                // Property 4: Scale invariance - due to normalization, scaling input shouldn't dramatically change output
-                // Test with a scale factor of 10
+                
+                
                 if data.len() > warmup + 10 {
                     let scale_factor = 10.0;
                     let scaled_data: Vec<f64> = data.iter().map(|&x| x * scale_factor).collect();
@@ -1901,14 +1901,14 @@ mod tests {
                     );
                     let scaled_output = trendflex_with_kernel(&scaled_input, kernel)?;
 
-                    // Compare normalized outputs - they should be very similar
+                    
                     let mut similarity_count = 0;
                     let mut total_compared = 0;
                     for i in warmup..output.values.len() {
                         if output.values[i].is_finite() && scaled_output.values[i].is_finite() {
-                            // Allow for some numerical differences, but shapes should be similar
+                            
                             let diff = (output.values[i] - scaled_output.values[i]).abs();
-                            // TrendFlex is normalized, so outputs should be very close
+                            
                             if diff < 0.5 {
                                 similarity_count += 1;
                             }
@@ -1926,9 +1926,9 @@ mod tests {
                     }
                 }
 
-                // Property 5: Trend response - monotonic sequences should produce appropriate signed values
+                
                 if data.len() > warmup + 20 {
-                    // Check if we have a monotonic increasing sequence
+                    
                     let mut is_increasing = true;
                     let mut is_decreasing = true;
                     for i in (warmup + 1)..data.len().min(warmup + 50) {
@@ -1940,9 +1940,9 @@ mod tests {
                         }
                     }
 
-                    // For strong trends, TrendFlex should respond appropriately
+                    
                     if is_increasing {
-                        // Count positive values in the output after warmup
+                        
                         let positive_count =
                             output.values[warmup..].iter().filter(|&&v| v > 0.0).count();
                         let total = output.values.len() - warmup;
@@ -1953,7 +1953,7 @@ mod tests {
 							positive_ratio * 100.0
 						);
                     } else if is_decreasing {
-                        // Count negative values in the output after warmup
+                        
                         let negative_count =
                             output.values[warmup..].iter().filter(|&&v| v < 0.0).count();
                         let total = output.values.len() - warmup;
@@ -1966,8 +1966,8 @@ mod tests {
                     }
                 }
 
-                // Property 6: Constant input produces values near zero
-                // Since there's no trend in constant data, TrendFlex should converge near 0
+                
+                
                 let all_same = data[first..]
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() < 1e-10);
@@ -1982,10 +1982,10 @@ mod tests {
                     }
                 }
 
-                // Property 7: Period = 1 special case
+                
                 if period == 1 {
-                    // With period=1, super smoother period = round(1/2) = 1
-                    // Values should still be finite after warmup
+                    
+                    
                     for i in (first + 1)..output.values.len() {
                         prop_assert!(
                             output.values[i].is_finite(),
@@ -1995,10 +1995,10 @@ mod tests {
                     }
                 }
 
-                // Property 8: Large period behavior
-                // When period is close to data length, should still produce valid output
+                
+                
                 if data.len() > 5 && period >= data.len().saturating_sub(5) && data.len() > period {
-                    // Should have at least some non-NaN values at the end
+                    
                     let last_idx = data.len() - 1;
                     if last_idx >= warmup {
                         prop_assert!(
@@ -2008,9 +2008,9 @@ mod tests {
                     }
                 }
 
-                // Property 9: Kernel consistency
+                
                 if cfg!(all(feature = "nightly-avx", target_arch = "x86_64")) {
-                    // Test that different kernels produce identical results
+                    
                     let scalar_output = trendflex_with_kernel(&input, Kernel::Scalar)?;
 
                     for i in 0..output.values.len() {
@@ -2041,10 +2041,10 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_trendflex_tests!(check_trendflex_property);
 
-    // Test for trendflex_into_slice validation (prevents panic when period > data.len())
+    
     #[test]
     fn test_trendflex_into_slice_validation() {
-        // Test case 1: period exceeds data length
+        
         let data = vec![1.0, 2.0, 3.0];
         let params = TrendFlexParams { period: Some(10) };
         let input = TrendFlexInput::from_slice(&data, params);
@@ -2060,7 +2060,7 @@ mod tests {
             _ => panic!("Expected TrendFlexPeriodExceedsData error"),
         }
 
-        // Test case 2: empty data
+        
         let empty_data: Vec<f64> = vec![];
         let params = TrendFlexParams { period: Some(5) };
         let input = TrendFlexInput::from_slice(&empty_data, params);
@@ -2073,7 +2073,7 @@ mod tests {
             _ => panic!("Expected NoDataProvided error"),
         }
 
-        // Test case 3: zero period
+        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let params = TrendFlexParams { period: Some(0) };
         let input = TrendFlexInput::from_slice(&data, params);
@@ -2088,7 +2088,7 @@ mod tests {
             _ => panic!("Expected ZeroTrendFlexPeriod error"),
         }
 
-        // Test case 4: valid input should work
+        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let params = TrendFlexParams { period: Some(3) };
         let input = TrendFlexInput::from_slice(&data, params);
@@ -2098,7 +2098,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // Parity test: native into() matches Vec API including warmup NaNs
+    
     #[test]
     #[cfg(not(feature = "wasm"))]
     fn test_trendflex_into_matches_api() -> Result<(), Box<dyn Error>> {
@@ -2129,13 +2129,13 @@ mod tests {
         Ok(())
     }
 
-    // Test for batch kernel policy (non-batch -> error)
+    
     #[test]
     fn test_trendflex_batch_kernel_policy() {
         let data = vec![1.0; 50];
         let sweep = TrendFlexBatchRange { period: (5, 10, 1) };
 
-        // Non-batch kernels should return InvalidKernelForBatch
+        
         let result_scalar = trendflex_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(result_scalar, Err(TrendFlexError::InvalidKernelForBatch(Kernel::Scalar))));
 
@@ -2148,7 +2148,7 @@ mod tests {
             assert!(matches!(result_avx512, Err(TrendFlexError::InvalidKernelForBatch(Kernel::Avx512))));
         }
 
-        // Test that batch kernels still work
+        
         let result_scalar_batch = trendflex_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch);
         assert!(result_scalar_batch.is_ok());
     }
@@ -2218,7 +2218,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2226,15 +2226,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different period ranges
+        
         let test_configs = vec![
-            (5, 20, 3),    // Small periods with fine steps
-            (10, 50, 5),   // Medium periods
-            (20, 100, 10), // Large periods
-            (30, 120, 15), // Very large periods
-            (7, 7, 1),     // Single small period
-            (80, 80, 1),   // Single large period
-            (15, 45, 5),   // Medium range
+            (5, 20, 3),    
+            (10, 50, 5),   
+            (20, 100, 10), 
+            (30, 120, 15), 
+            (7, 7, 1),     
+            (80, 80, 1),   
+            (15, 45, 5),   
         ];
 
         for (start, end, step) in test_configs {
@@ -2243,9 +2243,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2259,7 +2259,7 @@ mod tests {
                     .map(|p| p.period.unwrap_or(0))
                     .unwrap_or(0);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (period {}, flat index {})",
@@ -2267,7 +2267,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (period {}, flat index {})",
@@ -2275,7 +2275,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (period {}, flat index {})",
@@ -2288,7 +2288,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2341,16 +2341,16 @@ pub fn trendflex_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    // Build input struct
+    
     let params = TrendFlexParams { period };
     let trendflex_in = TrendFlexInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| trendflex_with_kernel(&trendflex_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2407,13 +2407,13 @@ pub fn trendflex_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?; 
 
     let sweep = TrendFlexBatchRange {
         period: period_range,
     };
 
-    // Calculate dimensions with overflow guard
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
@@ -2421,14 +2421,14 @@ pub fn trendflex_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("dimensions overflow"))?;
 
-    // Pre-allocate NumPy array (like ALMA does)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Heavy work without the GIL
+    
     let combos = py
         .allow_threads(|| -> Result<Vec<TrendFlexParams>, TrendFlexError> {
-            // Handle kernel selection for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2440,16 +2440,16 @@ pub fn trendflex_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            // Use the new _batch_inner_into function
+            
             trendflex_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build output dict
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Extract periods from combos using into_pyarray() for zero-copy
+    
     dict.set_item(
         "periods",
         combos
@@ -2489,7 +2489,7 @@ pub fn trendflex_cuda_batch_dev_py<'py>(
         let (dev, combos) = cuda
             .trendflex_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        // Synchronize producing stream so CAI v3 can omit 'stream'
+        
         cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, combos, cuda.context_arc_clone(), cuda.device_id()))
     })?;
@@ -2597,7 +2597,7 @@ pub fn trendflex_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     trendflex_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2726,22 +2726,22 @@ pub fn trendflex_batch_into(
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Build the batch sweep
+        
         let sweep = TrendFlexBatchRange {
             period: (period_start, period_end, period_step),
         };
 
-        // Calculate the number of combinations
+        
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let n_combos = combos.len();
         let total_size = n_combos
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("dimensions overflow"))?;
 
-        // Get output slice
+        
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Use trendflex_batch_inner_into to write directly
+        
         trendflex_batch_inner_into(data, &sweep, Kernel::Auto, false, out_slice)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

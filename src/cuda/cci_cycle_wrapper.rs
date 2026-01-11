@@ -56,7 +56,7 @@ impl CudaCciCycle {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/cci_cycle_kernel.ptx"));
-        // Prefer the most optimized JIT level (O4) and derive target from the current context.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -73,7 +73,7 @@ impl CudaCciCycle {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Cache device attributes for smarter launches
+        
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)?;
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)?;
 
@@ -87,7 +87,7 @@ impl CudaCciCycle {
 
     fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaCciCycleError> {
         if let Ok((free, _total)) = mem_get_info() {
-            let dyn_headroom = (free as f64 * 0.05) as usize; // keep ~5% free
+            let dyn_headroom = (free as f64 * 0.05) as usize; 
             let keep = dyn_headroom.max(headroom);
             if required_bytes.saturating_add(keep) <= free {
                 Ok(())
@@ -129,7 +129,7 @@ impl CudaCciCycle {
             .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Pinned (page-locked) host buffers for real async DMA
+        
         let h_prices = LockedBuffer::from_slice(data_f32).map_err(CudaCciCycleError::Cuda)?;
         let lengths: Vec<i32> = combos.iter().map(|p| p.length.unwrap_or(0) as i32).collect();
         let factors: Vec<f32> = combos.iter().map(|p| p.factor.unwrap_or(0.5) as f32).collect();
@@ -153,7 +153,7 @@ impl CudaCciCycle {
                 .map_err(CudaCciCycleError::Cuda)?
         };
 
-        // Note: Kernel writes leading NaNs and all subsequent outputs; no extra memset needed here.
+        
 
         self.launch_batch_kernel(
             &d_prices,
@@ -185,7 +185,7 @@ impl CudaCciCycle {
             .get_function("cci_cycle_batch_f32")
             .map_err(|_| CudaCciCycleError::MissingKernelSymbol { name: "cci_cycle_batch_f32" })?;
 
-        // 1D grid over rows: keep several blocks per SM; respect MaxGridDimX
+        
         let block: BlockSize = (256, 1, 1).into();
         let needed_blocks = ((n_combos + 255) / 256) as u32;
         let min_blocks = (self.sm_count as u32).saturating_mul(16);
@@ -241,7 +241,7 @@ impl CudaCciCycle {
             return Err(CudaCciCycleError::InvalidInput("length must be > 0".into()));
         }
 
-        // First-valid per series (host)
+        
         let mut first_valids = vec![0i32; rows];
         for r in 0..rows {
             let mut fv = 0usize;
@@ -255,7 +255,7 @@ impl CudaCciCycle {
             first_valids[r] = fv as i32;
         }
 
-        // VRAM estimate
+        
         let bytes = data_tm_f32
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -264,7 +264,7 @@ impl CudaCciCycle {
             .ok_or_else(|| CudaCciCycleError::InvalidInput("size overflow".into()))?;
         Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
-        // Upload via pinned host buffers
+        
         let h_prices = LockedBuffer::from_slice(data_tm_f32).map_err(CudaCciCycleError::Cuda)?;
         let h_firsts = LockedBuffer::from_slice(&first_valids).map_err(CudaCciCycleError::Cuda)?;
         let d_prices = unsafe {
@@ -279,14 +279,14 @@ impl CudaCciCycle {
             DeviceBuffer::uninitialized_async(expected, &self.stream)
                 .map_err(CudaCciCycleError::Cuda)?
         };
-        // Note: Kernel covers all writes; memset omitted.
+        
 
-        // Launch
+        
         let func = self
             .module
             .get_function("cci_cycle_many_series_one_param_f32")
             .map_err(|_| CudaCciCycleError::MissingKernelSymbol { name: "cci_cycle_many_series_one_param_f32" })?;
-        // One thread per series (sequential over time). Chunk rows across blocks of 256.
+        
         let block: BlockSize = (256, 1, 1).into();
         let grid_x = ((rows + 255) / 256) as u32;
         if grid_x == 0 || block.x == 0 || block.x > 1024 {
@@ -332,7 +332,7 @@ impl CudaCciCycle {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCciCycleError::InvalidInput("all values NaN".into()))?;
         let combos = expand_grid(sweep)?;
-        // Validate max length
+        
         let max_len = combos
             .iter()
             .map(|p| p.length.unwrap_or(0))
@@ -445,7 +445,7 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    // 1m x 250 can take minutes for this recurrence-heavy kernel; keep the bench practical.
+    
     const ONE_SERIES_LEN: usize = 100_000;
     const PARAM_SWEEP: usize = 250;
 
@@ -490,7 +490,7 @@ pub mod benches {
             data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
         }
         let sweep = CciCycleBatchRange {
-            // Sweep length only (250 combos). Factor held constant.
+            
             length: (10, 10 + PARAM_SWEEP as usize - 1, 1),
             factor: (0.5, 0.5, 0.0),
         };

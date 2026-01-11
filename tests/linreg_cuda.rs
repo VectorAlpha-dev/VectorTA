@@ -1,13 +1,13 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaLinreg;
-use my_project::indicators::moving_averages::linreg::{
+use vector_ta::cuda::moving_averages::CudaLinreg;
+use vector_ta::indicators::moving_averages::linreg::{
     expand_grid_linreg, linreg_batch_inner_into, LinRegBatchRange, LinRegBuilder, LinRegParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];

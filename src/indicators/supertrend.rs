@@ -246,7 +246,7 @@ fn supertrend_prepare<'a>(
 ) -> Result<
     (
         &'a [f64], // high
-        &'a [f64], // low
+        &'a [f64], 
         &'a [f64], // close
         usize,     // period
         f64,       // factor
@@ -745,7 +745,7 @@ pub unsafe fn supertrend_scalar_classic(
     // Step 1: Calculate ATR inline (Wilder's method)
     let mut tr_values = vec![0.0; n];
 
-    // Calculate True Range values
+    
     if first_valid < n {
         tr_values[first_valid] = high[first_valid] - low[first_valid];
     }
@@ -757,10 +757,10 @@ pub unsafe fn supertrend_scalar_classic(
         tr_values[i] = high_low.max(high_close).max(low_close);
     }
 
-    // Calculate ATR using Wilder's smoothing
+    
     let mut atr_values = vec![f64::NAN; n];
 
-    // Initial ATR is simple average of first 'period' TR values
+    
     let mut atr_sum = 0.0;
     for i in first_valid..(first_valid + period).min(n) {
         atr_sum += tr_values[i];
@@ -769,7 +769,7 @@ pub unsafe fn supertrend_scalar_classic(
     if first_valid + period <= n {
         atr_values[first_valid + period - 1] = atr_sum / period as f64;
 
-        // Continue with Wilder's smoothing
+        
         let alpha = 1.0 / period as f64;
         let alpha_1minus = 1.0 - alpha;
 
@@ -778,17 +778,17 @@ pub unsafe fn supertrend_scalar_classic(
         }
     }
 
-    // Step 2: Calculate SuperTrend bands
+    
     if warmup >= n {
         return Ok(());
     }
 
-    // Initialize first valid point
+    
     let half_range = (high[warmup] + low[warmup]) / 2.0;
     let mut prev_upper_band = factor.mul_add(atr_values[warmup], half_range);
     let mut prev_lower_band = (-factor).mul_add(atr_values[warmup], half_range);
 
-    // Initialize state from warmup close
+    
     let mut last_close = close[warmup];
     let mut upper_state = if last_close <= prev_upper_band {
         trend_out[warmup] = prev_upper_band;
@@ -799,13 +799,13 @@ pub unsafe fn supertrend_scalar_classic(
     };
     changed_out[warmup] = 0.0;
 
-    // Process remaining points
+    
     for i in (warmup + 1)..n {
         let half_range = (high[i] + low[i]) / 2.0;
         let upper_basic = factor.mul_add(atr_values[i], half_range);
         let lower_basic = (-factor).mul_add(atr_values[i], half_range);
 
-        // Update bands based on previous close
+        
         let prev_close = last_close;
         let mut curr_upper_band = upper_basic;
         let mut curr_lower_band = lower_basic;
@@ -816,7 +816,7 @@ pub unsafe fn supertrend_scalar_classic(
             curr_lower_band = curr_lower_band.max(prev_lower_band);
         }
 
-        // Determine current trend and change flag using previous state
+        
         let curr_close = close[i];
         if upper_state {
             if curr_close <= curr_upper_band {
@@ -838,7 +838,7 @@ pub unsafe fn supertrend_scalar_classic(
             }
         }
 
-        // Update previous bands for next iteration
+        
         prev_upper_band = curr_upper_band;
         prev_lower_band = curr_lower_band;
         last_close = curr_close;
@@ -847,19 +847,19 @@ pub unsafe fn supertrend_scalar_classic(
     Ok(())
 }
 
-// Streaming (stateful) implementation — drop-in replacement
-// Decision: Streaming uses O(1) state (prev bands, prev close, boolean state) and FMA for band math.
+
+
 #[derive(Debug, Clone)]
 pub struct SuperTrendStream {
     pub period: usize,
     pub factor: f64,
     atr_stream: crate::indicators::atr::AtrStream,
-    // O(1) state we actually need
+    
     prev_upper_band: f64,
     prev_lower_band: f64,
     prev_close: f64,
-    upper_state: bool, // true = using upper band, false = using lower band
-    warmed: bool,      // first output has been produced
+    upper_state: bool, 
+    warmed: bool,      
 }
 
 impl SuperTrendStream {
@@ -888,18 +888,18 @@ impl SuperTrendStream {
     /// - Emits (trend, changed) once warmup is complete
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        // 1) Update embedded ATR; None until warmup is complete.
+        
         let atr = match self.atr_stream.update(high, low, close) {
             Some(v) => v,
             None => return None,
         };
 
-        // 2) Compute HL2 and basic bands with FMA
+        
         let hl2 = (high + low) * 0.5;
         let upper_basic = self.factor.mul_add(atr, hl2);
         let lower_basic = (-self.factor).mul_add(atr, hl2);
 
-        // 3) First emission: seed state; changed = 0.0
+        
         if !self.warmed {
             self.prev_upper_band = upper_basic;
             self.prev_lower_band = lower_basic;
@@ -914,7 +914,7 @@ impl SuperTrendStream {
             return Some((trend, 0.0));
         }
 
-        // 4) Tighten bands using previous close vs previous bands
+        
         let mut curr_upper_band = upper_basic;
         if self.prev_close <= self.prev_upper_band {
             curr_upper_band = curr_upper_band.min(self.prev_upper_band);
@@ -924,7 +924,7 @@ impl SuperTrendStream {
             curr_lower_band = curr_lower_band.max(self.prev_lower_band);
         }
 
-        // 5) Decide trend & change from previous state
+        
         let mut changed = 0.0;
         let trend = if self.upper_state {
             if close <= curr_upper_band {
@@ -944,7 +944,7 @@ impl SuperTrendStream {
             }
         };
 
-        // 6) Carry state forward
+        
         self.prev_upper_band = curr_upper_band;
         self.prev_lower_band = curr_lower_band;
         self.prev_close = close;
@@ -953,7 +953,7 @@ impl SuperTrendStream {
     }
 }
 
-// Batch range builder + batch output
+
 #[derive(Clone, Debug)]
 pub struct SuperTrendBatchRange {
     pub period: (usize, usize, usize),
@@ -1047,7 +1047,7 @@ impl SuperTrendBatchOutput {
     }
 }
 
-// Python VRAM handle for CUDA SuperTrend results (CAI v3 + DLPack v1.x)
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct SupertrendDeviceArrayF32Py {
@@ -2168,9 +2168,9 @@ impl SuperTrendStreamPy {
     }
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[inline]
@@ -2197,7 +2197,7 @@ pub fn supertrend_into_slice(
         });
     }
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut trend_dst[..warmup_end] {
         *v = f64::NAN;
@@ -2225,9 +2225,9 @@ pub fn supertrend_into_slice(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SuperTrendJsResult {
-    pub values: Vec<f64>, // [trend..., changed...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2246,7 +2246,7 @@ pub fn supertrend_js(
     };
     let input = SuperTrendInput::from_slices(high, low, close, params);
 
-    // Compute directly into two slices of one flat buffer
+    
     let mut values = vec![0.0; len * 2];
     let (trend_slice, changed_slice) = values.split_at_mut(len);
     supertrend_into_slice(trend_slice, changed_slice, &input, Kernel::Auto)
@@ -2293,7 +2293,7 @@ pub fn supertrend_into(
         };
         let input = SuperTrendInput::from_slices(high, low, close, params);
 
-        // Check for aliasing between input and output pointers
+        
         let input_ptrs = [
             high_ptr as *const u8,
             low_ptr as *const u8,
@@ -2306,7 +2306,7 @@ pub fn supertrend_into(
             .any(|&inp| output_ptrs.iter().any(|&out| inp == out));
 
         if has_aliasing {
-            // Use temporary buffers if there's aliasing
+            
             let output = supertrend_with_kernel(&input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2316,7 +2316,7 @@ pub fn supertrend_into(
             trend_out.copy_from_slice(&output.trend);
             changed_out.copy_from_slice(&output.changed);
         } else {
-            // Direct computation when no aliasing
+            
             let trend_out = std::slice::from_raw_parts_mut(trend_ptr, len);
             let changed_out = std::slice::from_raw_parts_mut(changed_ptr, len);
 
@@ -2357,10 +2357,10 @@ pub struct SuperTrendBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct SuperTrendBatchJsOutput {
-    pub values: Vec<f64>, // rows = 2 * combos, each row has `cols`
+    pub values: Vec<f64>, 
     pub periods: Vec<usize>,
     pub factors: Vec<f64>,
-    pub rows: usize, // 2 * combos
+    pub rows: usize, 
     pub cols: usize,
 }
 
@@ -2383,7 +2383,7 @@ pub fn supertrend_batch_js(
     let batch = supertrend_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // flatten to [trend(row0), changed(row0), trend(row1), changed(row1), ...]
+    
     let mut values = Vec::with_capacity(batch.rows * 2 * batch.cols);
     for r in 0..batch.rows {
         let rs = r * batch.cols;
@@ -2422,7 +2422,7 @@ mod tests {
 
     #[test]
     fn test_supertrend_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the existing CSV dataset for parity with other tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -2432,15 +2432,15 @@ mod tests {
         };
         let input = SuperTrendInput::from_candles(&candles, params);
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = supertrend_with_kernel(&input, Kernel::Auto)?;
 
-        // Preallocate outputs and compute via new into API
+        
         let n = candles.close.len();
         let mut trend_out = vec![0.0; n];
         let mut changed_out = vec![0.0; n];
 
-        // Only compiled for native; avoid wasm symbol clash
+        
         #[cfg(not(feature = "wasm"))]
         {
             supertrend_into(&input, &mut trend_out, &mut changed_out)?;
@@ -2451,7 +2451,7 @@ mod tests {
         assert_eq!(trend_out.len(), n);
         assert_eq!(changed_out.len(), n);
 
-        // Helper: treat NaN == NaN; otherwise allow tiny epsilon due to classic vs ATR-prep paths
+        
         #[inline]
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-9
@@ -2778,16 +2778,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             SuperTrendParams::default(),
-            // Minimum period
+            
             SuperTrendParams {
                 period: Some(2),
                 factor: Some(1.0),
             },
-            // Small period with various factors
+            
             SuperTrendParams {
                 period: Some(5),
                 factor: Some(0.5),
@@ -2800,7 +2800,7 @@ mod tests {
                 period: Some(5),
                 factor: Some(3.5),
             },
-            // Medium periods
+            
             SuperTrendParams {
                 period: Some(10),
                 factor: Some(1.5),
@@ -2813,7 +2813,7 @@ mod tests {
                 period: Some(20),
                 factor: Some(3.0),
             },
-            // Large periods
+            
             SuperTrendParams {
                 period: Some(50),
                 factor: Some(2.0),
@@ -2822,7 +2822,7 @@ mod tests {
                 period: Some(100),
                 factor: Some(1.0),
             },
-            // Edge case factors
+            
             SuperTrendParams {
                 period: Some(10),
                 factor: Some(0.1),
@@ -2837,15 +2837,15 @@ mod tests {
             let input = SuperTrendInput::from_candles(&candles, params.clone());
             let output = supertrend_with_kernel(&input, kernel)?;
 
-            // Check trend values
+            
             for (i, &val) in output.trend.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in trend \
@@ -2880,7 +2880,7 @@ mod tests {
                 }
             }
 
-            // Check changed values
+            
             for (i, &val) in output.changed.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2931,7 +2931,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2943,42 +2943,42 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic OHLC data
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
-            let data_len = period * 2 + 50; // Ensure sufficient data length
+            let data_len = period * 2 + 50; 
             (
-                // Base price generation
+                
                 prop::collection::vec(
                     (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                     data_len,
                 ),
                 Just(period),
-                0.5f64..5.0f64, // factor range
+                0.5f64..5.0f64, 
             )
         });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(base_prices, period, factor)| {
-                // Generate more realistic OHLC data from base prices
+                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
                 let mut close = Vec::with_capacity(base_prices.len());
 
-                // Use a simple RNG for variation
+                
                 let mut rng_state = 42u64;
                 for &base in &base_prices {
-                    // Simple LCG for pseudo-random numbers
+                    
                     rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                     let rand1 = ((rng_state >> 32) as f64) / (u32::MAX as f64);
                     rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                     let rand2 = ((rng_state >> 32) as f64) / (u32::MAX as f64);
 
-                    // Variable spread between 0.5% and 3%
+                    
                     let spread = base * (0.005 + rand1 * 0.025);
                     let h = base + spread;
                     let l = base - spread;
 
-                    // Close can be anywhere within high/low range
+                    
                     let c = l + (h - l) * rand2;
 
                     high.push(h);
@@ -2992,13 +2992,13 @@ mod tests {
                 };
                 let input = SuperTrendInput::from_slices(&high, &low, &close, params);
 
-                // Test with specified kernel
+                
                 let output = supertrend_with_kernel(&input, kernel).unwrap();
 
-                // Also get reference output from scalar kernel for comparison
+                
                 let ref_output = supertrend_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length should match input
+                
                 prop_assert_eq!(
                     output.trend.len(),
                     high.len(),
@@ -3012,7 +3012,7 @@ mod tests {
                     test_name
                 );
 
-                // Property 2: Warmup period handling
+                
                 let warmup_end = period - 1;
                 for i in 0..warmup_end {
                     prop_assert!(
@@ -3029,13 +3029,13 @@ mod tests {
                     );
                 }
 
-                // Property 3: Trend values should be reasonable relative to price data
-                // SuperTrend uses ATR-based bands, so values should be within a reasonable
-                // multiple of the price range
+                
+                
+                
                 for i in warmup_end..output.trend.len() {
                     let val = output.trend[i];
                     if !val.is_nan() {
-                        // Get the entire data range to understand the scale
+                        
                         let global_high = high.iter().fold(f64::NEG_INFINITY, |a, &b| {
                             if b.is_finite() {
                                 a.max(b)
@@ -3051,13 +3051,13 @@ mod tests {
                             }
                         });
 
-                        // SuperTrend bands can legitimately be far from current price
-                        // when there are large price movements in the ATR period
-                        // Just verify the value is within the overall data scale
+                        
+                        
+                        
                         let global_range = global_high - global_low;
 
-                        // Allow trend to be within the global range plus some margin
-                        // for ATR-based expansion
+                        
+                        
                         let margin = global_range * factor;
 
                         prop_assert!(
@@ -3072,7 +3072,7 @@ mod tests {
                     }
                 }
 
-                // Property 4: Changed values must be 0.0 or 1.0
+                
                 for i in warmup_end..output.changed.len() {
                     let val = output.changed[i];
                     if !val.is_nan() {
@@ -3086,14 +3086,14 @@ mod tests {
                     }
                 }
 
-                // Property 5: Kernel consistency
+                
                 for i in 0..output.trend.len() {
                     let trend_val = output.trend[i];
                     let ref_trend_val = ref_output.trend[i];
                     let changed_val = output.changed[i];
                     let ref_changed_val = ref_output.changed[i];
 
-                    // Check trend consistency
+                    
                     if !trend_val.is_finite() || !ref_trend_val.is_finite() {
                         prop_assert_eq!(
                             trend_val.to_bits(),
@@ -3115,7 +3115,7 @@ mod tests {
                         );
                     }
 
-                    // Check changed consistency (should be exact)
+                    
                     if !changed_val.is_nan() && !ref_changed_val.is_nan() {
                         prop_assert_eq!(
                             changed_val,
@@ -3129,9 +3129,9 @@ mod tests {
                     }
                 }
 
-                // Property 6: Special case - when all prices are identical
+                
                 if base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
-                    // After warmup, trend should stabilize
+                    
                     let stable_start = (period * 2).min(output.trend.len());
                     if stable_start < output.trend.len() {
                         let stable_trend = output.trend[stable_start];
@@ -3148,9 +3148,9 @@ mod tests {
                     }
                 }
 
-                // Property 7: Trend switching consistency
-                // When changed=1.0, verify trend actually switched from previous
-                // When changed=0.0, trend should maintain same band type
+                
+                
+                
                 if output.trend.len() > warmup_end + 1 {
                     for i in (warmup_end + 1)..output.changed.len() {
                         let changed_val = output.changed[i];
@@ -3160,16 +3160,16 @@ mod tests {
 
                             if !curr_trend.is_nan() && !prev_trend.is_nan() {
                                 if changed_val == 1.0 {
-                                    // Changed flag indicates a switch - trends should be different
-                                    // Allow for small numerical differences
+                                    
+                                    
                                     prop_assert!(
 										(curr_trend - prev_trend).abs() > 1e-6,
 										"[{}] Changed=1.0 at index {} but trend didn't switch: {} vs {}",
 										test_name, i, prev_trend, curr_trend
 									);
                                 }
-                                // Note: We can't strictly enforce changed=0.0 means same value
-                                // because the bands themselves can move even without switching
+                                
+                                
                             }
                         }
                     }
@@ -3240,7 +3240,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Last few values of trend for reference.
+        
         let expected = [
             61811.479454208165,
             61721.73150878735,
@@ -3265,16 +3265,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, factor_start, factor_end, factor_step)
-            (2, 10, 2, 1.0, 3.0, 0.5),   // Small periods
-            (5, 25, 5, 2.0, 2.0, 0.0),   // Medium periods, static factor
-            (10, 10, 0, 0.5, 4.0, 0.5),  // Static period, varying factors
-            (2, 5, 1, 1.5, 1.5, 0.0),    // Dense small range
-            (30, 60, 15, 3.0, 3.0, 0.0), // Large periods
-            (20, 30, 5, 1.0, 3.0, 1.0),  // Mixed ranges
-            (8, 12, 1, 0.5, 2.5, 0.5),   // Dense medium range
+            
+            (2, 10, 2, 1.0, 3.0, 0.5),   
+            (5, 25, 5, 2.0, 2.0, 0.0),   
+            (10, 10, 0, 0.5, 4.0, 0.5),  
+            (2, 5, 1, 1.5, 1.5, 0.0),    
+            (30, 60, 15, 3.0, 3.0, 0.0), 
+            (20, 30, 5, 1.0, 3.0, 1.0),  
+            (8, 12, 1, 0.5, 2.5, 0.5),   
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, f_start, f_end, f_step)) in
@@ -3286,7 +3286,7 @@ mod tests {
                 .factor_range(f_start, f_end, f_step)
                 .apply_candles(&c)?;
 
-            // Check trend values
+            
             for (idx, &val) in output.trend.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3346,7 +3346,7 @@ mod tests {
                 }
             }
 
-            // Check changed values
+            
             for (idx, &val) in output.changed.iter().enumerate() {
                 if val.is_nan() {
                     continue;

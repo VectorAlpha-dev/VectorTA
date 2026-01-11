@@ -87,7 +87,7 @@ pub struct CudaIftRsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // --- cached device caps for launch heuristics ---
+    
     sm_count: u32,
     max_smem_per_block: usize,
     warp_size: u32,
@@ -100,7 +100,7 @@ impl CudaIftRsi {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // Query device caps for heuristics and safety checks
+        
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let max_smem_per_block = device.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
         let warp_size = device.get_attribute(DeviceAttribute::WarpSize)? as u32;
@@ -270,7 +270,7 @@ impl CudaIftRsi {
     ) -> Result<(DeviceArrayF32, Vec<IftRsiParams>), CudaIftRsiError> {
         let (combos, first_valid, len, max_wp) = Self::prepare_batch_inputs(data_f32, sweep)?;
 
-        // VRAM estimate: input + two params + output (with checked arithmetic)
+        
         let bytes_in = len
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
@@ -322,8 +322,8 @@ impl CudaIftRsi {
             .get_function("ift_rsi_batch_f32")
             .map_err(|_| CudaIftRsiError::MissingKernelSymbol { name: "ift_rsi_batch_f32" })?;
 
-        // One warp per block by default; grid capped to ~8x SMs per guide.
-        // Safety check for shared memory ring used by each block
+        
+        
         let shmem_bytes_usize: usize = max_wp
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
@@ -334,7 +334,7 @@ impl CudaIftRsi {
             )));
         }
 
-        // One warp per block by default; kernel grid-strides over combos
+        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => self.warp_size.max(32),
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
@@ -391,7 +391,7 @@ impl CudaIftRsi {
             return Err(CudaIftRsiError::InvalidInput("invalid periods".into()));
         }
 
-        // Per-series first_valid (first non-NaN row)
+        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -409,7 +409,7 @@ impl CudaIftRsi {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate: input + first + out
+        
         let elems = cols.checked_mul(rows).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
         let bytes_in = elems.checked_mul(core::mem::size_of::<f32>()).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
         let bytes_first = cols.checked_mul(core::mem::size_of::<i32>()).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
@@ -427,7 +427,7 @@ impl CudaIftRsi {
             .get_function("ift_rsi_many_series_one_param_f32")
             .map_err(|_| CudaIftRsiError::MissingKernelSymbol { name: "ift_rsi_many_series_one_param_f32" })?;
 
-        // Each thread needs wp*sizeof(f32) shared memory; clamp block by SMEM and HW limits
+        
         let bytes_per_thread = wma_p
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
@@ -530,7 +530,7 @@ impl CudaIftRsi {
     }
 }
 
-// ------------------------ Benches ------------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

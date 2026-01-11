@@ -964,10 +964,10 @@ fn gaussian_with_kernel_into(
 ) -> Result<(), GaussianError> {
     let (data, period, poles, first, chosen) = gaussian_prepare(input, kernel)?;
 
-    // Initialize NaN prefix
+    
     out[..first + period].fill(f64::NAN);
 
-    // Compute directly into output buffer
+    
     gaussian_compute_into(data, period, poles, first, chosen, out);
 
     Ok(())
@@ -979,7 +979,7 @@ fn gaussian_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // period
         usize,
@@ -1797,9 +1797,9 @@ mod tests {
         assert_eq!(second_result.values.len(), first_result.values.len());
         // The test just needs to verify that we get reasonable output after chaining
         // Don't be overly strict about exact warmup periods
-        // Just check that eventually we get non-NaN values
-        // With first_period=14 and second_period=7, we'd expect values after 14+7=21
-        // But give some buffer for safety
+        
+        
+        
         for i in 10..second_result.values.len() {
             assert!(
                 !second_result.values[i].is_nan(),
@@ -1820,7 +1820,7 @@ mod tests {
         let input = GaussianInput::from_candles(&candles, "close", GaussianParams::default());
         let res = gaussian_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
-        // Skip warmup period (first_valid + period)
+        
         let skip = input.params.poles.unwrap_or(4);
         for val in res.values.iter().skip(skip) {
             assert!(
@@ -1889,8 +1889,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: generate random data with various period and pole combinations
-        // Start from period=2 to avoid the degenerate period=1 case initially
+        
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1898,7 +1898,7 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                1usize..=4, // All valid pole values
+                1usize..=4, 
             )
         });
 
@@ -1914,19 +1914,19 @@ mod tests {
                 let GaussianOutput { values: ref_out } =
                     gaussian_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Basic property: output length matches input
+                
                 prop_assert_eq!(out.len(), data.len());
 
-                // Find first non-NaN value in data
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
 
-                // Property 1: Warmup period validation
-                // The implementation calculates warm = first_valid + period
-                // and calls alloc_with_nan_prefix(len, warm)
-                // We should verify this is respected
+                
+                
+                
+                
                 let expected_warmup = first_valid + period;
 
-                // Check that NaN values are properly set for leading NaN inputs
+                
                 for i in 0..first_valid {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1936,9 +1936,9 @@ mod tests {
                     );
                 }
 
-                // Property 2: After first valid data, values should be finite (unless input has NaN)
-                // Note: The Gaussian filter starts producing values immediately after first_valid,
-                // not after warmup, which may be a design choice or issue
+                
+                
+                
                 for i in first_valid..data.len() {
                     if data[i].is_finite() && !data[first_valid..=i].iter().any(|x| x.is_nan()) {
                         prop_assert!(
@@ -1950,9 +1950,9 @@ mod tests {
                     }
                 }
 
-                // Property 3: STRICT Smoothness - Gaussian filter MUST reduce variance
-                // No tolerance for variance increase
-                let stability_point = first_valid + period * 2; // Use 2x period for stability
+                
+                
+                let stability_point = first_valid + period * 2; 
                 if period > 1 && stability_point + 20 < data.len() {
                     let window_start = stability_point;
                     let window_end = (stability_point + 50).min(data.len());
@@ -1980,10 +1980,10 @@ mod tests {
                             .sum::<f64>()
                             / output_slice.len() as f64;
 
-                        // STRICT: Gaussian filter MUST reduce variance (no tolerance)
+                        
                         if input_var > 1e-10 {
-                            // Only check if input has meaningful variance
-                            // Allow tiny numerical error (1e-15) but no real increase
+                            
+                            
                             prop_assert!(
 								output_var <= input_var + 1e-15,
 								"Gaussian filter MUST reduce variance: input_var={}, output_var={}, period={}, poles={}",
@@ -1993,10 +1993,10 @@ mod tests {
                     }
                 }
 
-                // Property 4: Period validation - period must be >= 2
-                // Period=1 is now properly handled with an error
+                
+                
                 if period < 2 {
-                    // This should never happen since we start from period=2 in our strategy
+                    
                     prop_assert!(
                         false,
                         "Test should not generate period < 2, but got period={}",
@@ -2004,8 +2004,8 @@ mod tests {
                     );
                 }
 
-                // Property 5: Constant input MUST produce constant output (after stability)
-                let stability_check = first_valid + period * 3; // More conservative stability point
+                
+                let stability_check = first_valid + period * 3; 
                 if data[first_valid..]
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() < 1e-10)
@@ -2014,7 +2014,7 @@ mod tests {
                     let constant_val = data[first_valid];
                     for i in stability_check..data.len() {
                         if out[i].is_finite() {
-                            // STRICT: Constant input must converge to exact constant
+                            
                             prop_assert!(
 								(out[i] - constant_val).abs() <= 1e-12,
 								"constant input MUST produce constant output: idx={}, expected={}, got={}, diff={}",
@@ -2024,8 +2024,8 @@ mod tests {
                     }
                 }
 
-                // Property 6: Kernel consistency - different kernels MUST produce identical results
-                // Within reasonable floating point precision
+                
+                
                 if kernel != Kernel::Scalar {
                     for i in first_valid..data.len() {
                         if out[i].is_finite() && ref_out[i].is_finite() {
@@ -2037,7 +2037,7 @@ mod tests {
                                 r_bits - y_bits
                             };
 
-                            // STRICT: Maximum 10 ULP difference for same algorithm
+                            
                             prop_assert!(
 								diff_bits <= 10 || (out[i] - ref_out[i]).abs() < 1e-14,
 								"kernel consistency failed at idx {}: {:?}={}, Scalar={}, diff_bits={}, abs_diff={}",
@@ -2047,13 +2047,13 @@ mod tests {
                     }
                 }
 
-                // Property 7: STRICT Pole Testing - Mathematical properties of each pole count
-                // Each pole adds a recursive stage to the filter
+                
+                
                 if stability_point + 30 < data.len() {
                     match poles {
                         1 => {
-                            // Single pole: Should provide some smoothing
-                            // We verify this by checking overall variance reduction
+                            
+                            
                             let check_start = (first_valid + period * 2).min(data.len() / 2);
                             let check_end = data.len();
 
@@ -2061,7 +2061,7 @@ mod tests {
                                 let input_slice = &data[check_start..check_end];
                                 let output_slice = &out[check_start..check_end];
 
-                                // Calculate variance for both
+                                
                                 if input_slice.iter().all(|x| x.is_finite())
                                     && output_slice.iter().all(|x| x.is_finite())
                                 {
@@ -2081,7 +2081,7 @@ mod tests {
                                         .sum::<f64>()
                                         / output_slice.len() as f64;
 
-                                    // 1-pole filter should reduce variance
+                                    
                                     if input_var > 1e-10 {
                                         prop_assert!(
 											output_var <= input_var,
@@ -2093,7 +2093,7 @@ mod tests {
                             }
                         }
                         2 | 3 | 4 => {
-                            // Multi-pole: Should be smoother than single pole
+                            
                             let params_1pole = GaussianParams {
                                 period: Some(period),
                                 poles: Some(1),
@@ -2102,12 +2102,12 @@ mod tests {
                             if let Ok(GaussianOutput { values: out_1pole }) =
                                 gaussian_with_kernel(&input_1pole, kernel)
                             {
-                                // Calculate smoothness metric
+                                
                                 let window_start = stability_point;
                                 let window_end = (stability_point + 30).min(data.len() - 1);
 
                                 if window_end > window_start + 5 {
-                                    // Calculate second differences (acceleration) as smoothness metric
+                                    
                                     let accel_multi: f64 = (window_start + 2..window_end)
                                         .map(|i| {
                                             if out[i - 2].is_finite()
@@ -2137,18 +2137,18 @@ mod tests {
                                         })
                                         .sum::<f64>();
 
-                                    // Multi-pole should have lower acceleration (smoother)
-                                    // Only check if we have meaningful variation in the data
-                                    // For sparse/impulse data, skip the smoothness check as multi-pole
-                                    // filters can have different impulse response characteristics
+                                    
+                                    
+                                    
+                                    
                                     let non_zero_count =
                                         data.iter().filter(|&&x| x.abs() > 1e-10).count();
                                     if accel_1pole > 1e-10
                                         && accel_multi > 1e-10
                                         && non_zero_count > 5
                                     {
-                                        // For non-sparse data, multi-pole should be smoother
-                                        // Allow small relative tolerance for numerical errors
+                                        
+                                        
                                         prop_assert!(
 											accel_multi <= accel_1pole * 1.1,
 											"{}-pole filter should be smoother than 1-pole: accel_{}pole={}, accel_1pole={}",
@@ -2190,14 +2190,14 @@ mod tests {
         }
     }
 
-    // Test edge cases that the property test might miss
+    
     fn check_gaussian_edge_cases(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Edge Case 1: Period=1 should now return error
+        
         {
             let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
             let params = GaussianParams {
@@ -2207,7 +2207,7 @@ mod tests {
             let input = GaussianInput::from_slice(&data, params);
             let result = gaussian_with_kernel(&input, kernel);
 
-            // Should return error for period=1
+            
             assert!(
                 result.is_err(),
                 "[{}] Period=1 should return error, but got Ok",
@@ -2222,7 +2222,7 @@ mod tests {
             }
         }
 
-        // Edge Case 2: Period equals data length
+        
         {
             let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
             let params = GaussianParams {
@@ -2233,9 +2233,9 @@ mod tests {
             let result = gaussian_with_kernel(&input, kernel)?;
             assert_eq!(result.values.len(), data.len());
 
-            // The Gaussian filter is an IIR filter that starts producing output immediately
-            // It doesn't require a full period of data to start, unlike moving averages
-            // So we just check that it produces finite values
+            
+            
+            
             for i in 0..data.len() {
                 assert!(
                     result.values[i].is_finite() || result.values[i].is_nan(),
@@ -2247,7 +2247,7 @@ mod tests {
             }
         }
 
-        // Edge Case 3: Single data point with period=1 should return error
+        
         {
             let data = vec![42.0];
             let params = GaussianParams {
@@ -2257,7 +2257,7 @@ mod tests {
             let input = GaussianInput::from_slice(&data, params);
             let result = gaussian_with_kernel(&input, kernel);
 
-            // Should return error for period=1
+            
             assert!(
                 result.is_err(),
                 "[{}] Single data point with period=1 should return error",
@@ -2265,7 +2265,7 @@ mod tests {
             );
         }
 
-        // Edge Case 4: All zeros input - should produce all zeros
+        
         {
             let data = vec![0.0; 10];
             let params = GaussianParams {
@@ -2275,7 +2275,7 @@ mod tests {
             let input = GaussianInput::from_slice(&data, params);
             let result = gaussian_with_kernel(&input, kernel)?;
 
-            // After warmup, should be all zeros
+            
             for i in 3..result.values.len() {
                 assert!(
                     result.values[i].abs() < 1e-15 || result.values[i].is_nan(),
@@ -2287,7 +2287,7 @@ mod tests {
             }
         }
 
-        // Edge Case 5: Period > data length should return error
+        
         {
             let data = vec![1.0, 2.0, 3.0];
             let params = GaussianParams {
@@ -2315,7 +2315,7 @@ mod tests {
             }
         }
 
-        // Edge Case 6: Maximum poles (4) with minimum period (2)
+        
         {
             let data = vec![1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0];
             let params = GaussianParams {
@@ -2325,9 +2325,9 @@ mod tests {
             let input = GaussianInput::from_slice(&data, params);
             let result = gaussian_with_kernel(&input, kernel)?;
 
-            // Should heavily smooth the alternating pattern
-            // After warmup, variance should be very low
-            let start = 2; // warmup
+            
+            
+            let start = 2; 
             if result.values.len() > start + 2 {
                 let slice = &result.values[start..];
                 let valid_values: Vec<f64> =
@@ -2338,9 +2338,9 @@ mod tests {
                     let variance = valid_values.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                         / valid_values.len() as f64;
 
-                    // 4 poles should smooth alternating input, though with period=2 the effect is limited
+                    
                     assert!(
-                        variance < 0.6, // Adjusted for realistic expectation with period=2
+                        variance < 0.6, 
                         "[{}] 4-pole filter should smooth alternating input: variance={}",
                         test_name,
                         variance
@@ -2352,7 +2352,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_gaussian_no_poison(
         test_name: &str,
@@ -2363,56 +2363,56 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations
+        
         let test_cases = vec![
             GaussianParams {
                 period: Some(14),
                 poles: Some(4),
-            }, // default
+            }, 
             GaussianParams {
                 period: Some(10),
                 poles: Some(1),
-            }, // minimum poles
+            }, 
             GaussianParams {
                 period: Some(30),
                 poles: Some(2),
-            }, // medium values
+            }, 
             GaussianParams {
                 period: Some(20),
                 poles: Some(3),
-            }, // different combination
+            }, 
             GaussianParams {
                 period: Some(50),
                 poles: Some(4),
-            }, // larger period
+            }, 
             GaussianParams {
                 period: Some(5),
                 poles: Some(1),
-            }, // small period, min poles
+            }, 
             GaussianParams {
                 period: Some(100),
                 poles: Some(4),
-            }, // large period
+            }, 
             GaussianParams {
                 period: None,
                 poles: None,
-            }, // None values (use defaults)
+            }, 
         ];
 
         for params in test_cases {
             let input = GaussianInput::from_candles(&candles, "close", params);
             let output = gaussian_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2421,7 +2421,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -2430,7 +2430,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -2444,7 +2444,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_gaussian_no_poison(
         _test_name: &str,
@@ -2519,7 +2519,7 @@ mod tests {
             }
         };
     }
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2527,16 +2527,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations with different parameter ranges
+        
         let batch_configs = vec![
-            // Original test case
+            
             ((10, 30, 10), (1, 4, 1)),
-            // Edge cases
-            ((5, 5, 0), (1, 1, 0)),      // Single parameter combo
-            ((100, 120, 20), (2, 4, 2)), // Larger periods
-            ((7, 21, 7), (1, 3, 2)),     // Different steps
-            ((15, 45, 15), (1, 4, 3)),   // Multiple poles
-            ((3, 12, 3), (1, 2, 1)),     // Small periods
+            
+            ((5, 5, 0), (1, 1, 0)),      
+            ((100, 120, 20), (2, 4, 2)), 
+            ((7, 21, 7), (1, 3, 2)),     
+            ((15, 45, 15), (1, 4, 3)),   
+            ((3, 12, 3), (1, 2, 1)),     
         ];
 
         for ((p_start, p_end, p_step), (poles_start, poles_end, poles_step)) in batch_configs {
@@ -2546,9 +2546,9 @@ mod tests {
                 .poles_range(poles_start, poles_end, poles_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2558,7 +2558,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -2567,7 +2567,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -2576,7 +2576,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -2590,7 +2590,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2603,7 +2603,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2615,13 +2615,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Helper function for batch operations with output buffer
+
 #[inline(always)]
 fn gaussian_batch_inner_into(
     data: &[f64],
@@ -2652,12 +2652,12 @@ fn gaussian_batch_inner_into(
         let period = c.period.unwrap_or(14);
         let poles = c.poles.unwrap_or(4);
 
-        // Check for degenerate period=1 case
+        
         if period == 1 {
             return Err(GaussianError::PeriodOneDegenerate);
         }
 
-        // Period must be at least 2 for meaningful Gaussian filtering
+        
         if period < 2 {
             return Err(GaussianError::DegeneratePeriod { period });
         }
@@ -2687,15 +2687,15 @@ fn gaussian_batch_inner_into(
         })
         .collect();
 
-    // Reinterpret output slice as MaybeUninit
+    
     let raw = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Initialize NaN prefixes
+    
     unsafe { init_matrix_prefixes(raw, cols, &warm) };
 
-    // Determine kernel
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -2710,7 +2710,7 @@ fn gaussian_batch_inner_into(
         _ => gaussian_row_scalar,
     };
 
-    // Process rows
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let dst = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         row_runner(data, &combos[row], dst);
@@ -2816,11 +2816,11 @@ pub fn gaussian_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output array
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Heavy work without the GIL
+    
 	    let combos = py
 	        .allow_threads(|| {
 	            let kernel = match kern {
@@ -2879,7 +2879,7 @@ pub fn gaussian_cuda_batch_dev_py(
     let slice = data_f32.as_slice()?;
     let sweep = GaussianBatchRange { period: period_range, poles: poles_range };
 
-    // Create CUDA wrapper outside allow_threads so we can capture its context/stream
+    
     let cuda = CudaGaussian::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let stream = cuda.stream_handle();
     let dev_id = cuda.device_id();
@@ -2937,10 +2937,10 @@ pub fn gaussian_js(data: &[f64], period: usize, poles: usize) -> Result<Vec<f64>
     };
     let input = GaussianInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     gaussian_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2956,16 +2956,16 @@ pub fn gaussian_into(
     period: usize,
     poles: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to gaussian_into"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs using consistent error checking
+        
         if period == 1 {
             return Err(JsValue::from_str("Period of 1 causes degenerate filter"));
         }
@@ -2986,25 +2986,25 @@ pub fn gaussian_into(
             return Err(JsValue::from_str("Invalid poles (must be 1-4)"));
         }
 
-        // Calculate Gaussian
+        
         let params = GaussianParams {
             period: Some(period),
             poles: Some(poles),
         };
         let input = GaussianInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
+        
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
+            
             let mut temp = vec![0.0; len];
             gaussian_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             gaussian_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -3017,17 +3017,17 @@ pub fn gaussian_into(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn gaussian_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn gaussian_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -3159,7 +3159,7 @@ pub fn gaussian_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Use optimized batch processing
+        
         gaussian_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

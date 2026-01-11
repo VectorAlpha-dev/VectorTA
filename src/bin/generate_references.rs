@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let indicator = &args[1];
     let source = args.get(2).map(|s| s.as_str()).unwrap_or("close");
 
-    // Load test data
+    
     let candles = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
 
     let output = match indicator.as_str() {
@@ -222,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "emv" => {
-            // EMV requires OHLCV data
+            
             let high = candles.select_candle_field("high")?;
             let low = candles.select_candle_field("low")?;
             let close = candles.select_candle_field("close")?;
@@ -238,7 +238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "devstop" => {
-            // DevStop requires high/low data
+            
             let params = DevStopParams::default();
             let period = params.period.unwrap_or(20);
             let mult = params.mult.unwrap_or(0.0);
@@ -475,7 +475,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = fisher(&input)?;
             json!({
                 "indicator": "fisher",
-                "source": "high,low",  // Fisher uses high and low
+                "source": "high,low",  
                 "params": {
                     "period": period
                 },
@@ -486,8 +486,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "frama" => {
             let params = FramaParams::default();
-            // Use the true FRAMA defaults from FramaParams::default()
-            // Window defaults to 10, sc to 300, fc to 1.
+            
+            
             let window = params.window.unwrap_or(10);
             let sc = params.sc.unwrap_or(300);
             let fc = params.fc.unwrap_or(1);
@@ -495,7 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = frama(&input)?;
             json!({
                 "indicator": "frama",
-                "source": "high,low,close", // FRAMA uses multiple price sources
+                "source": "high,low,close", 
                 "params": {
                     "window": window,
                     "sc": sc,
@@ -891,7 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "mass" => {
-            // Mass Index requires high and low data
+            
             if !source.contains(",") {
                 eprintln!("Mass Index requires 'high,low' source");
                 std::process::exit(1);
@@ -911,7 +911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "mfi" => {
-            // MFI requires typical price and volume
+            
             if source != "hlc3_volume" {
                 eprintln!("MFI indicator requires 'hlc3_volume' source");
                 std::process::exit(1);
@@ -919,7 +919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let params = MfiParams::default();
             let period = params.period.unwrap_or(14);
 
-            // Calculate typical price directly from candles fields
+            
             let typical_price: Vec<f64> = candles
                 .high
                 .iter()
@@ -1014,8 +1014,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let params = PmaParams::default();
             let input = PmaInput::from_candles(&candles, source, params);
             let result = pma(&input)?;
-            // PMA returns two arrays: predict and trigger
-            // For consistency with other indicators, we'll return predict as the main values
+            
+            
             json!({
                 "indicator": "pma",
                 "source": source,
@@ -1377,8 +1377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mult_kc = params.mult_kc.unwrap_or(1.5);
             let input = SqueezeMomentumInput::from_candles(&candles, params);
             let result = squeeze_momentum(&input)?;
-            // For squeeze_momentum, we return the momentum values as the main output
-            // This matches what the Python test expects
+            
+            
             json!({
                 "indicator": "squeeze_momentum",
                 "source": "hlc",
@@ -1441,7 +1441,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "vpt" => {
-            // VPT requires price and volume data
+            
             let volume = candles.select_candle_field("volume")?;
             let price = candles.select_candle_field(source)?;
             let input = VptInput::from_slices(price, volume);
@@ -1827,7 +1827,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "bop" => {
-            // BOP requires OHLC data
+            
             let input = BopInput::from_candles(&candles, BopParams::default());
             let result = bop(&input)?;
             json!({
@@ -1973,7 +1973,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "correl_hl" => {
-            // correl_hl takes high,low as source
+            
             if source != "high,low" {
                 eprintln!("CORREL_HL indicator requires 'high,low' source");
                 std::process::exit(1);
@@ -2015,7 +2015,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "vama" => {
-            // Volatility Adjusted MA uses only price; accept any source but default to close
+            
             let price = candles.select_candle_field(match source {
                 "open" | "high" | "low" | "close" | "hl2" | "hlc3" | "ohlc4" | "hlcc4" => source,
                 _ => "close",
@@ -2043,7 +2043,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "volume_adjusted_ma" => {
-            // Volume Adjusted MA requires price and volume; tests pass 'close_volume'
+            
             let price = candles.select_candle_field("close")?;
             let volume = candles.select_candle_field("volume")?;
             let params = VoluMaParams::default();
@@ -2072,7 +2072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // Output as JSON
+    
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())

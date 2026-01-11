@@ -1,15 +1,15 @@
-// Integration tests for CUDA SRSI kernels
 
-use my_project::indicators::rsi::{rsi, RsiInput, RsiParams};
-use my_project::indicators::srsi::{SrsiBatchRange, SrsiParams};
+
+use vector_ta::indicators::rsi::{rsi, RsiInput, RsiParams};
+use vector_ta::indicators::srsi::{SrsiBatchRange, SrsiParams};
 use std::collections::BTreeMap;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaSrsi;
+use vector_ta::cuda::oscillators::CudaSrsi;
 
 fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -20,7 +20,7 @@ fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
 
 #[inline(always)]
 fn ftz_f32(x: f32) -> f32 {
-    // Mirror CUDA's common FTZ behavior (subnormals -> 0).
+    
     if x.abs() < f32::MIN_POSITIVE {
         0.0f32
     } else {
@@ -77,7 +77,7 @@ fn srsi_from_rsi_f32(
             lo = lo.min(v);
         }
         let denom = hi - lo;
-        // Mirror CUDA math: treat subnormal/zero ranges as "no-range".
+        
         let fk = if denom >= f32::MIN_POSITIVE {
             (rv - lo) * 100.0f32 / denom
         } else {
@@ -142,7 +142,7 @@ fn rsi_wilder_f32(prices: &[f32], first_valid: usize, period: usize) -> Vec<f32>
         return out;
     }
 
-    // Wilder seed: average gains/losses over the first `period` deltas.
+    
     let mut avg_gain = 0.0f32;
     let mut avg_loss = 0.0f32;
     let mut prev = prices[first_valid];
@@ -168,7 +168,7 @@ fn rsi_wilder_f32(prices: &[f32], first_valid: usize, period: usize) -> Vec<f32>
         100.0f32 - 100.0f32 / (1.0f32 + avg_gain / avg_loss)
     };
 
-    // Wilder recursion (use mul_add to match GPU fmaf).
+    
     let alpha = inv_p;
     let mut prev = prices[warm];
     for i in (warm + 1)..n {
@@ -235,8 +235,8 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_pair.k.buf.copy_to(&mut gk)?;
     dev_pair.d.buf.copy_to(&mut gd)?;
 
-    // CPU baseline that matches the device math: RSI is computed on host (f64 -> f32),
-    // then StochRSI + SMA(SMA) are computed in f32.
+    
+    
     let mut rsi_cache: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
     for prm in &combos {
         let rp = prm.rsi_period.unwrap();
@@ -378,7 +378,7 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let kp = 3usize;
     let dp = 3usize;
 
-    // CPU baseline per series
+    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let mut cpu_k = vec![f32::NAN; cols * rows];
     let mut cpu_d = vec![f32::NAN; cols * rows];

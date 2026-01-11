@@ -234,9 +234,9 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
         other => other,
     };
 
-    // Heuristic: For small periods, the unrolled scalar path outperforms SIMD
-    // due to lane reversal + horizontal reductions overhead. Short-circuit to
-    // scalar for period <= 32.
+    
+    
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -315,8 +315,8 @@ pub fn srwma_scalar(
     let start_idx = first_val + period + 1;
     let len = data.len();
 
-    // Hot path: compute reverse dot with unrolling + fused mul-add to
-    // improve ILP and numerical agreement without extra allocations.
+    
+    
     unsafe {
         let w_ptr = weights.as_ptr();
         for i in start_idx..len {
@@ -333,7 +333,7 @@ pub fn srwma_scalar(
 
             let mut k = 0usize;
 
-            // Unroll by 8
+            
             while k + 8 <= wlen {
                 let x0 = *dp.sub(k + 0);
                 let w0 = *w_ptr.add(k + 0);
@@ -370,7 +370,7 @@ pub fn srwma_scalar(
                 k += 8;
             }
 
-            // Unroll by 4
+            
             while k + 4 <= wlen {
                 let x0 = *dp.sub(k + 0);
                 let w0 = *w_ptr.add(k + 0);
@@ -391,7 +391,7 @@ pub fn srwma_scalar(
                 k += 4;
             }
 
-            // Remainder
+            
             while k < wlen {
                 let x = *dp.sub(k);
                 let w = *w_ptr.add(k);
@@ -698,19 +698,19 @@ fn srwma_batch_inner(
 
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() + 1) // +1 because SRWMA starts at first+period+1
+        .map(|c| first + c.period.unwrap() + 1) 
         .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    // ---------- 2. per-row worker ---------------------------------------
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
         let inv_n = *inv_norms.get_unchecked(row);
 
-        // treat this row as &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -728,7 +728,7 @@ fn srwma_batch_inner(
         }
     };
 
-    // ---------- 3. fill every row directly into `raw` --------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -749,7 +749,7 @@ fn srwma_batch_inner(
         }
     }
 
-    // ---------- 4. finished – convert to Vec<f64> ------------------------
+    
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values = unsafe { Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity()) };
 
@@ -821,13 +821,13 @@ pub fn srwma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-    // Warmup per row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() + 1)
         .collect();
 
-    // Validate provided output buffer size with checked arithmetic
+    
     let total = rows
         .checked_mul(cols)
         .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
@@ -835,18 +835,18 @@ pub fn srwma_batch_inner_into(
         return Err(SrwmaError::OutputLengthMismatch { expected: total, got: out.len() });
     }
 
-    // Cast `out` to MaybeUninit and initialize warm prefixes with NaN
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Worker writes each row directly
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
         let inv_n = *inv_norms.get_unchecked(row);
-        // Treat this row as &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -992,8 +992,8 @@ unsafe fn srwma_row_avx2(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    // Match the single-series heuristic: for small periods, the scalar unrolled dot
-    // is faster than SIMD lane-reversal + horizontal reductions.
+    
+    
     if period <= 32 {
         srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
         return;
@@ -1022,7 +1022,7 @@ unsafe fn srwma_row_avx2(
         let len = data.len();
         let start_idx = first + period + 1;
 
-        const REV: i32 = 0x1B; // reverse 4 lanes
+        const REV: i32 = 0x1B; 
         for i in start_idx..len {
             let mut vacc = _mm256_setzero_pd();
             let dp = data.as_ptr().add(i);
@@ -1058,7 +1058,7 @@ pub unsafe fn srwma_row_avx512(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    // Same heuristic as srwma_with_kernel(): scalar wins for small periods.
+    
     if period <= 32 {
         srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
         return;
@@ -1142,7 +1142,7 @@ unsafe fn srwma_row_avx512_long(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    // Same implementation as short for now; kept separate for potential tuning.
+    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn dot8_rev(dp: *const f64, w_ptr: *const f64, k: usize) -> f64 {
         let wv = _mm512_loadu_pd(w_ptr.add(k));
@@ -1194,29 +1194,29 @@ unsafe fn srwma_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrwmaStream {
-    period: usize, // user period
-    wlen: usize,   // p = period - 1
-    inv_norm: f64, // 1 / sum(weights)
-    // exact O(p) path
-    weights: Vec<f64>, // length p; weights[k] = sqrt(period - k), k=0..p-1 (k=0 is newest)
-    ring: Vec<f64>,    // mirrored ring buffer, length 2p
-    head: usize,       // write index in [0, p)
-    count: usize,      // total samples seen
-    // optional O(1) approximate path
+    period: usize, 
+    wlen: usize,   
+    inv_norm: f64, 
+    
+    weights: Vec<f64>, 
+    ring: Vec<f64>,    
+    head: usize,       
+    count: usize,      
+    
     approx: Option<SrwmaApprox>,
 }
 
 #[derive(Debug, Clone)]
 struct SrwmaApprox {
-    // Sum-of-Exponentials approximation: w_k ~ sum_j a_j r_j^k on k in [0, p-1]
-    a: Vec<f64>,        // coefficients (length Q)
-    r: Vec<f64>,        // bases in (0,1) (length Q)
-    r_pow_p1: Vec<f64>, // r_j^(p+1) for finite-window subtraction
-    s: Vec<f64>,        // state S_t^(j), one per exponential
-    denom: f64,         // sum_j a_j * sum_{k=0}^{p-1} r_j^k
-    // for x_{t-p} access
-    lag_buf: Vec<f64>, // ring of length p+1 to fetch the leaving sample
-    lag_head: usize,   // write index within lag_buf
+    
+    a: Vec<f64>,        
+    r: Vec<f64>,        
+    r_pow_p1: Vec<f64>, 
+    s: Vec<f64>,        
+    denom: f64,         
+    
+    lag_buf: Vec<f64>, 
+    lag_head: usize,   
 }
 
 impl SrwmaStream {
@@ -1230,7 +1230,7 @@ impl SrwmaStream {
         }
         let p = period - 1;
 
-        // Precompute descending weights: w[k] = sqrt(period - k), k=0..p-1
+        
         let mut weights = Vec::with_capacity(p);
         let mut sumw = 0.0f64;
         for k in 0..p {
@@ -1239,7 +1239,7 @@ impl SrwmaStream {
             sumw += w;
         }
 
-        // Allocate mirrored ring of length 2p; if p==0 (period==1), this won't be used.
+        
         let ring_len = 2 * p.max(1);
 
         Ok(Self {
@@ -1259,7 +1259,7 @@ impl SrwmaStream {
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let p = self.wlen;
-        // For period==1 (p=0), there is no defined window; maintain prior behavior (None until warmup).
+        
         if p == 0 {
             self.count += 1;
             return if self.count <= self.period + 1 {
@@ -1269,30 +1269,30 @@ impl SrwmaStream {
             };
         }
 
-        // Write new sample into ring and its mirror
+        
         let h = self.head;
         self.ring[h] = value;
         self.ring[h + p] = value;
         self.head = if h + 1 == p { 0 } else { h + 1 };
         self.count += 1;
 
-        // Preserve warmup semantics: None until count > period + 1
+        
         if self.count <= self.period + 1 {
             return None;
         }
 
-        // After advancing, `self.head` points to the next write position.
-        // The newest sample is at index start = self.head + p - 1 in the mirrored area.
+        
+        
         let start = self.head + p - 1;
 
-        // Reverse dot: sum_{k=0}^{p-1} ring[start - k] * weights[k]
+        
         let mut s0 = 0.0f64;
         let mut s1 = 0.0f64;
         let mut s2 = 0.0f64;
         let mut s3 = 0.0f64;
         let mut k = 0usize;
 
-        // Unroll by 4 safely
+        
         while k + 4 <= p {
             let d0 = self.ring[start - (k + 0)];
             let d1 = self.ring[start - (k + 1)];
@@ -1320,7 +1320,7 @@ impl SrwmaStream {
         Some(sum * self.inv_norm)
     }
 
-    // --------------------- Optional O(1) approximation ---------------------
+    
     /// Enable the SOE approximation (Q exponentials). Does not affect exact `update()`.
     pub fn enable_approx_soe(&mut self, q: usize) {
         if self.approx.is_some() || q == 0 {
@@ -1328,7 +1328,7 @@ impl SrwmaStream {
         }
         let p = self.wlen;
 
-        // Choose a simple grid of time constants scaled by p
+        
         let taus: Vec<f64> = match q {
             1 => vec![0.35 * p as f64],
             2 => vec![0.12, 0.5].into_iter().map(|f| f * p as f64).collect(),
@@ -1349,7 +1349,7 @@ impl SrwmaStream {
             .map(|tau| (-1.0f64 / tau.max(1.0)).exp())
             .collect();
 
-        // Build normal equations G a = b for least-squares fit of sqrt(period-k)
+        
         let mut g = vec![0.0f64; q * q];
         let mut b = vec![0.0f64; q];
         for i in 0..q {
@@ -1373,10 +1373,10 @@ impl SrwmaStream {
             b[i] = acc;
         }
 
-        // Solve for coefficients a
+        
         let a = solve_small_ge(&g, &b, q);
 
-        // Precompute denom and r^(p+1)
+        
         let mut r_pow_p1 = Vec::with_capacity(q);
         let mut denom = 0.0;
         for j in 0..q {
@@ -1407,7 +1407,7 @@ impl SrwmaStream {
         let some = self.approx.as_mut()?;
         let p = self.wlen;
 
-        // Maintain lag buffer of length p+1; x_{t-p} leaves the window
+        
         let x_old = some.lag_buf[some.lag_head];
         some.lag_buf[some.lag_head] = value;
         some.lag_head = if some.lag_head + 1 == (p + 1) {
@@ -1416,12 +1416,12 @@ impl SrwmaStream {
             some.lag_head + 1
         };
 
-        // Update Q exponential states: S_t = r S_{t-1} + r x_t - r^{p+1} x_{t-p}
+        
         for j in 0..some.s.len() {
             some.s[j] = some.r[j] * some.s[j] + some.r[j] * value - some.r_pow_p1[j] * x_old;
         }
 
-        // Reuse exact counters/warmup alignment
+        
         self.count += 1;
         if self.count <= self.period + 1 {
             return None;
@@ -1435,14 +1435,14 @@ impl SrwmaStream {
     }
 }
 
-// Small dense Gaussian elimination with partial pivoting (q <= ~8).
+
 #[inline]
 fn solve_small_ge(g: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
     a.copy_from_slice(g);
     let mut x = b.to_vec();
     for k in 0..n {
-        // pivot row
+        
         let mut piv = k;
         let mut best = a[k * n + k].abs();
         for i in (k + 1)..n {
@@ -1719,7 +1719,7 @@ mod tests {
     
     #[test]
     fn test_srwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input with an NaN prefix
+        
         let mut data: Vec<f64> = vec![f64::NAN; 5];
         for i in 0..251usize {
             let x = (i as f64).sin() * 0.5 + (i as f64) * 0.01;
@@ -1728,20 +1728,20 @@ mod tests {
 
         let input = SrwmaInput::from_slice(&data, SrwmaParams::default());
 
-        // Baseline using Vec-returning API
+        
         let baseline = srwma(&input)?.values;
 
-        // Preallocated output
+        
         let mut out = vec![0.0; data.len()];
 
-        // Native into-API
+        
         #[cfg(not(feature = "wasm"))]
         {
             srwma_into(&input, &mut out)?;
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, fall back to slice variant to validate parity
+            
             srwma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1753,7 +1753,7 @@ mod tests {
 
         Ok(())
     }
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_srwma_no_poison(
         test_name: &str,
@@ -1764,19 +1764,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let test_periods = vec![
-            3,   // Small period
-            5,   // Small period
-            14,  // Default period
-            30,  // Medium period
-            50,  // Large period
-            100, // Very large period
-            200, // Extra large period
+            3,   
+            5,   
+            14,  
+            30,  
+            50,  
+            100, 
+            200, 
         ];
 
         for &period in &test_periods {
-            // Skip if period would be too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
@@ -1790,16 +1790,16 @@ mod tests {
             );
             let output = srwma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1807,7 +1807,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1815,7 +1815,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1828,7 +1828,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_srwma_no_poison(
         _test_name: &str,
@@ -1846,12 +1846,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Single comprehensive strategy - SRWMA requires period >= 2
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 2..400, // Need at least period+2 for valid output
+                    period + 2..400, 
                 ),
                 Just(period),
             )
@@ -1864,18 +1864,18 @@ mod tests {
                 };
                 let input = SrwmaInput::from_slice(&data, params);
 
-                // Compute with specified kernel and scalar reference
+                
                 let SrwmaOutput { values: out } = srwma_with_kernel(&input, kernel).unwrap();
                 let SrwmaOutput { values: ref_out } =
                     srwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length must match input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // SRWMA warmup is period + 1 (assuming clean input data)
+                
                 let warmup_end = period + 1;
 
-                // Property 2: Warmup period values must be NaN
+                
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1885,7 +1885,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: Values after warmup should be finite and within bounds
+                
                 for i in warmup_end..data.len() {
                     let window_start = i + 1 - period;
                     let window_end = i;
@@ -1896,7 +1896,7 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 4: Output within window bounds
+                    
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
                         "idx {}: {} ∉ [{}, {}]",
@@ -1906,7 +1906,7 @@ mod tests {
                         hi
                     );
 
-                    // Property 5: SIMD consistency check
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1928,10 +1928,10 @@ mod tests {
                     );
                 }
 
-                // Property 6: Constant data should produce near-constant output
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_end {
-                    // For constant data, all outputs after warmup should equal the input constant value
-                    let const_val = data[0]; // All values are the same, use first one
+                    
+                    let const_val = data[0]; 
                     for i in warmup_end..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -1945,10 +1945,10 @@ mod tests {
                     }
                 }
 
-                // Property 7: Period=2 edge case (minimum valid period)
+                
                 if period == 2 && data.len() > warmup_end {
-                    // With period=2, weights are [sqrt(2), sqrt(1)] = [1.414.., 1.0]
-                    // Output should be weighted average favoring more recent value
+                    
+                    
                     for i in warmup_end..out.len() {
                         if out[i].is_finite() {
                             let expected_range_lo = data[i - 1].min(data[i]) - 1e-9;
@@ -1965,13 +1965,13 @@ mod tests {
                     }
                 }
 
-                // Property 8: Monotonicity test for trending data
-                // If input is strictly increasing/decreasing, output should follow trend
+                
+                
                 let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                 let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                 if (is_increasing || is_decreasing) && data.len() > warmup_end + 10 {
-                    // Check trend preservation in stable part (skip immediate post-warmup)
+                    
                     for i in (warmup_end + 5)..out.len() - 1 {
                         if out[i].is_finite() && out[i + 1].is_finite() {
                             if is_increasing {
@@ -2081,7 +2081,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2089,18 +2089,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase detection coverage
+        
         let batch_configs = vec![
-            (3, 10, 1),    // Small range with step 1
-            (5, 25, 5),    // Small range with step 5
-            (10, 30, 10),  // Medium range with larger step
-            (14, 100, 7),  // Default start with step 7
-            (50, 200, 50), // Very large periods
-            (2, 8, 2),     // Edge case: very small range
+            (3, 10, 1),    
+            (5, 25, 5),    
+            (10, 30, 10),  
+            (14, 100, 7),  
+            (50, 200, 50), 
+            (2, 8, 2),     
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip configurations that would exceed data length
+            
             if start > c.close.len() {
                 continue;
             }
@@ -2110,9 +2110,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2122,7 +2122,7 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2130,7 +2130,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2138,7 +2138,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2151,7 +2151,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2241,7 +2241,7 @@ pub fn srwma_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
-// ---------------- Python device handle: CAI v3 + DLPack (SRWMA) -----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32SrwmaPy {

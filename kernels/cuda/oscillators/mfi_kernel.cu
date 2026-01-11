@@ -1,14 +1,14 @@
-// CUDA kernels for Money Flow Index (MFI)
-//
-// Semantics mirror src/indicators/mfi.rs (scalar path):
-// - Warmup: first non-NaN index + period - 1; values before are NaN
-// - Division by zero -> 0.0
-// - Batch kernel processes one series × many params; lane 0 per CTA performs the
-//   sequential O(1) sliding update (grid.x>1 would previously duplicate work). We
-//   now restrict the scan to blockIdx.x==0 to avoid redundant computation.
-// - Many-series one-param uses a time-major per-series sequential scan with a
-//   ring buffer. We replace f64 accumulators with double-single (float2) for
-//   near-f64 summation accuracy at fp32 throughput.
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -24,10 +24,10 @@ static __device__ __forceinline__ float qnan() {
     return __int_as_float(0x7fffffff);
 }
 
-// -----------------------------------------------------------------------------
-// Batch (one series × many params): sequential per-combo scan with O(1) updates.
-// Note: We intentionally restrict the work to blockIdx.x==0 to avoid duplicating
-// the sequential scan across CTAs when grid.x>1.
+
+
+
+
 extern "C" __global__
 void mfi_batch_f32(const float* __restrict__ typical,
                    const float* __restrict__ volume,
@@ -42,19 +42,19 @@ void mfi_batch_f32(const float* __restrict__ typical,
     const int row_off = combo * series_len;
     const int warm = first_valid + period - 1;
 
-    // Only one CTA performs the sequential scan to avoid redundant work.
+    
     if (blockIdx.x != 0) return;
 
-    // Fill warmup with NaNs cooperatively (threads within this CTA only)
+    
     for (int t = threadIdx.x; t < min(warm, series_len); t += blockDim.x) {
         out[row_off + t] = qnan();
     }
-    // Lane 0 performs the sequential O(1) rolling update
+    
     if (threadIdx.x != 0) return;
     if (first_valid < 0 || first_valid >= series_len) return;
     if (warm >= series_len) return;
 
-    // Seed sums across (first_valid+1 ..= warm) using double-single accumulators
+    
     dsf pos_sum = ds_set(0.0f), neg_sum = ds_set(0.0f);
     float prev = typical[first_valid];
     for (int i = first_valid + 1; i <= warm; ++i) {
@@ -63,21 +63,21 @@ void mfi_batch_f32(const float* __restrict__ typical,
         const float diff = tp - prev;
         prev = tp;
         const float flow = tp * vol;
-        // branchless selection into dsf
+        
         const float posf = (diff > 0.0f) ? flow : 0.0f;
         const float negf = (diff < 0.0f) ? flow : 0.0f;
         pos_sum = ds_add(pos_sum, ds_set(posf));
         neg_sum = ds_add(neg_sum, ds_set(negf));
     }
-    // First value at warm index
+    
     float pos0 = ds_to_f(pos_sum);
     float neg0 = ds_to_f(neg_sum);
     float tot = pos0 + neg0;
     out[row_off + warm] = (tot <= 1e-14f) ? 0.0f : (100.0f * (pos0 / tot));
 
-    // Rolling updates for t > warm
+    
     for (int t = warm + 1; t < series_len; ++t) {
-        // add new flow at t
+        
         const float tp_new = typical[t];
         const float vol_new = volume[t];
         const float diff_new = tp_new - typical[t - 1];
@@ -85,7 +85,7 @@ void mfi_batch_f32(const float* __restrict__ typical,
         if (diff_new > 0.0f) pos_sum = ds_add(pos_sum, ds_set(flow_new));
         else if (diff_new < 0.0f) neg_sum = ds_add(neg_sum, ds_set(flow_new));
 
-        // remove old flow starting once the window is full
+        
         {
             const int i = t - period;
             const float tp_old = typical[i];
@@ -102,10 +102,10 @@ void mfi_batch_f32(const float* __restrict__ typical,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Many-series × one-param (time-major). Each block handles one series; lane 0
-// scans sequentially using a double-single (float2) ring buffer for accuracy
-// without incurring the FP64 throughput penalty on consumer GPUs.
+
+
+
+
 extern "C" __global__
 void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
                                    const float* __restrict__ volume_tm,
@@ -119,7 +119,7 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
     const int first = first_valids[s];
     const int stride = num_series;
 
-    // Initialize warmup region to NaN cooperatively
+    
     if (first < 0 || first >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_tm[t * stride + s] = qnan();
@@ -131,16 +131,16 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
         out_tm[t * stride + s] = qnan();
     }
 
-    if (threadIdx.x != 0) return; // lane 0 performs the scan
+    if (threadIdx.x != 0) return; 
 
-    // double-single ring buffers in dynamic shared memory: 2 * period entries
+    
     extern __shared__ float2 shared[];
     float2* pos_buf = shared;
     float2* neg_buf = shared + period;
-    // Zero-init ring
+    
     for (int i = 0; i < period; ++i) { pos_buf[i] = make_float2(0.0f, 0.0f); neg_buf[i] = make_float2(0.0f, 0.0f); }
 
-    // Seed using flows from (first+1 ..= warm)
+    
     dsf pos_sum = ds_set(0.0f), neg_sum = ds_set(0.0f);
     float prev = typical_tm[first * stride + s];
     int ring = 0;
@@ -160,12 +160,12 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
     }
 
     if (warm < series_len) {
-        // First value at warm index
+        
         const float tot0 = ds_to_f(pos_sum) + ds_to_f(neg_sum);
         out_tm[warm * stride + s] = (tot0 <= 1e-14f) ? 0.0f : (100.0f * (ds_to_f(pos_sum) / tot0));
     }
 
-    // Continue rolling
+    
     for (int t = warm + 1; t < series_len; ++t) {
         const float tp = typical_tm[t * stride + s];
         const float vol = volume_tm[t * stride + s];
@@ -173,12 +173,12 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
         prev = tp;
         const float flow = tp * vol;
 
-        // Evict
+        
         dsf old_pos = ds_make(pos_buf[ring].x, pos_buf[ring].y);
         dsf old_neg = ds_make(neg_buf[ring].x, neg_buf[ring].y);
         pos_sum = ds_sub(pos_sum, old_pos); neg_sum = ds_sub(neg_sum, old_neg);
 
-        // Insert
+        
         const float posv = (diff > 0.0f) ? flow : 0.0f;
         const float negv = (diff < 0.0f) ? flow : 0.0f;
         pos_buf[ring] = make_float2(posv, 0.0f);
@@ -192,11 +192,11 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
     }
 }
 
-// -----------------------------------------------------------------------------
-// New DS prefix-scan pipeline for one-series × many-params (optional; not
-// currently invoked by the wrapper but available for future use).
 
-// Stage 1: fused transform + per-block inclusive scan (double-single).
+
+
+
+
 extern "C" __global__
 void mfi_prefix_stage1_transform_scan_ds(const float* __restrict__ typical,
                                          const float* __restrict__ volume,
@@ -292,7 +292,7 @@ void mfi_prefix_stage1_transform_scan_ds(const float* __restrict__ typical,
     }
 }
 
-// Stage 2: serial scan of block totals to build EXCLUSIVE offsets
+
 extern "C" __global__
 void mfi_prefix_stage2_scan_block_totals(const float2* __restrict__ blk_tot_pos,
                                          const float2* __restrict__ blk_tot_neg,
@@ -311,7 +311,7 @@ void mfi_prefix_stage2_scan_block_totals(const float2* __restrict__ blk_tot_pos,
     }
 }
 
-// Stage 3: add block-exclusive offsets to each tile’s prefix
+
 extern "C" __global__
 void mfi_prefix_stage3_add_offsets(float2* __restrict__ pos_ps,
                                    float2* __restrict__ neg_ps,
@@ -335,7 +335,7 @@ void mfi_prefix_stage3_add_offsets(float2* __restrict__ pos_ps,
     neg_ps[i] = make_float2(vneg.hi, vneg.lo);
 }
 
-// Stage 4: compute MFI rows given DS prefixes
+
 extern "C" __global__
 void mfi_batch_from_prefix_ds_f32(const float2* __restrict__ pos_ps,
                                   const float2* __restrict__ neg_ps,

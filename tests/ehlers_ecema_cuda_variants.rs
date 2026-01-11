@@ -1,16 +1,16 @@
 #![cfg(feature = "cuda")]
 
 use cust::memory::CopyDestination;
-use my_project::cuda::cuda_available;
-use my_project::cuda::moving_averages::ehlers_ecema_wrapper::{
+use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::moving_averages::ehlers_ecema_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaEhlersEcemaPolicy, ManySeriesKernelPolicy,
 };
-use my_project::cuda::moving_averages::CudaEhlersEcema;
-use my_project::indicators::moving_averages::ehlers_ecema::{
+use vector_ta::cuda::moving_averages::CudaEhlersEcema;
+use vector_ta::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema_batch_with_kernel, ehlers_ecema_with_kernel, EhlersEcemaBatchRange,
     EhlersEcemaInput, EhlersEcemaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,7 +46,7 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     };
     let cpu = ehlers_ecema_batch_with_kernel(&data_quant, &sweep, Kernel::ScalarBatch)?;
 
-    // Plain: use legacy one-block-per-combo
+    
     let mut cuda_plain = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -64,7 +64,7 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     let mut gpu_plain = vec![0f32; handle_plain.len()];
     handle_plain.buf.copy_to(&mut gpu_plain)?;
 
-    // Tiled/thread-per-combo path
+    
     let mut cuda_tiled = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -85,7 +85,7 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     assert_eq!(cpu.cols, handle_tiled.cols);
 
     let tol_plain = 3e-5;
-    let tol_tiled = 1e-4; // FP32 compensated tiled path
+    let tol_tiled = 1e-4; 
     for i in 0..cpu.values.len() {
         let c = cpu.values[i];
         let p = gpu_plain[i] as f64;
@@ -137,7 +137,7 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
         confirmed_only: Some(false),
     };
 
-    // CPU
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -151,7 +151,7 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    // 1D
+    
     let mut cuda_1d = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -164,7 +164,7 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
     let mut gpu_1d = vec![0f32; handle_1d.len()];
     handle_1d.buf.copy_to(&mut gpu_1d)?;
 
-    // 2D
+    
     let mut cuda_2d = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {

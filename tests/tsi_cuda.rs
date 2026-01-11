@@ -1,12 +1,12 @@
-use my_project::indicators::tsi::{tsi_batch_with_kernel, TsiBatchRange};
-use my_project::utilities::enums::Kernel;
+use vector_ta::indicators::tsi::{tsi_batch_with_kernel, TsiBatchRange};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::tsi_wrapper::CudaTsi;
+use vector_ta::cuda::oscillators::tsi_wrapper::CudaTsi;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -34,7 +34,7 @@ fn tsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 8192usize;
     let mut price = vec![f64::NAN; len];
     for i in 1..len {
-        // momentum needs previous
+        
         let x = i as f64;
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
@@ -57,7 +57,7 @@ fn tsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    // fp32 path; chained EMAs accumulate small error – allow modest tolerance
+    
     let (atol, rtol) = (0.5, 5e-3);
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
@@ -80,14 +80,14 @@ fn tsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[tsi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    use my_project::indicators::tsi::{tsi_with_kernel, TsiData, TsiInput, TsiParams};
+    use vector_ta::indicators::tsi::{tsi_with_kernel, TsiData, TsiInput, TsiParams};
 
-    let cols = 6usize; // series
-    let rows = 2048usize; // length
+    let cols = 6usize; 
+    let rows = 2048usize; 
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (1 + s)..rows {
-            // ensure prev exists for momentum
+            
             let x = (t as f64) + (s as f64) * 0.2;
             price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
@@ -95,7 +95,7 @@ fn tsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let long = 25usize;
     let short = 13usize;
 
-    // CPU baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

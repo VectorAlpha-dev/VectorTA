@@ -1,20 +1,20 @@
-// CUDA kernels for DevStop (Deviation Stop) indicator
-//
-// This patch applies performance-oriented changes while keeping existing kernel
-// names and parameter signatures to avoid breaking host wrappers:
-// - Device FP64 arithmetic removed from hot paths. The batch kernel now casts
-//   double prefixes to float before arithmetic; the streaming kernel switches
-//   to Kahan-compensated FP32 for Σr/Σr² with FMA.
-// - Integer modulo reduced by maintaining rolling slots via wrap-increment;
-//   (full removal would require an extra age[] ring, which we avoid to keep
-//   shared memory footprint compatible with current launcher).
-// - Warm-up initialization trims to [0, warm) instead of whole row/column.
-//
-// Batch (one series × many params):
-//   - devstop_batch_grouped_f32: one block per parameter combo (grouped by period).
-//
-// Many-series × one param (time-major):
-//   - devstop_many_series_one_param_f32: one block per series; FP32 Kahan stats.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -23,11 +23,11 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// ---- helpers ---------------------------------------------------------------
+
 __device__ __forceinline__ float qnan32() { return __int_as_float(0x7fffffff); }
 __device__ __forceinline__ int wrap_inc(int x, int cap) { int nx = x + 1; return (nx == cap) ? 0 : nx; }
 
-// Kahan compensated sum pair
+
 struct kahan_t { float s, c; };
 __device__ __forceinline__ void kahan_add(kahan_t &K, float x) {
     float y = x - K.c;
@@ -37,7 +37,7 @@ __device__ __forceinline__ void kahan_add(kahan_t &K, float x) {
 }
 __device__ __forceinline__ void kahan_sub(kahan_t &K, float x) { kahan_add(K, -x); }
 
-// Dual-f32 (float-float) helpers (subset): value ~= hi + lo
+
 struct ds_t { float hi, lo; };
 __device__ __forceinline__ ds_t ds_from2(float2 v) { ds_t r; r.hi = v.x; r.lo = v.y; return r; }
 __device__ __forceinline__ float ds_to_f(ds_t a) { return a.hi + a.lo; }
@@ -56,7 +56,7 @@ __device__ __forceinline__ ds_t ds_add(ds_t x, ds_t y) {
     float s3, e3; two_sum(s1, s2, s3, e3);
     float e = e1 + e2 + e3; float hi, lo; quick_two_sum(s3, e, hi, lo); ds_t r{hi, lo}; return r;
 }
-__device__ __forceinline__ ds_t ds_sub(ds_t x, ds_t y) { ds_t r{ x.hi - y.hi, x.lo - y.lo }; // good enough; refine with two_sum chain
+__device__ __forceinline__ ds_t ds_sub(ds_t x, ds_t y) { ds_t r{ x.hi - y.hi, x.lo - y.lo }; 
     float s, e; two_sum(x.hi, -y.hi, s, e); float t, f; two_sum(x.lo, -y.lo, t, f); float u, g; two_sum(s, t, u, g);
     float hi, lo; quick_two_sum(u, e + f + g, hi, lo); return ds_t{hi, lo}; }
 __device__ __forceinline__ ds_t ds_scale(ds_t x, float b) {
@@ -69,24 +69,24 @@ __device__ __forceinline__ ds_t ds_mul(ds_t x, ds_t y) {
     float hi, lo; quick_two_sum(s, err, hi, lo); return ds_t{hi, lo};
 }
 
-// -------------------- Batch: one series × many params (grouped by period) --------------------
-// Dynamic shared memory layout per block:
-//   float base_ring[period]
-//   int   dq_idx   [period]
+
+
+
+
 extern "C" __global__ void devstop_batch_grouped_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
-    const float2* __restrict__ p1,   // DS prefix sum of r (hi,lo)
-    const float2* __restrict__ p2,   // DS prefix sum of r^2 (hi,lo)
-    const int* __restrict__ pc,      // prefix count of finite r
+    const float2* __restrict__ p1,   
+    const float2* __restrict__ p2,   
+    const int* __restrict__ pc,      
     int len,
     int first_valid,
     int period,
     const float* __restrict__ mults,
     int n_combos,
-    int is_long,            // 1 = long, 0 = short
-    int out_row_base,       // global row base for this period group
-    float* __restrict__ out // [rows=len*n_combos_total]
+    int is_long,            
+    int out_row_base,       
+    float* __restrict__ out 
 ) {
     const int combo = blockIdx.x;
     if (combo >= n_combos || period <= 0) return;
@@ -95,12 +95,12 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     const int row = out_row_base + combo;
     const int row_off = row * len;
 
-    // Initialize only warm-up region to NaN in parallel
+    
     const int warm_clamp = (warm < len) ? warm : len;
     for (int t = threadIdx.x; t < warm_clamp; t += blockDim.x) { out[row_off + t] = qnan32(); }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single lane performs the sequential scan
+    if (threadIdx.x != 0) return; 
     if (warm >= len) return;
 
     extern __shared__ unsigned char smem[];
@@ -111,7 +111,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     int dq_head = 0, dq_len = 0;
     const int cap = period;
 
-    // Helpers (match CPU policy)
+    
     auto dq_back_at = [&](int len_) { int pos = dq_head + len_ - 1; if (pos >= cap) pos -= cap; return dq_idx[pos]; };
     auto dq_push_back = [&](int value) { int pos = dq_head + dq_len; if (pos >= cap) pos -= cap; dq_idx[pos] = value; dq_len += 1; };
     auto dq_pop_back = [&]() { dq_len -= 1; };
@@ -119,18 +119,18 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     auto dq_front = [&]() { return dq_idx[dq_head]; };
 
     const float mult = mults[combo];
-    const int start_base = first_valid + period;           // first index where base is defined
-    const int start_final = start_base + period - 1;       // first valid output index
+    const int start_base = first_valid + period;           
+    const int start_final = start_base + period - 1;       
 
-    int slot = start_base % period; // maintain rolling ring slot to avoid per-iter modulo
+    int slot = start_base % period; 
     for (int i = start_base; i < len; ++i) {
-        // Compute mean and std over window [i-period+1, i]
+        
         const int t1 = i + 1;
-        int a = t1 - period; if (a < 0) a = 0; // clamp (matches scalar prefix handling)
+        int a = t1 - period; if (a < 0) a = 0; 
         const int cnt = pc[t1] - pc[a];
         float base = qnan32();
         if (cnt > 0) {
-            // Dual-f32 prefix diffs
+            
             ds_t S1 = ds_sub(ds_from2(p1[t1]), ds_from2(p1[a]));
             ds_t S2 = ds_sub(ds_from2(p2[t1]), ds_from2(p2[a]));
             const float inv = 1.0f / (float)cnt;
@@ -139,7 +139,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             ds_t var_ds  = ds_sub(m2_ds, ds_mul(mean_ds, mean_ds));
             const float mean = ds_to_f(mean_ds);
             float var = ds_to_f(var_ds);
-            if (var < 0.0f) var = 0.0f;                  // numeric safety
+            if (var < 0.0f) var = 0.0f;                  
             const float sigma = sqrtf(var);
             const float h = high[i];
             const float l = low[i];
@@ -154,24 +154,24 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             }
         }
 
-        // Update deque over base using a ring. If base is NaN, inject a
-        // dominated sentinel so the deque logic remains well-defined.
+        
+        
         if (isnan(base)) { base = is_long ? -INFINITY : INFINITY; }
         base_ring[slot] = base;
         {
-            // Expire old indices BEFORE pushing to avoid overwriting head when deque is full
+            
             const int cut = i + 1 - period;
             while (dq_len > 0 && dq_front() < cut) dq_pop_front();
 
             if (is_long) {
-                // Long: pop while bj <= base (decreasing deque -> front holds max)
+                
                 while (dq_len > 0) {
                     int j = dq_back_at(dq_len);
                     float bj = base_ring[j % period];
                     if (isnan(bj) || bj <= base) dq_pop_back(); else break;
                 }
             } else {
-                // Short: pop while bj >= base (increasing deque -> front holds min)
+                
                 while (dq_len > 0) {
                     int j = dq_back_at(dq_len);
                     float bj = base_ring[j % period];
@@ -181,7 +181,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             dq_push_back(i);
         }
 
-        // Expire old indices
+        
         const int cut = i + 1 - period;
         while (dq_len > 0 && dq_front() < cut) { dq_pop_front(); }
 
@@ -197,35 +197,35 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     }
 }
 
-// -------------------- Many series × one param (time-major) --------------------
-// Dynamic shared memory per block:
-//   float r_ring   [period]
-//   float base_ring[period]
-//   int   dq_idx   [period]
+
+
+
+
+
 extern "C" __global__ void devstop_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
-    const int* __restrict__ first_valids, // per series (column)
+    const int* __restrict__ first_valids, 
     int cols,
     int rows,
     int period,
     float mult,
     int is_long,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x; // series index (column)
+    const int s = blockIdx.x; 
     if (s >= cols || period <= 0) return;
 
-    // Warm-up limits for this series
+    
     const int fv = first_valids[s];
     const int start_base  = fv + period;
     const int start_final = start_base + period - 1;
 
-    // Initialize only warm-up cells to NaN in parallel
+    
     const int warm_clamp = (start_final < rows) ? start_final : rows;
     for (int t = threadIdx.x; t < warm_clamp; t += blockDim.x) { out_tm[t * cols + s] = qnan32(); }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; // single lane per series
+    if (threadIdx.x != 0) return; 
     if (start_base >= rows) return;
 
     extern __shared__ unsigned char smem_uc[];
@@ -239,7 +239,7 @@ extern "C" __global__ void devstop_many_series_one_param_f32(
     float prev_h = high_tm[fv * cols + s];
     float prev_l = low_tm [fv * cols + s];
 
-    // Prefill r over (fv+1 .. start_base-1)
+    
     for (int k = fv + 1; k < min(start_base, rows); ++k) {
         const float h = high_tm[k * cols + s];
         const float l = low_tm [k * cols + s];
@@ -298,7 +298,7 @@ extern "C" __global__ void devstop_many_series_one_param_f32(
         if (isnan(base)) { base = is_long ? -INFINITY : INFINITY; }
         base_ring[slot] = base;
         {
-            // Expire old indices BEFORE pushing to avoid overwriting head when deque is full
+            
             const int cut = i + 1 - period;
             while (dq_len > 0 && dq_front() < cut) dq_pop_front();
 

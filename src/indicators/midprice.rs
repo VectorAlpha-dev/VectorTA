@@ -49,7 +49,7 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// --- Input Data Abstractions ---
+
 #[derive(Debug, Clone)]
 pub enum MidpriceData<'a> {
     Candles {
@@ -126,7 +126,7 @@ impl<'a> MidpriceInput<'a> {
     }
 }
 
-// --- Builder/Stream/Batch Structs for Parity ---
+
 #[derive(Copy, Clone, Debug)]
 pub struct MidpriceBuilder {
     period: Option<usize>,
@@ -307,7 +307,7 @@ pub fn midprice_into(input: &MidpriceInput, out: &mut [f64]) -> Result<(), Midpr
         });
     }
 
-    // Reuse the module's into-slice implementation with Kernel::Auto
+    
     midprice_into_slice(out, high, low, &input.params, Kernel::Auto)
 }
 
@@ -460,19 +460,19 @@ pub unsafe fn midprice_avx512_long(
     midprice_scalar(high, low, period, first_valid_idx, out);
 }
 
-// --- Streaming Struct ---
-// Decision: Switch streaming to O(1) amortized updates using two
-// monotonic deques; warmup matches batch (first_valid_idx + period - 1).
+
+
+
 #[derive(Debug, Clone)]
 pub struct MidpriceStream {
     period: usize,
-    // Have we observed the first fully valid (high, low)?
+    
     started: bool,
-    // Number of valid bars seen since `started` (also the next index to use).
+    
     seen: usize,
-    // Monotonic deques; store (index_since_start, value)
-    dq_high: std::collections::VecDeque<(usize, f64)>, // max queue (descending values)
-    dq_low: std::collections::VecDeque<(usize, f64)>,  // min queue (ascending values)
+    
+    dq_high: std::collections::VecDeque<(usize, f64)>, 
+    dq_low: std::collections::VecDeque<(usize, f64)>,  
 }
 
 impl MidpriceStream {
@@ -496,18 +496,18 @@ impl MidpriceStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        // Delay start until both high & low are finite, mirroring batch warmup
+        
         if !self.started {
             if !(high.is_finite() && low.is_finite()) {
                 return None;
             }
             self.started = true;
-            self.seen = 0; // first valid sample uses index 0
+            self.seen = 0; 
         }
 
         let i = self.seen;
 
-        // Push into max-deque for highs (keep descending values)
+        
         if high.is_finite() {
             while let Some(&(_, v)) = self.dq_high.back() {
                 if v <= high {
@@ -519,7 +519,7 @@ impl MidpriceStream {
             self.dq_high.push_back((i, high));
         }
 
-        // Push into min-deque for lows (keep ascending values)
+        
         if low.is_finite() {
             while let Some(&(_, v)) = self.dq_low.back() {
                 if v >= low {
@@ -531,7 +531,7 @@ impl MidpriceStream {
             self.dq_low.push_back((i, low));
         }
 
-        // Evict items that fell out of the window [i - period + 1, i]
+        
         let start = i.saturating_add(1).saturating_sub(self.period);
         while let Some(&(idx, _)) = self.dq_high.front() {
             if idx < start {
@@ -548,10 +548,10 @@ impl MidpriceStream {
             }
         }
 
-        // Advance stream index
+        
         self.seen = i + 1;
 
-        // Not enough bars since start → still warming
+        
         if self.seen < self.period {
             return None;
         }
@@ -575,7 +575,7 @@ impl MidpriceStream {
     }
 }
 
-// --- Batch/Range/Builder ---
+
 
 #[derive(Clone, Debug)]
 pub struct MidpriceBatchRange {
@@ -653,7 +653,7 @@ pub fn midprice_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Fallback to scalar
+        _ => Kernel::Scalar, 
     };
     midprice_batch_par_slice(high, low, sweep, simd)
 }
@@ -836,7 +836,7 @@ fn midprice_batch_inner_into(
         });
     }
 
-    // Note: output is already initialized with proper NaN prefixes by the caller
+    
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
@@ -856,7 +856,7 @@ fn midprice_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 midprice_row_scalar(high, low, first, period, out_row)
             }
-            Kernel::Auto => midprice_row_scalar(high, low, first, period, out_row), // Shouldn't happen but handle it
+            Kernel::Auto => midprice_row_scalar(high, low, first, period, out_row), 
         }
     };
 
@@ -913,18 +913,18 @@ fn midprice_batch_inner(
         .checked_mul(cols)
         .ok_or(MidpriceError::InvalidInput("rows*cols overflow"))?;
 
-    // 1) allocate uninit
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
-    // 2) set only warm prefixes to NaN
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // 3) compute directly into the same allocation
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     let combos = midprice_batch_inner_into(high, low, sweep, kern, parallel, out)?;
 
-    // 4) return the very same buffer as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1155,7 +1155,7 @@ pub fn midprice_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // warm NaN prefixes in-place (no extra buffer)
+    
     let (warm, _max_p) = batch_warm_prefixes(&combos, first, cols)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let out_mu = unsafe {
@@ -1166,7 +1166,7 @@ pub fn midprice_batch_py<'py>(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // compute
+    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -1177,7 +1177,7 @@ pub fn midprice_batch_py<'py>(
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => Kernel::Scalar, // Fallback to scalar for any other kernel type
+                _ => Kernel::Scalar, 
             };
             midprice_batch_inner_into(high_slice, low_slice, &sweep, simd, true, slice_out)
         })
@@ -1220,7 +1220,7 @@ impl MidpriceStreamPy {
     }
 }
 
-// --- WASM Bindings ---
+
 
 /// Write midprice values directly to output slice - no allocations
 pub fn midprice_into_slice(
@@ -1230,7 +1230,7 @@ pub fn midprice_into_slice(
     params: &MidpriceParams,
     kern: Kernel,
 ) -> Result<(), MidpriceError> {
-    // Validate inputs
+    
     if high.is_empty() || low.is_empty() {
         return Err(MidpriceError::EmptyInputData);
     }
@@ -1255,7 +1255,7 @@ pub fn midprice_into_slice(
         });
     }
 
-    // Find first valid index
+    
     let first_valid_idx = match (0..high.len()).find(|&i| !high[i].is_nan() && !low[i].is_nan()) {
         Some(idx) => idx,
         None => return Err(MidpriceError::AllValuesNaN),
@@ -1268,19 +1268,19 @@ pub fn midprice_into_slice(
         });
     }
 
-    // Select kernel
+    
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
 
-    // Initialize output with NaN up to warmup period
+    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
 
-    // Compute midprice directly into output
+    
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => {
             midprice_scalar(high, low, period, first_valid_idx, dst)
@@ -1295,7 +1295,7 @@ pub fn midprice_into_slice(
         Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
             midprice_scalar(high, low, period, first_valid_idx, dst)
         }
-        Kernel::Auto => midprice_scalar(high, low, period, first_valid_idx, dst), // Shouldn't happen but handle it
+        Kernel::Auto => midprice_scalar(high, low, period, first_valid_idx, dst), 
     }
 
     Ok(())
@@ -1355,9 +1355,9 @@ pub fn midprice_into(
             period: Some(period),
         };
 
-        // Check for aliasing - if either input pointer equals output pointer
+        
         if in_high_ptr == out_ptr || in_low_ptr == out_ptr {
-            // Use temporary buffer
+            
             let mut temp = vec![0.0; len];
             midprice_into_slice(&mut temp, high, low, &params, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1375,7 +1375,7 @@ pub fn midprice_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct MidpriceBatchConfig {
-    pub period_range: (usize, usize, usize), // (start, end, step)
+    pub period_range: (usize, usize, usize), 
 }
 
 #[cfg(feature = "wasm")]
@@ -1400,7 +1400,7 @@ pub fn midprice_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
     let output = midprice_batch_inner(high, low, &range, Kernel::Auto, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Convert output to flat array with period values based on resolved combos
+    
     let periods: Vec<usize> = output
         .combos
         .iter()
@@ -1692,17 +1692,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            MidpriceParams::default(),            // period: 14
-            MidpriceParams { period: Some(2) },   // minimum viable
-            MidpriceParams { period: Some(5) },   // small
-            MidpriceParams { period: Some(7) },   // small
-            MidpriceParams { period: Some(20) },  // medium
-            MidpriceParams { period: Some(30) },  // medium-large
-            MidpriceParams { period: Some(50) },  // large
-            MidpriceParams { period: Some(100) }, // very large
-            MidpriceParams { period: Some(200) }, // extreme
+            MidpriceParams::default(),            
+            MidpriceParams { period: Some(2) },   
+            MidpriceParams { period: Some(5) },   
+            MidpriceParams { period: Some(7) },   
+            MidpriceParams { period: Some(20) },  
+            MidpriceParams { period: Some(30) },  
+            MidpriceParams { period: Some(50) },  
+            MidpriceParams { period: Some(100) }, 
+            MidpriceParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1711,12 +1711,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1763,7 +1763,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_midprice_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(test)]
@@ -1774,28 +1774,28 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test strategy with realistic price data
+        
         let strat = (2usize..=100)
             .prop_flat_map(|period| {
                 (
-                    // Generate base prices - include edge cases with very small and large values
+                    
                     prop::collection::vec(
                         prop::strategy::Union::new(vec![
-                            (0.001f64..0.1f64).boxed(), // Very small prices
-                            (10f64..10000f64).boxed(),  // Normal prices
-                            (1e6f64..1e8f64).boxed(),   // Very large prices
+                            (0.001f64..0.1f64).boxed(), 
+                            (10f64..10000f64).boxed(),  
+                            (1e6f64..1e8f64).boxed(),   
                         ])
                         .prop_filter("finite", |x| x.is_finite()),
                         period..=500,
                     ),
                     Just(period),
-                    // Spread factor - realistic market spreads
+                    
                     prop::strategy::Union::new(vec![
-                        (0.0001f64..0.01f64).boxed(), // Tight spreads (0.01% - 1%)
-                        (0.01f64..0.1f64).boxed(),    // Normal spreads (1% - 10%)
-                        (0.1f64..0.3f64).boxed(),     // Wide spreads (10% - 30%)
+                        (0.0001f64..0.01f64).boxed(), 
+                        (0.01f64..0.1f64).boxed(),    
+                        (0.1f64..0.3f64).boxed(),     
                     ]),
-                    // Scenario selector - expanded to 10 scenarios
+                    
                     0usize..=9,
                 )
             })
@@ -1806,7 +1806,7 @@ mod tests {
 
                 match scenario {
                     0 => {
-                        // Random realistic price data with variable spread
+                        
                         for &base in &base_prices {
                             let spread = base * spread_factor;
                             highs.push(base + spread / 2.0);
@@ -1814,7 +1814,7 @@ mod tests {
                         }
                     }
                     1 => {
-                        // Constant prices
+                        
                         let price = base_prices[0];
                         let spread = price * spread_factor;
                         for _ in 0..len {
@@ -1823,7 +1823,7 @@ mod tests {
                         }
                     }
                     2 => {
-                        // Monotonically increasing prices
+                        
                         let start_price = base_prices[0];
                         let increment = 10.0;
                         for i in 0..len {
@@ -1834,7 +1834,7 @@ mod tests {
                         }
                     }
                     3 => {
-                        // Monotonically decreasing prices
+                        
                         let start_price = base_prices[0];
                         let decrement = 10.0;
                         for i in 0..len {
@@ -1845,15 +1845,15 @@ mod tests {
                         }
                     }
                     4 => {
-                        // Period=1 special case (exact midpoint test)
+                        
                         for &base in &base_prices {
-                            let spread = base * 0.01; // Small fixed spread
+                            let spread = base * 0.01; 
                             highs.push(base + spread);
                             lows.push(base);
                         }
                     }
                     5 => {
-                        // Oscillating prices (sine wave)
+                        
                         let amplitude = 100.0;
                         let offset = base_prices[0];
                         for i in 0..len {
@@ -1865,7 +1865,7 @@ mod tests {
                         }
                     }
                     6 => {
-                        // Step function (sudden jumps)
+                        
                         let step_size = 100.0;
                         let steps = 5;
                         for i in 0..len {
@@ -1877,10 +1877,10 @@ mod tests {
                         }
                     }
                     7 => {
-                        // Volatile market (use base prices with added volatility)
+                        
                         for (i, &base) in base_prices.iter().enumerate() {
-                            // Add volatility based on position (creates pseudo-random walk)
-                            let volatility = ((i as f64 * 0.1).sin() + 1.0) * 0.5; // 0 to 1
+                            
+                            let volatility = ((i as f64 * 0.1).sin() + 1.0) * 0.5; 
                             let price = base * (1.0 + spread_factor * volatility);
                             let spread = price * spread_factor;
                             highs.push(price + spread / 2.0);
@@ -1888,29 +1888,29 @@ mod tests {
                         }
                     }
                     8 => {
-                        // Edge case: period equals data length (test full window)
-                        // Generate prices that change to verify window includes all data
+                        
+                        
                         for i in 0..len {
                             let price = base_prices[0] + (i as f64) * 5.0;
-                            let spread = price * spread_factor.min(0.1); // Cap spread for this test
+                            let spread = price * spread_factor.min(0.1); 
                             highs.push(price + spread / 2.0);
                             lows.push(price - spread / 2.0);
                         }
                     }
                     _ => {
-                        // Extreme monotonic test: prices that strictly increase then strictly decrease
-                        // This tests the indicator's ability to track turning points
+                        
+                        
                         let mid_point = len / 2;
                         for i in 0..len {
                             let base = if i < mid_point {
-                                // Strictly increasing in first half
+                                
                                 base_prices[0] + (i as f64) * 20.0
                             } else {
-                                // Strictly decreasing in second half
+                                
                                 base_prices[0] + (mid_point as f64) * 20.0
                                     - ((i - mid_point) as f64) * 20.0
                             };
-                            let spread = base * spread_factor.min(0.05); // Cap spread at 5% for this test
+                            let spread = base * spread_factor.min(0.05); 
                             highs.push(base + spread / 2.0);
                             lows.push(base - spread / 2.0);
                         }
@@ -1925,16 +1925,16 @@ mod tests {
 				let params = MidpriceParams { period: Some(period) };
 				let input = MidpriceInput::from_slices(&highs, &lows, params);
 
-				// Get outputs from both test kernel and scalar reference
+				
 				let MidpriceOutput { values: out } = midprice_with_kernel(&input, kernel)?;
 				let MidpriceOutput { values: ref_out } = midprice_with_kernel(&input, Kernel::Scalar)?;
 
-				// Find first valid index
+				
 				let first_valid = (0..highs.len())
 					.find(|&i| !highs[i].is_nan() && !lows[i].is_nan())
 					.unwrap_or(0);
 
-				// Property 1: Warmup period - first (first_valid + period - 1) values should be NaN
+				
 				let warmup_end = first_valid + period - 1;
 				for i in 0..warmup_end.min(out.len()) {
 					prop_assert!(
@@ -1944,19 +1944,19 @@ mod tests {
 					);
 				}
 
-				// Properties for valid output values
+				
 				for i in warmup_end..out.len() {
 					let y = out[i];
 					let r = ref_out[i];
 					let window_start = i + 1 - period;
 
-					// Property 2: Output bounds - midprice should be between min(low) and max(high) in window
+					
 					let window_high = &highs[window_start..=i];
 					let window_low = &lows[window_start..=i];
 					let max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 					let min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
 
-					// Adaptive tolerance based on magnitude
+					
 					let magnitude = y.abs().max(1.0);
 					let tolerance = (magnitude * f64::EPSILON * 10.0).max(1e-9);
 
@@ -1966,7 +1966,7 @@ mod tests {
 						y, i, min_low, max_high
 					);
 
-					// Property 3: Kernel consistency
+					
 					if y.is_finite() && r.is_finite() {
 						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 						prop_assert!(
@@ -1982,7 +1982,7 @@ mod tests {
 						);
 					}
 
-					// Property 4: Period=1 special case
+					
 					if period == 1 {
 						let expected = (highs[i] + lows[i]) / 2.0;
 						prop_assert!(
@@ -1992,7 +1992,7 @@ mod tests {
 						);
 					}
 
-					// Property 5: Constant data
+					
 					if window_high.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) &&
 					   window_low.windows(2).all(|w| (w[0] - w[1]).abs() < tolerance) {
 						let expected = (window_high[0] + window_low[0]) / 2.0;
@@ -2003,7 +2003,7 @@ mod tests {
 						);
 					}
 
-					// Property 6: Mathematical correctness
+					
 					let actual_max_high = window_high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 					let actual_min_low = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
 					let expected = (actual_max_high + actual_min_low) / 2.0;
@@ -2013,10 +2013,10 @@ mod tests {
 						y, expected, i
 					);
 
-					// Property 7: Midprice always within actual high and low at current index
-					// The midprice of the window should be between the lowest low and highest high
-					// but also should never exceed the current bar's high or go below current bar's low
-					// when period = 1
+					
+					
+					
+					
 					if period == 1 {
 						prop_assert!(
 							y >= lows[i] - tolerance && y <= highs[i] + tolerance,
@@ -2025,24 +2025,24 @@ mod tests {
 						);
 					}
 
-					// Property 8: Monotonicity check for strictly monotonic data
-					// If both high and low arrays are strictly increasing/decreasing in the window,
-					// the midprice should follow the trend
+					
+					
+					
 					if i > warmup_end && window_high.len() > 1 && window_low.len() > 1 {
 						let high_increasing = window_high.windows(2).all(|w| w[1] >= w[0] - tolerance);
 						let high_decreasing = window_high.windows(2).all(|w| w[1] <= w[0] + tolerance);
 						let low_increasing = window_low.windows(2).all(|w| w[1] >= w[0] - tolerance);
 						let low_decreasing = window_low.windows(2).all(|w| w[1] <= w[0] + tolerance);
 
-						// If both arrays are monotonic in the same direction
+						
 						if high_increasing && low_increasing {
-							// Previous midprice should be less than or equal to current
+							
 							if i > warmup_end {
 								let prev_y = out[i - 1];
 								if prev_y.is_finite() && y.is_finite() {
-									// Allow for some tolerance due to the sliding window
-									// The midprice might decrease slightly if a high value exits the window
-									let allowed_decrease = max_high * 0.1; // Allow 10% decrease
+									
+									
+									let allowed_decrease = max_high * 0.1; 
 									prop_assert!(
 										y >= prev_y - allowed_decrease,
 										"Midprice should generally increase with monotonic increasing data: {} < {} - {} at index {}",
@@ -2134,15 +2134,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods
-            (5, 25, 5),    // Medium periods
-            (30, 60, 15),  // Large periods
-            (2, 5, 1),     // Dense small range
-            (10, 10, 0),   // Single period (no step)
-            (14, 14, 0),   // Default period
-            (50, 100, 25), // Very large periods
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (30, 60, 15),  
+            (2, 5, 1),     
+            (10, 10, 0),   
+            (14, 14, 0),   
+            (50, 100, 25), 
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -2161,7 +2161,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2243,7 +2243,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_midprice_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Deterministic synthetic data (no file IO)
+        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -2255,13 +2255,13 @@ mod tests {
             low.push(l);
         }
 
-        let params = MidpriceParams::default(); // period = 14
+        let params = MidpriceParams::default(); 
         let input = MidpriceInput::from_slices(&high, &low, params.clone());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = midprice(&input)?.values;
 
-        // Preallocate destination and call into API
+        
         let mut out = vec![0.0; n];
         midprice_into(&input, &mut out)?;
 

@@ -198,7 +198,7 @@ impl CudaKeltner {
         Ok(())
     }
 
-    // ---- Batch: one series × many params ----
+    
     pub fn keltner_batch_dev(
         &self,
         high: &[f32],
@@ -206,7 +206,7 @@ impl CudaKeltner {
         close: &[f32],
         source: &[f32],
         sweep: &KeltnerBatchRange,
-        ma_type: &str, // "ema" (default) or "sma"
+        ma_type: &str, 
     ) -> Result<CudaKeltnerBatchResult, CudaKeltnerError> {
         let len = close.len();
         if !(high.len() == low.len() && low.len() == close.len() && close.len() == source.len()) {
@@ -223,7 +223,7 @@ impl CudaKeltner {
             return Err(CudaKeltnerError::InvalidInput("empty sweep".into()));
         }
 
-        // Period coverage: compute a single contiguous [min..max] range for MA + ATR.
+        
         let min_p = combos.iter().map(|c| c.period.unwrap()).min().unwrap();
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
         if min_p == 0 || max_p > len {
@@ -232,7 +232,7 @@ impl CudaKeltner {
             ));
         }
 
-        // Launch MA and ATR batch once for [min..max] with step=1
+        
         let rows_p = (max_p - min_p + 1) as usize;
         let ma_rows = match ma_type.to_ascii_lowercase().as_str() {
             "ema" => {
@@ -264,9 +264,9 @@ impl CudaKeltner {
             other => return Err(CudaKeltnerError::UnsupportedMa(other.to_string())),
         };
 
-        // ATR rows: compute on device but preserve scalar semantics for leading NaNs
-        // (scalar computes TR/RMA from index 0, so any NaN in the early prefix may
-        // propagate; tests depend on this behavior).
+        
+        
+        
         let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(0)
             .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
         let d_high_atr = DeviceBuffer::from_slice(high).map_err(CudaKeltnerError::Cuda)?;
@@ -275,12 +275,12 @@ impl CudaKeltner {
         let mut d_tr: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaKeltnerError::Cuda)?;
 
-        // Force first_valid=0 to match scalar's TR seed rule at i==0.
+        
         cuda_atr
             .tr_from_hlc_device(&d_high_atr, &d_low_atr, &d_close_atr, len, 0, &mut d_tr)
             .map_err(|e| CudaKeltnerError::InvalidInput(e.to_string()))?;
 
-        // ATR params for the contiguous period range; warm = period-1 (first_valid==0).
+        
         let mut h_periods: Vec<i32> = Vec::with_capacity(rows_p);
         let mut h_alphas: Vec<f32> = Vec::with_capacity(rows_p);
         let mut h_warms: Vec<i32> = Vec::with_capacity(rows_p);
@@ -310,7 +310,7 @@ impl CudaKeltner {
 
         let atr_rows = DeviceArrayF32 { buf: d_atr_out, rows: rows_p, cols: len };
 
-        // VRAM estimate: parameters + outputs. Inputs already allocated above.
+        
         let out_elems = combos
             .len()
             .checked_mul(len)
@@ -348,7 +348,7 @@ impl CudaKeltner {
             }
         }
 
-        // Map each combo row -> period-row index in [min..max]
+        
         let row_period_idx: Vec<i32> = combos
             .iter()
             .map(|c| (c.period.unwrap() as i32) - (min_p as i32))
@@ -358,7 +358,7 @@ impl CudaKeltner {
             .map(|c| c.multiplier.unwrap() as f32)
             .collect();
 
-        // Warm indices per combo: Keltner warm = first_valid(close) + period - 1
+        
         let first_valid_close = close
             .iter()
             .position(|v| !v.is_nan())
@@ -375,7 +375,7 @@ impl CudaKeltner {
         let d_row_warms =
             unsafe { DeviceBuffer::from_slice_async(&row_warms, &self.stream) }?;
 
-        // Outputs
+        
         let mut d_upper: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
         let mut d_middle: DeviceBuffer<f32> =
@@ -383,13 +383,13 @@ impl CudaKeltner {
         let mut d_lower: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &self.stream) }?;
 
-        // Kernel
+        
         let func = self
             .module
             .get_function("keltner_batch_f32")
             .map_err(|_| CudaKeltnerError::MissingKernelSymbol { name: "keltner_batch_f32" })?;
 
-        // grid.y must be <= device max; chunk if needed
+        
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let max_y = self.max_grid_y as usize;
@@ -404,7 +404,7 @@ impl CudaKeltner {
                 let mut atr_ptr = atr_rows.buf.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut rows_i = chunk as i32;
-                // typed element offsets
+                
                 let mut idx_ptr = d_row_period_idx.as_device_ptr().offset(launched as isize).as_raw();
                 let mut mul_ptr = d_row_multipliers.as_device_ptr().offset(launched as isize).as_raw();
                 let mut warm_ptr = d_row_warms.as_device_ptr().offset(launched as isize).as_raw();
@@ -442,7 +442,7 @@ impl CudaKeltner {
         })
     }
 
-    // ---- Many-series × one-param (time-major) ----
+    
     pub fn keltner_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -471,7 +471,7 @@ impl CudaKeltner {
             return Err(CudaKeltnerError::InvalidInput("invalid period".into()));
         }
 
-        // MA per series (time-major) depending on selection
+        
         let ma_tm = match ma_type.to_ascii_lowercase().as_str() {
             "ema" => {
                 use crate::indicators::moving_averages::ema::EmaParams;
@@ -504,8 +504,8 @@ impl CudaKeltner {
             other => return Err(CudaKeltnerError::UnsupportedMa(other.to_string())),
         };
 
-        // ATR per series (time-major)
-        // Host ATR per series to mirror scalar behavior
+        
+        
         let atr_tm = {
             let mut out = vec![f32::NAN; cols * rows];
             let alpha = 1.0f64 / (period as f64);
@@ -541,7 +541,7 @@ impl CudaKeltner {
             DeviceArrayF32 { buf, rows, cols }
         };
 
-        // VRAM + outputs
+        
         let out_bytes = expected
             .checked_mul(3)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -583,7 +583,7 @@ impl CudaKeltner {
                 }
             })?;
         let block_x = self.policy.many_block_x.unwrap_or(256);
-        // Build first_valids per series from close (Keltner semantics)
+        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             first_valids[s] = (0..rows)
@@ -596,7 +596,7 @@ impl CudaKeltner {
         let d_first =
             unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
 
-        // Prefer 2-D launch if rows fits in grid.y; else 1-D fallback
+        
         let use_2d = (rows as u32) <= self.max_grid_y;
         if use_2d {
             let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
@@ -610,7 +610,7 @@ impl CudaKeltner {
                 let mut period_i = period as i32;
                 let mut cols_i = cols as i32;
                 let mut rows_i = rows as i32;
-                let mut elems_i = expected as i32; // unused in 2D path
+                let mut elems_i = expected as i32; 
                 let mut mult = multiplier as f32;
                 let mut up_ptr = d_upper.as_device_ptr().as_raw();
                 let mut mid_ptr = d_middle.as_device_ptr().as_raw();
@@ -674,7 +674,7 @@ impl CudaKeltner {
     }
 }
 
-// Local replica of expand_grid from the indicator (kept private there)
+
 fn expand_grid_local(r: &KeltnerBatchRange) -> Result<Vec<KeltnerParams>, CudaKeltnerError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaKeltnerError> {
         if step == 0 || start == end {
@@ -753,7 +753,7 @@ fn expand_grid_local(r: &KeltnerBatchRange) -> Result<Vec<KeltnerParams>, CudaKe
 
     Ok(out)
 }
-// ---------------- Bench profiles ----------------
+
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
@@ -944,7 +944,7 @@ pub mod benches {
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(1);
         let rows_p = (max_p - min_p + 1).max(1);
 
-        // MA rows (EMA) for contiguous period range
+        
         let ma_rows = {
             use crate::indicators::moving_averages::ema::EmaBatchRange;
             let cuda = CudaEma::new(0).expect("cuda ema");
@@ -958,7 +958,7 @@ pub mod benches {
         };
         let d_ma_rows = ma_rows.buf;
 
-        // ATR rows for contiguous period range (first_valid=0 to mirror scalar TR seed)
+        
         let cuda_atr = crate::cuda::atr_wrapper::CudaAtr::new(0).expect("cuda atr");
         let d_high_atr = DeviceBuffer::from_slice(&high).expect("d_high");
         let d_low_atr = DeviceBuffer::from_slice(&low).expect("d_low");
@@ -1049,7 +1049,7 @@ pub mod benches {
         }
         let source_tm = close_tm.clone();
 
-        // MA and ATR on device once (EMA).
+        
         let ma_tm = {
             use crate::indicators::moving_averages::ema::EmaParams;
             let cuda = CudaEma::new(0).expect("cuda ema");
@@ -1072,7 +1072,7 @@ pub mod benches {
         };
         let d_atr_tm = atr_tm.buf;
 
-        // first_valids from close (Keltner semantics)
+        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             first_valids[s] = (0..rows)

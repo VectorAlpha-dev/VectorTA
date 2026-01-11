@@ -202,7 +202,7 @@ pub enum MswError {
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("msw: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
-    // Backwards-compatible alias; prefer EmptyInputData in new call sites.
+    
     #[error("msw: Empty data provided for MSW.")]
     EmptyData,
 }
@@ -242,8 +242,8 @@ pub fn msw_with_kernel(input: &MswInput, kernel: Kernel) -> Result<MswOutput, Ms
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    // Prefer AVX2 over AVX512 for MSW in Auto: AVX512 often downclocks and underperforms
-    // compared to AVX2 on many CPUs. Allow explicit Avx512 selection via API.
+    
+    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
         chosen = Kernel::Avx2;
@@ -267,12 +267,12 @@ pub unsafe fn msw_scalar(
     first: usize,
     len: usize,
 ) -> Result<MswOutput, MswError> {
-    // Warmup prefix length
+    
     let warm = first + period - 1;
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    // Precompute sin/cos weights with one sin_cos per tap
+    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -284,7 +284,7 @@ pub unsafe fn msw_scalar(
         ang += step;
     }
 
-    // Keep lead via sin(phase + π/4) to match streaming path exactly
+    
 
     for i in warm..len {
         let mut rp = 0.0f64;
@@ -332,7 +332,7 @@ pub unsafe fn msw_avx2(
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    // Precompute weights
+    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -346,7 +346,7 @@ pub unsafe fn msw_avx2(
     let dptr = data.as_ptr();
 
     const LANES: usize = 4;
-    // Keep lead via sin(phase + π/4) to match streaming path
+    
 
     let mut i = warm;
     while i + (LANES - 1) < len {
@@ -395,7 +395,7 @@ pub unsafe fn msw_avx2(
         i += LANES;
     }
 
-    // Scalar tail inline without extra allocations/copies
+    
     while i < len {
         let mut rp = 0.0f64;
         let mut ip = 0.0f64;
@@ -442,7 +442,7 @@ pub unsafe fn msw_avx512(
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    // Precompute weights
+    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -456,7 +456,7 @@ pub unsafe fn msw_avx512(
     let dptr = data.as_ptr();
 
     const LANES: usize = 8;
-    // Keep lead via sin(phase + π/4) to match streaming path
+    
 
     let mut i = warm;
     while i + (LANES - 1) < len {
@@ -614,10 +614,10 @@ impl MswStream {
     fn dot_ring(&self) -> (f64, f64) {
         let mut rp = 0.0;
         let mut ip = 0.0;
-        // `self.head` always points to the next insertion position, which is
-        // the oldest sample in the ring buffer. The most recent value is the
-        // element just before `head`. The batch implementation processes data
-        // from newest to oldest, so mirror that ordering here.
+        
+        
+        
+        
         let mut idx = (self.head + self.period - 1) % self.period;
         for j in 0..self.period {
             rp += self.cos_table[j] * self.buffer[idx];
@@ -640,7 +640,7 @@ impl MswStream {
             phase -= TULIP_TPI;
         }
         let (s, c) = phase.sin_cos();
-        // Use identity for lead: sin(phase + π/4) = (sin + cos) * √½
+        
         let lead = (s + c) * 0.707106781186547524400844362104849039_f64;
         (s, lead)
     }
@@ -761,7 +761,7 @@ fn expand_grid(r: &MswBatchRange) -> Result<Vec<MswParams>, MswError> {
                 Ok(v)
             };
         }
-        // Reversed bounds: walk downwards, including both ends.
+        
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -840,11 +840,11 @@ fn msw_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Use uninitialized memory for better performance
+    
     let mut sine_buf = make_uninit_matrix(rows, cols);
     let mut lead_buf = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes for each row based on warmup periods
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -855,7 +855,7 @@ fn msw_batch_inner(
     init_matrix_prefixes(&mut sine_buf, cols, &warmup_periods);
     init_matrix_prefixes(&mut lead_buf, cols, &warmup_periods);
 
-    // Convert to mutable slices for computation
+    
     let mut sine_guard = core::mem::ManuallyDrop::new(sine_buf);
     let mut lead_guard = core::mem::ManuallyDrop::new(lead_buf);
     let sine: &mut [f64] = unsafe {
@@ -900,7 +900,7 @@ fn msw_batch_inner(
         }
     }
 
-    // Convert back to owned vectors
+    
     let sine_vec = unsafe {
         Vec::from_raw_parts(
             sine_guard.as_mut_ptr() as *mut f64,
@@ -967,7 +967,7 @@ fn msw_batch_inner_into(
         });
     }
 
-    // 1) Cast to MaybeUninit and initialize NaN warm prefixes with helper
+    
     let sine_mu = unsafe {
         std::slice::from_raw_parts_mut(
             sine_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -988,7 +988,7 @@ fn msw_batch_inner_into(
     init_matrix_prefixes(sine_mu, cols, &warm);
     init_matrix_prefixes(lead_mu, cols, &warm);
 
-    // 2) Compute rows into the same backing memory
+    
     let do_row = |row: usize,
                   sine_row_mu: &mut [MaybeUninit<f64>],
                   lead_row_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -1062,7 +1062,7 @@ unsafe fn msw_row_scalar(
         ang += step;
     }
 
-    // Keep lead via sin(phase + π/4) to match streaming path
+    
 
     let warm = first + period - 1;
     for i in warm..data.len() {
@@ -1120,7 +1120,7 @@ unsafe fn msw_row_avx2(
     let dptr = data.as_ptr();
 
     const LANES: usize = 4;
-    // Keep lead via sin(phase + π/4) to match streaming path
+    
 
     let mut i = warm;
     while i + (LANES - 1) < data.len() {
@@ -1239,7 +1239,7 @@ unsafe fn msw_row_avx512_short(
     let dptr = data.as_ptr();
 
     const LANES: usize = 8;
-    // Keep lead via sin(phase + π/4) to match streaming path
+    
 
     let mut i = warm;
     while i + (LANES - 1) < data.len() {
@@ -1326,8 +1326,8 @@ unsafe fn msw_row_avx512_long(
     sine: &mut [f64],
     lead: &mut [f64],
 ) {
-    // For now identical to the short variant; keep as a separate symbol
-    // to allow future period-specific tuning.
+    
+    
     msw_row_avx512_short(data, first, period, sine, lead)
 }
 
@@ -2478,20 +2478,20 @@ mod tests {
                     }
                 }
 
-                // Property 7: Zero data produces specific deterministic values
+                
                 if data.iter().all(|&x| x.abs() < 1e-10) && warmup_end < data.len() {
-                    // For all-zero data:
-                    // rp = sum(cos_table[j] * 0) = 0
-                    // ip = sum(sin_table[j] * 0) = 0
-                    // Since rp.abs() <= 0.001 and ip == 0 (not < 0):
-                    // phase = π * 1.0 = π
-                    // Since rp == 0 (not < 0), no additional π added
-                    // phase += π/2 → phase = π + π/2 = 3π/2
-                    // sine = sin(3π/2) = -1
-                    // lead = sin(3π/2 + π/4) = sin(7π/4) = -0.7071...
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
+                    
 
                     const EXPECTED_SINE: f64 = -1.0;
-                    const EXPECTED_LEAD: f64 = -0.7071067811865476; // sin(7π/4)
+                    const EXPECTED_LEAD: f64 = -0.7071067811865476; 
 
                     for i in warmup_end..(warmup_end + 3).min(data.len()) {
                         let sine_val = output.sine[i];
@@ -2514,20 +2514,20 @@ mod tests {
                     }
                 }
 
-                // Property 8: Period=2 special case (minimum valid period)
-                // With period=2, we only look at current and previous value
-                // This tests the edge case of minimum lookback
+                
+                
+                
                 if period == 2 && warmup_end < data.len() {
-                    // For period=2:
-                    // cos_table = [cos(0), cos(π)] = [1, -1]
-                    // sin_table = [sin(0), sin(π)] = [0, 0]
-                    // So ip = 0 always, and rp = data[i] * 1 + data[i-1] * (-1) = data[i] - data[i-1]
+                    
+                    
+                    
+                    
 
                     for i in warmup_end..(warmup_end + 3).min(data.len()) {
                         let sine_val = output.sine[i];
                         let lead_val = output.lead[i];
 
-                        // Verify outputs are valid
+                        
                         prop_assert!(
                             !sine_val.is_nan(),
                             "Period=2: Sine[{}] should not be NaN",
@@ -2539,7 +2539,7 @@ mod tests {
                             i
                         );
 
-                        // Verify bounds
+                        
                         prop_assert!(
                             sine_val >= -1.0 - 1e-9 && sine_val <= 1.0 + 1e-9,
                             "Period=2: Sine[{}] = {} out of bounds",
@@ -2553,7 +2553,7 @@ mod tests {
                             lead_val
                         );
 
-                        // For alternating data [a, b, a, b, ...], should produce consistent phase
+                        
                         if i >= 3
                             && i >= warmup_end + 2
                             && (data[i] - data[i - 2]).abs() < 1e-10
@@ -2568,16 +2568,16 @@ mod tests {
                     }
                 }
 
-                // Property 9: Kernel consistency - all kernels produce identical results
+                
                 for i in 0..data.len() {
                     let sine_val = output.sine[i];
                     let ref_sine = ref_output.sine[i];
                     let lead_val = output.lead[i];
                     let ref_lead = ref_output.lead[i];
 
-                    // Check sine consistency
+                    
                     if sine_val.is_nan() && ref_sine.is_nan() {
-                        continue; // Both NaN is OK
+                        continue; 
                     }
 
                     if sine_val.is_finite() && ref_sine.is_finite() {
@@ -2602,9 +2602,9 @@ mod tests {
                         );
                     }
 
-                    // Check lead consistency
+                    
                     if lead_val.is_nan() && ref_lead.is_nan() {
-                        continue; // Both NaN is OK
+                        continue; 
                     }
 
                     if lead_val.is_finite() && ref_lead.is_finite() {
@@ -2660,15 +2660,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods
-            (5, 25, 5),    // Medium periods
-            (30, 60, 15),  // Large periods
-            (2, 5, 1),     // Dense small range
-            (10, 20, 2),   // Dense medium range
-            (15, 30, 3),   // Medium-large range
-            (50, 100, 10), // Very large periods
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (30, 60, 15),  
+            (2, 5, 1),     
+            (10, 20, 2),   
+            (15, 30, 3),   
+            (50, 100, 10), 
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -2677,7 +2677,7 @@ mod tests {
                 .period_range(period_start, period_end, period_step)
                 .apply_candles(&c, "close")?;
 
-            // Check sine values
+            
             for (idx, &val) in output.sine.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2688,7 +2688,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2735,7 +2735,7 @@ mod tests {
                 }
             }
 
-            // Check lead values
+            
             for (idx, &val) in output.lead.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2746,7 +2746,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2826,7 +2826,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ==================== Python CUDA bindings ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "msw_cuda_batch_dev")]
 #[pyo3(signature = (close_f32, period_range, device_id=0))]

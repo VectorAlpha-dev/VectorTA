@@ -24,7 +24,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('SINWMA partial params', () => {
-    // Test with default parameters - mirrors check_sinwma_partial_params
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.sinwma_js(close, 14);
@@ -49,7 +49,7 @@ test('SINWMA partial params', () => {
 });
 
 test('SINWMA default candles', () => {
-    // Test SINWMA with default parameters - mirrors check_sinwma_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.sinwma_js(close, 14);
@@ -57,7 +57,7 @@ test('SINWMA default candles', () => {
 });
 
 test('SINWMA accuracy', async () => {
-    // Test SINWMA matches expected values from Rust tests - mirrors check_sinwma_accuracy
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.sinwma;
     
@@ -65,7 +65,7 @@ test('SINWMA accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -74,22 +74,22 @@ test('SINWMA accuracy', async () => {
         "SINWMA last 5 values mismatch"
     );
     
-    // Compare with Rust implementation
+    
     await compareWithRust('sinwma', result, 'close', expected.defaultParams);
 });
 
 test('SINWMA invalid period', () => {
-    // Test SINWMA fails with invalid period
+    
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
-    // Period = 0 should fail
+    
     assert.throws(() => {
         wasm.sinwma_js(inputData, 0);
     });
 });
 
 test('SINWMA period exceeds length', () => {
-    // Test SINWMA fails with period exceeding length
+    
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -98,7 +98,7 @@ test('SINWMA period exceeds length', () => {
 });
 
 test('SINWMA very small dataset', () => {
-    // Test SINWMA fails with insufficient data
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -107,7 +107,7 @@ test('SINWMA very small dataset', () => {
 });
 
 test('SINWMA empty input', () => {
-    // Test SINWMA with empty input
+    
     const dataEmpty = new Float64Array([]);
     
     assert.throws(() => {
@@ -116,29 +116,29 @@ test('SINWMA empty input', () => {
 });
 
 test('SINWMA period one', () => {
-    // Test SINWMA with period=1 acts as passthrough
+    
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
     
     const result = wasm.sinwma_js(data, 1);
     
-    // With period=1, weight is sin(π/2) = 1.0, so output should equal input
+    
     assertArrayClose(result, data, 1e-10, "Period=1 should act as passthrough");
 });
 
 test('SINWMA reinput', () => {
-    // Test SINWMA with re-input of SINWMA result - mirrors check_sinwma_reinput
+    
     const close = new Float64Array(testData.close);
     
-    // First SINWMA pass with period=14
+    
     const firstResult = wasm.sinwma_js(close, 14);
     
-    // Second SINWMA pass with period=5 using first result as input
+    
     const secondResult = wasm.sinwma_js(firstResult, 5);
     
     assert.strictEqual(secondResult.length, firstResult.length);
     
-    // All values should be finite after warmup
-    // Find first non-NaN in original input
+    
+    
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -146,7 +146,7 @@ test('SINWMA reinput', () => {
             break;
         }
     }
-    // Find first non-NaN in first result
+    
     let firstValidInFirst = 0;
     for (let i = 0; i < firstResult.length; i++) {
         if (!isNaN(firstResult[i])) {
@@ -154,25 +154,25 @@ test('SINWMA reinput', () => {
             break;
         }
     }
-    const warmup = firstValidInFirst + 5 - 1;  // first_valid_in_first + second_period - 1
+    const warmup = firstValidInFirst + 5 - 1;  
     for (let i = warmup; i < secondResult.length; i++) {
         assert(isFinite(secondResult[i]), `NaN found at index ${i}`);
     }
 });
 
 test('SINWMA NaN handling', () => {
-    // Test SINWMA handling of NaN values - mirrors check_sinwma_nan_handling
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.sinwma_js(close, 14);
     
     assert.strictEqual(result.length, close.length);
     
-    // First period-1 values should be NaN
+    
     assertAllNaN(result.slice(0, 13), "Expected NaN in warmup period (first 13 values)");
     
-    // After warmup, all values should be finite
-    // Find first non-NaN in input
+    
+    
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -180,7 +180,7 @@ test('SINWMA NaN handling', () => {
             break;
         }
     }
-    const warmup = firstValid + 14 - 1;  // first_valid + period - 1
+    const warmup = firstValid + 14 - 1;  
     if (result.length > warmup) {
         for (let i = warmup; i < result.length; i++) {
             assert(isFinite(result[i]), `Found unexpected NaN at index ${i} after warmup`);
@@ -189,31 +189,31 @@ test('SINWMA NaN handling', () => {
 });
 
 test('SINWMA batch', () => {
-    // Test SINWMA batch computation
+    
     const close = new Float64Array(testData.close);
     
-    // Test parameter ranges
+    
     const batch_result = wasm.sinwma_batch_js(
         close, 
-        10, 30, 5    // period range: 10, 15, 20, 25, 30
+        10, 30, 5    
     );
     
-    // Get rows and cols info
+    
     const rows_cols = wasm.sinwma_batch_rows_cols_js(10, 30, 5, close.length);
     const rows = rows_cols[0];
     const cols = rows_cols[1];
     
     assert(batch_result instanceof Float64Array);
-    assert.strictEqual(rows, 5); // 5 period values
+    assert.strictEqual(rows, 5); 
     assert.strictEqual(cols, close.length);
     assert.strictEqual(batch_result.length, rows * cols);
     
-    // Verify first combination matches individual calculation
+    
     const individual_result = wasm.sinwma_js(close, 10);
     const batch_first = batch_result.slice(0, close.length);
     
-    // Compare after warmup
-    // Find first non-NaN in input
+    
+    
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -221,25 +221,25 @@ test('SINWMA batch', () => {
             break;
         }
     }
-    const warmup = firstValid + 10 - 1;  // first valid + period - 1
+    const warmup = firstValid + 10 - 1;  
     for (let i = warmup; i < close.length; i++) {
         assertClose(batch_first[i], individual_result[i], 1e-9, `Batch mismatch at ${i}`);
     }
 });
 
 test('SINWMA different periods', () => {
-    // Test SINWMA with different period values
+    
     const close = new Float64Array(testData.close);
     
-    // Test various period values
+    
     const testPeriods = [5, 10, 14, 20, 50];
     
     for (const period of testPeriods) {
         const result = wasm.sinwma_js(close, period);
         assert.strictEqual(result.length, close.length);
         
-        // After warmup, all values should be finite
-        // Find first non-NaN in input
+        
+        
         let firstValid = 0;
         for (let i = 0; i < close.length; i++) {
             if (!isNaN(close[i])) {
@@ -257,40 +257,40 @@ test('SINWMA different periods', () => {
 });
 
 test('SINWMA batch performance', () => {
-    // Test that batch computation is more efficient than multiple single computations
-    const close = new Float64Array(testData.close.slice(0, 1000)); // Use first 1000 values
     
-    // Test multiple parameter combinations
+    const close = new Float64Array(testData.close.slice(0, 1000)); 
+    
+    
     const startBatch = performance.now();
     const batchResult = wasm.sinwma_batch_js(
         close,
-        10, 50, 10    // periods: 10, 20, 30, 40, 50
+        10, 50, 10    
     );
     const batchTime = performance.now() - startBatch;
     
-    // Get the exact parameters used by the batch function
+    
     const metadata = wasm.sinwma_batch_metadata_js(10, 50, 10);
     
     const startSingle = performance.now();
     const singleResults = [];
-    // Use the exact parameters from metadata
+    
     for (const period of metadata) {
         const result = wasm.sinwma_js(close, period);
         singleResults.push(...result);
     }
     const singleTime = performance.now() - startSingle;
     
-    // Batch should be faster than multiple single calls
+    
     console.log(`Batch time: ${batchTime.toFixed(2)}ms, Single time: ${singleTime.toFixed(2)}ms`);
     
-    // Verify results match
+    
     assertArrayClose(batchResult, singleResults, 1e-9, 'Batch vs single results');
 });
 
 test('SINWMA edge cases', () => {
-    // Test SINWMA with edge case inputs
     
-    // Test with monotonically increasing data
+    
+    
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = i + 1;
@@ -298,30 +298,30 @@ test('SINWMA edge cases', () => {
     const result = wasm.sinwma_js(data, 14);
     assert.strictEqual(result.length, data.length);
     
-    // After warmup, all values should be finite
+    
     for (let i = 14; i < result.length; i++) {
         assert(isFinite(result[i]), `NaN at index ${i}`);
     }
     
-    // Test with constant values
+    
     const constantData = new Float64Array(100).fill(50.0);
     const constantResult = wasm.sinwma_js(constantData, 14);
     
     assert.strictEqual(constantResult.length, constantData.length);
     
-    // With constant input, after warmup should produce constant output
+    
     for (let i = 14; i < constantResult.length; i++) {
         assert(isFinite(constantResult[i]), `NaN at index ${i} for constant input`);
     }
 });
 
 test('SINWMA batch metadata', () => {
-    // Test metadata function returns correct period values
+    
     const metadata = wasm.sinwma_batch_metadata_js(
-        10, 30, 5    // period range: 10, 15, 20, 25, 30
+        10, 30, 5    
     );
     
-    // Should have 5 period values
+    
     assert.strictEqual(metadata.length, 5);
     assert.strictEqual(metadata[0], 10);
     assert.strictEqual(metadata[1], 15);
@@ -331,7 +331,7 @@ test('SINWMA batch metadata', () => {
 });
 
 test('SINWMA consistency across calls', () => {
-    // Test that SINWMA produces consistent results across multiple calls
+    
     const close = new Float64Array(testData.close.slice(0, 100));
     
     const result1 = wasm.sinwma_js(close, 14);
@@ -341,7 +341,7 @@ test('SINWMA consistency across calls', () => {
 });
 
 test('SINWMA step precision', () => {
-    // Test batch with various step sizes
+    
     const data = new Float64Array(50);
     for (let i = 0; i < 50; i++) {
         data[i] = i + 1;
@@ -349,18 +349,18 @@ test('SINWMA step precision', () => {
     
     const batch_result = wasm.sinwma_batch_js(
         data,
-        10, 20, 2     // periods: 10, 12, 14, 16, 18, 20
+        10, 20, 2     
     );
     
-    // Get rows and cols info
+    
     const rows_cols = wasm.sinwma_batch_rows_cols_js(10, 20, 2, data.length);
     const rows = rows_cols[0];
     
-    // Should have 6 combinations
+    
     assert.strictEqual(rows, 6);
     assert.strictEqual(batch_result.length, 6 * data.length);
     
-    // Verify metadata
+    
     const metadata = wasm.sinwma_batch_metadata_js(10, 20, 2);
     assert.strictEqual(metadata.length, 6);
     assert.strictEqual(metadata[0], 10);
@@ -372,13 +372,13 @@ test('SINWMA step precision', () => {
 });
 
 test('SINWMA warmup behavior', () => {
-    // Test SINWMA warmup period behavior
+    
     const close = new Float64Array(testData.close);
     const period = 14;
     
     const result = wasm.sinwma_js(close, period);
     
-    // Find first non-NaN value in input
+    
     let firstValid = 0;
     for (let i = 0; i < close.length; i++) {
         if (!isNaN(close[i])) {
@@ -389,19 +389,19 @@ test('SINWMA warmup behavior', () => {
     
     const warmup = firstValid + period - 1;
     
-    // Values during warmup should be NaN
+    
     for (let i = firstValid; i < warmup && i < result.length; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup`);
     }
     
-    // Values after warmup should be finite
+    
     for (let i = warmup; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i} after warmup`);
     }
 });
 
 test('SINWMA oscillating data', () => {
-    // Test with oscillating values
+    
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = (i % 2 === 0) ? 10.0 : 20.0;
@@ -410,14 +410,14 @@ test('SINWMA oscillating data', () => {
     const result = wasm.sinwma_js(data, 14);
     assert.strictEqual(result.length, data.length);
     
-    // After warmup, all values should be finite
+    
     for (let i = 14; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
 });
 
 test('SINWMA small step size', () => {
-    // Test batch with very small step size
+    
     const data = new Float64Array(50);
     for (let i = 0; i < 50; i++) {
         data[i] = i + 1;
@@ -425,7 +425,7 @@ test('SINWMA small step size', () => {
     
     const batch_result = wasm.sinwma_batch_js(
         data,
-        10, 14, 1     // periods: 10, 11, 12, 13, 14
+        10, 14, 1     
     );
     
     const rows_cols = wasm.sinwma_batch_rows_cols_js(10, 14, 1, data.length);
@@ -436,23 +436,23 @@ test('SINWMA small step size', () => {
 });
 
 test('SINWMA formula verification', () => {
-    // Test that SINWMA detects patterns correctly
+    
     const data = new Float64Array([10.0, 11.0, 12.0, 11.0, 10.0, 9.0, 10.0, 11.0, 12.0, 13.0]);
     const period = 5;
     
     const result = wasm.sinwma_js(data, period);
     
-    // Result length should match input
+    
     assert.strictEqual(result.length, data.length);
     
-    // After warmup, values should be finite
+    
     for (let i = period; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i}`);
     }
 });
 
 test('SINWMA all NaN input', () => {
-    // Test SINWMA with all NaN values
+    
     const allNaN = new Float64Array(100).fill(NaN);
     
     assert.throws(() => {
@@ -461,32 +461,32 @@ test('SINWMA all NaN input', () => {
 });
 
 test('SINWMA batch error conditions', () => {
-    // Test various error conditions for batch
+    
     const data = new Float64Array([1, 2, 3, 4, 5]);
     
-    // Period exceeds data length
+    
     assert.throws(() => {
         wasm.sinwma_batch_js(data, 10, 20, 5);
     });
     
-    // Empty data
+    
     const empty = new Float64Array([]);
     assert.throws(() => {
         wasm.sinwma_batch_js(empty, 10, 20, 5);
     });
 });
 
-// Fast API (Zero-copy) tests
+
 test('SINWMA zero-copy in-place operation', () => {
-    // Test in-place computation (aliasing)
+    
     const data = new Float64Array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0]);
     const period = 5;
     
-    // Allocate buffer
+    
     const ptr = wasm.sinwma_alloc(data.length);
     assert(ptr !== 0, 'Failed to allocate memory');
     
-    // Create view into WASM memory
+    
     const memory = wasm.__wasm.memory;
     const memView = new Float64Array(
         memory.buffer,
@@ -494,24 +494,24 @@ test('SINWMA zero-copy in-place operation', () => {
         data.length
     );
     
-    // Copy data into WASM memory
+    
     memView.set(data);
     
-    // Compute SINWMA in-place
+    
     try {
         wasm.sinwma_into(ptr, ptr, data.length, period);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.sinwma_js(data, period);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.sinwma_free(ptr, data.length);
     }
 });
@@ -533,16 +533,16 @@ test('SINWMA zero-copy with large dataset', () => {
         
         wasm.sinwma_into(ptr, ptr, size, 14);
         
-        // Recreate view in case memory grew
+        
         const memory2 = wasm.__wasm.memory;
         const memView2 = new Float64Array(memory2.buffer, ptr, size);
         
-        // Check warmup period has NaN
+        
         for (let i = 0; i < 13; i++) {
             assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values
+        
         for (let i = 13; i < Math.min(100, size); i++) {
             assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
         }
@@ -552,20 +552,20 @@ test('SINWMA zero-copy with large dataset', () => {
 });
 
 test('SINWMA zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.sinwma_into(0, 0, 10, 14);
     }, /null pointer|invalid memory/i);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.sinwma_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.sinwma_into(ptr, ptr, 10, 0);
         }, /Invalid period/);
         
-        // Period exceeds length
+        
         assert.throws(() => {
             wasm.sinwma_into(ptr, ptr, 10, 20);
         }, /Invalid period/);
@@ -575,73 +575,73 @@ test('SINWMA zero-copy error handling', () => {
 });
 
 test('SINWMA zero-copy memory management', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 10000, 100000];
     
     for (const size of sizes) {
         const ptr = wasm.sinwma_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
-        // Write pattern to verify memory
+        
         const memory = wasm.__wasm.memory;
         const memView = new Float64Array(memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.sinwma_free(ptr, size);
     }
 });
 
 test('SINWMA batch new API', () => {
-    // Test the new unified batch API that returns structured data
+    
     const close = new Float64Array(testData.close.slice(0, 100));
     
     const config = {
-        period_range: [10, 20, 5]  // 10, 15, 20
+        period_range: [10, 20, 5]  
     };
     
     const result = wasm.sinwma_batch(close, config);
     
-    // Check that result has the expected structure
+    
     assert(result.values, 'Result should have values array');
     assert(result.periods, 'Result should have periods array');
     assert(result.rows, 'Result should have rows count');
     assert(result.cols, 'Result should have cols count');
     
-    // Check dimensions
+    
     assert.strictEqual(result.rows, 3, 'Should have 3 parameter combinations');
     assert.strictEqual(result.cols, close.length, 'Cols should match input length');
     assert.strictEqual(result.values.length, result.rows * result.cols, 'Values array size mismatch');
     
-    // Check periods
+    
     assert.deepStrictEqual(result.periods, [10, 15, 20], 'Periods mismatch');
     
-    // Verify first row matches individual calculation
+    
     const individual = wasm.sinwma_js(close, 10);
     const firstRow = result.values.slice(0, close.length);
     
-    for (let i = 9; i < close.length; i++) {  // After warmup
+    for (let i = 9; i < close.length; i++) {  
         assertClose(firstRow[i], individual[i], 1e-9, 
             `Batch result mismatch at index ${i}`);
     }
 });
 
 test('SINWMA leading NaN', () => {
-    // Test SINWMA with leading NaN values in data
+    
     const data = new Float64Array([NaN, NaN, NaN, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     
     const result = wasm.sinwma_js(data, 5);
     
     assert.strictEqual(result.length, data.length);
     
-    // First non-NaN is at index 3, so warmup ends at 3 + 5 - 1 = 7
+    
     assertAllNaN(result.slice(0, 7), "Expected NaN during warmup with leading NaN");
     for (let i = 7; i < result.length; i++) {
         assert(isFinite(result[i]), `Expected finite value at index ${i} after warmup`);
@@ -649,31 +649,31 @@ test('SINWMA leading NaN', () => {
 });
 
 test('SINWMA batch single parameter', () => {
-    // Test batch with single parameter combination - mirrors ALMA pattern
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.sinwma;
     
     const config = {
-        period_range: [14, 14, 0]  // Default period only
+        period_range: [14, 14, 0]  
     };
     
     const result = wasm.sinwma_batch(close, config);
     
-    // Check structure
+    
     assert(result.values, 'Should have values array');
     assert(result.periods, 'Should have periods array');
     assert(typeof result.rows === 'number', 'Should have rows count');
     assert(typeof result.cols === 'number', 'Should have cols count');
     
-    // Should have 1 combination
+    
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, close.length);
     assert.strictEqual(result.periods[0], 14);
     
-    // Extract the single row
+    
     const defaultRow = result.values.slice(0, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = defaultRow.slice(-5);
     assertArrayClose(
         last5,
@@ -684,14 +684,14 @@ test('SINWMA batch single parameter', () => {
 });
 
 test('SINWMA constant input normalization', () => {
-    // Test with constant input to verify normalization
+    
     const data = new Float64Array(20).fill(1.0);
     
-    // For any period with constant input, result should produce constant output after warmup
+    
     for (const period of [3, 5, 7]) {
         const result = wasm.sinwma_js(data, period);
         
-        // After warmup, check if output is constant
+        
         let firstValidOutput = null;
         for (let i = period; i < result.length; i++) {
             if (isFinite(result[i])) {

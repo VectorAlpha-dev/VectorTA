@@ -1,20 +1,20 @@
-// CUDA kernels for Linear Regression Angle (LRA).
-//
-// This version removes device-side FP64 from the hot paths and replaces
-// previous double math with compensated FP32 ("double-single") arithmetic.
-// It also fixes NaN window persistence in the many-series kernel by keeping
-// a rolling nan_count and rebuilding once when a window becomes clean.
-//
-// Batch path note: the host still builds FP64 prefixes (Σy, Σk*y) to
-// preserve ABI with existing wrappers. On device we down-convert each prefix
-// endpoint to FP32 and form a compensated difference via TwoSum, avoiding
-// FP64 arithmetic in the kernels while maintaining good accuracy.
+
+
+
+
+
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Provide a portable definition of M_PI when building with toolchains
-// (e.g., MSVC) that don't expose it by default.
+
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846264338327950288
 #endif
@@ -23,17 +23,17 @@
 #define LRA_NAN_F (__int_as_float(0x7fffffff))
 #endif
 
-// -------------------------- Helpers --------------------------
+
 
 static __device__ __forceinline__ int tm_idx(int row, int num_series, int series) {
     return row * num_series + series;
 }
 
 static __device__ __forceinline__ float kRad2Deg() {
-    return 57.2957795130823208767981548141051703f; // 180/pi
+    return 57.2957795130823208767981548141051703f; 
 }
 
-// Dual-float (double-single) accumulator: value ~= hi + lo (|lo| << |hi|)
+
 struct df32 {
     float hi;
     float lo;
@@ -43,14 +43,14 @@ static __device__ __forceinline__ df32 df32_make(float x) {
     df32 r; r.hi = x; r.lo = 0.0f; return r;
 }
 
-// Exact error of a+b (Knuth TwoSum) for single precision
+
 static __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
     s = a + b;
     float bb = s - a;
     e = (a - (s - bb)) + (b - bb);
 }
 
-// df32 + float
+
 static __device__ __forceinline__ df32 df32_add_f(df32 a, float b) {
     float s, e; two_sum(a.hi, b, s, e);
     e += a.lo;
@@ -58,12 +58,12 @@ static __device__ __forceinline__ df32 df32_add_f(df32 a, float b) {
     return {s2, e2};
 }
 
-// df32 - float
+
 static __device__ __forceinline__ df32 df32_sub_f(df32 a, float b) {
     return df32_add_f(a, -b);
 }
 
-// df32 + df32
+
 static __device__ __forceinline__ df32 df32_add(df32 a, df32 b) {
     float s, e; two_sum(a.hi, b.hi, s, e);
     e += a.lo + b.lo;
@@ -71,21 +71,21 @@ static __device__ __forceinline__ df32 df32_add(df32 a, df32 b) {
     return {s2, e2};
 }
 
-// df32 - df32
+
 static __device__ __forceinline__ df32 df32_sub(df32 a, df32 b) {
     return df32_add(a, { -b.hi, -b.lo });
 }
 
-// Add exact product a*b to accumulator (df32 += a*b)
+
 static __device__ __forceinline__ df32 df32_add_prod(df32 acc, float a, float b) {
     float p = a * b;
-    float err = fmaf(a, b, -p);      // exact product error term in float
+    float err = fmaf(a, b, -p);      
     acc = df32_add_f(acc, p);
     acc = df32_add_f(acc, err);
     return acc;
 }
 
-// Subtract exact product a*b from accumulator (df32 -= a*b)
+
 static __device__ __forceinline__ df32 df32_sub_prod(df32 acc, float a, float b) {
     float p = a * b;
     float err = fmaf(a, b, -p);
@@ -94,7 +94,7 @@ static __device__ __forceinline__ df32 df32_sub_prod(df32 acc, float a, float b)
     return acc;
 }
 
-// Multiply df32 by scalar s (df32 *= s)
+
 static __device__ __forceinline__ df32 df32_mul_scalar(df32 a, float s) {
     float p = a.hi * s;
     float err = fmaf(a.hi, s, -p);
@@ -103,7 +103,7 @@ static __device__ __forceinline__ df32 df32_mul_scalar(df32 a, float s) {
     return {s2, e2};
 }
 
-// Helpers for float2 <-> df32
+
 static __device__ __forceinline__ df32 df32_from_float2(const float2 v) {
     df32 r; r.hi = v.x; r.lo = v.y; return r;
 }
@@ -111,24 +111,24 @@ static __device__ __forceinline__ float2 float2_from_df32(const df32 v) {
     return make_float2(v.hi, v.lo);
 }
 
-// Collapse df32 to float
+
 static __device__ __forceinline__ float df32_to_float(df32 a) {
     return a.hi + a.lo;
 }
 
-// -------------------------- Batch kernel (one series × many params) --------------------------
 
-// Inputs:
-//  - prices:        [len]
-//  - prefix_sum:    [len+1] double, running sum of y with NaNs treated as 0 (host-built)
-//  - prefix_kd:     [len+1] double, running sum of (k_abs * y) with NaNs treated as 0 (host-built)
-//  - prefix_nan:    [len+1] int, running count of NaNs
-//  - periods:       [n_combos]
-//  - sum_x:         [n_combos] float, Σx for x=0..p-1 = p*(p-1)/2
-//  - inv_div:       [n_combos] float, 1 / (sum_x^2 - p*Σx^2), where Σx^2 = p*(p-1)*(2p-1)/6
-//  - first_valid:   first non-NaN index in prices
-// Output:
-//  - out:           [n_combos * len] row-major (combo-major) results in degrees
+
+
+
+
+
+
+
+
+
+
+
+
 
 extern "C" __global__ void linearreg_angle_batch_f32(
     const float*   __restrict__ prices,
@@ -169,9 +169,9 @@ extern "C" __global__ void linearreg_angle_batch_f32(
                 df32 sum_kd = df32_sub(df32_from_float2(prefix_kd2[t + 1]),
                                        df32_from_float2(prefix_kd2[start]));
 
-                // reversed-x identity: sum_xy = t*sum_y - sum_kd (absolute index weighting)
+                
                 df32 sum_xy = df32_sub(df32_mul_scalar(sum_y, (float)t), sum_kd);
-                // numerator: p*sum_xy - sum_x*sum_y (df32)
+                
                 df32 num = df32_sub(df32_mul_scalar(sum_xy, (float)period),
                                     df32_mul_scalar(sum_y, sx_f));
                 const float slope = df32_to_float(num) * invd_f;
@@ -183,11 +183,11 @@ extern "C" __global__ void linearreg_angle_batch_f32(
     }
 }
 
-// -------------------------- Many-series kernel (time-major, one param) --------------------------
+
 
 extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, // [rows * cols], time-major
-    const int*   __restrict__ first_valids, // [cols]
+    const float* __restrict__ prices_tm, 
+    const int*   __restrict__ first_valids, 
     int cols,
     int rows,
     int period,
@@ -220,7 +220,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
         const int warm = fv + period - 1;
         for (int r = 0; r < warm; ++r) out_tm[tm_idx(r, cols, s)] = LRA_NAN_F;
 
-        // Initialize window at r = warm
+        
         df32 y_sum = df32_make(0.0f);
         df32 sum_kd = df32_make(0.0f);
         int nan_count = 0;
@@ -236,7 +236,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
         }
 
-        // Emit r = warm
+        
         {
             float outv = LRA_NAN_F;
             if (nan_count == 0) {
@@ -248,7 +248,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
             out_tm[tm_idx(warm, cols, s)] = outv;
 
-            // Prepare for next step when window is valid: remove earliest sample
+            
             if (nan_count == 0) {
                 const int leave0_idx = warm - period + 1;
                 const float leave0 = prices_tm[tm_idx(leave0_idx, cols, s)];
@@ -257,10 +257,10 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
         }
 
-        // Prefetch next entering value
+        
         float next_enter = (warm + 1 < rows) ? prices_tm[tm_idx(warm + 1, cols, s)] : LRA_NAN_F;
 
-        // Slide r = warm+1 .. rows-1
+        
         for (int r = warm + 1; r < rows; ++r) {
             const float enter = next_enter;
             if (r + 1 < rows) next_enter = prices_tm[tm_idx(r + 1, cols, s)];
@@ -276,7 +276,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
 
             if (nan_count == 0) {
                 if (prev_nan_count == 0) {
-                    // O(1) slide: include 'enter' at absolute index r, compute, then roll out 'leave'
+                    
                     y_sum  = df32_add_f(y_sum, enter);
                     sum_kd = df32_add_prod(sum_kd, (float)r, enter);
 
@@ -286,17 +286,17 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
                     const double slope_d = (double)df32_to_float(num) * (double)invd_f;
                     outv = atanf((float)slope_d) * rad2deg;
 
-                    // prepare for next step (r+1) by removing the earliest sample
+                    
                     y_sum  = df32_sub_f(y_sum, leave);
                     sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 } else {
-                    // Transition invalid->valid: rebuild exactly once
+                    
                     y_sum  = df32_make(0.0f);
                     sum_kd = df32_make(0.0f);
                     for (int k = 0; k < period; ++k) {
                         const int r0 = r - period + 1 + k;
                         const float v = prices_tm[tm_idx(r0, cols, s)];
-                        // nan_count==0 ensures all finite
+                        
                         y_sum  = df32_add_f(y_sum, v);
                         sum_kd = df32_add_prod(sum_kd, (float)r0, v);
                     }
@@ -306,12 +306,12 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
                     const double slope_d = (double)df32_to_float(num) * (double)invd_f;
                     outv = atanf((float)slope_d) * rad2deg;
 
-                    // prepare for next step
+                    
                     y_sum  = df32_sub_f(y_sum, leave);
                     sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 }
             } else {
-                // Remain invalid while any NaN is within the window; defer O(1) slides until clean
+                
                 outv = LRA_NAN_F;
             }
 

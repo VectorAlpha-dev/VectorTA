@@ -1,13 +1,13 @@
-// Quick test for new MA selectors
+
 use my_project::indicators::moving_averages::ma::{ma, MaData};
 use my_project::indicators::moving_averages::ma_stream::ma_stream;
 
 fn main() {
-    // Test data
+    
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     let period = 3;
 
-    // Test new MAs in batch selector
+    
     println!("Testing batch selector (ma):");
 
     let test_mas = vec![
@@ -25,7 +25,7 @@ fn main() {
         }
     }
 
-    // Test new MAs in streaming selector
+    
     println!("\nTesting streaming selector (ma_stream):");
 
     let test_stream_mas = vec![
@@ -35,7 +35,7 @@ fn main() {
     for ma_type in test_stream_mas {
         match ma_stream(ma_type, period) {
             Ok(mut stream) => {
-                // Test a few updates
+                
                 let val1 = stream.update(1.0);
                 let val2 = stream.update(2.0);
                 let val3 = stream.update(3.0);

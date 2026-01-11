@@ -24,7 +24,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('CWMA partial params', () => {
-    // Test with default parameters - mirrors check_cwma_partial_params
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.cwma_js(close, 14);
@@ -48,7 +48,7 @@ test('CWMA partial params', () => {
 });
 
 test('CWMA accuracy', async () => {
-    // Test CWMA matches expected values from Rust tests - mirrors check_cwma_accuracy
+    
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.cwma;
     
@@ -56,21 +56,21 @@ test('CWMA accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
         expected.last5Values,
-        1.0,  // WASM has different floating point precision than Rust (absolute tolerance)
+        1.0,  
         "CWMA last 5 values mismatch"
     );
     
-    // Compare full output with Rust
+    
     await compareWithRust('cwma', result, 'close', expected.defaultParams);
 });
 
 test('CWMA default candles', () => {
-    // Test CWMA with default parameters - mirrors check_cwma_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.cwma_js(close, 14);
@@ -78,7 +78,7 @@ test('CWMA default candles', () => {
 });
 
 test('CWMA zero period', () => {
-    // Test CWMA fails with zero period - mirrors check_cwma_zero_period
+    
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -87,7 +87,7 @@ test('CWMA zero period', () => {
 });
 
 test('CWMA period exceeds length', () => {
-    // Test CWMA fails when period exceeds data length - mirrors check_cwma_period_exceeds_length
+    
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -96,7 +96,7 @@ test('CWMA period exceeds length', () => {
 });
 
 test('CWMA very small dataset', () => {
-    // Test CWMA fails with insufficient data - mirrors check_cwma_very_small_dataset
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -105,7 +105,7 @@ test('CWMA very small dataset', () => {
 });
 
 test('CWMA empty input', () => {
-    // Test CWMA fails with empty input - mirrors check_cwma_empty_input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -114,18 +114,18 @@ test('CWMA empty input', () => {
 });
 
 test('CWMA reinput', () => {
-    // Test CWMA applied twice (re-input) - mirrors check_cwma_reinput
+    
     const close = new Float64Array(testData.close);
     
-    // First pass with period 80
+    
     const firstResult = wasm.cwma_js(close, 80);
     assert.strictEqual(firstResult.length, close.length);
     
-    // Second pass with period 60 - apply CWMA to CWMA output
+    
     const secondResult = wasm.cwma_js(firstResult, 60);
     assert.strictEqual(secondResult.length, firstResult.length);
     
-    // After warmup period (240), no NaN values should exist
+    
     if (secondResult.length > 240) {
         for (let i = 240; i < secondResult.length; i++) {
             assert(!isNaN(secondResult[i]), `Found unexpected NaN at index ${i}`);
@@ -134,28 +134,28 @@ test('CWMA reinput', () => {
 });
 
 test('CWMA NaN handling', () => {
-    // Test CWMA handles NaN values correctly - mirrors check_cwma_nan_handling
+    
     const close = new Float64Array(testData.close);
     const period = 9;
     
     const result = wasm.cwma_js(close, period);
     assert.strictEqual(result.length, close.length);
     
-    // After warmup period (240), no NaN values should exist
+    
     if (result.length > 240) {
         for (let i = 240; i < result.length; i++) {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
     
-    // First period-1 values should be NaN (warmup period)
+    
     const warmupLength = period - 1;
     assertAllNaN(result.slice(0, warmupLength), `Expected NaN in warmup period (first ${warmupLength} values)`);
     assert(!isNaN(result[warmupLength]), `Expected valid value at index ${warmupLength}`);
 });
 
 test('CWMA all NaN input', () => {
-    // Test CWMA with all NaN values
+    
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
@@ -165,36 +165,36 @@ test('CWMA all NaN input', () => {
 });
 
 test('CWMA batch single parameter set', () => {
-    // Test batch with single parameter combination
+    
     const close = new Float64Array(testData.close);
     
-    // Single parameter set: period=14
+    
     const batchResult = wasm.cwma_batch_js(
         close,
-        14, 14, 0  // period range
+        14, 14, 0  
     );
     
-    // Should match single calculation
+    
     const singleResult = wasm.cwma_js(close, 14);
     
     assert.strictEqual(batchResult.length, singleResult.length);
-    assertArrayClose(batchResult, singleResult, 10.0, "Batch vs single mismatch");  // Batch uses different optimizations with accumulated FP differences
+    assertArrayClose(batchResult, singleResult, 10.0, "Batch vs single mismatch");  
 });
 
 test('CWMA batch multiple periods', () => {
-    // Test batch with multiple period values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Multiple periods: 10, 15, 20, 25
+    const close = new Float64Array(testData.close.slice(0, 100)); 
+    
+    
     const batchResult = wasm.cwma_batch_js(
         close,
-        10, 25, 5  // period range
+        10, 25, 5  
     );
     
-    // Should have 4 rows * 100 cols = 400 values
+    
     assert.strictEqual(batchResult.length, 4 * 100);
     
-    // Verify each row matches individual calculation
+    
     const periods = [10, 15, 20, 25];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -205,22 +205,22 @@ test('CWMA batch multiple periods', () => {
         assertArrayClose(
             rowData, 
             singleResult, 
-            2.0,  // Batch optimizations can differ (absolute tolerance)
+            2.0,  
             `Period ${periods[i]} mismatch`
         );
     }
 });
 
 test('CWMA batch metadata', () => {
-    // Test metadata function returns correct parameter combinations
+    
     const metadata = wasm.cwma_batch_metadata_js(
-        10, 30, 5  // period: 10, 15, 20, 25, 30
+        10, 30, 5  
     );
     
-    // Should have 5 periods
+    
     assert.strictEqual(metadata.length, 5);
     
-    // Check values
+    
     assert.strictEqual(metadata[0], 10);
     assert.strictEqual(metadata[1], 15);
     assert.strictEqual(metadata[2], 20);
@@ -229,30 +229,30 @@ test('CWMA batch metadata', () => {
 });
 
 test('CWMA batch warmup validation', () => {
-    // Test that batch correctly handles warmup periods
+    
     const close = new Float64Array(testData.close.slice(0, 50));
     
     const batchResult = wasm.cwma_batch_js(
         close,
-        5, 15, 5  // periods: 5, 10, 15
+        5, 15, 5  
     );
     
     const metadata = wasm.cwma_batch_metadata_js(5, 15, 5);
     const numCombos = metadata.length;
     assert.strictEqual(numCombos, 3);
     
-    // Verify warmup for each period
+    
     for (let combo = 0; combo < numCombos; combo++) {
         const period = metadata[combo];
         const rowStart = combo * 50;
         const rowData = batchResult.slice(rowStart, rowStart + 50);
         
-        // First period-1 values should be NaN
+        
         for (let i = 0; i < period - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for period ${period}`);
         }
         
-        // After warmup should have values
+        
         for (let i = period - 1; i < 50; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for period ${period}`);
         }
@@ -260,10 +260,10 @@ test('CWMA batch warmup validation', () => {
 });
 
 test('CWMA batch edge cases', () => {
-    // Test edge cases for batch processing
+    
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     
-    // Single value sweep
+    
     const singleBatch = wasm.cwma_batch_js(
         close,
         7, 7, 1
@@ -271,23 +271,23 @@ test('CWMA batch edge cases', () => {
     
     assert.strictEqual(singleBatch.length, 15);
     
-    // Step = 0 with single period
+    
     const stepZero = wasm.cwma_batch_js(
         close,
         5, 5, 0
     );
     assert.strictEqual(stepZero.length, 15);
     
-    // Step larger than range
+    
     const largeBatch = wasm.cwma_batch_js(
         close,
-        5, 7, 10  // Step larger than range
+        5, 7, 10  
     );
     
-    // Should only have period=5
+    
     assert.strictEqual(largeBatch.length, 15);
     
-    // Empty data should throw
+    
     assert.throws(() => {
         wasm.cwma_batch_js(
             new Float64Array([]),
@@ -297,18 +297,18 @@ test('CWMA batch edge cases', () => {
 });
 
 test('CWMA batch performance test', () => {
-    // Test that batch is more efficient than multiple single calls
+    
     const close = new Float64Array(testData.close.slice(0, 200));
     
-    // Batch calculation
+    
     const startBatch = Date.now();
     const batchResult = wasm.cwma_batch_js(
         close,
-        10, 50, 2  // 21 periods
+        10, 50, 2  
     );
     const batchTime = Date.now() - startBatch;
     
-    // Equivalent single calculations
+    
     const startSingle = Date.now();
     const singleResults = [];
     for (let period = 10; period <= 50; period += 2) {
@@ -316,15 +316,15 @@ test('CWMA batch performance test', () => {
     }
     const singleTime = Date.now() - startSingle;
     
-    // Batch should have same total length
+    
     assert.strictEqual(batchResult.length, singleResults.length);
     
-    // Log performance (batch should be faster)
+    
     console.log(`  CWMA Batch time: ${batchTime}ms, Single calls time: ${singleTime}ms`);
 });
 
 test('CWMA period one invalid', () => {
-    // Test CWMA fails with period=1 - CWMA requires period > 1
+    
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
     
     assert.throws(() => {
@@ -333,10 +333,10 @@ test('CWMA period one invalid', () => {
 });
 
 test('CWMA leading NaN handling', () => {
-    // Test CWMA handles leading NaN values correctly
+    
     const close = new Float64Array(testData.close);
     
-    // Inject NaN values at the start
+    
     for (let i = 0; i < 10; i++) {
         close[i] = NaN;
     }
@@ -344,8 +344,8 @@ test('CWMA leading NaN handling', () => {
     const result = wasm.cwma_js(close, 14);
     assert.strictEqual(result.length, close.length);
     
-    // First 10 + warmup period (13) should be NaN
-    const expectedNans = 10 + 13; // leading NaNs + warmup
+    
+    const expectedNans = 10 + 13; 
     for (let i = 0; i < expectedNans; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
@@ -353,7 +353,7 @@ test('CWMA leading NaN handling', () => {
 });
 
 test('CWMA warmup validation', () => {
-    // Test CWMA warmup period is exactly period - 1
+    
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = i + 1;
@@ -363,7 +363,7 @@ test('CWMA warmup validation', () => {
     for (const period of testPeriods) {
         const result = wasm.cwma_js(data, period);
         
-        // Count leading NaN values
+        
         let nanCount = 0;
         for (const val of result) {
             if (isNaN(val)) {
@@ -380,7 +380,7 @@ test('CWMA warmup validation', () => {
             `Period ${period}: Expected ${expectedWarmup} NaN values, got ${nanCount}`
         );
         
-        // Verify first non-NaN is at correct index
+        
         assert(!isNaN(result[expectedWarmup]),
             `Period ${period}: Expected valid value at index ${expectedWarmup}`);
         if (expectedWarmup > 0) {
@@ -391,11 +391,11 @@ test('CWMA warmup validation', () => {
 });
 
 test('CWMA unified batch API', () => {
-    // Test the unified batch API with config object
+    
     const close = new Float64Array(testData.close.slice(0, 100));
     
     const config = {
-        period_range: [10, 20, 5]  // periods: 10, 15, 20
+        period_range: [10, 20, 5]  
     };
     
     const result = wasm.cwma_batch(close, config);
@@ -407,16 +407,16 @@ test('CWMA unified batch API', () => {
     assert.strictEqual(result.values.length, 300, 'Should have 300 total values');
     assert.strictEqual(result.combos.length, 3, 'Should have 3 combinations');
     
-    // Verify periods
+    
     const periods = result.combos.map(c => c.period);
     assert.deepStrictEqual(periods, [10, 15, 20], 'Periods should match');
 });
 
 test('CWMA unified batch API validation', () => {
-    // Test validation of the unified batch API
+    
     const close = new Float64Array([1, 2, 3, 4, 5]);
     
-    // Invalid config object
+    
     assert.throws(() => {
         wasm.cwma_batch(close, {});
     }, /Invalid config/, 'Should error on missing period_range');
@@ -430,90 +430,90 @@ test('CWMA unified batch API validation', () => {
     }, /Invalid config/, 'Should error on non-object config');
 });
 
-// Note: Streaming tests would require streaming functions to be exposed in WASM bindings
 
-// ================== Fast/Unsafe API Tests ==================
+
+
 
 test('CWMA memory allocation and deallocation', () => {
-    // Test memory management functions
+    
     const len = 100;
     
-    // Allocate memory
+    
     const ptr = wasm.cwma_alloc(len);
     assert(ptr !== 0, 'Memory allocation should return non-zero pointer');
     
-    // Free memory
+    
     assert.doesNotThrow(() => {
         wasm.cwma_free(ptr, len);
     }, 'Memory deallocation should not throw');
     
-    // Don't test double free as it's undefined behavior
+    
 });
 
 test('CWMA fast API basic functionality', () => {
-    // Test fast/unsafe API produces same results as safe API
+    
     const close = new Float64Array(testData.close.slice(0, 1000));
     const period = 14;
     
-    // Safe API result
+    
     const safeResult = wasm.cwma_js(close, period);
     
-    // Fast API
+    
     const inPtr = wasm.cwma_alloc(close.length);
     const outPtr = wasm.cwma_alloc(close.length);
     
     try {
-        // Copy data to WASM memory
+        
         const memView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
         memView.set(close);
         
-        // Compute using fast API
+        
         wasm.cwma_into(inPtr, outPtr, close.length, period);
         
-        // Read results
+        
         const fastResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length);
         
-        // Compare results
+        
         assertArrayClose(
             Array.from(fastResult),
             safeResult,
-            1e-10,  // Fast API can be more precise since it's direct memory
+            1e-10,  
             "Fast API should produce same results as safe API"
         );
     } finally {
-        // Clean up
+        
         wasm.cwma_free(inPtr, close.length);
         wasm.cwma_free(outPtr, close.length);
     }
 });
 
 test('CWMA fast API with aliasing (in-place)', () => {
-    // Test in-place computation (input and output buffers are the same)
+    
     const close = new Float64Array(testData.close.slice(0, 500));
     const period = 20;
     
-    // Expected result from safe API
+    
     const expected = wasm.cwma_js(close, period);
     
-    // Allocate single buffer for in-place operation
+    
     const ptr = wasm.cwma_alloc(close.length);
     
     try {
-        // Copy data to WASM memory
+        
         const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
         memView.set(close);
         
-        // Compute in-place (same pointer for input and output)
+        
         wasm.cwma_into(ptr, ptr, close.length, period);
         
-        // Read results
+        
         const result = new Float64Array(wasm.__wasm.memory.buffer, ptr, close.length);
         
-        // Compare results
+        
         assertArrayClose(
             Array.from(result),
             expected,
-            1e-10,  // Fast API can be more precise since it's direct memory
+            1e-10,  
             "In-place computation should produce correct results"
         );
     } finally {
@@ -527,7 +527,7 @@ test('CWMA fast API error handling', () => {
     const outPtr = wasm.cwma_alloc(len);
     
     try {
-        // Test null pointer handling
+        
         assert.throws(() => {
             wasm.cwma_into(0, outPtr, len, 14);
         }, /null pointer/, 'Should error on null input pointer');
@@ -536,7 +536,7 @@ test('CWMA fast API error handling', () => {
             wasm.cwma_into(inPtr, 0, len, 14);
         }, /null pointer/, 'Should error on null output pointer');
         
-        // Test invalid period
+        
         assert.throws(() => {
             wasm.cwma_into(inPtr, outPtr, len, 0);
         }, /Invalid period/, 'Should error on zero period');
@@ -551,34 +551,34 @@ test('CWMA fast API error handling', () => {
 });
 
 test('CWMA batch into performance', () => {
-    // Test that batch_into is more efficient than multiple cwma_into calls
+    
     const close = new Float64Array(testData.close.slice(0, 200));
     const periods = [10, 15, 20, 25, 30];
     
-    // Allocate memory for batch operation
+    
     const inPtr = wasm.cwma_alloc(close.length);
     const outPtr = wasm.cwma_alloc(close.length * periods.length);
     
     try {
-        // Copy data to WASM memory
+        
         const memView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
         memView.set(close);
         
-        // Batch computation
+        
         const startBatch = Date.now();
         const rows = wasm.cwma_batch_into(
             inPtr, 
             outPtr, 
             close.length,
-            10,   // period_start
-            30,   // period_end
-            5     // period_step
+            10,   
+            30,   
+            5     
         );
         const batchTime = Date.now() - startBatch;
         
         assert.strictEqual(rows, periods.length, 'Should return correct number of rows');
         
-        // Compare with multiple single calls
+        
         const startSingle = Date.now();
         for (let i = 0; i < periods.length; i++) {
             const singleOutPtr = wasm.cwma_alloc(close.length);
@@ -598,39 +598,39 @@ test('CWMA batch into performance', () => {
 });
 
 test('CWMA batch into validation', () => {
-    // Test batch_into with various parameter combinations
+    
     const close = new Float64Array(testData.close.slice(0, 50));
     const periods = [5, 10, 15];
     
-    // Allocate memory
+    
     const inPtr = wasm.cwma_alloc(close.length);
     const outPtr = wasm.cwma_alloc(close.length * periods.length);
     
     try {
-        // Copy data to WASM memory
+        
         const memView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, close.length);
         memView.set(close);
         
-        // Batch computation
+        
         const rows = wasm.cwma_batch_into(
             inPtr,
             outPtr,
             close.length,
-            5,   // period_start
-            15,  // period_end  
-            5    // period_step
+            5,   
+            15,  
+            5    
         );
         
         assert.strictEqual(rows, 3, 'Should return 3 rows');
         
-        // Read results and verify against regular batch
+        
         const batchResult = new Float64Array(wasm.__wasm.memory.buffer, outPtr, close.length * rows);
         const regularBatch = wasm.cwma_batch_js(close, 5, 15, 5);
         
         assertArrayClose(
             Array.from(batchResult),
             regularBatch,
-            2.0,  // Batch operations absolute tolerance
+            2.0,  
             'batch_into should match batch_js'
         );
     } finally {

@@ -8,7 +8,7 @@
 
 #![cfg(feature = "cuda")]
 
-// note: decycler defines its own device handle type below
+
 use crate::indicators::decycler::{DecyclerBatchRange, DecyclerParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::{Device, DeviceAttribute};
@@ -97,10 +97,10 @@ impl CudaDecycler {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/decycler_kernel.ptx"));
-        // Simple, robust JIT opts
+        
         let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
-        // Recurrence is memory bound; prefer L1
+        
         if let Ok(mut f) = module.get_function("decycler_batch_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
         }
@@ -231,7 +231,7 @@ impl CudaDecycler {
         }
     }
 
-    // -------- Batch (one series × many params) --------
+    
 
     pub fn decycler_batch_dev(
         &self,
@@ -305,7 +305,7 @@ impl CudaDecycler {
             &mut d_out,
         )?;
 
-        // ensure producing stream completes so CAI may omit stream
+        
         self.synchronize()?;
         Ok(DeviceArrayF32Decycler { buf: d_out, rows: n, cols: prepared.series_len, ctx: self._context.clone(), device_id: self.device_id })
     }
@@ -389,7 +389,7 @@ impl CudaDecycler {
             ),
             BatchKernelPolicy::Auto => self.calc_launch_1d(&func, n_combos, None),
         };
-        // simple launch validation vs device limits
+        
         if let Ok(dev) = Device::get_device(self.device_id) {
             let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).unwrap_or(2_147_483_647) as u32;
             let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX).unwrap_or(1024) as u32;
@@ -435,7 +435,7 @@ impl CudaDecycler {
         Ok(())
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
 
     pub fn decycler_many_series_one_param_time_major_dev(
         &self,
@@ -550,7 +550,7 @@ impl CudaDecycler {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
-                std::ptr::null_mut(), // padding (unused)
+                std::ptr::null_mut(), 
             ];
             self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
@@ -566,7 +566,7 @@ impl CudaDecycler {
         Ok(())
     }
 
-    // -------- Prep helpers --------
+    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -578,7 +578,7 @@ impl CudaDecycler {
         }
         let combos = expand_grid(sweep)?;
 
-        // first valid (non-NaN) index
+        
         let mut first_valid: Option<usize> = None;
         for i in 0..series_len {
             if data_f32[i].is_finite() {
@@ -597,7 +597,7 @@ impl CudaDecycler {
             )));
         }
 
-        // host precompute: second difference reused across rows
+        
         let mut diff = vec![0f32; series_len];
         for i in (fv + 2)..series_len {
             let x = data_f32[i];
@@ -606,7 +606,7 @@ impl CudaDecycler {
             diff[i] = x - 2.0 * x1 + x2;
         }
 
-        // per-row coefficients
+        
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut c_vals = Vec::with_capacity(combos.len());
         let mut two_1m_vals = Vec::with_capacity(combos.len());
@@ -660,7 +660,7 @@ impl CudaDecycler {
             ));
         }
 
-        // per-series first valid
+        
         let needed = period;
         let mut first_valids = Vec::with_capacity(cols);
         for s in 0..cols {
@@ -696,7 +696,7 @@ impl CudaDecycler {
     }
 }
 
-// ---- Prepared inputs ----
+
 struct PreparedDecyclerBatch {
     combos: Vec<DecyclerParams>,
     first_valid: usize,
@@ -715,7 +715,7 @@ struct PreparedDecyclerMany {
     neg_oma_sq: f32,
 }
 
-// ---- Benches ----
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -895,7 +895,7 @@ pub mod benches {
     }
 }
 
-// ---- Utilities ----
+
 struct Coefficients {
     c: f32,
     two_1m: f32,

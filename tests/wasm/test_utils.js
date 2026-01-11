@@ -21,14 +21,14 @@ function loadTestData() {
     };
 
     const lines = content.split(/\r?\n/);
-    // Skip header (first line)
+    
     for (let li = 1; li < lines.length; li++) {
         const line = lines[li].trim();
         if (!line) continue;
         const cols = line.split(',');
         if (cols.length < 6) continue;
 
-        // CSV format matches Rust: timestamp[0], open[1], close[2], high[3], low[4], volume[5]
+        
         const t = Number(cols[0]);
         const o = Number(cols[1]);
         const c = Number(cols[2]);
@@ -36,7 +36,7 @@ function loadTestData() {
         const l = Number(cols[4]);
         const v = Number(cols[5]);
 
-        // Ignore rows with unparsable values
+        
         if ([t, o, c, h, l, v].some(x => Number.isNaN(x))) continue;
 
         candles.timestamp.push(t);
@@ -47,7 +47,7 @@ function loadTestData() {
         candles.volume.push(v);
     }
 
-    // Add calculated fields
+    
     candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
 
     return candles;
@@ -62,7 +62,7 @@ function assertClose(actual, expected, tolerance = 1e-8, msg = "") {
 }
 
 function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
-    // Supports either absolute tolerance as a number, or an object { atol, rtol }
+    
     let atol, rtol;
     if (typeof tolerance === 'number') {
         atol = tolerance;
@@ -74,7 +74,7 @@ function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
         atol = 1e-8;
         rtol = 0;
     }
-    // Both should have valid length property
+    
     const actualLen = actual ? actual.length : 0;
     const expectedLen = expected ? expected.length : 0;
     
@@ -82,7 +82,7 @@ function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
         throw new Error(`${msg}: Length mismatch: ${actualLen} vs ${expectedLen}`);
     }
     for (let i = 0; i < actualLen; i++) {
-        // Skip NaN comparisons - both NaN is OK
+        
         if (isNaN(actual[i]) && isNaN(expected[i])) {
             continue;
         }
@@ -118,7 +118,7 @@ function assertNoNaN(array, msg = "") {
     }
 }
 
-// Expected outputs from Rust tests - these must match EXACTLY
+
 const EXPECTED_OUTPUTS = {
     epma: {
         defaultParams: { period: 11, offset: 4 },
@@ -129,12 +129,12 @@ const EXPECTED_OUTPUTS = {
             59200.32,
             59117.04
         ],
-        warmupPeriod: 16 // period + offset + 1
+        warmupPeriod: 16 
     },
     zscore: {
-        // Default parameters used in Rust tests
+        
         defaultParams: { period: 14, maType: 'sma', nbdev: 1.0, devtype: 0 },
-        // Expected last 5 values from Rust unit test (population stddev)
+        
         last5Values: [
             -0.3040683926967643,
             -0.41042159719064014,
@@ -169,7 +169,7 @@ const EXPECTED_OUTPUTS = {
     },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
-        // Reference values mirror src/indicators/wto.rs::check_wto_accuracy
+        
         last5Values: {
             wavetrend1: [
                 -34.81423091,
@@ -193,7 +193,7 @@ const EXPECTED_OUTPUTS = {
                 -5.02955265,
             ]
         },
-        warmupPeriod: 20,  // Based on average_length - 1
+        warmupPeriod: 20,  
         hasThreeOutputs: true
     },
     mass: {
@@ -205,7 +205,7 @@ const EXPECTED_OUTPUTS = {
             3.6450956734739375,
             3.6748009093527125
         ],
-        warmupPeriod: 20  // 16 + period - 1 = 16 + 5 - 1 = 20
+        warmupPeriod: 20  
     },
     aso: {
         defaultParams: { period: 10, mode: 0 },
@@ -233,7 +233,7 @@ const EXPECTED_OUTPUTS = {
             59155.93381742,
             59026.92526112
         ],
-        // Re-input test expected values
+        
         reinputLast5: [
             59140.73195170,
             59211.58090986,
@@ -300,9 +300,9 @@ const EXPECTED_OUTPUTS = {
             58575.33291206,
             58376.00589983
         ],
-        // Reinput test - apply PRB to PRB output  
+        
         reinputLast5: [
-            59083.04826441,  // Will be calculated from actual test
+            59083.04826441,  
             58900.06593477,
             58722.13172976,
             58575.33291206,
@@ -318,13 +318,13 @@ const EXPECTED_OUTPUTS = {
             -261.87532144673423,
             -698.9026088956363
         ],
-        // Highpass has no warmup period - produces values from index 0
+        
         hasWarmup: false,
         warmupLength: 0
     },
     percentileNearestRank: {
         defaultParams: { length: 15, percentage: 50.0 },
-        // Actual last 5 values from CSV data with default params
+        
         last5Values: [
             59419.0,
             59419.0,
@@ -332,23 +332,23 @@ const EXPECTED_OUTPUTS = {
             59285.0,
             59273.0
         ],
-        // Test values from Rust tests
+        
         basicTest: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             length: 5,
             percentage: 50.0,
-            expectedAt4: 3.0,  // 50th percentile of [1,2,3,4,5]
-            expectedAt5: 4.0,  // 50th percentile of [2,3,4,5,6]
+            expectedAt4: 3.0,  
+            expectedAt5: 4.0,  
         },
         percentileTests: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             length: 5,
-            p25At4: 1.0,  // 25th percentile of [1,2,3,4,5]
-            p75At4: 4.0,  // 75th percentile of [1,2,3,4,5]
-            p100At4: 5.0,  // 100th percentile of [1,2,3,4,5]
+            p25At4: 1.0,  
+            p75At4: 4.0,  
+            p100At4: 5.0,  
         },
-        // Expected warmup period behavior
-        warmupPeriod: 14,  // For default length=15, first 14 values are NaN
+        
+        warmupPeriod: 14,  
     },
     alphatrend: {
         defaultParams: { coeff: 1.0, period: 14, noVolume: false },
@@ -366,7 +366,7 @@ const EXPECTED_OUTPUTS = {
             60243.00,
             60138.92857143
         ],
-        warmupPeriod: 13  // period - 1
+        warmupPeriod: 13  
     },
     kama: {
         defaultParams: { period: 30 },
@@ -397,8 +397,8 @@ const EXPECTED_OUTPUTS = {
             59048.71111114628,
             58803.44444447962
         ],
-        // Warmup period = first + period + sqrt(period) - 2
-        // For period=5: sqrt(5) = 2 (floor), so warmup = 0 + 5 + 2 - 2 = 5
+        
+        
         warmupPeriod: 5
     },
     pwma: {
@@ -410,20 +410,20 @@ const EXPECTED_OUTPUTS = {
             59175.625,
             59094.875
         ],
-        warmupPeriod: 244,  // first_valid (240) + period - 1 = 240 + 5 - 1 = 244
-        // Values for re-input test (applying PWMA twice)
+        warmupPeriod: 244,  
+        
         reinputPeriods: { first: 5, second: 3 },
-        reinputWarmup: 246,  // 240 + (5 - 1) + (3 - 1) = 246
-        // Values for constant input test (all values = 50.0)
+        reinputWarmup: 246,  
+        
         constantValue: 50.0,
-        // Values for simple formula verification test
+        
         formulaTest: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0],
             period: 3,
-            // For period=3: weights = [1, 2, 1] / 4 = [0.25, 0.5, 0.25]
+            
             expected: [NaN, NaN, 2.0, 3.0, 4.0]
         },
-        // Batch test parameters
+        
         batchPeriods: [3, 5, 7, 9],
         batchRange: { start: 3, end: 10, step: 2 }
     },
@@ -463,7 +463,7 @@ const EXPECTED_OUTPUTS = {
             centerType: 'dynamic',
             tickSize: 0.0001
         },
-        // PineScript reference values for validation
+        
         pinescriptDvdi: [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595],
         pinescriptSlowTl: [356.29040696, -955.69385266, -951.82562405, -903.39071943, -903.39071943],
         pinescriptFastTl: [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895],
@@ -478,7 +478,7 @@ const EXPECTED_OUTPUTS = {
             0.3155080213903743,
             0.7308584686774942
         ],
-        // Values at specific indices for validation
+        
         valuesAt100_104: [
             0.2715789473684199,
             0.35274356103023446,
@@ -486,25 +486,25 @@ const EXPECTED_OUTPUTS = {
             0.7715877437325899,
             0.6793743890518072
         ],
-        // Expected values for perfectly trending data [1,2,3,4,5,6,7,8,9,10]
-        trendingDataValues: Array(6).fill(1.0),  // ER should be 1.0 for perfect trend after warmup
-        // Expected values for choppy data [1,5,2,6,3,7,4,8,5,9]
-        choppyDataValues: Array(6).fill(0.14285714285714285),  // Low ER for choppy market
-        // Warmup period for default params (first valid index)
-        warmupPeriod: 4  // period - 1 = 5 - 1 = 4
+        
+        trendingDataValues: Array(6).fill(1.0),  
+        
+        choppyDataValues: Array(6).fill(0.14285714285714285),  
+        
+        warmupPeriod: 4  
     },
     cvi: {
         defaultParams: { period: 10 },
         accuracyParams: { period: 5 },
-        last5Values: [  // For period=5
+        last5Values: [  
             -52.96320026271643,
             -64.39616778235792,
             -59.4830094380472,
             -52.4690724045071,
             -11.858704179539174
         ],
-        warmupPeriod: 19,  // 2 * period - 1 = 2 * 10 - 1 = 19 for default
-        accuracyWarmup: 9  // 2 * 5 - 1 = 9 for accuracy test
+        warmupPeriod: 19,  
+        accuracyWarmup: 9  
     },
     tema: {
         defaultParams: { period: 9 },
@@ -515,12 +515,12 @@ const EXPECTED_OUTPUTS = {
             59175.218345941066,
             58934.24395798363
         ],
-        warmupPeriod: 24  // (period - 1) * 3 = (9 - 1) * 3 = 24
+        warmupPeriod: 24  
     },
     lrsi: {
         defaultParams: { alpha: 0.2 },
-        // LRSI is a momentum oscillator that produces values in [0,1] range
-        // Actual values depend on market conditions and cannot be predetermined
+        
+        
     },
     iftRsi: {
         defaultParams: { rsiPeriod: 5, wmaPeriod: 9 },
@@ -531,7 +531,7 @@ const EXPECTED_OUTPUTS = {
             -0.26631220621545837,
             0.28324385010826775
         ],
-        warmupPeriod: 13,  // first + rsi_period + wma_period - 1 (0 + 5 + 9 - 1)
+        warmupPeriod: 13,  
         parameterCombinations: [
             { rsiPeriod: 2, wmaPeriod: 2 },
             { rsiPeriod: 3, wmaPeriod: 5 },
@@ -543,7 +543,7 @@ const EXPECTED_OUTPUTS = {
     },
     ehlersEcema: {
         defaultParams: { length: 20, gainLimit: 50 },
-        // Values from real CSV data (2018-09-01-2024-Bitfinex_Spot-4h.csv)
+        
         last5Values: [
             59368.42792078,
             59311.07435861,
@@ -551,7 +551,7 @@ const EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        // Note: Pine mode currently produces same values as regular mode
+        
         pineModeLast5: [
             59368.42792078,
             59311.07435861,
@@ -559,7 +559,7 @@ const EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        // Re-input test (length=10, gainLimit=30)
+        
         reinputParams: { length: 10, gainLimit: 30 },
         reinputLast5: [
             59324.20351585,
@@ -568,14 +568,14 @@ const EXPECTED_OUTPUTS = {
             59194.22630265,
             59025.67038012
         ],
-        warmupPeriod: 19,  // length - 1 = 20 - 1 = 19
-        pineWarmupPeriod: 0,  // Pine mode starts from first value
-        // Batch test parameters
+        warmupPeriod: 19,  
+        pineWarmupPeriod: 0,  
+        
         batchParams: {
-            lengthRange: [15, 25, 5],  // 15, 20, 25
-            gainLimitRange: [40, 60, 10]  // 40, 50, 60
+            lengthRange: [15, 25, 5],  
+            gainLimitRange: [40, 60, 10]  
         },
-        batchCombinations: 9  // 3 lengths * 3 gainLimits
+        batchCombinations: 9  
     },
     tilson: {
         defaultParams: { period: 5, volume_factor: 0.0 },
@@ -586,7 +586,7 @@ const EXPECTED_OUTPUTS = {
             59240.25895948583,
             59203.544843167765
         ],
-        // Re-input test with period=3, volume_factor=0.7 on first pass results
+        
         reinputLast5: [
             59328.94228019944,
             59292.16983061365,
@@ -677,11 +677,11 @@ const EXPECTED_OUTPUTS = {
         last5Upper: [61290.0, 61290.0, 61290.0, 61290.0, 61290.0],
         last5Middle: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
         last5Lower: [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
-        // Re-input test: Apply Donchian to the middle band output
+        
         reinputLast5Upper: [61700.0, 61700.0, 61700.0, 61642.5, 61642.5],
         reinputLast5Middle: [60641.5, 60641.5, 60641.5, 60612.75, 60612.75],
         reinputLast5Lower: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
-        warmupPeriod: 19  // period - 1
+        warmupPeriod: 19  
     },
     trima: {
         defaultParams: { period: 30 },
@@ -692,7 +692,7 @@ const EXPECTED_OUTPUTS = {
             59665.2125,
             59581.612499999996
         ],
-        // Re-input test expected values (period=10 on first pass result)
+        
         reinputLast5: [
             60750.01069444444,
             60552.44180555555,
@@ -700,7 +700,7 @@ const EXPECTED_OUTPUTS = {
             60210.39555555556,
             60066.62458333334
         ],
-        warmupPeriod: 29  // period - 1
+        warmupPeriod: 29  
     },
     msw: {
         defaultParams: { period: 5 },
@@ -718,12 +718,12 @@ const EXPECTED_OUTPUTS = {
             0.36030983330963545,
             -0.28983704937461496
         ],
-        warmupPeriod: 4  // period - 1
+        warmupPeriod: 4  
     },
     jsa: {
         defaultParams: { period: 30 },
         last5Values: [61640.0, 61418.0, 61240.0, 61060.5, 60889.5],
-        warmupPeriod: 30  // first_valid + period where first_valid = 0 for this data
+        warmupPeriod: 30  
     },
     cg: {
         defaultParams: { period: 10 },
@@ -744,7 +744,7 @@ const EXPECTED_OUTPUTS = {
             63966.35530620797,
             64039.04719192334
         ],
-        // Batch test - single parameter (default)
+        
         batchDefaultRow: [
             64320.486018271724,
             64227.95719984426,
@@ -762,11 +762,11 @@ const EXPECTED_OUTPUTS = {
             59100.6,
             58987.94285714286
         ],
-        warmupPeriod: 13,  // first + period - 1 = 0 + 14 - 1 = 13
-        // Values for re-input test (applying LinReg twice)
+        warmupPeriod: 13,  
+        
         reinputPeriods: { first: 14, second: 10 },
-        reinputWarmup: 23,  // 0 + (14 - 1) + (10 - 1) = 22, but since the second starts with NaN from first, it's 23
-        // Batch test parameters
+        reinputWarmup: 23,  
+        
         batchPeriods: [10, 20, 30, 40],
         batchRange: [10, 40, 10]
     },
@@ -779,7 +779,7 @@ const EXPECTED_OUTPUTS = {
             58724.56154031242,
             58713.39965211639
         ],
-        warmupPeriod: 21  // period - 1
+        warmupPeriod: 21  
     },
     cfo: {
         defaultParams: { period: 14, scalar: 100.0 },
@@ -810,7 +810,7 @@ const EXPECTED_OUTPUTS = {
             59167.01279027576,
             59039.413552249636
         ],
-        // Warmup period is period - 1
+        
         warmupPeriod: 13
     },
     decycler: {
@@ -881,9 +881,9 @@ const EXPECTED_OUTPUTS = {
             59391.23,
             59372.19
         ],
-        // Re-input test expected values (using same params)
+        
         reinputLast5: [
-            59638.12,  // These will be updated after we run the reinput test
+            59638.12,  
             59497.26,
             59431.08,
             59391.23,
@@ -934,7 +934,7 @@ const EXPECTED_OUTPUTS = {
             57137.18181818182,
             56516.09090909091
         ],
-        warmupPeriod: 21,  // first + period - 1 = 0 + 22 - 1
+        warmupPeriod: 21,  
         batchDefaultRow: [
             56711.545454545456,
             57132.72727272727,
@@ -982,10 +982,10 @@ const EXPECTED_OUTPUTS = {
             59171.22758152845,
             59127.859841077094
         ],
-        // Re-input test expected values (period=10 on first pass result)
-        // Note: The Rust test only verifies length, not specific values
-        reinputLast5: null,  // Not verified in Rust tests
-        warmupPeriod: 13  // first + period - 1 (with no leading NaNs, first=0)
+        
+        
+        reinputLast5: null,  
+        warmupPeriod: 13  
     },
     trix: {
         defaultParams: { period: 18 },
@@ -1038,7 +1038,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     acosc: {
-        defaultParams: {},  // ACOSC has no parameters
+        defaultParams: {},  
         last5Osc: [
             273.30,
             383.72,
@@ -1156,7 +1156,7 @@ const EXPECTED_OUTPUTS = {
             59720.60576365108,
             59673.9954445178
         ],
-        warmupPeriod: 10,  // period - 1 = 11 - 1
+        warmupPeriod: 10,  
         batchDefaultRow: [
             59747.657115949725,
             59740.803138018055,
@@ -1192,7 +1192,7 @@ const EXPECTED_OUTPUTS = {
     },
     bollinger_bands_width: {
         defaultParams: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
-        // Match Python test fixtures and Rust reference generator
+        
         last_5_values: [
             0.03715911020016619,
             0.036072736452195386,
@@ -1247,7 +1247,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     bop: {
-        defaultParams: {},  // BOP has no parameters
+        defaultParams: {},  
         last5Values: [
             0.045454545454545456,
             -0.32398753894080995,
@@ -1277,7 +1277,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     roc: {
-        // Matches Rust src/indicators/roc.rs check_roc_accuracy expected values
+        
         defaultParams: { period: 10 },
         last5Values: [
             -0.22551709049294377,
@@ -1295,7 +1295,7 @@ const EXPECTED_OUTPUTS = {
             sed_std: 100,
             threshold: 1.4
         },
-        // Close-only reference (binding single-series path uses close for H/L/C)
+        
         volLast5Values: [
             0.8539059,
             0.75935611,
@@ -1310,7 +1310,7 @@ const EXPECTED_OUTPUTS = {
             1.13929192,
             1.12982407
         ],
-        // Candles-based Rust references from src/indicators/damiani_volatmeter.rs tests (check_damiani_accuracy)
+        
         rustVolLast5Values: [
             0.9009485470514558,
             0.8333604467044887,
@@ -1325,7 +1325,7 @@ const EXPECTED_OUTPUTS = {
             1.1403866079746106,
             1.1392919184055932
         ],
-        warmupPeriod: 101  // max(vis_atr, vis_std, sed_atr, sed_std, 3) + 1
+        warmupPeriod: 101  
     },
     di: {
         defaultParams: { period: 14 },
@@ -1366,7 +1366,7 @@ const EXPECTED_OUTPUTS = {
                 -47.01112630514571
             ]
         },
-        warmupPeriod: 44  // max(roc_period4 + sma_period4 - 1) = 30 + 15 - 1 = 44
+        warmupPeriod: 44  
     },
     efi: {
         defaultParams: { period: 13 },
@@ -1454,8 +1454,8 @@ const EXPECTED_OUTPUTS = {
             -0.664976238854087,
             0.7454354957832976
         ],
-        // Reinput test just verifies no NaN after index 28
-        reinputLast5: [0, 0, 0, 0, 0]  // Placeholder - test will skip this check
+        
+        reinputLast5: [0, 0, 0, 0, 0]  
     },
     rvi: {
         defaultParams: { period: 10, ma_len: 14, matype: 1, devtype: 0 },
@@ -1484,7 +1484,7 @@ const EXPECTED_OUTPUTS = {
             -39811.02321812391,
             -36599.9671820205,
             -29903.28014503471,
-            -55406.382981  // Updated to match actual calculation
+            -55406.382981  
         ]
     },
     coppock: {
@@ -1520,7 +1520,7 @@ const EXPECTED_OUTPUTS = {
     sma: {
         defaultParams: { period: 9 },
         last_5_values: [59180.8, 59175.0, 59129.4, 59085.4, 59133.7],
-        reinputLast5: null  // To be calculated if needed
+        reinputLast5: null  
     },
     mwdx: {
         defaultParams: { factor: 0.2 },
@@ -1541,17 +1541,17 @@ const EXPECTED_OUTPUTS = {
             59171.14999178,
             59053.74201623
         ],
-        warmupPeriod: 22,  // first + period - 1 + smooth_period.saturating_sub(1) - actual is 22 for smooth=true
-        // Values for parameter variation tests
-        noSmoothingDiffers: true,  // Raw vs smoothed should differ
-        differentRMultiDiffers: true,  // Different r_multi values should produce different results
-        // Batch test parameters
+        warmupPeriod: 22,  
+        
+        noSmoothingDiffers: true,  
+        differentRMultiDiffers: true,  
+        
         batchPeriods: [15, 20, 25],
         batchRMultis: [1.5, 2.0, 2.5],
         batchRange: {
             periodRange: [15, 25, 5],
             rMultiRange: [1.5, 2.5, 0.5],
-            smooth: false  // Test without smoothing for batch
+            smooth: false  
         }
     },
     dma: {
@@ -1568,18 +1568,18 @@ const EXPECTED_OUTPUTS = {
             59153.22811529,
             58933.88503421
         ],
-        // Warmup period calculation: max(hull_period-1, ema_period-1) = max(6, 19) = 19
+        
         warmupPeriod: 19,
-        // Values for constant input test (all values = 100.0)
+        
         constantValue: 100.0,
-        // Batch test parameters - testing different hull lengths  
+        
         batchHullLengths: [5, 7, 9, 11],
-        batchHullRange: [5, 11, 2],  // hull_length_range
-        batchEmaRange: [20, 20, 0],  // ema_length_range (fixed)
-        batchGainRange: [50, 50, 0], // ema_gain_limit_range (fixed)
-        // Alternative hull MA types to test
+        batchHullRange: [5, 11, 2],  
+        batchEmaRange: [20, 20, 0],  
+        batchGainRange: [50, 50, 0], 
+        
         hullMaTypes: ['WMA', 'EMA'],
-        // For batch test - default params row should match single calculation
+        
         batchDefaultRow: [
             59404.62489256,
             59326.48766951,
@@ -1596,21 +1596,21 @@ const EXPECTED_OUTPUTS = {
             59250.0, 59240.0, 59230.0, 59220.0, 59210.0,
             59200.0, 59190.0, 59180.0
         ],
-        expectedValueAt13: 59309.748,  // Value at index 13 for period=14
-        warmupPeriod: 13,  // period - 1 = 14 - 1 = 13
-        // For period=10 on different data
-        period10Warmup: 9,  // period - 1 = 10 - 1 = 9
-        // For batch processing with different periods
+        expectedValueAt13: 59309.748,  
+        warmupPeriod: 13,  
+        
+        period10Warmup: 9,  
+        
         batchPeriods: [10, 14, 20, 28],
-        batchRange: [10, 30, 10],  // Start, stop+step, step
-        // Streaming test - values should match batch calculation
+        batchRange: [10, 30, 10],  
+        
         streamingMatchesBatch: true,
-        // Values for consistency test - running EHMA multiple times should produce same results
+        
         consistencyTest: true
     },
     ott: {
         defaultParams: { period: 2, percent: 1.4, ma_type: 'VAR' },
-        accuracyParams: { period: 2, percent: 1.4, ma_type: 'VAR' },  // Using period=2 for accuracy test
+        accuracyParams: { period: 2, percent: 1.4, ma_type: 'VAR' },  
         last5Values: [
             59719.89457348,
             59719.89457348,
@@ -1618,8 +1618,8 @@ const EXPECTED_OUTPUTS = {
             59719.89457348,
             59649.80599569
         ],
-        warmupPeriod: 1,  // For period=2
-        // Re-input test values (OTT applied to OTT output with period=2)
+        warmupPeriod: 1,  
+        
         reinputLast5: [
             60132.08843846,
             60132.08843846,
@@ -1647,7 +1647,7 @@ const EXPECTED_OUTPUTS = {
             0.1320298011553359,
             -0.7969910390628968
         ],
-        warmupPeriod: 33  // Actual warmup from implementation
+        warmupPeriod: 33  
     },
     lpc: {
         default_params: {
@@ -1657,7 +1657,7 @@ const EXPECTED_OUTPUTS = {
             cycle_mult: 1.0,
             tr_mult: 1.0
         },
-        // Reference values from actual LPC implementation output
+        
         last_5_filter: [
             59346.30519969,
             59327.59393858,
@@ -1679,7 +1679,7 @@ const EXPECTED_OUTPUTS = {
             58534.26453184,
             58488.71820303
         ],
-        warmupPeriod: 1  // First value that's not NaN (based on first valid index)
+        warmupPeriod: 1  
     },
     qqe: {
         defaultParams: { rsiPeriod: 14, smoothingFactor: 5, fastFactor: 4.236 },
@@ -1697,8 +1697,8 @@ const EXPECTED_OUTPUTS = {
             36.64790896,
             36.64790896
         ],
-        warmupPeriod: 17,  // Actual warmup period: first + rsi_period + smoothing_factor - 2 = 0 + 14 + 5 - 2 = 17
-        // For batch testing
+        warmupPeriod: 17,  
+        
         batchDefaultRowFast: [
             42.68548144,
             42.68200826,
@@ -1716,7 +1716,7 @@ const EXPECTED_OUTPUTS = {
     },
     vama: {
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        fastValues: [  // length=13
+        fastValues: [  
             58881.58124494,
             58866.67951208,
             58873.34641238,
@@ -1724,19 +1724,19 @@ const EXPECTED_OUTPUTS = {
             58696.37821343
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        slowValues: [  // length=55
+        slowValues: [  
             60338.30226444,
             60327.06967012,
             60318.07491767,
             60324.78454609,
             60305.94922998
         ],
-        warmupPeriod: 12  // length - 1 for default params
+        warmupPeriod: 12  
     },
-    volume_adjusted_ma: {  // Same as vama but with new name
+    volume_adjusted_ma: {  
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        // Exact references from Rust unit tests (tolerance 1e-6)
-        fastValues: [  // length=13
+        
+        fastValues: [  
             60249.34558277224,
             60283.79398716032,
             60173.3929697517,
@@ -1744,14 +1744,14 @@ const EXPECTED_OUTPUTS = {
             60226.095375540506
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        slowValues: [  // length=55 (Updated after Pine logic fixes)
+        slowValues: [  
             60943.90131552854,
             60929.79497887764,
             60912.66617792769,
             60900.71462347596,
             60844.41271673433
         ],
-        warmupPeriod: 12  // length - 1 for default params
+        warmupPeriod: 12  
     },
     ehlersKama: {
         defaultParams: { period: 20 },
@@ -1768,12 +1768,12 @@ const EXPECTED_OUTPUTS = {
         testIndices: [15570, 15571, 15574, 15575, 15576],
         expectedHalftrend: [59763.0, 59763.0, 59763.0, 59310.0, 59310.0],
         expectedTrend: [0.0, 0.0, 1.0, 1.0, 1.0],
-        warmupPeriod: 99,  // max(amplitude, atrPeriod) - 1 with firstValidIndex=0
+        warmupPeriod: 99,  
         hasWarmup: true
     }
 };
 
-// Convenience constants for individual indicators
+
 const EXPECTED_SUPERSMOOTHER_3_POLE = EXPECTED_OUTPUTS.supersmoother_3_pole.last5Values;
 const EXPECTED_SUPERSMOOTHER = EXPECTED_OUTPUTS.supersmoother.last5Values;
 

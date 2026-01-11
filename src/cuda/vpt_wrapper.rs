@@ -66,7 +66,7 @@ impl CudaVpt {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Query SM count to cap grid size heuristically for large GPUs.
+        
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let block_x = 256u32;
 
@@ -142,7 +142,7 @@ impl CudaVpt {
 
         let first = Self::first_valid_pair(price, volume)?;
 
-        // VRAM: inputs + output
+        
         let el = std::mem::size_of::<f32>();
         let bytes = len
             .checked_mul(3)
@@ -198,7 +198,7 @@ impl CudaVpt {
             ));
         }
 
-        // First-valid per series (host): earliest i>=1 satisfying pair constraints
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 1..rows {
@@ -210,10 +210,10 @@ impl CudaVpt {
                     break;
                 }
             }
-            // Do not error if a series never finds a valid pair; kernel writes NaNs.
+            
         }
 
-        // VRAM: 2 inputs + output + first_valids
+        
         let el_f32 = std::mem::size_of::<f32>();
         let el_i32 = std::mem::size_of::<i32>();
         let bytes_inputs_outputs = 3usize
@@ -237,7 +237,7 @@ impl CudaVpt {
             .module
             .get_function("vpt_many_series_one_param_f32")
             .map_err(|_| CudaVptError::MissingKernelSymbol { name: "vpt_many_series_one_param_f32" })?;
-        // Launch with grid capped by SMs*16 for scalable occupancy on large GPUs.
+        
         let block_x = self.block_x;
         let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
         let max_blocks = self.sm_count.saturating_mul(16);
@@ -266,7 +266,7 @@ impl CudaVpt {
     }
 }
 
-// ---------------- Bench profiles ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -279,7 +279,7 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series() -> usize {
-        // price + volume + out + ~64MB
+        
         (3 * ONE_SERIES_LEN * std::mem::size_of::<f32>()) + (64 << 20)
     }
     fn bytes_many_series() -> usize {
@@ -330,7 +330,7 @@ pub mod benches {
         let cuda = CudaVpt::new(0).expect("cuda vpt");
         let mut price = gen_series(ONE_SERIES_LEN);
         let mut volume = gen_series(ONE_SERIES_LEN);
-        // Ensure there is a valid pair after index 0
+        
         if !price[1].is_finite() || price[0] == 0.0 || !volume[1].is_finite() {
             price[0] = 100.0;
             price[1] = 100.1;

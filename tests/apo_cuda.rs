@@ -1,16 +1,16 @@
-// Integration tests for CUDA APO kernels
 
-use my_project::indicators::apo::{
+
+use vector_ta::indicators::apo::{
     apo_batch_with_kernel, apo_with_kernel, ApoBatchRange, ApoData, ApoInput, ApoParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaApo;
+use vector_ta::cuda::moving_averages::CudaApo;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -97,7 +97,7 @@ fn apo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let short = 10usize;
     let long = 21usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

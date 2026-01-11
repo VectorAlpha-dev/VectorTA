@@ -7,8 +7,8 @@
 //! - Warmup/NaN semantics identical to scalar reference
 //!
 //! Kernels expected (present minimal set):
-//! - "epma_batch_f32"                                   // one-series × many-params
-//! - "epma_many_series_one_param_time_major_f32"       // many-series × one-param (time-major)
+//! - "epma_batch_f32"                                   
+//! - "epma_many_series_one_param_time_major_f32"       
 
 #![cfg(feature = "cuda")]
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -32,10 +32,10 @@ use thiserror::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// Keep TILE in sync with kTile() in the CUDA kernels.
+
 const EPMA_TILE: u32 = 8;
 
-// -------- Kernel selection policy (mirrors ALMA, minimal variants enabled) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -64,7 +64,7 @@ impl Default for CudaEpmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -838,7 +838,7 @@ impl super::alma_wrapper::DeviceArrayF32 {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

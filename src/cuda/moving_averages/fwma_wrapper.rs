@@ -7,8 +7,8 @@
 //! - Warmup/NaN semantics identical to scalar reference
 //!
 //! Kernels expected (present minimal set):
-//! - "fwma_batch_f32"                          // one-series × many-params
-//! - "fwma_multi_series_one_param_f32"        // many-series × one-param (time-major)
+//! - "fwma_batch_f32"                          
+//! - "fwma_multi_series_one_param_f32"        
 //!
 //! Optional symbols may be added in the future (tiled/2x/on-device weights),
 //! but the wrapper preserves the public API and selection fields today.
@@ -32,7 +32,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// -------- Kernel selection policy (mirrors ALMA, minimal variants enabled) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -61,7 +61,7 @@ impl Default for CudaFwmaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {

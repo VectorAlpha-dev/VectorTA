@@ -24,7 +24,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::sync::Arc;
 
-const ERI_TIME_TILE: u32 = 16; // must match kernels/cuda/eri_kernel.cu
+const ERI_TIME_TILE: u32 = 16; 
 const ERI_SMALL_P_NO_TRANSPOSE_THRESHOLD: usize = 64;
 #[inline]
 fn ceil_div(x: u32, y: u32) -> u32 {
@@ -191,7 +191,7 @@ impl CudaEri {
         Ok(first)
     }
 
-    // ---------- Batch: one series × many params ----------
+    
     pub fn eri_batch_dev(
         &self,
         high: &[f32],
@@ -199,13 +199,13 @@ impl CudaEri {
         source: &[f32],
         sweep: &EriBatchRange,
     ) -> Result<((DeviceArrayF32, DeviceArrayF32), Vec<EriParams>), CudaEriError> {
-        // Validate and build combos
+        
         let periods = Self::expand_periods(sweep)?;
         let max_p = *periods.iter().max().unwrap();
         let first_valid = Self::validate_and_first_valid(high, low, source, max_p)?;
         let len = source.len().min(high.len()).min(low.len());
 
-        // VRAM estimate (approx): inputs + outputs + P*len MA + small temporaries
+        
         let combos = periods.len();
         let pl = combos
             .checked_mul(len)
@@ -221,7 +221,7 @@ impl CudaEri {
         let req = base
             .checked_mul(el)
             .ok_or_else(|| CudaEriError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(req, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaEriError::OutOfMemory { required: req, free, headroom });
@@ -230,15 +230,15 @@ impl CudaEri {
             }
         }
 
-        // Upload shared inputs
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
 
-        // Outputs (row-major [P x len])
+        
         let mut d_bull: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(pl, &self.stream) }?;
         let mut d_bear: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(pl, &self.stream) }?;
 
-        // Try to compute MA as a batch on device.
+        
         let ma_type_lc = sweep.ma_type.to_ascii_lowercase();
         let maybe_ma_batch: Option<DeviceArrayF32> = match ma_type_lc.as_str() {
             "ema" => {
@@ -276,12 +276,12 @@ impl CudaEri {
 
         let mut combos = Vec::with_capacity(periods.len());
         if let Some(ma_rm) = maybe_ma_batch {
-            // Expect row-major [P x len]
+            
             debug_assert_eq!(ma_rm.rows, periods.len());
             debug_assert_eq!(ma_rm.cols, len);
 
             if periods.len() <= ERI_SMALL_P_NO_TRANSPOSE_THRESHOLD {
-                // For small P, avoid the RM->TM transpose and just run the simple per-row subtract.
+                
                 let func = self
                     .module
                     .get_function("eri_batch_f32")
@@ -335,7 +335,7 @@ impl CudaEri {
                 return Ok(((bull, bear), combos));
             }
 
-            // 1) Transpose MA to time-major [len x P] on device
+            
             let func_tr = self
                 .module
                 .get_function("transpose_rm_to_tm_32x32_pad_f32")
@@ -345,8 +345,8 @@ impl CudaEri {
                 unsafe { DeviceBuffer::uninitialized_async(tm_len, &self.stream) }?;
             unsafe {
                 let mut in_ptr = ma_rm.buf.as_device_ptr().as_raw();
-                let mut R = periods.len() as i32; // rows in RM (params)
-                let mut C = len as i32; // cols in RM (time)
+                let mut R = periods.len() as i32; 
+                let mut C = len as i32; 
                 let mut out_ptr = d_ma_tm.as_device_ptr().as_raw();
                 let block_tr: BlockSize = (32, 32, 1).into();
                 let grid_tr: GridSize = (ceil_div(C as u32, 32), ceil_div(R as u32, 32), 1).into();
@@ -358,9 +358,9 @@ impl CudaEri {
                 ];
                 self.stream.launch(&func_tr, grid_tr, block_tr, 0, &mut args)?;
             }
-            // Debug logging removed: no indicator-specific env flags.
+            
 
-            // 2) Launch optimized ERI kernel once (write row-major outputs)
+            
             let func = self
                 .module
                 .get_function("eri_one_series_many_params_time_major_f32")
@@ -401,11 +401,11 @@ impl CudaEri {
                 let mut P_i = periods.len() as i32;
                 let mut rows_i = len as i32;
                 let mut fv_i = first_valid as i32;
-                let mut per_ptr = d_periods.as_device_ptr().as_raw(); // [P]
-                let mut per_fallback = 0i32; // ignored because per_ptr != nullptr
+                let mut per_ptr = d_periods.as_device_ptr().as_raw(); 
+                let mut per_fallback = 0i32; 
                 let mut bo = d_bull.as_device_ptr().as_raw();
                 let mut ro = d_bear.as_device_ptr().as_raw();
-                let mut out_rm = 1i32; // write outputs as row-major
+                let mut out_rm = 1i32; 
                 let mut args: [*mut c_void; 11] = [
                     &mut h as *mut _ as *mut c_void,
                     &mut l as *mut _ as *mut c_void,
@@ -427,7 +427,7 @@ impl CudaEri {
                 ma_type: Some(sweep.ma_type.clone()),
             }));
         } else {
-            // Fallback: per-row MA via selector (inputs already uploaded)
+            
             let func = self
                 .module
                 .get_function("eri_batch_f32")
@@ -495,7 +495,7 @@ impl CudaEri {
         Ok(((bull, bear), combos))
     }
 
-    // ---------- Many-series × one param (time-major) ----------
+    
     pub fn eri_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -516,7 +516,7 @@ impl CudaEri {
             return Err(CudaEriError::InvalidInput("matrix shape mismatch".into()));
         }
 
-        // Per-series triple-valid first_valids
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -526,7 +526,7 @@ impl CudaEri {
                     break;
                 }
             }
-            // Validate warmup
+            
             if (first_valids[s] as usize) + period - 1 >= rows {
                 return Err(CudaEriError::InvalidInput(
                     "not enough valid data for at least one series".into(),
@@ -534,7 +534,7 @@ impl CudaEri {
             }
         }
 
-        // VRAM: inputs + first_valids + outputs + MA
+        
         let cr = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaEriError::InvalidInput("cols*rows overflow".into()))?;
@@ -552,7 +552,7 @@ impl CudaEri {
         let req = base
             .checked_mul(el)
             .ok_or_else(|| CudaEriError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(req, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaEriError::OutOfMemory { required: req, free, headroom });
@@ -561,21 +561,21 @@ impl CudaEri {
             }
         }
 
-        // Upload inputs
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
 
-        // Compute MA TM on device using specific wrappers
+        
         let ma_dev =
             self.ma_many_series_one_param_time_major_dev(source_tm, cols, rows, period, ma_type)?;
 
-        // Allocate outputs
+        
         let total = cr;
         let mut d_bull: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
         let mut d_bear: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream) }?;
 
-        // Launch kernel
+        
         let func = self
             .module
             .get_function("eri_many_series_one_param_time_major_f32")
@@ -584,7 +584,7 @@ impl CudaEri {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
-        // 2D grid: x over series (cols), y over time tiles (rows / ERI_TIME_TILE)
+        
         let grid: GridSize = (
             ceil_div(cols as u32, block_x),
             ceil_div(rows as u32, ERI_TIME_TILE),
@@ -641,7 +641,7 @@ impl CudaEri {
     ) -> Result<DeviceArrayF32, CudaEriError> {
         use crate::cuda::moving_averages;
         let t = ma_type.to_ascii_lowercase();
-        // Map common MA types; extend as needed.
+        
         match t.as_str() {
             "ema" => {
                 let params = crate::indicators::moving_averages::ema::EmaParams { period: Some(period) };
@@ -675,7 +675,7 @@ impl CudaEri {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

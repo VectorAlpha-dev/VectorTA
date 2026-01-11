@@ -232,7 +232,7 @@ pub fn linearreg_angle_into(
     input: &Linearreg_angleInput,
     out: &mut [f64],
 ) -> Result<(), Linearreg_angleError> {
-    // Delegate to the existing into-slice kernel dispatcher using Auto.
+    
     linearreg_angle_into_slice(out, input, Kernel::Auto)
 }
 
@@ -265,8 +265,8 @@ pub fn linearreg_angle_with_kernel(
         });
     }
 
-    // For this indicator, scalar outperforms current SIMD variants in typical sizes.
-    // Keep SIMD implementations available for explicit selection, but default Auto → Scalar.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -294,11 +294,11 @@ pub fn linearreg_angle_with_kernel(
 
 #[inline]
 pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // Optimized sliding window with O(1) per step, NaN-safe rebuild on boundary NaNs
+    
     let p = period as f64;
-    let sum_x = (period * (period - 1)) as f64 * 0.5; // Σx
-    let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0; // Σx^2
-    let divisor = sum_x * sum_x - p * sum_x_sqr; // reversed-x denominator
+    let sum_x = (period * (period - 1)) as f64 * 0.5; 
+    let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0; 
+    let divisor = sum_x * sum_x - p * sum_x_sqr; 
     let inv_div = 1.0 / divisor;
     let rad2deg = 180.0 / PI;
 
@@ -308,16 +308,16 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
         return;
     }
 
-    // Initial window [start..=i]
+    
     let mut start = i + 1 - period;
     let mut sum_y = 0.0;
     let mut sum_kd = 0.0;
 
-    // Fast path if there are no NaNs after first_valid: no per-step NaN checks
+    
     let has_nan = data[first_valid..].iter().any(|v| v.is_nan());
 
     unsafe {
-        // Build initial sums (unrolled)
+        
         let mut j = start;
         let end = i + 1;
         while j + 3 < end {
@@ -340,7 +340,7 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
         }
 
         if !has_nan {
-            // No-NaN fast path: O(1) slide with no NaN checks
+            
             loop {
                 let i_f = i as f64;
                 let sum_xy = i_f * sum_y - sum_kd;
@@ -361,7 +361,7 @@ pub fn linearreg_angle_scalar(data: &[f64], period: usize, first_valid: usize, o
                 sum_kd += (i as f64) * enter - ((i - period) as f64) * leave;
             }
         } else {
-            // NaN-safe path: rebuild on boundary-NaN
+            
             loop {
                 let i_f = i as f64;
                 let sum_xy = i_f * sum_y - sum_kd;
@@ -422,7 +422,7 @@ pub fn linearreg_angle_avx512(data: &[f64], period: usize, first_valid: usize, o
 
 #[inline]
 pub fn linearreg_angle_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // SIMD stub: delegate to scalar for accuracy/performance reasons
+    
     linearreg_angle_scalar(data, period, first_valid, out)
 }
 
@@ -434,7 +434,7 @@ pub fn linearreg_angle_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_scalar(data, period, first_valid, out)
 }
 
@@ -446,7 +446,7 @@ pub fn linearreg_angle_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_scalar(data, period, first_valid, out)
 }
 
@@ -460,7 +460,7 @@ unsafe fn linearreg_angle_avx512_impl(
 ) {
     use core::arch::x86_64::*;
 
-    // Fallback to scalar if NaNs present (prefix sums would poison later windows).
+    
     if data[first_valid..].iter().any(|v| v.is_nan()) {
         return linearreg_angle_scalar(data, period, first_valid, out);
     }
@@ -471,7 +471,7 @@ unsafe fn linearreg_angle_avx512_impl(
         return;
     }
 
-    // Constants
+    
     let p = period as f64;
     let sum_x = (period * (period - 1)) as f64 * 0.5;
     let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
@@ -479,7 +479,7 @@ unsafe fn linearreg_angle_avx512_impl(
     let inv_div = 1.0 / divisor;
     let rad2deg = 180.0 / PI;
 
-    // Prefix sums (S and K)
+    
     let mut s = vec![0.0f64; n + 1];
     let mut k = vec![0.0f64; n + 1];
     let mut acc_s = 0.0f64;
@@ -520,7 +520,7 @@ unsafe fn linearreg_angle_avx512_impl(
         idx += 1;
     }
 
-    // SIMD constants
+    
     let v_p = _mm512_set1_pd(p);
     let v_nsumx = _mm512_set1_pd(-sum_x);
     let v_invdiv = _mm512_set1_pd(inv_div);
@@ -528,7 +528,7 @@ unsafe fn linearreg_angle_avx512_impl(
     let mut i = start_i;
     let width = 8usize;
 
-    // Bulk by 8 lanes
+    
     while i + width <= n {
         let s_hi = _mm512_loadu_pd(s.as_ptr().add(i + 1));
         let s_lo = _mm512_loadu_pd(s.as_ptr().add(i + 1 - period));
@@ -588,27 +588,27 @@ unsafe fn linearreg_angle_avx512_impl(
 pub struct Linearreg_angleStream {
     period: usize,
 
-    // Ring buffer of the last `period` samples (values only)
+    
     ring: Vec<f64>,
-    head: usize, // next write position (also oldest when len == period)
-    len: usize,  // number of items currently in the ring (<= period)
+    head: usize, 
+    len: usize,  
 
-    // Running accumulators for the current window [i-(len-1) .. i]
-    // sum_y  = Σ y[k]
-    // sum_kd = Σ (k_abs * y[k]) with absolute index k_abs
+    
+    
+    
     sum_y: f64,
     sum_kd: f64,
 
-    // Absolute index of the next incoming sample
+    
     idx: usize,
 
-    // Precomputed constants for fixed x = 0..(period-1)
+    
     p: f64,
-    sum_x: f64,   // Σ x = period*(period-1)/2
-    inv_div: f64, // 1 / (sum_x^2 - p * Σx^2)
-    rad2deg: f64, // 180 / π
+    sum_x: f64,   
+    inv_div: f64, 
+    rad2deg: f64, 
 
-    // Preserve params for API consistency (builders/bindings)
+    
     params: Linearreg_angleParams,
 }
 
@@ -622,7 +622,7 @@ impl Linearreg_angleStream {
             });
         }
 
-        // Precompute constants for fixed x = 0..N-1
+        
         let p = period as f64;
         let sum_x = (period * (period - 1)) as f64 * 0.5;
         let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
@@ -650,11 +650,11 @@ impl Linearreg_angleStream {
     /// until at least `period` samples have been seen.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        let i = self.idx; // absolute index of this sample
+        let i = self.idx; 
         let had_full = self.len == self.period;
         let leave = if had_full { self.ring[self.head] } else { 0.0 };
 
-        // Write into ring and advance head
+        
         self.ring[self.head] = value;
         self.head += 1;
         if self.head == self.period {
@@ -662,15 +662,15 @@ impl Linearreg_angleStream {
         }
 
         if self.len < self.period {
-            // Warmup accumulation for Σy and Σ(k*y)
+            
             self.len += 1;
             self.sum_y += value;
             self.sum_kd += (i as f64) * value;
         } else if value.is_nan() | leave.is_nan() {
-            // Boundary NaN → rebuild window sums from ring (O(period))
+            
             self.rebuild_window_sums(i);
         } else {
-            // Steady slide in O(1)
+            
             self.sum_y += value - leave;
             self.sum_kd += (i as f64) * value - ((i - self.period) as f64) * leave;
         }
@@ -678,7 +678,7 @@ impl Linearreg_angleStream {
         let out = if self.len < self.period {
             None
         } else {
-            // reversed-x identity: sum_xy = i*sum_y - sum_kd
+            
             let sum_xy = (i as f64) * self.sum_y - self.sum_kd;
             let num = self.p.mul_add(sum_xy, -self.sum_x * self.sum_y);
             let slope = num * self.inv_div;
@@ -697,7 +697,7 @@ impl Linearreg_angleStream {
         let mut s_y = 0.0f64;
         let mut s_kd = 0.0f64;
 
-        // Window absolute indices: [i - (win_len - 1) .. i]
+        
         let start_abs = i + 1 - win_len;
 
         for j in 0..win_len {
@@ -903,7 +903,7 @@ fn linearreg_angle_batch_inner(
         });
     }
 
-    // Validate all periods are >= 2 (linear regression needs at least 2 points)
+    
     for combo in &combos {
         let period = combo.period.unwrap();
         if period < 2 {
@@ -942,10 +942,10 @@ fn linearreg_angle_batch_inner(
             step: sweep.period.2,
         })?;
 
-    // Use uninitialized memory helpers to avoid allocation
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -957,12 +957,12 @@ fn linearreg_angle_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // If input contains NaNs post-first, avoid prefix-sum path to preserve semantics
+    
     let has_nan = data[first..].iter().any(|v| v.is_nan());
 
-    // Optional shared prefixes for all rows (S: Σy, K: Σ(k*y)) when NaN-free
+    
     let (s_pref, k_pref): (Option<Vec<f64>>, Option<Vec<f64>>) = if !has_nan {
-        // Precompute S and K once for reuse across rows
+        
         let n = data.len();
         let mut s = vec![0.0f64; n + 1];
         let mut k = vec![0.0f64; n + 1];
@@ -1012,10 +1012,10 @@ fn linearreg_angle_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         if has_nan {
-            // Always use scalar sliding path when NaNs present
+            
             linearreg_angle_row_scalar(data, first, period, out_row)
         } else {
-            // Hoist per-row constants once
+            
             let p = period as f64;
             let sum_x = (period * (period - 1)) as f64 * 0.5;
             let sum_x_sqr = (period * (period - 1) * (2 * period - 1)) as f64 / 6.0;
@@ -1085,7 +1085,7 @@ fn linearreg_angle_batch_inner(
         }
     }
 
-    // Convert uninitialized memory to Vec
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1111,14 +1111,14 @@ unsafe fn linearreg_angle_row_scalar(data: &[f64], first: usize, period: usize, 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn linearreg_angle_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_row_scalar(data, first, period, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn linearreg_angle_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_row_scalar(data, first, period, out)
 }
 
@@ -1130,7 +1130,7 @@ unsafe fn linearreg_angle_row_avx512_short(
     period: usize,
     out: &mut [f64],
 ) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_row_scalar(data, first, period, out)
 }
 
@@ -1142,11 +1142,11 @@ unsafe fn linearreg_angle_row_avx512_long(
     period: usize,
     out: &mut [f64],
 ) {
-    // SIMD stub: delegate to scalar
+    
     linearreg_angle_row_scalar(data, first, period, out)
 }
 
-// Row-specific helpers using shared prefix sums (S, K)
+
 #[inline(always)]
 unsafe fn linearreg_angle_row_scalar_with_prefixes(
     data: &[f64],
@@ -1192,7 +1192,7 @@ unsafe fn linearreg_angle_row_avx2_with_prefixes(
     rad2deg: f64,
     period: usize,
 ) {
-    // SIMD stub with prefixes: call scalar prefix path
+    
     linearreg_angle_row_scalar_with_prefixes(
         data, first, out, s, k, p, sum_x, inv_div, rad2deg, period,
     )
@@ -1212,7 +1212,7 @@ unsafe fn linearreg_angle_row_avx512_with_prefixes(
     rad2deg: f64,
     period: usize,
 ) {
-    // SIMD stub with prefixes: call scalar prefix path
+    
     linearreg_angle_row_scalar_with_prefixes(
         data, first, out, s, k, p, sum_x, inv_div, rad2deg, period,
     )
@@ -1338,21 +1338,21 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations for linearreg_angle
+        
         let test_params = vec![
-            Linearreg_angleParams::default(),            // period: 14 (default)
-            Linearreg_angleParams { period: Some(2) },   // minimum viable period
-            Linearreg_angleParams { period: Some(3) },   // very small period
-            Linearreg_angleParams { period: Some(5) },   // small period
-            Linearreg_angleParams { period: Some(7) },   // small period
-            Linearreg_angleParams { period: Some(10) },  // small-medium period
-            Linearreg_angleParams { period: Some(14) },  // default period
-            Linearreg_angleParams { period: Some(20) },  // medium period
-            Linearreg_angleParams { period: Some(30) },  // medium period
-            Linearreg_angleParams { period: Some(50) },  // medium-large period
-            Linearreg_angleParams { period: Some(100) }, // large period
-            Linearreg_angleParams { period: Some(200) }, // very large period
-            Linearreg_angleParams { period: Some(500) }, // extremely large period
+            Linearreg_angleParams::default(),            
+            Linearreg_angleParams { period: Some(2) },   
+            Linearreg_angleParams { period: Some(3) },   
+            Linearreg_angleParams { period: Some(5) },   
+            Linearreg_angleParams { period: Some(7) },   
+            Linearreg_angleParams { period: Some(10) },  
+            Linearreg_angleParams { period: Some(14) },  
+            Linearreg_angleParams { period: Some(20) },  
+            Linearreg_angleParams { period: Some(30) },  
+            Linearreg_angleParams { period: Some(50) },  
+            Linearreg_angleParams { period: Some(100) }, 
+            Linearreg_angleParams { period: Some(200) }, 
+            Linearreg_angleParams { period: Some(500) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1361,12 +1361,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1413,7 +1413,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_lra_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_lra_tests {
@@ -1442,26 +1442,26 @@ mod tests {
 
     #[test]
     fn test_linearreg_angle_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input slice with a few leading NaNs
+        
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
             let x = i as f64;
-            // Smoothly varying series with trend + curvature
+            
             let v = (0.05 * x).sin() * 3.0 + 0.01 * x + (0.001 * x * x);
             data.push(v);
         }
-        // Introduce a couple of NaNs at the start to exercise warmup handling
+        
         data[0] = f64::NAN;
         data[1] = f64::NAN;
 
         let params = Linearreg_angleParams::default();
         let input = Linearreg_angleInput::from_slice(&data, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = linearreg_angle(&input)?.values;
 
-        // Preallocate output buffer and invoke the new into API
+        
         let mut into_out = vec![0.0f64; len];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1469,13 +1469,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In WASM builds the native into is not available; use into_slice directly
+            
             linearreg_angle_into_slice(&mut into_out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), into_out.len());
 
-        // Helper: NaN == NaN, else exact equality
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1501,32 +1501,32 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic data and parameters
-        let strat = (2usize..=50) // Period from 2-50 (1 is invalid for linear regression)
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    // Generate base price and volatility
+                    
                     (100f64..10000f64, 0.0001f64..0.1f64, period + 10..400)
                         .prop_flat_map(move |(base_price, volatility, data_len)| {
-                            // Generate price movements with controlled volatility
+                            
                             let price_changes = prop::collection::vec(
                                 (-volatility..volatility).prop_filter("finite", |x| x.is_finite()),
                                 data_len,
                             );
 
-                            // Generate scenarios with different data patterns
+                            
                             let scenario = prop::strategy::Union::new(vec![
-                                // 60% normal price movements
+                                
                                 (0u8..60u8).boxed(),
-                                // 10% constant prices
+                                
                                 (60u8..70u8).boxed(),
-                                // 10% linear uptrend
+                                
                                 (70u8..80u8).boxed(),
-                                // 10% linear downtrend
+                                
                                 (80u8..90u8).boxed(),
-                                // 5% near-horizontal (very small slope)
+                                
                                 (90u8..95u8).boxed(),
-                                // 5% steep trend (large slope)
+                                
                                 (95u8..100u8).boxed(),
                             ]);
 
@@ -1544,7 +1544,7 @@ mod tests {
 
                                 match scenario {
                                     0..=59 => {
-                                        // Normal price movements
+                                        
                                         let mut current_price = base_price;
                                         for change in price_changes {
                                             current_price *= 1.0 + change;
@@ -1552,33 +1552,33 @@ mod tests {
                                         }
                                     }
                                     60..=69 => {
-                                        // Constant prices
+                                        
                                         data.resize(data_len, base_price);
                                     }
                                     70..=79 => {
-                                        // Linear uptrend
-                                        let slope = base_price * 0.001; // 0.1% per period
+                                        
+                                        let slope = base_price * 0.001; 
                                         for i in 0..data_len {
                                             data.push(base_price + slope * i as f64);
                                         }
                                     }
                                     80..=89 => {
-                                        // Linear downtrend
+                                        
                                         let slope = base_price * 0.001;
                                         for i in 0..data_len {
                                             data.push(base_price - slope * i as f64);
                                         }
                                     }
                                     90..=94 => {
-                                        // Near-horizontal (very small slope)
-                                        let slope = base_price * 0.00001; // 0.001% per period
+                                        
+                                        let slope = base_price * 0.00001; 
                                         for i in 0..data_len {
                                             data.push(base_price + slope * i as f64);
                                         }
                                     }
                                     95..=99 => {
-                                        // Steep trend (large slope)
-                                        let slope = base_price * 0.1; // 10% per period
+                                        
+                                        let slope = base_price * 0.1; 
                                         for i in 0..data_len {
                                             data.push(base_price + slope * i as f64);
                                         }
@@ -1598,19 +1598,19 @@ mod tests {
             };
             let input = Linearreg_angleInput::from_slice(&data, params);
 
-            // Get output from the kernel being tested
+            
             let result = linearreg_angle_with_kernel(&input, kernel)?;
             let out = &result.values;
 
-            // Get reference output from scalar kernel
+            
             let ref_result = linearreg_angle_with_kernel(&input, Kernel::Scalar)?;
             let ref_out = &ref_result.values;
 
-            // Property 1: Output length matches input
+            
             prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-            // Property 2: Warmup period values are NaN
-            // Since we generate clean data without NaN, first = 0
+            
+            
             let warmup_end = period - 1;
             for i in 0..warmup_end {
                 prop_assert!(
@@ -1621,7 +1621,7 @@ mod tests {
                 );
             }
 
-            // Property 3: Valid values are within [-90, 90] degrees
+            
             for (i, &val) in out.iter().enumerate().skip(warmup_end) {
                 if !val.is_nan() {
                     prop_assert!(
@@ -1633,13 +1633,13 @@ mod tests {
                 }
             }
 
-            // Property 4: Constant data produces ~0 degree angle (relaxed tolerance)
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
-                // All values are essentially the same
+                
                 for (i, &val) in out.iter().enumerate().skip(warmup_end) {
                     if !val.is_nan() {
                         prop_assert!(
-                            val.abs() < 1e-3, // Relaxed tolerance for floating-point
+                            val.abs() < 1e-3, 
                             "Expected ~0° for constant data at index {}, got {}°",
                             i,
                             val
@@ -1648,21 +1648,21 @@ mod tests {
                 }
             }
 
-            // Property 5: Enhanced linear trend validation
-            // Check if data is perfectly linear
+            
+            
             let is_perfectly_linear = if data.len() >= 3 {
                 let mut deltas = Vec::new();
                 for i in 1..data.len() {
                     deltas.push(data[i] - data[i - 1]);
                 }
-                // Check if all deltas are approximately equal
+                
                 deltas.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
             } else {
                 false
             };
 
             if is_perfectly_linear && data.len() > period {
-                // For perfectly linear data, all angles should be identical
+                
                 let valid_angles: Vec<f64> = out
                     .iter()
                     .skip(warmup_end)
@@ -1682,7 +1682,7 @@ mod tests {
                 }
             }
 
-            // Check trend direction for linear data
+            
             let is_linear_up = data.windows(2).all(|w| w[1] > w[0]);
             let is_linear_down = data.windows(2).all(|w| w[1] < w[0]);
 
@@ -1712,10 +1712,10 @@ mod tests {
                 }
             }
 
-            // Property 6: Mathematical correctness for simple cases
-            // For a simple linear sequence, verify the angle is correct
+            
+            
             if period <= 10 && data.len() >= period * 2 {
-                // Create a simple test case: y = x (45-degree line in data space)
+                
                 let test_data: Vec<f64> = (0..period).map(|i| i as f64).collect();
                 let test_params = Linearreg_angleParams {
                     period: Some(period),
@@ -1726,7 +1726,7 @@ mod tests {
                     if test_result.values.len() >= period {
                         let test_angle = test_result.values[period - 1];
                         if !test_angle.is_nan() {
-                            // For y = x with unit spacing, slope = 1, angle = atan(1) = 45°
+                            
                             let expected_angle = 45.0;
                             prop_assert!(
                                 (test_angle - expected_angle).abs() < 1.0,
@@ -1738,8 +1738,8 @@ mod tests {
                 }
             }
 
-            // Property 7: Edge cases - extreme angles
-            // Near-horizontal should produce small angles
+            
+            
             let base_price = data[0];
             if data.windows(2).all(|w| {
                 let delta = (w[1] - w[0]).abs();
@@ -1748,7 +1748,7 @@ mod tests {
                 for &val in out.iter().skip(warmup_end) {
                     if !val.is_nan() {
                         prop_assert!(
-                            val.abs() < 1.0, // Should be very small angle
+                            val.abs() < 1.0, 
                             "Near-horizontal data should produce small angle, got {}°",
                             val
                         );
@@ -1756,12 +1756,12 @@ mod tests {
                 }
             }
 
-            // Property 8: Kernel consistency
+            
             for i in warmup_end..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                // Handle NaN/infinity cases
+                
                 if !y.is_finite() || !r.is_finite() {
                     prop_assert_eq!(
                         y.to_bits(),
@@ -1774,7 +1774,7 @@ mod tests {
                     continue;
                 }
 
-                // Check ULP difference for finite values
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = y_bits.abs_diff(r_bits);
@@ -1849,7 +1849,7 @@ mod tests {
             .period_range(10, 16, 2)
             .apply_candles(&c, "close")?;
 
-        // Should have periods: 10, 12, 14, 16
+        
         let periods = [10, 12, 14, 16];
         assert_eq!(batch.rows, 4);
 
@@ -1879,7 +1879,7 @@ mod tests {
         let row = batch.values_for(&param).expect("Missing static row");
         assert_eq!(row.len(), batch.cols);
 
-        // Check a value
+        
         let last = *row.last().unwrap();
         let expected = -87.77085937059316;
         assert!(
@@ -1897,25 +1897,25 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for linearreg_angle
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (2, 10, 2),      // Small periods, step 2
-            (5, 15, 1),      // Dense small range
-            (10, 50, 10),    // Medium periods, step 10
-            (20, 100, 20),   // Large periods, step 20
-            (50, 200, 50),   // Very large periods
-            (14, 14, 0),     // Single period (default)
-            (2, 5, 1),       // Very small dense range
-            (100, 500, 100), // Extremely large periods
-            (7, 21, 7),      // Weekly-based periods
-            (30, 90, 30),    // Monthly-based periods
+            
+            (2, 10, 2),      
+            (5, 15, 1),      
+            (10, 50, 10),    
+            (20, 100, 20),   
+            (50, 200, 50),   
+            (14, 14, 0),     
+            (2, 5, 1),       
+            (100, 500, 100), 
+            (7, 21, 7),      
+            (30, 90, 30),    
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
             let mut builder = Linearreg_angleBatchBuilder::new().kernel(kernel);
 
-            // Configure period range
+            
             if p_step > 0 {
                 builder = builder.period_range(p_start, p_end, p_step);
             } else {
@@ -1934,7 +1934,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1987,7 +1987,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2059,7 +2059,7 @@ pub fn linearreg_angle_into_slice(
         other => other,
     };
 
-    // Initialize warmup period with NaN before computation
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2157,7 +2157,7 @@ pub fn linearreg_angle_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Validate all periods are >= 2 before computing warmups/allocating.
+    
     for combo in &combos {
         let period = combo.period.unwrap();
         if period < 2 {
@@ -2182,11 +2182,11 @@ pub fn linearreg_angle_batch_py<'py>(
         )
     })?;
 
-    // Allocate uninitialized flat output (rows*cols), like alma.rs
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Warmup prefixes via helper, zero-copy, before compute
+    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -2196,7 +2196,7 @@ pub fn linearreg_angle_batch_py<'py>(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Reinterpret NumPy memory as MaybeUninit<f64> and initialize prefixes with NaN
+    
     let mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -2205,7 +2205,7 @@ pub fn linearreg_angle_batch_py<'py>(
     };
     init_matrix_prefixes(mu, cols, &warm);
 
-    // Resolve kernel once, map batch→simd
+    
     let kern = validate_kernel(kernel, true)?;
     let resolved = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -2218,7 +2218,7 @@ pub fn linearreg_angle_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    // Compute into pre-initialized buffer
+    
     py.allow_threads(|| linearreg_angle_batch_inner_into(slice_in, &sweep, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -2235,7 +2235,7 @@ pub fn linearreg_angle_batch_py<'py>(
     Ok(dict)
 }
 
-// ---- CUDA Python bindings (device handles) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct LinearregAngleDeviceArrayF32Py {
@@ -2428,7 +2428,7 @@ fn linearreg_angle_batch_inner_into(
         });
     }
 
-    // Validate all periods are >= 2 (linear regression needs at least 2 points)
+    
     for combo in &combos {
         let period = combo.period.unwrap();
         if period < 2 {
@@ -2475,7 +2475,7 @@ fn linearreg_angle_batch_inner_into(
         });
     }
 
-    // Treat out as uninitialized to avoid UB and copies, like alma.rs
+    
     let out_uninit: &mut [core::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -2485,7 +2485,7 @@ fn linearreg_angle_batch_inner_into(
 
     let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        // Temporarily view as f64 for kernel write
+        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -2528,9 +2528,9 @@ fn linearreg_angle_batch_inner_into(
     Ok(combos)
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2591,14 +2591,14 @@ pub fn linearreg_angle_into(
         let input = Linearreg_angleInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Aliasing detected - use temp buffer
+            
             let mut temp = vec![0.0; len];
             linearreg_angle_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing - write directly
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             linearreg_angle_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2633,7 +2633,7 @@ pub fn linearreg_angle_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
         period: config.period_range,
     };
 
-    // Use same kernel resolution as Python binding for consistency
+    
     let kernel = detect_best_batch_kernel();
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2642,7 +2642,7 @@ pub fn linearreg_angle_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
         _ => Kernel::Scalar,
     };
 
-    // Use same inner that does make_uninit_matrix + init_matrix_prefixes
+    
     let output = linearreg_angle_batch_inner(data, &sweep, simd, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

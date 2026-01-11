@@ -1,4 +1,4 @@
-// Parallel processor for ALMA computations using Web Workers
+
 import { Worker } from 'worker_threads';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -21,7 +21,7 @@ export class AlmaParallelProcessor {
     async initialize() {
         if (this.initialized) return;
         
-        // Create worker pool
+        
         const workerPromises = [];
         
         for (let i = 0; i < this.numWorkers; i++) {
@@ -30,7 +30,7 @@ export class AlmaParallelProcessor {
             });
             this.workers.push(worker);
             
-            // Set up worker message handler
+            
             worker.on('message', (message) => {
                 this.handleWorkerMessage(worker, message);
             });
@@ -39,7 +39,7 @@ export class AlmaParallelProcessor {
                 console.error(`Worker ${i} error:`, error);
             });
             
-            // Wait for worker to be ready
+            
             workerPromises.push(new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     reject(new Error(`Worker ${i} initialization timeout`));
@@ -69,10 +69,10 @@ export class AlmaParallelProcessor {
         const { type, taskId, result, error } = message;
         
         if (type === 'result' || type === 'error') {
-            // Mark worker as available
+            
             this.busyWorkers.delete(worker);
             
-            // Get callback for this task
+            
             const callback = this.taskCallbacks.get(taskId);
             if (callback) {
                 this.taskCallbacks.delete(taskId);
@@ -84,7 +84,7 @@ export class AlmaParallelProcessor {
                 }
             }
             
-            // Process next task in queue
+            
             this.processNextTask();
         }
     }
@@ -92,15 +92,15 @@ export class AlmaParallelProcessor {
     processNextTask() {
         if (this.taskQueue.length === 0) return;
         
-        // Find available worker
+        
         const availableWorker = this.workers.find(w => !this.busyWorkers.has(w));
         if (!availableWorker) return;
         
-        // Get next task
+        
         const task = this.taskQueue.shift();
         this.busyWorkers.add(availableWorker);
         
-        // Send task to worker
+        
         availableWorker.postMessage(task);
     }
     
@@ -112,13 +112,13 @@ export class AlmaParallelProcessor {
         const taskId = this.nextTaskId++;
         
         return new Promise((resolve, reject) => {
-            // Store callback
+            
             this.taskCallbacks.set(taskId, { resolve, reject });
             
-            // Convert TypedArray to regular array for proper transfer
+            
             const dataArray = Array.from(data);
             
-            // Add task to queue
+            
             this.taskQueue.push({
                 type: 'compute',
                 taskId,
@@ -131,7 +131,7 @@ export class AlmaParallelProcessor {
                 }
             });
             
-            // Try to process immediately
+            
             this.processNextTask();
         });
     }
@@ -141,16 +141,16 @@ export class AlmaParallelProcessor {
             await this.initialize();
         }
         
-        // Create promises for all computations
+        
         const promises = dataArrays.map(data => 
             this.computeAlma(data, period, offset, sigma)
         );
         
-        // Wait for all to complete
+        
         return Promise.all(promises);
     }
     
-    // Compute multiple ALMAs with different parameters
+    
     async computeAlmaParameterSweep(data, parameterSets) {
         if (!this.initialized) {
             await this.initialize();
@@ -164,7 +164,7 @@ export class AlmaParallelProcessor {
     }
     
     async terminate() {
-        // Terminate all workers
+        
         await Promise.all(this.workers.map(worker => worker.terminate()));
         this.workers = [];
         this.initialized = false;
@@ -174,7 +174,7 @@ export class AlmaParallelProcessor {
     }
 }
 
-// Benchmark helper for parallel processing
+
 export async function benchmarkParallelAlma() {
     const processor = new AlmaParallelProcessor();
     
@@ -182,12 +182,12 @@ export async function benchmarkParallelAlma() {
         await processor.initialize();
         console.log(`Initialized ${processor.numWorkers} workers`);
         
-        // Test data sizes
+        
         const sizes = [10000, 100000, 1000000];
         const numBatches = 10;
         
         for (const size of sizes) {
-            // Create test data batches
+            
             const dataBatches = [];
             for (let i = 0; i < numBatches; i++) {
                 const data = new Float64Array(size);
@@ -197,14 +197,14 @@ export async function benchmarkParallelAlma() {
                 dataBatches.push(data);
             }
             
-            // Benchmark serial processing
+            
             const serialStart = performance.now();
             for (const data of dataBatches) {
                 await processor.computeAlma(data, 9);
             }
             const serialTime = performance.now() - serialStart;
             
-            // Benchmark parallel processing
+            
             const parallelStart = performance.now();
             await processor.computeAlmaBatch(dataBatches, 9);
             const parallelTime = performance.now() - parallelStart;

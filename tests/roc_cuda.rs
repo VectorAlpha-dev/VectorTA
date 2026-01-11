@@ -1,16 +1,16 @@
-// CUDA integration tests for ROC
 
-use my_project::indicators::roc::{
+
+use vector_ta::indicators::roc::{
     roc_batch_slice, roc_with_kernel, RocBatchRange, RocInput, RocParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::roc_wrapper::CudaRoc;
+use vector_ta::cuda::oscillators::roc_wrapper::CudaRoc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -42,11 +42,11 @@ fn roc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = RocBatchRange { period: (2, 64, 3) };
 
-    // CPU (map batch kernel to appropriate single-series kernel)
+    
     let cpu =
-        my_project::indicators::roc::roc_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
+        vector_ta::indicators::roc::roc_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU
+    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaRoc::new(0).expect("CudaRoc::new");
     let dev = cuda
@@ -68,7 +68,7 @@ fn roc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let diff = (expected - gotf).abs();
-        // Mixed absolute + relative tolerance
+        
         let tol_i = 5e-4 + expected.abs() * 1e-4;
         if diff > max_ratio {
             max_ratio = diff;
@@ -98,19 +98,19 @@ fn roc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 11usize; // series
-    let rows = 2048usize; // time
+    let cols = 11usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            // stagger first_valid per series
+            
             let x = (t as f64) + (s as f64) * 0.2;
             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -127,7 +127,7 @@ fn roc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaRoc::new(0).expect("CudaRoc::new");
     let dev = cuda

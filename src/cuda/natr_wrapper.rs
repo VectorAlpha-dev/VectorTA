@@ -81,7 +81,7 @@ impl Default for BatchKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    OneD { block_x: u32 }, // expressed as threads (must be multiple of 32)
+    OneD { block_x: u32 }, 
 }
 
 impl Default for ManySeriesKernelPolicy {
@@ -215,7 +215,7 @@ impl CudaNatr {
         Ok(())
     }
 
-    // ----------------------- Host precompute (batch) -----------------------
+    
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Option<usize> {
         let n = high.len().min(low.len()).min(close.len());
         for i in 0..n {
@@ -279,7 +279,7 @@ impl CudaNatr {
         }
         let mut fv = vec![0i32; cols];
         for s in 0..cols {
-            let mut first: i32 = rows as i32; // default: no valid
+            let mut first: i32 = rows as i32; 
             for t in 0..rows {
                 let idx = match t.checked_mul(cols).and_then(|v| v.checked_add(s)) {
                     Some(i) => i,
@@ -300,7 +300,7 @@ impl CudaNatr {
         Ok(fv)
     }
 
-    // ----------------------- Public device entry points -----------------------
+    
     pub fn natr_batch_dev(
         &mut self,
         high: &[f32],
@@ -315,7 +315,7 @@ impl CudaNatr {
             ));
         }
 
-        // Expand periods
+        
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaNatrError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
@@ -369,14 +369,14 @@ impl CudaNatr {
         let periods_i32: Vec<i32> = periods_v.iter().map(|&p| p as i32).collect();
         let rows = periods_v.len();
 
-        // Heuristic: enable shared inv_close100 if it will save real work
+        
         let min_period = *periods_v.iter().min().unwrap();
         let warm_needed = first_valid + min_period - 1;
         let active_len = if len > warm_needed { len - warm_needed } else { 0 };
         let use_precompute = rows >= 4
             || rows.saturating_mul(active_len) >= 1_000_000;
 
-        // VRAM checks (account for optional inv buffer)
+        
         let elem_out = rows
             .checked_mul(len)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*len overflow".into()))?;
@@ -401,13 +401,13 @@ impl CudaNatr {
             .ok_or_else(|| CudaNatrError::InvalidInput("input bytes overflow".into()))?;
         let head = Self::headroom_bytes();
 
-        // Baseline check without inv buffer; this must succeed.
+        
         let base_bytes = out_bytes
             .checked_add(in_bytes)
             .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(base_bytes, head)?;
 
-        // Optional inv_close100 buffer
+        
         let inv_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaNatrError::InvalidInput("inv bytes overflow".into()))?;
@@ -420,7 +420,7 @@ impl CudaNatr {
             false
         };
 
-        // Upload inputs (async on NON_BLOCKING stream)
+        
         let d_tr: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::from_slice_async(&tr, &self.stream)?
         };
@@ -436,7 +436,7 @@ impl CudaNatr {
                 Err(_) => unsafe { DeviceBuffer::uninitialized(elem_out)? },
             };
 
-        // Optionally build inv_close100 on device
+        
         let mut d_inv: Option<DeviceBuffer<f32>> = None;
         if allow_inv {
             let mut d = match unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
@@ -483,7 +483,7 @@ impl CudaNatr {
 
         let use_warp_io = warp_io_enabled && block_x == 32;
 
-        // Choose kernel symbol based on policy + availability of precompute buffer
+        
         let func = match (use_warp_io, d_inv.is_some()) {
             (true, true) => self
                 .module
@@ -502,7 +502,7 @@ impl CudaNatr {
                 .get_function("natr_batch_f32")
                 .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32" })?,
         };
-        let grid_x = rows as u32; // one block per period row
+        let grid_x = rows as u32; 
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
@@ -589,7 +589,7 @@ impl CudaNatr {
 
         let first_valids = Self::first_valids_time_major(high_tm, low_tm, close_tm, cols, rows)?;
 
-        // VRAM estimate and check
+        
         let elem_out = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*cols overflow".into()))?;
@@ -617,7 +617,7 @@ impl CudaNatr {
             .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(total, head)?;
 
-        // Upload inputs (async on our stream)
+        
         let d_high: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::from_slice_async(high_tm, &self.stream)?
         };
@@ -636,13 +636,13 @@ impl CudaNatr {
                 Err(_) => unsafe { DeviceBuffer::uninitialized(elem_out)? },
             };
 
-        // Launch
+        
         let func = self
             .module
             .get_function("natr_many_series_one_param_f32")
             .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_many_series_one_param_f32" })?;
 
-        // Choose 4 warps per block by default (128 threads), tuneable via policy
+        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
@@ -687,7 +687,7 @@ impl CudaNatr {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -696,7 +696,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series(n_combos: usize) -> usize {
-        // 3 inputs + TR + periods + output
+        
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + n_combos * std::mem::size_of::<i32>();

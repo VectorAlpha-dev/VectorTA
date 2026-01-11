@@ -212,7 +212,7 @@ impl CudaSar {
         Ok(())
     }
 
-    // ---------------- One-series × many-params (batch) ----------------
+    
     pub fn sar_batch_dev(
         &self,
         high: &[f32],
@@ -235,7 +235,7 @@ impl CudaSar {
 
         let combos = expand_grid(sweep)?;
 
-        // Validate params & build f32 arrays
+        
         let mut accs = Vec::with_capacity(combos.len());
         let mut maxs = Vec::with_capacity(combos.len());
         for p in &combos {
@@ -250,7 +250,7 @@ impl CudaSar {
             maxs.push(m as f32);
         }
 
-        // VRAM: inputs + params + output
+        
         let elem_size = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -274,7 +274,7 @@ impl CudaSar {
             .ok_or_else(|| CudaSarError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, Self::headroom_bytes())?;
 
-        // H2D
+        
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_accs = DeviceBuffer::from_slice(&accs)?;
@@ -348,7 +348,7 @@ impl CudaSar {
             maxs.push(m as f32);
         }
 
-        // VRAM: params + output (inputs already resident)
+        
         let elem_size = std::mem::size_of::<f32>();
         let param_bytes = combos
             .len()
@@ -419,7 +419,7 @@ impl CudaSar {
             .get_function("sar_batch_f32")
             .map_err(|_| CudaSarError::MissingKernelSymbol { name: "sar_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        // Suggest an occupancy-friendly block size, fallback to 256
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => {
@@ -463,7 +463,7 @@ impl CudaSar {
         Ok(())
     }
 
-    // ---------------- Many-series × one-param (time‑major) ----------------
+    
     pub fn sar_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -493,7 +493,7 @@ impl CudaSar {
 
         let first_valids = first_valids_time_major(high_tm, low_tm, cols, rows)?;
 
-        // VRAM: inputs + first_valids + output
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let in_bytes = elems
@@ -512,7 +512,7 @@ impl CudaSar {
             .ok_or_else(|| CudaSarError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, Self::headroom_bytes())?;
 
-        // H2D
+        
         let d_high = DeviceBuffer::from_slice(high_tm)?;
         let d_low = DeviceBuffer::from_slice(low_tm)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
@@ -664,7 +664,7 @@ impl CudaSar {
     }
 }
 
-// -------- Helpers --------
+
 fn first_valid_hl(high: &[f32], low: &[f32]) -> Option<usize> {
     high.iter()
         .zip(low.iter())
@@ -680,7 +680,7 @@ fn first_valids_time_major(
     let mut out = vec![-1i32; cols];
     for s in 0..cols {
         for t in s..rows {
-            // mirror staggered warmup used in helpers
+            
             let idx = t
                 .checked_mul(cols)
                 .and_then(|v| v.checked_add(s))
@@ -722,7 +722,7 @@ fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaSarError> {
                 x += step;
             }
         } else {
-            // Reversed bounds: walk downwards with positive step.
+            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
@@ -730,12 +730,12 @@ fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaSarError> {
             }
         }
     } else {
-        // step < 0.0
+        
         if start >= end {
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
-                x += step; // negative step
+                x += step; 
             }
         } else {
             return Err(CudaSarError::InvalidInput(format!(
@@ -773,7 +773,7 @@ fn expand_grid(r: &SarBatchRange) -> Result<Vec<SarParams>, CudaSarError> {
     Ok(out)
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -915,7 +915,7 @@ pub mod benches {
         let cuda = CudaSar::new(0).expect("cuda sar");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_ROWS;
-        // build time‑major from single-series generator with per-series phase offset
+        
         let mut high_tm = vec![f32::NAN; cols * rows];
         let mut low_tm = vec![f32::NAN; cols * rows];
         for s in 0..cols {

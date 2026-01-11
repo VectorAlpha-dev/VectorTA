@@ -1,14 +1,14 @@
-// Integration tests for CUDA EFI kernels
 
-use my_project::indicators::efi::{efi_batch_with_kernel, EfiBatchRange, EfiParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::efi::{efi_batch_with_kernel, EfiBatchRange, EfiParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaEfi;
+use vector_ta::cuda::CudaEfi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -83,8 +83,8 @@ fn efi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // num_series
-    let rows = 2048usize; // series_len
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut price_tm = vec![f64::NAN; cols * rows];
     let mut volume_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -97,7 +97,7 @@ fn efi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 13usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -109,8 +109,8 @@ fn efi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         let params = EfiParams {
             period: Some(period),
         };
-        let input = my_project::indicators::efi::EfiInput::from_slices(&p, &v, params);
-        let out = my_project::indicators::efi::efi(&input)?.values;
+        let input = vector_ta::indicators::efi::EfiInput::from_slices(&p, &v, params);
+        let out = vector_ta::indicators::efi::efi(&input)?.values;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out[t];
         }

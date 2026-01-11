@@ -163,9 +163,9 @@ pub enum VptError {
 
 #[inline]
 fn vpt_first_valid(price: &[f64], volume: &[f64]) -> Option<usize> {
-    // VPT always has NaN at index 0, so warmup is at least 1
-    // Find earliest i >= 1 where the formula can produce a finite value
-    // needs p[i-1] finite and != 0, p[i] finite, v[i] finite
+    
+    
+    
     for i in 1..price.len() {
         let p0 = price[i - 1];
         let p1 = price[i];
@@ -255,12 +255,12 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
     let mut res = alloc_with_nan_prefix(n, first + 1);
 
-    // Raw pointers to avoid bounds checks inside the hot loop.
+    
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
     let o_ptr = res.as_mut_ptr();
 
-    // Seed with the VPT increment at index `first` (not written to output).
+    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -268,17 +268,17 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         if (p0 != p0) || (p0 == 0.0) || (p1 != p1) || (v1 != v1) {
             f64::NAN
         } else {
-            // Keep operation order identical to reference path
+            
             v1 * ((p1 - p0) / p0)
         }
     };
 
-    // Sliding reuse of p[i-1]; unroll by 4 to reduce overhead.
+    
     let mut i = first + 1;
     let mut p_prev = *p_ptr.add(i - 1);
 
     while i + 3 < n {
-        // i
+        
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
         let cur0 = if (p_prev != p_prev) || (p_prev == 0.0) || (p1 != p1) || (v1 != v1) {
@@ -291,7 +291,7 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val0;
         p_prev = p1;
 
-        // i + 1
+        
         let j1 = i + 1;
         let p2 = *p_ptr.add(j1);
         let v2 = *v_ptr.add(j1);
@@ -305,7 +305,7 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val1;
         p_prev = p2;
 
-        // i + 2
+        
         let j2 = i + 2;
         let p3 = *p_ptr.add(j2);
         let v3 = *v_ptr.add(j2);
@@ -319,7 +319,7 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val2;
         p_prev = p3;
 
-        // i + 3
+        
         let j3 = i + 3;
         let p4 = *p_ptr.add(j3);
         let v4 = *v_ptr.add(j3);
@@ -336,7 +336,7 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 4;
     }
 
-    // Tail
+    
     while i < n {
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
@@ -386,7 +386,7 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    // Seed carry = cur(first)
+    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -408,11 +408,11 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
         let hi = _mm256_extractf128_pd(x, 1);
         let z = _mm_setzero_pd();
 
-        // [a0, a1] -> [a0, a0+a1]
+        
         let tlo = _mm_add_pd(lo, _mm_shuffle_pd(z, lo, 0));
         let thi = _mm_add_pd(hi, _mm_shuffle_pd(z, hi, 0));
 
-        // add last of low pair into both lanes of high pair
+        
         let last_lo = _mm_unpackhi_pd(tlo, tlo);
         let thi2 = _mm_add_pd(thi, last_lo);
 
@@ -420,12 +420,12 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
     }
 
     while i + 3 < n {
-        // p0 = [p[i-1..i+2]], p1 = [p[i..i+3]], v = [v[i..i+3]]
+        
         let p0 = _mm256_loadu_pd(p_ptr.add(i - 1));
         let p1 = _mm256_loadu_pd(p_ptr.add(i));
         let vv = _mm256_loadu_pd(v_ptr.add(i));
 
-        // invalid mask: isnan(p0)|isnan(p1)|isnan(v)| (p0==0)
+        
         let m_nan_p0 = _mm256_cmp_pd(p0, p0, _CMP_UNORD_Q);
         let m_nan_p1 = _mm256_cmp_pd(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm256_cmp_pd(vv, vv, _CMP_UNORD_Q);
@@ -435,21 +435,21 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
             _mm256_or_pd(m_nan_v, m_eq0_p0),
         );
 
-        // cur = v * ((p1 - p0) / p0)
+        
         let diff = _mm256_sub_pd(p1, p0);
         let div = _mm256_div_pd(diff, p0);
         let mul = _mm256_mul_pd(vv, div);
         let cur = _mm256_blendv_pd(mul, vnan, invalid);
 
-        // vector inclusive scan + add carry
+        
         let ps = prefix4_pd(cur);
         let cary = _mm256_set1_pd(prev);
         let outv = _mm256_add_pd(ps, cary);
 
-        // store
+        
         _mm256_storeu_pd(o_ptr.add(i), outv);
 
-        // update carry = last lane of outv
+        
         let hi128 = _mm256_extractf128_pd(outv, 1);
         let last_hi = _mm_unpackhi_pd(hi128, hi128);
         let tmp: [f64; 2] = core::mem::transmute(last_hi);
@@ -458,7 +458,7 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
         i += 4;
     }
 
-    // Scalar tail
+    
     if i < n {
         let mut p_prev = *p_ptr.add(i - 1);
         while i < n {
@@ -511,7 +511,7 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    // Seed carry
+    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -539,39 +539,39 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
     }
 
     while i + 7 < n {
-        // 8-lane loads
-        let p0 = _mm512_loadu_pd(p_ptr.add(i - 1)); // [p[i-1]..p[i+6]]
-        let p1 = _mm512_loadu_pd(p_ptr.add(i)); // [p[i]..p[i+7]]
-        let vv = _mm512_loadu_pd(v_ptr.add(i)); // [v[i]..v[i+7]]
+        
+        let p0 = _mm512_loadu_pd(p_ptr.add(i - 1)); 
+        let p1 = _mm512_loadu_pd(p_ptr.add(i)); 
+        let vv = _mm512_loadu_pd(v_ptr.add(i)); 
 
-        // invalid: isnan(p0)|isnan(p1)|isnan(v)| (p0==0)
+        
         let m_nan_p0 = _mm512_cmp_pd_mask(p0, p0, _CMP_UNORD_Q);
         let m_nan_p1 = _mm512_cmp_pd_mask(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm512_cmp_pd_mask(vv, vv, _CMP_UNORD_Q);
         let m_eq0_p0 = _mm512_cmp_pd_mask(p0, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
         let invalid = m_nan_p0 | m_nan_p1 | m_nan_v | m_eq0_p0;
 
-        // cur = v * ((p1 - p0) / p0)
-        // Use rcp14 with two Newton refinements to reach near-IEEE precision
-        // while remaining faster than full-width division on most CPUs.
+        
+        
+        
         let diff = _mm512_sub_pd(p1, p0);
         let r0 = _mm512_rcp14_pd(p0);
         let two = _mm512_set1_pd(2.0);
-        let e1 = _mm512_fnmadd_pd(p0, r0, two);      // e1 = 2 - p0*r0
-        let r1 = _mm512_mul_pd(r0, e1);              // first refinement
-        let e2 = _mm512_fnmadd_pd(p0, r1, two);      // e2 = 2 - p0*r1
-        let r2 = _mm512_mul_pd(r1, e2);              // second refinement
+        let e1 = _mm512_fnmadd_pd(p0, r0, two);      
+        let r1 = _mm512_mul_pd(r0, e1);              
+        let e2 = _mm512_fnmadd_pd(p0, r1, two);      
+        let r2 = _mm512_mul_pd(r1, e2);              
         let div = _mm512_mul_pd(diff, r2);
         let mul = _mm512_mul_pd(vv, div);
         let cur = _mm512_mask_mov_pd(mul, invalid, _mm512_set1_pd(f64::NAN));
 
-        // Inclusive scan: do two 4-lane scans on 256-bit halves, then fix up high half
+        
         let lo256 = _mm512_castpd512_pd256(cur);
         let hi256 = _mm512_extractf64x4_pd(cur, 1);
         let lo_ps = prefix4_pd(lo256);
         let mut hi_ps = prefix4_pd(hi256);
 
-        // add low-half total to high-half prefix
+        
         let lo_hi128 = _mm256_extractf128_pd(lo_ps, 1);
         let lo_total = {
             let last_lo = _mm_unpackhi_pd(lo_hi128, lo_hi128);
@@ -580,16 +580,16 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         };
         hi_ps = _mm256_add_pd(hi_ps, _mm256_set1_pd(lo_total));
 
-        // combine halves into 512
+        
         let ps512 = _mm512_insertf64x4(_mm512_castpd256_pd512(lo_ps), hi_ps, 1);
 
-        // add carry and store
+        
         let outv = _mm512_add_pd(ps512, _mm512_set1_pd(prev));
         _mm512_storeu_pd(o_ptr.add(i), outv);
 
-        // update carry: last lane of outv
-        let hi2 = _mm512_extractf64x4_pd(outv, 1); // __m256d with lanes [4..7]
-        let hi128 = _mm256_extractf128_pd(hi2, 1); // __m128d with lanes [6,7]
+        
+        let hi2 = _mm512_extractf64x4_pd(outv, 1); 
+        let hi128 = _mm256_extractf128_pd(hi2, 1); 
         let last_hi = _mm_unpackhi_pd(hi128, hi128);
         let tmp: [f64; 2] = core::mem::transmute(last_hi);
         prev = tmp[0];
@@ -597,7 +597,7 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 8;
     }
 
-    // AVX2 tail if >= 4 remain
+    
     while i + 3 < n {
         use core::arch::x86_64::*;
         let p0 = _mm256_loadu_pd(p_ptr.add(i - 1));
@@ -640,7 +640,7 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 4;
     }
 
-    // Scalar tail
+    
     if i < n {
         let mut p_prev = *p_ptr.add(i - 1);
         while i < n {
@@ -882,7 +882,7 @@ pub fn vpt_batch_inner_into(
     let first = vpt_first_valid(price, volume)
         .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
 
-    // change calls to start at first + 1
+    
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
@@ -903,15 +903,15 @@ pub fn vpt_batch_inner_into(
 /// Streaming VPT: sticky-NaN to match slice/batch; FMA used on hot path.
 #[derive(Clone, Debug, Default)]
 pub struct VptStream {
-    // Previous price p[i-1]
+    
     last_price: f64,
-    // Previous increment cur(i-1) = v[i-1] * ((p[i-1] - p[i-2]) / p[i-2]); NaN until available
+    
     carry_inc: f64,
-    // Last cumulative VPT value emitted; NaN until first non-NaN is produced
+    
     cum: f64,
-    // Have we seen at least one sample?
+    
     seeded: bool,
-    // Once true, we permanently output NaN (matches slice/batch semantics after invalid data)
+    
     sticky_nan: bool,
 }
 
@@ -923,7 +923,7 @@ impl VptStream {
     ///   - Some(value): cumulative VPT thereafter
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        // Seed with the very first price; no output yet.
+        
         if !self.seeded {
             self.last_price = price;
             self.seeded = true;
@@ -933,14 +933,14 @@ impl VptStream {
             return None;
         }
 
-        // If we ever hit an invalid sample, match array semantics: stay NaN forever.
+        
         if self.sticky_nan {
-            self.last_price = price; // keep tracking price for potential manual restart
+            self.last_price = price; 
             return Some(f64::NAN);
         }
 
-        // Strict validation to mirror the slice/batch code:
-        // need finite p[i-1], finite p[i], finite v[i], and p[i-1] != 0.0.
+        
+        
         if !(self.last_price.is_finite()
             && self.last_price != 0.0
             && price.is_finite()
@@ -953,24 +953,24 @@ impl VptStream {
             return Some(f64::NAN);
         }
 
-        // Hot-path math (one div, two muls, one add). Use FMA to reduce latency/rounding:
-        // cur = volume * ((price - last_price) / last_price)
+        
+        
         let inv = 1.0 / self.last_price;
         let scale = volume * inv;
         let dv = price - self.last_price;
         self.last_price = price;
 
-        // Fused: cur = dv * scale + 0
+        
         let cur_inc = dv.mul_add(scale, 0.0);
-        // First valid increment: emit NaN (warmup) but store carry for the next step
+        
         if self.carry_inc.is_nan() {
             self.carry_inc = cur_inc;
             return Some(f64::NAN);
         }
 
-        // From the second valid pair onward:
-        // at the second pair, cum is NaN, so base := carry_inc (sum of two increments);
-        // after that, base := cum (running sum).
+        
+        
+        
         let base = if self.cum.is_finite() {
             self.cum
         } else {
@@ -1111,11 +1111,11 @@ fn vpt_batch_inner(
     let rows = 1usize;
     let cols = price.len();
 
-    // uninit matrix, then fill warmup prefixes with NaN
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // For VPT, warmup is always at least 1 (index 0 is always NaN)
-    // but might be more if there are NaN values in the data
+    
+    
     let valid_count = price
         .iter()
         .zip(volume.iter())
@@ -1135,7 +1135,7 @@ fn vpt_batch_inner(
     let warm = vec![first_valid + 1];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // get &mut [f64] view over MaybeUninit<f64> buffer
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1160,18 +1160,18 @@ fn vpt_batch_inner(
 
 #[inline(always)]
 pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
-    // full coverage writer for python path
-    // Find first valid index and set everything before and including it to NaN
+    
+    
     let n = price.len();
     if let Some(first) = vpt_first_valid(price, volume) {
-        // Set warmup prefix to NaN
+        
         for i in 0..=first {
             out[i] = f64::NAN;
         }
-        // Use the _from variant starting at first + 1
+        
         vpt_row_scalar_from(price, volume, first + 1, out);
     } else {
-        // No valid data, all NaN
+        
         for i in 0..n {
             out[i] = f64::NAN;
         }
@@ -1191,7 +1191,7 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    // Seed with the increment at index (start_i - 1); not written to out.
+    
     let mut prev = if start_i >= 2 {
         let k = start_i - 1;
         let p0 = *p_ptr.add(k - 1);
@@ -1206,12 +1206,12 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         0.0
     };
 
-    // Sliding reuse of p[i-1]; unroll by 4.
+    
     let mut i = start_i;
     let mut p_prev = *p_ptr.add(i - 1);
 
     while i + 3 < n {
-        // i
+        
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
         let cur0 = if (p_prev != p_prev) || (p_prev == 0.0) || (p1 != p1) || (v1 != v1) {
@@ -1224,7 +1224,7 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val0;
         p_prev = p1;
 
-        // i + 1
+        
         let j1 = i + 1;
         let p2 = *p_ptr.add(j1);
         let v2 = *v_ptr.add(j1);
@@ -1238,7 +1238,7 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val1;
         p_prev = p2;
 
-        // i + 2
+        
         let j2 = i + 2;
         let p3 = *p_ptr.add(j2);
         let v3 = *v_ptr.add(j2);
@@ -1252,7 +1252,7 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val2;
         p_prev = p3;
 
-        // i + 3
+        
         let j3 = i + 3;
         let p4 = *p_ptr.add(j3);
         let v4 = *v_ptr.add(j3);
@@ -1269,7 +1269,7 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         i += 4;
     }
 
-    // Tail
+    
     while i < n {
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
@@ -1379,7 +1379,7 @@ pub fn vpt_batch_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    // Accept non-contiguous inputs; copy only when necessary
+    
     let price_slice: &[f64];
     let volume_slice: &[f64];
     let owned_price;
@@ -1392,7 +1392,7 @@ pub fn vpt_batch_py<'py>(
         return Err(PyValueError::new_err(VptError::EmptyInputData.to_string()));
     }
 
-    // VPT has no parameters, so single row output
+    
     let rows: usize = 1;
     let cols = price_slice.len();
 
@@ -1432,13 +1432,13 @@ pub fn vpt_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // No parameters for VPT, but include empty list for consistency
+    
     dict.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
 
     Ok(dict)
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1567,16 +1567,16 @@ pub fn vpt_into(
         let price = std::slice::from_raw_parts(price_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
 
-        // Check if either input aliases with output
+        
         if price_ptr == out_ptr || volume_ptr == out_ptr {
-            // Need temporary buffer for aliasing
+            
             let mut temp = vec![0.0; len];
             vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, write directly
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             vpt_into_slice(out, price, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1589,7 +1589,7 @@ pub fn vpt_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct VptBatchConfig {
-    // VPT has no parameters, so empty config
+    
 }
 
 #[cfg(feature = "wasm")]
@@ -1604,7 +1604,7 @@ pub struct VptBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = vpt_batch)]
 pub fn vpt_batch_js(price: &[f64], volume: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
-    // VPT has no parameters, so batch returns single row
+    
     let output = vpt_batch_with_kernel(price, volume, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1634,7 +1634,7 @@ pub fn vpt_batch_into(
     unsafe {
         let price = std::slice::from_raw_parts(price_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
-        // Check if either input aliases with output
+        
         if price_ptr == out_ptr || volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
@@ -1647,16 +1647,16 @@ pub fn vpt_batch_into(
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
-        // Return number of parameter combinations (always 1 for VPT)
+        
         Ok(1)
     }
 }
 
-// Python CUDA handle for VPT: CAI v3 and DLPack v1.x. Keeps CUDA context alive.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "vector_ta", name = "VptDeviceArrayF32", unsendable)]
 pub struct VptDeviceArrayF32Py {
-    // One-shot export via __dlpack__: move out of this Option
+    
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
@@ -1912,12 +1912,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1949,7 +1949,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_vpt_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1961,10 +1961,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate price and volume data
-        // Prices: non-negative values (including zero to test edge case)
-        // Volume: non-negative values (realistic for trading volume)
-        // Length: at least 2 points (minimum for VPT calculation)
+        
+        
+        
+        
         let strat = (2usize..=400).prop_flat_map(|len| {
             (
                 prop::collection::vec(
@@ -1983,13 +1983,13 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(&strat, |(price, volume)| {
             let input = VptInput::from_slices(&price, &volume);
 
-            // Get output from the kernel being tested
+            
             let VptOutput { values: out } = vpt_with_kernel(&input, kernel)?;
 
-            // Get reference output from scalar kernel
+            
             let VptOutput { values: ref_out } = vpt_with_kernel(&input, Kernel::Scalar)?;
 
-            // Verify properties
+            
             prop_assert_eq!(out.len(), price.len(), "Output length mismatch");
             prop_assert_eq!(
                 ref_out.len(),
@@ -1997,7 +1997,7 @@ mod tests {
                 "Reference output length mismatch"
             );
 
-            // First value should always be NaN (warmup period)
+            
             prop_assert!(
                 out[0].is_nan(),
                 "First VPT value should be NaN, got {}",
@@ -2009,7 +2009,7 @@ mod tests {
                 ref_out[0]
             );
 
-            // Manually calculate VPT to verify correctness
+            
             let mut expected_vpt = vec![f64::NAN; price.len()];
             let mut prev_vpt_val = f64::NAN;
 
@@ -2018,36 +2018,36 @@ mod tests {
                 let p1 = price[i];
                 let v1 = volume[i];
 
-                // Calculate current VPT value
+                
                 let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
                     f64::NAN
                 } else {
                     v1 * ((p1 - p0) / p0)
                 };
 
-                // Output is current VPT value + previous VPT value (shifted array approach)
+                
                 expected_vpt[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
                     f64::NAN
                 } else {
                     vpt_val + prev_vpt_val
                 };
 
-                // Save current VPT value for next iteration
+                
                 prev_vpt_val = vpt_val;
             }
 
-            // Compare outputs with expected calculations
+            
             for i in 0..price.len() {
                 let y = out[i];
                 let r = ref_out[i];
                 let e = expected_vpt[i];
 
-                // Check consistency between kernels
+                
                 if y.is_nan() && r.is_nan() {
-                    // Both NaN is fine
+                    
                     continue;
                 } else if !y.is_nan() && !r.is_nan() {
-                    // Both should be very close
+                    
                     let diff = (y - r).abs();
                     prop_assert!(
                         diff < 1e-9,
@@ -2058,7 +2058,7 @@ mod tests {
                         diff
                     );
 
-                    // Also check against expected value
+                    
                     if !e.is_nan() {
                         let diff_expected = (y - e).abs();
                         prop_assert!(
@@ -2107,7 +2107,7 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various data sources since VPT has no parameters
+        
         let test_sources = vec!["close", "open", "high", "low"];
 
         for (src_idx, &source) in test_sources.iter().enumerate() {
@@ -2124,7 +2124,7 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Source {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \

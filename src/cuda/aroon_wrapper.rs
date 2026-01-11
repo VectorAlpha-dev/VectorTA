@@ -40,8 +40,8 @@ pub enum CudaAroonError {
 }
 
 pub struct DeviceArrayF32Pair {
-    pub first: DeviceArrayF32,  // up
-    pub second: DeviceArrayF32, // down
+    pub first: DeviceArrayF32,  
+    pub second: DeviceArrayF32, 
 }
 
 impl DeviceArrayF32Pair {
@@ -249,7 +249,7 @@ impl CudaAroon {
             .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_batch_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        // Dynamic shared memory: two int deques of capacity (max_len+1)
+        
         let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
 
@@ -306,11 +306,11 @@ impl CudaAroon {
             ));
         }
         if length == 0 || length > rows {
-            // lookback cannot exceed series length
+            
             return Err(CudaAroonError::InvalidInput("invalid length".into()));
         }
 
-        // first-valid per series (both finite)
+        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -348,7 +348,7 @@ impl CudaAroon {
             .get_function("aroon_many_series_one_param_f32")
             .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_many_series_one_param_f32" })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        // Dynamic shared memory: two int deques of capacity (length+1)
+        
         let shmem_bytes_usize: usize = 2 * (length + 1) * std::mem::size_of::<i32>();
         let (suggested_block, _min_grid) = func
             .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
@@ -445,7 +445,7 @@ impl CudaAroon {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -600,7 +600,7 @@ pub mod benches {
         let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
 
-        // Match wrapper kernel config selection (once in prep).
+        
         let mut func = cuda
             .module
             .get_function("aroon_many_series_one_param_f32")
@@ -633,8 +633,8 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4; // rough
-        let bytes_many = 256usize * 16_384usize * 2 * 4 * 3; // 2 inputs + 2 outputs + firsts
+        let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4; 
+        let bytes_many = 256usize * 16_384usize * 2 * 4 * 3; 
         vec![
             CudaBenchScenario::new(
                 "aroon",

@@ -1,17 +1,17 @@
-// Integration tests for CUDA Fisher kernels
 
-use my_project::indicators::fisher::{
+
+use vector_ta::indicators::fisher::{
     fisher_batch_with_kernel, fisher_with_kernel, FisherBatchBuilder, FisherBatchRange,
     FisherInput, FisherParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaFisher;
+use vector_ta::cuda::oscillators::CudaFisher;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,7 +67,7 @@ fn fisher_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_pair.fisher.buf.copy_to(&mut g_fish)?;
     dev_pair.signal.buf.copy_to(&mut g_sig)?;
 
-    let tol = 4.0; // relaxed absolute tol for GPU vs CPU (FP32 vs FP64)
+    let tol = 4.0; 
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.fisher[idx], g_fish[idx] as f64, tol),
@@ -96,8 +96,8 @@ fn fisher_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let cols = 6usize; // series
-    let rows = 2048usize; // length
+    let cols = 6usize; 
+    let rows = 2048usize; 
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -147,7 +147,7 @@ fn fisher_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     pair.fisher.buf.copy_to(&mut g_fish)?;
     pair.signal.buf.copy_to(&mut g_sig)?;
 
-    let tol = 4.0; // relaxed absolute tol for GPU vs CPU (FP32 vs FP64)
+    let tol = 4.0; 
     for idx in 0..g_fish.len() {
         assert!(
             approx_eq(cpu_fish_tm[idx], g_fish[idx] as f64, tol),

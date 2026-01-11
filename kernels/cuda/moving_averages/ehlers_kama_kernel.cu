@@ -1,10 +1,10 @@
-// CUDA kernels for Ehlers Kaufman Adaptive Moving Average (KAMA).
-//
-// Mirrors the scalar implementation: each parameter combination is handled by
-// a single thread block that walks the time series sequentially while
-// maintaining the rolling volatility sum used to derive the adaptive smoothing
-// factor. A second kernel covers the many-series × one-parameter path operating
-// on time-major input.
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,25 +13,25 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// --- Tunables ---------------------------------------------------------------
+
 #ifndef KAMA_USE_STREAMING_LOADS
-#define KAMA_USE_STREAMING_LOADS 1   // set 0 to disable ld.global.cs
+#define KAMA_USE_STREAMING_LOADS 1   
 #endif
 
 #ifndef KAMA_USE_PREFETCH
-#define KAMA_USE_PREFETCH 0          // set 1 to enable prefetch.global.L2
+#define KAMA_USE_PREFETCH 0          
 #endif
 
 #ifndef KAMA_PREFETCH_DIST
-#define KAMA_PREFETCH_DIST 64        // steps ahead to prefetch when enabled
+#define KAMA_PREFETCH_DIST 64        
 #endif
 
-// Match the scalar Rust implementation exactly (see `ehlers_kama_scalar`):
-// s = ((0.6667 * ER) + 0.0645)^2
+
+
 static constexpr float SC_MUL = 0.6667f;
 static constexpr float SC_ADD = 0.0645f;
 
-// Kahan compensated add for improved accuracy of rolling L1 sum
+
 __device__ __forceinline__
 void kahan_add(float x, float &sum, float &c) {
     float y = x - c;
@@ -40,7 +40,7 @@ void kahan_add(float x, float &sum, float &c) {
     sum = t;
 }
 
-// Optional streaming load (evict-first) to reduce L1 pollution on read-once inputs
+
 __device__ __forceinline__
 float ld_streaming_f32(const float* p) {
 #if KAMA_USE_STREAMING_LOADS && (__CUDA_ARCH__ >= 700)
@@ -52,7 +52,7 @@ float ld_streaming_f32(const float* p) {
 #endif
 }
 
-// Optional L2 prefetch for a given address
+
 __device__ __forceinline__
 void prefetch_l2(const float* p) {
 #if KAMA_USE_PREFETCH && (__CUDA_ARCH__ >= 700)
@@ -107,14 +107,14 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             continue;
         }
 
-        // Warmup semantics: [0, warm) = NaN
+        
         for (int i = 0; i < warm; ++i) out_row[i] = nan_f;
 
         const int start = warm;
         int delta_start = start - period + 1;
         if (delta_start < first + 1) delta_start = first + 1;
 
-        // Rolling sum of last (period-1) |Δ|
+        
         float delta_sum = 0.0f, delta_c = 0.0f;
         for (int k = delta_start; k <= start; ++k) {
             if (k > first) {
@@ -124,13 +124,13 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        // Seed the first KAMA value at index 'start'
+        
         const float prev_price = (start > 0)
             ? ld_streaming_f32(prices + (start - 1))
             : ld_streaming_f32(prices + start);
         const float cur_price  = ld_streaming_f32(prices + start);
 
-        const int anchor_idx   = start - (period - 1);    // >= 0 by construction
+        const int anchor_idx   = start - (period - 1);    
         const float anchor_p   = ld_streaming_f32(prices + anchor_idx);
         const float direction  = fabsf(cur_price - anchor_p);
 
@@ -142,7 +142,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
         float prev = fmaf(sc, cur_price - prev_price, prev_price);
         out_row[start] = prev;
 
-        // Main loop (window already full; anchor and drop always valid)
+        
         for (int i = start + 1; i < series_len; ++i) {
 #if KAMA_USE_PREFETCH
             if (i + KAMA_PREFETCH_DIST < series_len)
@@ -159,12 +159,12 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
                 const float drop = fabsf(d0 - d1);
                 const float net  = newest_diff - drop;
                 kahan_add(net, delta_sum, delta_c);
-                if (delta_sum < 0.0f) delta_sum = 0.0f;   // numerical safety
+                if (delta_sum < 0.0f) delta_sum = 0.0f;   
             } else {
                 kahan_add(newest_diff, delta_sum, delta_c);
             }
 
-            const int anchor_i  = i - (period - 1);       // >= 0 from here onward
+            const int anchor_i  = i - (period - 1);       
             const float anchor  = ld_streaming_f32(prices + anchor_i);
             float ef_i = (delta_sum > 0.0f) ? (fabsf(newest - anchor) / delta_sum) : 0.0f;
             ef_i = __saturatef(ef_i);
@@ -275,7 +275,7 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
             kahan_add(newest_diff, delta_sum, delta_c);
         }
 
-        // Optional periodic exact rebase
+        
         if ((t & 127) == 0) {
             float s = 0.0f;
             for (int u = t - (period - 1) + 1; u <= t; ++u) {
@@ -309,11 +309,11 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     }
 }
 
-// 2D tiled many-series kernel: each thread handles one series sequentially.
-// Threads in a block cover a tile of series of size (blockDim.x * blockDim.y).
-// Grid.x tiles across all series; mapping:
-//   lane = threadIdx.y * blockDim.x + threadIdx.x
-//   series_idx = blockIdx.x * (blockDim.x * blockDim.y) + lane
+
+
+
+
+
 extern "C" __global__
 void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_tm,
                                                int period,
@@ -333,20 +333,20 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
 
     const int stride = num_series;
     const int warm = first + period - 1;
-    // Assumption: caller prefilled out_tm with NaN for the whole buffer.
+    
     if (warm >= series_len) return;
 
-    // Dynamic shared ring: sized by the launcher as `tile_series * (period-1) * sizeof(float)`.
-    // We gate usage using `ring_len` so callers can disable the ring when dynamic shared
-    // allocation exceeds device limits, while keeping the same kernel entrypoint.
+    
+    
+    
     extern __shared__ float s_ring[];
 
-    // Ring length is (period-1). Use shared-memory ring when within static limits,
-    // else fall back to the legacy global-load path.
+    
+    
     const int rb_len = period - 1;
 
-    // Static shared ring: sized for common tiles (<=128 threads) and rb_len<=128.
-    // Fall back to legacy path if constraints not met.
+    
+    
     const int MAX_TILE_SERIES = 128;
     const int MAX_RING        = 128;
 
@@ -359,7 +359,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
         float* ring = &s_ring[lane * rb_len];
         int head = 0;
 
-        // Warmup: build the initial delta_sum and fill the ring with the last (period-1) |Δ|
+        
         const int delta_start = (warm - period + 1 > first + 1) ? (warm - period + 1) : (first + 1);
         for (int k = delta_start; k <= warm; ++k) {
             const int cur  = k * stride + series_idx;
@@ -370,7 +370,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             kahan_add(d, delta_sum, delta_c);
         }
 
-        // Seed at 'warm'
+        
         const int cur0_idx   = warm * stride + series_idx;
         const int prev0_idx  = (warm > 0 ? (warm - 1) : warm) * stride + series_idx;
         const float cur0     = ld_streaming_f32(prices_tm + cur0_idx);
@@ -388,7 +388,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
         float prev = fmaf(sc0, cur0 - prev_px0, prev_px0);
         out_tm[cur0_idx] = prev;
 
-        // Main loop
+        
         for (int t = warm + 1; t < series_len; ++t) {
 #if KAMA_USE_PREFETCH
             if (t + KAMA_PREFETCH_DIST < series_len) {
@@ -402,8 +402,8 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             const float newest_prev = ld_streaming_f32(prices_tm + prv_idx);
             const float d_new       = fabsf(newest - newest_prev);
 
-            const float d_drop = ring[head];      // drop the oldest |Δ|
-            ring[head] = d_new;                   // push new |Δ|
+            const float d_drop = ring[head];      
+            ring[head] = d_new;                   
             head = (head + 1) - (head + 1 == rb_len ? rb_len : 0);
             kahan_add(d_new - d_drop, delta_sum, delta_c);
             if (delta_sum < 0.0f) delta_sum = 0.0f;
@@ -422,7 +422,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             out_tm[cur_idx] = prev;
         }
     } else {
-        // Fallback: legacy path without shared ring (exactly previous semantics)
+        
         const int start = warm;
         int delta_start = (start - period + 1);
         if (delta_start < first + 1) delta_start = first + 1;
@@ -516,7 +516,7 @@ void ehlers_kama_enforce_warm_nan_tm_f32(int period,
     }
 }
 
-// Guard-rail fix: explicitly ensure first row (t=0) is NaN for any series with warm > 0.
+
 extern "C" __global__
 void ehlers_kama_fix_first_row_nan_tm_f32(int period,
                                           int num_series,
@@ -529,6 +529,6 @@ void ehlers_kama_fix_first_row_nan_tm_f32(int period,
     const int warm = first + period - 1;
     if (warm > 0) {
         const float nan_f = __int_as_float(0x7fc00000);
-        out_tm[series_idx] = nan_f; // t=0 -> 0 * stride + series_idx
+        out_tm[series_idx] = nan_f; 
     }
 }

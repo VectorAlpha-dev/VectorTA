@@ -1,15 +1,15 @@
-// Integration tests for CUDA BOP kernels
 
-use my_project::indicators::bop::{bop_with_kernel, BopInput, BopParams};
-use my_project::utilities::data_loader::{read_candles_from_csv, source_type};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::bop::{bop_with_kernel, BopInput, BopParams};
+use vector_ta::utilities::data_loader::{read_candles_from_csv, source_type};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaBop;
+use vector_ta::cuda::oscillators::CudaBop;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -89,8 +89,8 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 1024usize; // length
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut open_tm = vec![f64::NAN; cols * rows];
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
@@ -107,7 +107,7 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut o = vec![f64::NAN; rows];

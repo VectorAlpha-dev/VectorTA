@@ -5,42 +5,42 @@
 
 use std::os::raw::{c_double, c_int};
 
-// Include our Rust FFI exports
+
 pub mod rust_ffi;
 
-// Report generation module
+
 pub mod report;
 
-// FFI overhead measurement module
+
 pub mod ffi_overhead;
 
-// Benchmark methodology module
+
 pub mod benchmark_methodology;
 
-// Unified benchmark system
+
 pub mod unified_benchmark;
 
-// JSON export functionality
+
 pub mod json_export;
 
-// Benchmark collector for aggregating results
+
 pub mod benchmark_collector;
 
-// Include generated bindings
+
 include!(concat!(env!("OUT_DIR"), "/tulip_bindings.rs"));
 
-// TA-Lib bindings are optional - only include if available
+
 #[cfg(feature = "talib")]
 include!(concat!(env!("OUT_DIR"), "/talib_bindings.rs"));
 
-// Define constants that might be missing
+
 pub const TI_OKAY: i32 = 0;
 
-// Re-export useful types
+
 pub type TulipReal = c_double;
 pub type TulipInt = c_int;
 
-// Wrapper module for Tulip indicators
+
 pub mod tulip {
     use super::*;
     use std::slice;
@@ -77,7 +77,7 @@ pub mod tulip {
 
         let info = &*indicator;
 
-        // Verify input/output counts
+        
         if input_ptrs.len() != info.inputs as usize {
             return Err(format!(
                 "Expected {} inputs, got {}",
@@ -94,7 +94,7 @@ pub mod tulip {
             ));
         }
 
-        // Call the indicator function if it exists
+        
         let indicator_fn = info.indicator.expect("Indicator function not found");
         let result = indicator_fn(
             size as c_int,
@@ -127,7 +127,7 @@ pub mod tulip {
 
         let info = &*indicator;
 
-        // Verify input/output counts
+        
         if inputs.len() != info.inputs as usize {
             return Err(format!(
                 "Expected {} inputs, got {}",
@@ -142,7 +142,7 @@ pub mod tulip {
             ));
         }
 
-        // Convert to raw pointers
+        
         let input_ptrs: Vec<*const TulipReal> = inputs
             .iter()
             .map(|slice| slice.as_ptr() as *const TulipReal)
@@ -153,7 +153,7 @@ pub mod tulip {
             .map(|slice| slice.as_mut_ptr() as *mut TulipReal)
             .collect();
 
-        // Call the indicator function if it exists
+        
         let indicator_fn = info.indicator.expect("Indicator function not found");
         let result = indicator_fn(
             size as c_int,
@@ -197,11 +197,11 @@ pub mod tulip {
     }
 }
 
-// Module for TA-Lib wrappers (if available)
+
 #[cfg(feature = "talib")]
 pub mod talib_wrapper;
 
-// Common benchmark utilities
+
 pub mod utils {
     use std::path::Path;
     use csv::Reader;

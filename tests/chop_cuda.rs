@@ -1,14 +1,14 @@
-// Integration tests for CUDA CHOP kernels
 
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaChop;
-use my_project::indicators::chop::{ChopBatchBuilder, ChopBatchRange, ChopParams};
+use vector_ta::cuda::oscillators::CudaChop;
+use vector_ta::indicators::chop::{ChopBatchBuilder, ChopBatchRange, ChopParams};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -51,7 +51,7 @@ fn chop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         drift: (1, 3, 1),
     };
 
-    // CPU baseline
+    
     let cpu = ChopBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
         .period_range(5, 25, 5)
@@ -59,7 +59,7 @@ fn chop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .drift_range(1, 3, 1)
         .apply_slices(&h, &l, &c)?;
 
-    // GPU
+    
     let hf: Vec<f32> = h.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = l.iter().map(|&v| v as f32).collect();
     let cf: Vec<f32> = c.iter().map(|&v| v as f32).collect();
@@ -75,7 +75,7 @@ fn chop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 5e-3; // FP32 kernels
+    let tol = 5e-3; 
     for idx in 0..host.len() {
         assert!(
             approx_eq(cpu.values[idx], host[idx] as f64, tol),

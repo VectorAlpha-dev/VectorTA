@@ -1,17 +1,17 @@
-// Integration tests for CUDA VLMA kernels (SMA + StdDev path)
 
-use my_project::indicators::vlma::{
+
+use vector_ta::indicators::vlma::{
     vlma_batch_with_kernel, vlma_with_kernel, VlmaBatchBuilder, VlmaBatchRange, VlmaBuilder,
     VlmaInput, VlmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVlma;
+use vector_ta::cuda::moving_averages::CudaVlma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -43,7 +43,7 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
 
-    // Sweep SMA + stddev only (CUDA-supported)
+    
     let sweep = VlmaBatchRange {
         min_period: (5, 7, 1),
         max_period: (20, 28, 4),
@@ -65,7 +65,7 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-3; // FP32 device vs f64 CPU scalar
+    let tol = 2e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -88,8 +88,8 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 6usize; // series
-    let rows = 1200usize; // time
+    let cols = 6usize; 
+    let rows = 1200usize; 
     let mut tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         for t in s..rows {
@@ -100,7 +100,7 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let min_p = 5usize;
     let max_p = 27usize;
 
-    // CPU baseline per series
+    
     let mut cpu = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

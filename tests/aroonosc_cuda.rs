@@ -1,17 +1,17 @@
-// Integration tests for CUDA AROONOSC kernels
 
-use my_project::indicators::aroonosc::{
+
+use vector_ta::indicators::aroonosc::{
     aroon_osc_with_kernel, AroonOscBatchBuilder, AroonOscBatchRange, AroonOscData, AroonOscInput,
     AroonOscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaAroonOsc;
+use vector_ta::cuda::oscillators::CudaAroonOsc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,13 +46,13 @@ fn aroonosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = AroonOscBatchRange { length: (9, 60, 5) };
 
-    // CPU reference via batch builder
+    
     let cpu = AroonOscBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
         .length_range(sweep.length.0, sweep.length.1, sweep.length.2)
         .apply_slices(&high, &low)?;
 
-    // GPU
+    
     let cuda = CudaAroonOsc::new(0).expect("CudaAroonOsc::new");
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
@@ -67,7 +67,7 @@ fn aroonosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_host = vec![0f32; gpu_handle.len()];
     gpu_handle.buf.copy_to(&mut gpu_host).unwrap();
 
-    let tol = 7e-4; // FP32 tolerance
+    let tol = 7e-4; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let cpu_val = cpu.values[idx];
         let gpu_val = gpu_host[idx] as f64;
@@ -91,8 +91,8 @@ fn aroonosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let rows = 48usize; // num_series
-    let cols = 2048usize; // series_len
+    let rows = 48usize; 
+    let cols = 2048usize; 
     let length = 14usize;
     let mut high_tm = vec![f32::NAN; rows * cols];
     let mut low_tm = vec![f32::NAN; rows * cols];
@@ -108,7 +108,7 @@ fn aroonosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    // GPU
+    
     let cuda = CudaAroonOsc::new(0).expect("CudaAroonOsc::new");
     let handle = cuda
         .aroonosc_many_series_one_param_time_major_dev(&high_tm, &low_tm, cols, rows, length)
@@ -119,7 +119,7 @@ fn aroonosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     let mut gpu_host = vec![0f32; handle.len()];
     handle.buf.copy_to(&mut gpu_host).unwrap();
 
-    // Compare a handful of series against CPU
+    
     let tol = 7e-4;
     for &s in &[0usize, 7, 17, 31, 47] {
         let mut high = vec![f64::NAN; cols];

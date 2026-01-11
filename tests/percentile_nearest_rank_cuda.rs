@@ -1,14 +1,14 @@
-// CUDA tests for Percentile Nearest Rank (PNR)
 
-use my_project::indicators::percentile_nearest_rank as pnr;
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::percentile_nearest_rank as pnr;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::percentile_nearest_rank_wrapper::CudaPercentileNearestRank;
+use vector_ta::cuda::percentile_nearest_rank_wrapper::CudaPercentileNearestRank;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -82,8 +82,8 @@ fn percentile_nearest_rank_cuda_many_series_one_param_matches_cpu(
         eprintln!("[pnr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; // number of series
-    let rows = 1024usize; // length per series
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 2)..rows {
@@ -95,7 +95,7 @@ fn percentile_nearest_rank_cuda_many_series_one_param_matches_cpu(
     let length = 15usize;
     let percentage = 50.0f64;
 
-    // CPU per series baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

@@ -57,7 +57,7 @@ pub enum CudaVlmaError {
     NotImplemented,
 }
 
-// -------- Kernel selection policy (kept for ALMA parity/debug; single impl under the hood) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -208,7 +208,7 @@ impl CudaVlma {
         }
     }
 
-    // ----- Utilities -----
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -286,7 +286,7 @@ impl CudaVlma {
         Ok(())
     }
 
-    // ----- Host-side helpers -----
+    
     fn build_prefixes(data: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
         let n = data.len();
         let mut ps = vec![0.0f64; n + 1];
@@ -320,7 +320,7 @@ impl CudaVlma {
             .collect())
     }
 
-    // ----- Kernel launches -----
+    
     fn launch_batch(
         &mut self,
         d_prices: &DeviceBuffer<f32>,
@@ -341,7 +341,7 @@ impl CudaVlma {
                 name: "vlma_batch_sma_std_prefix_f32",
             })?;
 
-        // Chunk combos to respect grid limits (y/x either way). We use grid.x here.
+        
         let bx = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 128,
@@ -449,7 +449,7 @@ impl CudaVlma {
         Ok(())
     }
 
-    // ----- Public API -----
+    
     pub fn vlma_batch_dev(
         &mut self,
         data_f32: &[f32],
@@ -464,14 +464,14 @@ impl CudaVlma {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaVlmaError::InvalidInput("all values are NaN".into()))?;
 
-        // Supported combos only: SMA + stddev (devtype=0)
+        
         let combos = Self::expand_supported_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaVlmaError::InvalidInput(
                 "no supported parameter combinations (require matype='sma', devtype=0)".into(),
             ));
         }
-        // Validate periods and valid window
+        
         for c in &combos {
             let max_p = c.max_period.unwrap_or(0);
             if max_p == 0 || max_p > len {
@@ -490,7 +490,7 @@ impl CudaVlma {
             }
         }
 
-        // Estimate VRAM: prices + 3 prefixes + periods + output
+        
         let (ps, pss, pn) = Self::build_prefixes(data_f32);
         let n = len;
         let m = combos.len();
@@ -512,7 +512,7 @@ impl CudaVlma {
             .and_then(|x| x.checked_add(periods_b))
             .and_then(|x| x.checked_add(out_b))
             .ok_or_else(|| CudaVlmaError::InvalidInput("total VRAM size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
                 return Err(CudaVlmaError::OutOfMemory {
@@ -525,7 +525,7 @@ impl CudaVlma {
             }
         }
 
-        // Upload inputs
+        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_ps = DeviceBuffer::from_slice(&ps)?;
         let d_pss = DeviceBuffer::from_slice(&pss)?;
@@ -541,13 +541,13 @@ impl CudaVlma {
         let d_min = DeviceBuffer::from_slice(&min_periods)?;
         let d_max = DeviceBuffer::from_slice(&max_periods)?;
 
-        // Output buffer
+        
         let total_elems = m
             .checked_mul(n)
             .ok_or_else(|| CudaVlmaError::InvalidInput("m * n overflowed".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total_elems) }?;
 
-        // Launch
+        
         self.launch_batch(
             &d_prices,
             &d_ps,
@@ -598,7 +598,7 @@ impl CudaVlma {
             return Err(CudaVlmaError::InvalidInput("invalid periods".into()));
         }
 
-        // Compute first_valid per series and validate
+        
         let mut first_valids = Vec::with_capacity(cols);
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -622,7 +622,7 @@ impl CudaVlma {
             first_valids.push(fv as i32);
         }
 
-        // VRAM estimate: input + first_valids + output
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaVlmaError::InvalidInput("cols * rows overflowed".into()))?;
@@ -671,7 +671,7 @@ impl CudaVlma {
     }
 }
 
-// ---------- Bench profiles (simple smoke; align with ALMA style names) ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -684,7 +684,7 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_b = ONE_SERIES_LEN * 4;
         let out_b = ONE_SERIES_LEN * PARAM_SWEEP * 4;
-        // add rough prefixes and headroom
+        
         in_b + out_b + (ONE_SERIES_LEN + 1) * (8 + 8 + 4) + 64 * 1024 * 1024
     }
 

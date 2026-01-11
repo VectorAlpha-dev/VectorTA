@@ -1,16 +1,16 @@
-// Integration tests for CUDA RSX kernels
 
-use my_project::indicators::rsx::{
+
+use vector_ta::indicators::rsx::{
     rsx_batch_with_kernel, rsx_with_kernel, RsxBatchRange, RsxInput, RsxParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::rsx_wrapper::CudaRsx;
+use vector_ta::cuda::oscillators::rsx_wrapper::CudaRsx;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -59,8 +59,8 @@ fn rsx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let atol = 6e-1; // absolute tolerance (covers FP32 divergence in tails)
-    let rtol = 1e-1; // 10% relative tolerance (matches Python RSX tests)
+    let atol = 6e-1; 
+    let rtol = 1e-1; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -96,7 +96,7 @@ fn rsx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 14usize;
 
-    // CPU baseline per series (time-major -> column wise)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

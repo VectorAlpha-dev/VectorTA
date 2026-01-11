@@ -1,4 +1,4 @@
-// Simple test to check if worker loads correctly
+
 const { Worker } = require('worker_threads');
 const path = require('path');
 
@@ -11,7 +11,7 @@ worker.on('message', (msg) => {
     if (msg.type === 'ready') {
         console.log('Worker is ready!');
         
-        // Test a simple computation
+        
         const testData = new Float64Array([1, 2, 3, 4, 5]);
         worker.postMessage({
             type: 'compute',
@@ -35,7 +35,7 @@ worker.on('exit', (code) => {
     console.log('Worker exited with code:', code);
 });
 
-// Timeout to prevent hanging
+
 setTimeout(() => {
     console.log('Test timeout - terminating worker');
     worker.terminate();

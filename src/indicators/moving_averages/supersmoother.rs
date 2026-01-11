@@ -433,7 +433,7 @@ pub unsafe fn supersmoother_scalar(
         });
     }
 
-    // Allocate once and let the row kernel write from warm onward.
+    
     let mut out = alloc_with_nan_prefix(len, warm);
     supersmoother_row_scalar(data, first, period, &mut out);
     Ok(SuperSmootherOutput { values: out })
@@ -486,16 +486,16 @@ pub unsafe fn supersmoother_avx512_long(
 #[derive(Debug, Clone)]
 pub struct SuperSmootherStream {
     period: usize,
-    // Coefficients
+    
     a: f64,
     a_sq: f64,
     b: f64,
     c: f64,
-    // Minimal state for O(1) update
-    x_prev: f64, // x[t-1]
-    y1: f64,     // y[t-1]
-    y2: f64,     // y[t-2]
-    seen: u8,    // 0 = no samples, 1 = have x[t-1], >=2 = fully primed
+    
+    x_prev: f64, 
+    y1: f64,     
+    y2: f64,     
+    seen: u8,    
 }
 
 impl SuperSmootherStream {
@@ -509,7 +509,7 @@ impl SuperSmootherStream {
             });
         }
 
-        // Compute coefficients once (no divides in the hot path)
+        
         let inv_p = 1.0 / (period as f64);
         let f = std::f64::consts::SQRT_2 * PI * inv_p;
         let a = (-f).exp();
@@ -860,7 +860,7 @@ pub fn supersmoother_batch_inner_into(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Cast the output buffer to MaybeUninit and create a Vec from it temporarily
+    
     let mut out_vec = unsafe {
         Vec::from_raw_parts(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -869,7 +869,7 @@ pub fn supersmoother_batch_inner_into(
         )
     };
     init_matrix_prefixes(&mut out_vec, cols, &warm);
-    // Forget the Vec to avoid double-free
+    
     std::mem::forget(out_vec);
 
     let out_mu = unsafe {
@@ -879,7 +879,7 @@ pub fn supersmoother_batch_inner_into(
         )
     };
 
-    // 2) Per-row compute into the same memory
+    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let out_row =
@@ -924,23 +924,23 @@ pub unsafe fn supersmoother_row_scalar(data: &[f64], first: usize, period: usize
     let len = data.len();
     let warm = first + period - 1;
 
-    // Row kernels do not touch 0..warm; caller handles warmup.
+    
     if len <= warm {
         return;
     }
 
-    // Coefficients (Ehlers 2‑pole SuperSmoother)
+    
     let f = 1.414_f64 * PI / (period as f64);
     let a = (-f).exp();
     let a_sq = a * a;
     let b = 2.0 * a * f.cos();
     let c = 0.5 * (1.0 + a_sq - b);
 
-    // Use raw pointers to avoid bounds checks in the hot loop
+    
     let x_ptr = data.as_ptr();
     let y_ptr = out.as_mut_ptr();
 
-    // Initial conditions at warm and warm+1 (if present)
+    
     *y_ptr.add(warm) = *x_ptr.add(warm);
     if len == warm + 1 {
         return;
@@ -950,36 +950,36 @@ pub unsafe fn supersmoother_row_scalar(data: &[f64], first: usize, period: usize
         return;
     }
 
-    // Carry state in registers: y[i-2], y[i-1], x[i-1]
+    
     let mut y_im2 = *y_ptr.add(warm);
     let mut y_im1 = *y_ptr.add(warm + 1);
     let mut x_prev = *x_ptr.add(warm + 1);
 
-    // Main recurrence (2x unrolled)
+    
     let mut i = warm + 2;
     let end_even = warm + 2 + ((len - (warm + 2)) & !1);
 
     while i < end_even {
-        // i
+        
         let x_i = *x_ptr.add(i);
         let s0 = f64::mul_add(b, y_im1, -a_sq * y_im2);
         let y0 = f64::mul_add(c, x_i + x_prev, s0);
         *y_ptr.add(i) = y0;
 
-        // i+1
+        
         let x_ip1 = *x_ptr.add(i + 1);
         let s1 = f64::mul_add(b, y0, -a_sq * y_im1);
         let y1 = f64::mul_add(c, x_ip1 + x_i, s1);
         *y_ptr.add(i + 1) = y1;
 
-        // roll
+        
         y_im2 = y0;
         y_im1 = y1;
         x_prev = x_ip1;
         i += 2;
     }
 
-    // Tail
+    
     if i < len {
         let x_i = *x_ptr.add(i);
         let s0 = f64::mul_add(b, y_im1, -a_sq * y_im2);
@@ -1196,7 +1196,7 @@ mod tests {
             }
         }
     }
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_supersmoother_no_poison(
         test_name: &str,
@@ -1207,7 +1207,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to catch uninitialized memory reads
+        
         let test_periods = vec![3, 7, 10, 14, 20, 30, 50, 100, 200];
 
         for period in test_periods {
@@ -1216,23 +1216,23 @@ mod tests {
             };
             let input = SuperSmootherInput::from_candles(&candles, "close", params);
 
-            // Skip if period is too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = supersmoother_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1240,7 +1240,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1248,7 +1248,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1261,7 +1261,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_supersmoother_no_poison(
         _test_name: &str,
@@ -1279,7 +1279,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: generate period first, then data of appropriate length
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1297,22 +1297,22 @@ mod tests {
                 };
                 let input = SuperSmootherInput::from_slice(&data, params);
 
-                // Run with test kernel and reference scalar kernel
+                
                 let SuperSmootherOutput { values: out } =
                     supersmoother_with_kernel(&input, kernel).unwrap();
                 let SuperSmootherOutput { values: ref_out } =
                     supersmoother_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first non-NaN index
+                
                 let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first + period - 1;
 
-                // Property 1: Warmup period values should be NaN
+                
                 for i in 0..warmup.min(out.len()) {
                     prop_assert!(out[i].is_nan(), "Expected NaN during warmup at index {}", i);
                 }
 
-                // Property 2: Initial conditions - first two values after warmup should match input
+                
                 if warmup < data.len() {
                     let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
                     prop_assert!(
@@ -1334,9 +1334,9 @@ mod tests {
                     );
                 }
 
-                // Property 3: Constant input property
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
-                    // For constant input, output should converge to that constant
+                    
                     let constant_val = data[first];
                     for i in (warmup + 10).min(out.len() - 1)..out.len() {
                         let tolerance = if period == 1 { 1e-8 } else { 1e-6 };
@@ -1350,7 +1350,7 @@ mod tests {
                     }
                 }
 
-                // Property 4: Cross-kernel consistency
+                
                 for i in warmup..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1364,7 +1364,7 @@ mod tests {
                             r
                         );
                     } else {
-                        // Allow slightly more tolerance for period=1 due to numerical precision
+                        
                         let tolerance = if period == 1 { 1e-8 } else { 1e-9 };
                         let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 
@@ -1380,7 +1380,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Filter stability - output should not blow up
+                
                 for i in warmup..out.len() {
                     prop_assert!(
                         out[i].is_nan() || out[i].abs() < 1e12,
@@ -1390,14 +1390,14 @@ mod tests {
                     );
                 }
 
-                // Property 6: Reasonable bounds check - only for non-sparse data
-                // IIR filters can have unbounded overshoot with sparse/impulsive data
+                
+                
                 if warmup < out.len() {
-                    // Check for sparse data (lots of zeros or near-zeros)
+                    
                     let zero_count = data.iter().filter(|&&x| x.abs() < 1e-10).count();
                     let sparsity_ratio = zero_count as f64 / data.len() as f64;
 
-                    // Only check bounds for non-sparse data where behavior is more predictable
+                    
                     if sparsity_ratio < 0.3 {
                         let data_min = data[0..=out.len() - 1]
                             .iter()
@@ -1412,8 +1412,8 @@ mod tests {
 
                         for i in warmup..out.len() {
                             if out[i].is_finite() {
-                                // Allow up to 12x overshoot for IIR filters with normal data
-                                // IIR filters can have significant overshoot even with normal data
+                                
+                                
                                 let bound = 12.0 * max_magnitude + data_range + 1e-3;
                                 prop_assert!(
                                     out[i].abs() <= bound,
@@ -1427,15 +1427,15 @@ mod tests {
                     }
                 }
 
-                // Property 7: Recursive formula verification (for indices after initial conditions)
+                
                 if warmup + 2 < out.len() {
-                    // Calculate filter coefficients
+                    
                     let a = (-1.414_f64 * std::f64::consts::PI / (period as f64)).exp();
                     let a_sq = a * a;
                     let b = 2.0 * a * (1.414_f64 * std::f64::consts::PI / (period as f64)).cos();
                     let c = (1.0 + a_sq - b) * 0.5;
 
-                    // Verify recursive formula for a few samples
+                    
                     let test_start = warmup + 2;
                     let test_end = (test_start + 10).min(out.len());
 
@@ -1453,10 +1453,10 @@ mod tests {
                     }
                 }
 
-                // Property 8: Period=1 edge case with proper tolerance
+                
                 if period == 1 && warmup + 2 < out.len() {
-                    // With period=1, the filter still applies its coefficients
-                    // Check that output remains bounded relative to recent input
+                    
+                    
                     for i in warmup + 2..out.len() {
                         let recent_window = &data[i.saturating_sub(5)..=i];
                         let recent_min =
@@ -1467,7 +1467,7 @@ mod tests {
                             .fold(f64::NEG_INFINITY, f64::max);
                         let recent_range = (recent_max - recent_min).abs();
 
-                        // Allow significant overshoot for period=1 due to filter characteristics
+                        
                         let tolerance =
                             recent_range + recent_max.abs().max(recent_min.abs()) + 1e-6;
                         prop_assert!(
@@ -1479,7 +1479,7 @@ mod tests {
                     }
                 }
 
-                // Property 9: Poison value detection
+                
                 for (i, &val) in out.iter().enumerate() {
                     if val.is_finite() {
                         let bits = val.to_bits();
@@ -1550,7 +1550,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1558,17 +1558,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple different batch configurations to catch edge cases
+        
         let batch_configs = vec![
-            (3, 10, 2),    // Small periods with small step
-            (10, 30, 10),  // Medium periods
-            (20, 100, 20), // Large periods
-            (5, 5, 1),     // Single period (edge case)
-            (2, 50, 1),    // Many periods starting from minimum
+            (3, 10, 2),    
+            (10, 30, 10),  
+            (20, 100, 20), 
+            (5, 5, 1),     
+            (2, 50, 1),    
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip if the largest period exceeds data length
+            
             if end > c.close.len() {
                 continue;
             }
@@ -1578,9 +1578,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1594,7 +1594,7 @@ mod tests {
                     0
                 };
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1602,7 +1602,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1610,7 +1610,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1623,7 +1623,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1634,21 +1634,21 @@ mod tests {
 
     #[test]
     fn test_supersmoother_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input slice
+        
         let len = 512usize;
         let mut data = vec![0.0f64; len];
         for i in 0..len {
             let x = i as f64;
-            // mix slow/fast components with a mild trend
+            
             data[i] = (x * 0.01).sin() * 2.0 + (x * 0.2).cos() * 0.5 + 0.001 * x;
         }
 
         let input = SuperSmootherInput::from_slice(&data, SuperSmootherParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = supersmoother(&input)?.values;
 
-        // Preallocate output and compute via zero-allocation API
+        
         let mut out = vec![0.0f64; len];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1656,13 +1656,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, exercise the compute_into path directly to validate parity
+            
             supersmoother_compute_into(&input, Kernel::Auto, &mut out)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: NaN == NaN, otherwise exact or tight epsilon for finite values
+        
         fn equal(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -1725,14 +1725,14 @@ pub fn supersmoother_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; // false for single operations
+    let kern = validate_kernel(kernel, false)?; 
 
     let params = SuperSmootherParams {
         period: Some(period),
     };
     let ss_in = SuperSmootherInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function and zero-copy transfer to NumPy
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| supersmoother_with_kernel(&ss_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;

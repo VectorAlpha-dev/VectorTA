@@ -46,7 +46,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-// Note: AVec and CACHELINE_ALIGN are not used by Fisher itself, only by helper functions
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -208,7 +208,7 @@ impl FisherBuilder {
 pub enum FisherError {
     #[error("fisher: Empty data provided.")]
     EmptyData,
-    // alias used by new call sites where requested by guidelines
+    
     #[error("fisher: Empty input data.")]
     EmptyInputData,
     #[error("fisher: Invalid period: period = {period}, data length = {data_len}")]
@@ -217,15 +217,15 @@ pub enum FisherError {
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("fisher: All values are NaN.")]
     AllValuesNaN,
-    // legacy variant (kept for compatibility)
+    
     #[error("fisher: Invalid output length: expected = {expected}, actual = {actual}")]
     InvalidLength { expected: usize, actual: usize },
-    // preferred variant for out slice length mismatches
+    
     #[error("fisher: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("fisher: Mismatched data length: high={high}, low={low}")]
     MismatchedDataLength { high: usize, low: usize },
-    // batch-only errors
+    
     #[error("fisher: Invalid range expansion: start={start}, end={end}, step={step}")]
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("fisher: Invalid kernel for batch path: {0:?}")]
@@ -259,7 +259,7 @@ pub fn fisher_with_kernel(
         return Err(FisherError::InvalidPeriod { period, data_len });
     }
 
-    // Find first valid index by checking both high and low
+    
     let mut first = None;
     for i in 0..data_len {
         if !high[i].is_nan() && !low[i].is_nan() {
@@ -281,7 +281,7 @@ pub fn fisher_with_kernel(
         other => other,
     };
 
-    // Allocate output arrays with NaN prefix for warmup period
+    
     let warmup = first + period - 1;
     let mut fisher_vals = alloc_with_nan_prefix(data_len, warmup);
     let mut signal_vals = alloc_with_nan_prefix(data_len, warmup);
@@ -320,7 +320,7 @@ pub fn fisher_into(
     fisher_out: &mut [f64],
     signal_out: &mut [f64],
 ) -> Result<(), FisherError> {
-    // Delegate to the slice-based helper with Kernel::Auto to match default dispatch.
+    
     fisher_into_slice(fisher_out, signal_out, input, Kernel::Auto)
 }
 
@@ -345,7 +345,7 @@ pub fn fisher_scalar_into(
     for i in warm..len {
         let start = i + 1 - period;
 
-        // Scan window min/max using HL2 midpoint
+        
         let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
         for j in start..=i {
             let midpoint = 0.5 * (high[j] + low[j]);
@@ -382,7 +382,7 @@ pub fn fisher_avx512_into(
     fisher_out: &mut [f64],
     signal_out: &mut [f64],
 ) {
-    // AVX512 stub: fallback to scalar
+    
     fisher_scalar_into(high, low, period, first, fisher_out, signal_out)
 }
 
@@ -396,7 +396,7 @@ pub fn fisher_avx2_into(
     fisher_out: &mut [f64],
     signal_out: &mut [f64],
 ) {
-    // AVX2 stub: fallback to scalar
+    
     fisher_scalar_into(high, low, period, first, fisher_out, signal_out)
 }
 
@@ -422,7 +422,7 @@ pub fn fisher_into_slice(
     let data_len = high.len();
     let period = input.params.period.unwrap_or(9);
 
-    // Find first valid index by checking both high and low
+    
     let mut first = None;
     for i in 0..data_len {
         if !high[i].is_nan() && !low[i].is_nan() {
@@ -432,7 +432,7 @@ pub fn fisher_into_slice(
     }
     let first = first.ok_or(FisherError::AllValuesNaN)?;
 
-    // Validate parameters
+    
     if period == 0 || period > data_len {
         return Err(FisherError::InvalidPeriod { period, data_len });
     }
@@ -449,7 +449,7 @@ pub fn fisher_into_slice(
         kern
     };
 
-    // Write results directly to output slices
+    
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => {
             fisher_scalar_into(high, low, period, first, fisher_dst, signal_dst)
@@ -465,7 +465,7 @@ pub fn fisher_into_slice(
         _ => unreachable!(),
     }
 
-    // Fill warmup period with NaN
+    
     let warmup_end = first + period - 1;
     for i in 0..warmup_end {
         fisher_dst[i] = f64::NAN;
@@ -598,7 +598,7 @@ fn expand_grid(r: &FisherBatchRange) -> Vec<FisherParams> {
                 match v.checked_add(step) { Some(n) => v = n, None => break, }
             }
         } else {
-            // reversed bounds supported
+            
             if step == 0 { return vec![start]; }
             let mut v = start;
             while v >= end {
@@ -653,7 +653,7 @@ fn fisher_batch_inner(
 
     let data_len = high.len().min(low.len());
 
-    // Find first valid index
+    
     let mut first = None;
     for i in 0..data_len {
         if !high[i].is_nan() && !low[i].is_nan() {
@@ -672,7 +672,7 @@ fn fisher_batch_inner(
     }
     let rows = combos.len();
     let cols = data_len;
-    // checked arithmetic to avoid overflow on allocations / indexing
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or(FisherError::InvalidRange {
@@ -681,11 +681,11 @@ fn fisher_batch_inner(
             step: sweep.period.2,
         })?;
 
-    // Use make_uninit_matrix for zero allocation
+    
     let mut fisher_mu = make_uninit_matrix(rows, cols);
     let mut signal_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination with checked arithmetic
+    
     let mut warmup_periods: Vec<usize> = Vec::with_capacity(combos.len());
     for c in &combos {
         let p = c.period.unwrap_or(0);
@@ -699,11 +699,11 @@ fn fisher_batch_inner(
         warmup_periods.push(warm);
     }
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut fisher_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut signal_mu, cols, &warmup_periods);
 
-    // Convert to slices for computation
+    
     let mut fisher_guard = core::mem::ManuallyDrop::new(fisher_mu);
     let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
 
@@ -714,7 +714,7 @@ fn fisher_batch_inner(
         core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
     };
 
-    // Shared precompute: HL2 midpoints reused across parameter rows
+    
     let hl: Vec<f64> = (0..data_len).map(|i| 0.5 * (high[i] + low[i])).collect();
 
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
@@ -735,7 +735,7 @@ fn fisher_batch_inner(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
-            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), // Should be resolved before here
+            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), 
         }
     };
 
@@ -769,7 +769,7 @@ fn fisher_batch_inner(
         }
     }
 
-    // Convert back to owned vectors
+    
     let fisher = unsafe {
         Vec::from_raw_parts(
             fisher_guard.as_mut_ptr() as *mut f64,
@@ -785,7 +785,7 @@ fn fisher_batch_inner(
         )
     };
 
-    // Forget the guards to prevent double-free
+    
     core::mem::forget(fisher_guard);
     core::mem::forget(signal_guard);
 
@@ -816,7 +816,7 @@ fn fisher_batch_inner_into(
 
     let data_len = high.len().min(low.len());
 
-    // Find first valid index
+    
     let mut first = None;
     for i in 0..data_len {
         if !high[i].is_nan() && !low[i].is_nan() {
@@ -852,7 +852,7 @@ fn fisher_batch_inner_into(
             step: sweep.period.2,
         })?;
 
-    // Initialize NaN values for warmup periods in the pre-allocated buffers
+    
     for (row, combo) in combos.iter().enumerate() {
         let p = combo.period.unwrap_or(0);
         let warmup = first
@@ -869,7 +869,7 @@ fn fisher_batch_inner_into(
         }
     }
 
-    // Shared precompute: HL2 midpoints reused across parameter rows
+    
     let hl: Vec<f64> = (0..data_len).map(|i| 0.5 * (high[i] + low[i])).collect();
 
     let do_row = |row: usize, out_fish: &mut [f64], out_signal: &mut [f64]| {
@@ -890,7 +890,7 @@ fn fisher_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
             }
-            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), // Should be resolved before here
+            Kernel::Auto => fisher_row_scalar_from_hl(&hl, first, period, out_fish, out_signal), 
         }
     };
 
@@ -949,7 +949,7 @@ fn fisher_row_scalar_direct(
     for i in warm..len {
         let start = i + 1 - period;
 
-        // Scan window min/max using HL2 midpoint
+        
         let (mut min_val, mut max_val) = (f64::MAX, f64::MIN);
         for j in start..=i {
             let midpoint = 0.5 * (high[j] + low[j]);
@@ -1030,7 +1030,7 @@ pub fn fisher_row_avx2_direct(
     out_fish: &mut [f64],
     out_signal: &mut [f64],
 ) {
-    // AVX2 stub: fallback to scalar
+    
     fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 }
 
@@ -1044,7 +1044,7 @@ pub fn fisher_row_avx512_direct(
     out_fish: &mut [f64],
     out_signal: &mut [f64],
 ) {
-    // AVX512 stub: fallback to scalar
+    
     fisher_row_scalar_direct(high, low, first, period, out_fish, out_signal)
 }
 
@@ -1053,12 +1053,12 @@ pub fn fisher_row_avx512_direct(
 #[derive(Debug, Clone)]
 pub struct FisherStream {
     period: usize,
-    // absolute count of samples seen
+    
     idx: usize,
     filled: bool,
-    // monotonic queues hold (value, index)
-    minq: VecDeque<(f64, usize)>, // non-decreasing -> front is current window min
-    maxq: VecDeque<(f64, usize)>, // non-increasing -> front is current window max
+    
+    minq: VecDeque<(f64, usize)>, 
+    maxq: VecDeque<(f64, usize)>, 
     prev_fish: f64,
     val1: f64,
 }
@@ -1088,7 +1088,7 @@ impl FisherStream {
         let v = 0.5 * (high + low);
         let k = self.idx;
 
-        // ---- monotonic min queue (non-decreasing)
+        
         while let Some(&(last_v, _)) = self.minq.back() {
             if last_v >= v {
                 self.minq.pop_back();
@@ -1098,7 +1098,7 @@ impl FisherStream {
         }
         self.minq.push_back((v, k));
 
-        // ---- monotonic max queue (non-increasing)
+        
         while let Some(&(last_v, _)) = self.maxq.back() {
             if last_v <= v {
                 self.maxq.pop_back();
@@ -1108,7 +1108,7 @@ impl FisherStream {
         }
         self.maxq.push_back((v, k));
 
-        // evict indices that fell out of the window [idx - period + 1, idx]
+        
         let start = k.saturating_sub(self.period - 1);
         while let Some(&(_, i)) = self.minq.front() {
             if i < start {
@@ -1125,10 +1125,10 @@ impl FisherStream {
             }
         }
 
-        // advance the stream index
+        
         self.idx = k + 1;
 
-        // warmup: we need 'period' samples before emitting a value
+        
         if !self.filled {
             self.filled = self.idx >= self.period;
             if !self.filled {
@@ -1136,14 +1136,14 @@ impl FisherStream {
             }
         }
 
-        // window extrema in O(1)
+        
         let min_val = self.minq.front().map(|&(x, _)| x).unwrap_or(v);
         let max_val = self.maxq.front().map(|&(x, _)| x).unwrap_or(v);
 
-        // exact same range guard and arithmetic ordering as scalar/batch path
+        
         let range = (max_val - min_val).max(0.001);
 
-        // same 0.67/0.66 recurrence and clamping semantics
+        
         self.val1 = 0.67f64.mul_add(self.val1, 0.66 * ((v - min_val) / range - 0.5));
         if self.val1 > 0.99 {
             self.val1 = 0.999;
@@ -1151,7 +1151,7 @@ impl FisherStream {
             self.val1 = -0.999;
         }
 
-        // signal is previous fisher; fisher uses the standard Ehlers form
+        
         let signal = self.prev_fish;
         let fisher = 0.5f64.mul_add(
             ((1.0 + self.val1) / (1.0 - self.val1)).ln(),
@@ -1349,35 +1349,35 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            FisherParams::default(),            // period: 9
-            FisherParams { period: Some(1) },   // minimum period
-            FisherParams { period: Some(2) },   // very small period
-            FisherParams { period: Some(3) },   // small period
-            FisherParams { period: Some(5) },   // small period
-            FisherParams { period: Some(10) },  // medium period
-            FisherParams { period: Some(20) },  // medium period
-            FisherParams { period: Some(30) },  // medium-large period
-            FisherParams { period: Some(50) },  // large period
-            FisherParams { period: Some(100) }, // very large period
-            FisherParams { period: Some(200) }, // extra large period
-            FisherParams { period: Some(240) }, // edge case from default batch range
+            FisherParams::default(),            
+            FisherParams { period: Some(1) },   
+            FisherParams { period: Some(2) },   
+            FisherParams { period: Some(3) },   
+            FisherParams { period: Some(5) },   
+            FisherParams { period: Some(10) },  
+            FisherParams { period: Some(20) },  
+            FisherParams { period: Some(30) },  
+            FisherParams { period: Some(50) },  
+            FisherParams { period: Some(100) }, 
+            FisherParams { period: Some(200) }, 
+            FisherParams { period: Some(240) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = FisherInput::from_candles(&candles, params.clone());
             let output = fisher_with_kernel(&input, kernel)?;
 
-            // Check fisher values
+            
             for (i, &val) in output.fisher.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1418,15 +1418,15 @@ mod tests {
                 }
             }
 
-            // Check signal values
+            
             for (i, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_fisher_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1485,19 +1485,19 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic high/low price data
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                // Generate base price, volatility, and data length
+                
                 (100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
                     .prop_flat_map(move |(base_price, volatility, data_len)| {
-                        // Generate random changes for price movement and spread flags
+                        
                         (
                             Just(base_price),
                             Just(volatility),
                             Just(data_len),
                             prop::collection::vec((-1f64..1f64), data_len),
-                            prop::collection::vec(prop::bool::ANY, data_len), // Flags for zero spread
+                            prop::collection::vec(prop::bool::ANY, data_len), 
                         )
                     })
                     .prop_map(
@@ -1508,25 +1508,25 @@ mod tests {
                             price_changes,
                             zero_spread_flags,
                         )| {
-                            // Generate synthetic high/low data with realistic movement
+                            
                             let mut high = Vec::with_capacity(data_len);
                             let mut low = Vec::with_capacity(data_len);
                             let mut current_price = base_price;
 
                             for i in 0..data_len {
-                                // Random walk for price with volatility
+                                
                                 let change = price_changes[i] * volatility * current_price;
-                                current_price = (current_price + change).max(10.0); // Prevent negative prices
+                                current_price = (current_price + change).max(10.0); 
 
-                                // Sometimes have zero spread (high == low), sometimes have normal spread
+                                
                                 if zero_spread_flags[i] && i % 5 == 0 {
-                                    // ~20% chance of zero spread
+                                    
                                     high.push(current_price);
                                     low.push(current_price);
                                 } else {
-                                    // Generate high/low with some spread
+                                    
                                     let spread =
-                                        current_price * 0.01 * (0.1 + price_changes[i].abs()); // 0.1-2% spread
+                                        current_price * 0.01 * (0.1 + price_changes[i].abs()); 
                                     high.push(current_price + spread);
                                     low.push((current_price - spread).max(10.0));
                                 }
@@ -1554,7 +1554,7 @@ mod tests {
                 signal: ref_sig,
             } = fisher_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: Output length matches input length
+            
             prop_assert_eq!(
                 out.len(),
                 high.len(),
@@ -1568,8 +1568,8 @@ mod tests {
                 test_name
             );
 
-            // Property 2: Warmup period behavior (first + period - 1 positions should be NaN)
-            // Find first valid index
+            
+            
             let mut first_valid = None;
             for i in 0..high.len() {
                 if !high[i].is_nan() && !low[i].is_nan() {
@@ -1595,7 +1595,7 @@ mod tests {
                     );
                 }
 
-                // Should have valid values after warmup
+                
                 if warmup_end < out.len() {
                     prop_assert!(
                         !out[warmup_end].is_nan(),
@@ -1606,38 +1606,38 @@ mod tests {
                 }
             }
 
-            // Property 3: Constant price behavior - Fisher should trend toward zero
-            // Look for periods where high and low are very close (constant price)
+            
+            
             if let Some(first) = first_valid {
                 let warmup_end = first + period - 1;
 
                 for window_start in warmup_end..out.len().saturating_sub(period * 2) {
                     let window_end = (window_start + period).min(out.len());
 
-                    // Check if we have a constant price period
+                    
                     let mut is_constant = true;
                     let first_hl = (high[window_start] + low[window_start]) / 2.0;
 
                     for i in window_start..window_end {
                         let current_hl = (high[i] + low[i]) / 2.0;
                         if (current_hl - first_hl).abs() > 0.001 * first_hl {
-                            // 0.1% tolerance
+                            
                             is_constant = false;
                             break;
                         }
                     }
 
-                    // If prices are constant, Fisher should be trending toward zero
+                    
                     if is_constant && window_end > window_start + 3 {
                         let fisher_start = out[window_start].abs();
                         let fisher_end = out[window_end - 1].abs();
 
-                        // Fisher should be decreasing in magnitude (trending to zero)
-                        // Allow some tolerance for numerical precision
+                        
+                        
                         if fisher_start > 0.1 {
-                            // Only check if initial value is significant
+                            
                             prop_assert!(
-									fisher_end <= fisher_start * 1.1, // Allow 10% tolerance for numerical noise
+									fisher_end <= fisher_start * 1.1, 
 									"[{}] Fisher not trending to zero in constant period [{}, {}]: start={}, end={}",
 									test_name, window_start, window_end, fisher_start, fisher_end
 								);
@@ -1646,7 +1646,7 @@ mod tests {
                 }
             }
 
-            // Property 4: Signal equals previous Fisher value
+            
             for i in 1..out.len() {
                 if !out[i - 1].is_nan() && !sig[i].is_nan() {
                     prop_assert!(
@@ -1660,12 +1660,12 @@ mod tests {
                 }
             }
 
-            // Property 5: Initial state verification - first valid Fisher value calculation
+            
             if let Some(first) = first_valid {
                 let warmup_end = first + period - 1;
                 if warmup_end < out.len() && !out[warmup_end].is_nan() {
-                    // The first Fisher value should start from prev_fish = 0.0
-                    // Due to the 0.5 factor and starting from 0, first value should be moderate
+                    
+                    
                     prop_assert!(
                         out[warmup_end].abs() < 5.0,
                         "[{}] First Fisher value {} seems incorrect (should start from zero state)",
@@ -1675,14 +1675,14 @@ mod tests {
                 }
             }
 
-            // Property 6: Kernel consistency - compare with scalar reference
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
                 let s = sig[i];
                 let rs = ref_sig[i];
 
-                // Check NaN consistency
+                
                 if y.is_nan() || r.is_nan() {
                     prop_assert_eq!(
                         y.is_nan(),
@@ -1694,7 +1694,7 @@ mod tests {
                     continue;
                 }
 
-                // Check signal NaN consistency
+                
                 if s.is_nan() || rs.is_nan() {
                     prop_assert_eq!(
                         s.is_nan(),
@@ -1706,7 +1706,7 @@ mod tests {
                     continue;
                 }
 
-                // ULP comparison for floating-point accuracy
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let s_bits = s.to_bits();
@@ -1793,9 +1793,9 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Optional: If you have reference values for the last few outputs,
-        // you could add accuracy checks like ALMA does.
-        // For demonstration, let's assume the expected values for the last five Fisher are:
+        
+        
+        
         let expected_last_five = [
             -0.4720164683904261,
             -0.23467530106650444,
@@ -1821,19 +1821,19 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (1, 10, 1),     // Small periods, every value
-            (2, 20, 2),     // Small to medium, even values
-            (5, 50, 5),     // Medium range, step 5
-            (10, 100, 10),  // Medium to large, step 10
-            (20, 240, 20),  // Large range, step 20
-            (9, 9, 0),      // Static default period
-            (50, 200, 50),  // Large periods only
-            (1, 5, 1),      // Very small periods only
-            (100, 240, 40), // Very large periods
-            (3, 30, 3),     // Multiples of 3
+            
+            (1, 10, 1),     
+            (2, 20, 2),     
+            (5, 50, 5),     
+            (10, 100, 10),  
+            (20, 240, 20),  
+            (9, 9, 0),      
+            (50, 200, 50),  
+            (1, 5, 1),      
+            (100, 240, 40), 
+            (3, 30, 3),     
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1842,7 +1842,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            // Check fisher values
+            
             for (idx, &val) in output.fisher.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1853,7 +1853,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1900,7 +1900,7 @@ mod tests {
                 }
             }
 
-            // Check signal values
+            
             for (idx, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1911,7 +1911,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1964,7 +1964,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -1992,21 +1992,21 @@ mod tests {
 
     #[test]
     fn check_batch_kernel_dispatch() -> Result<(), Box<dyn Error>> {
-        // Test that batch functions correctly dispatch to different kernel row functions
+        
         let high = vec![10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0];
         let low = vec![5.0, 7.0, 9.0, 10.0, 13.0, 15.0, 17.0, 19.0, 21.0, 23.0];
         let sweep = FisherBatchRange {
-            period: (3, 5, 1), // Small periods that fit our test data
+            period: (3, 5, 1), 
         };
 
-        // Test scalar kernel
+        
         let scalar_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Scalar)?;
 
-        // Test AVX2 kernel (if available)
+        
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         if is_x86_feature_detected!("avx2") {
             let avx2_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Avx2)?;
-            // Results should be identical regardless of kernel
+            
             for i in 0..scalar_result.fisher.len() {
                 let diff = (scalar_result.fisher[i] - avx2_result.fisher[i]).abs();
                 assert!(
@@ -2020,11 +2020,11 @@ mod tests {
             }
         }
 
-        // Test AVX512 kernel (if available)
+        
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         if is_x86_feature_detected!("avx512f") {
             let avx512_result = fisher_batch_slice(&high, &low, &sweep, Kernel::Avx512)?;
-            // Results should be identical regardless of kernel
+            
             for i in 0..scalar_result.fisher.len() {
                 let diff = (scalar_result.fisher[i] - avx512_result.fisher[i]).abs();
                 assert!(
@@ -2043,7 +2043,7 @@ mod tests {
 
     #[test]
     fn test_fisher_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial OHLCV series (length 256)
+        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -2070,20 +2070,20 @@ mod tests {
         let candles = crate::utilities::data_loader::Candles::new(ts, open, high.clone(), low.clone(), close, volume);
         let input = FisherInput::from_candles(&candles, FisherParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let base = fisher(&input)?;
 
-        // Preallocate output buffers
+        
         let mut out_fish = vec![0.0; n];
         let mut out_sig = vec![0.0; n];
 
-        // New native into API (guarded to avoid wasm symbol clash)
+        
         #[cfg(not(feature = "wasm"))]
         {
             fisher_into(&input, &mut out_fish, &mut out_sig)?;
         }
 
-        // Helper: treat NaN == NaN; prefer exact equality for finite
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2129,7 +2129,7 @@ pub fn fisher_py<'py>(
 
     let data_len = high_slice.len().min(low_slice.len());
 
-    // Pre-allocate NumPy arrays for zero-copy operation
+    
     let fisher_arr = unsafe { PyArray1::<f64>::new(py, [data_len], false) };
     let signal_arr = unsafe { PyArray1::<f64>::new(py, [data_len], false) };
     let fisher_slice = unsafe { fisher_arr.as_slice_mut()? };
@@ -2140,7 +2140,7 @@ pub fn fisher_py<'py>(
     };
     let input = FisherInput::from_slices(high_slice, low_slice, params);
 
-    // Compute directly into pre-allocated arrays
+    
     py.allow_threads(|| fisher_into_slice(fisher_slice, signal_slice, &input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -2178,7 +2178,7 @@ pub fn fisher_batch_py<'py>(
     py: Python<'py>,
     high: PyReadonlyArray1<'py, f64>,
     low: PyReadonlyArray1<'py, f64>,
-    period_range: (usize, usize, usize), // (start, end, step)
+    period_range: (usize, usize, usize), 
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
@@ -2322,7 +2322,7 @@ impl FisherDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Preserve legacy stream validation: disallow sentinel 0.
+        
         if let Some(ref s_obj) = stream {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -2449,14 +2449,14 @@ pub fn fisher_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-// ================== WASM BINDINGS ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub struct FisherResult {
-    values: Vec<f64>, // layout: [fisher(0..len), signal(0..len)]
-    rows: usize,      // 2
-    cols: usize,      // len
+    values: Vec<f64>, 
+    rows: usize,      
+    cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2568,8 +2568,8 @@ pub struct FisherBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct FisherBatchJsOutput {
-    pub values: Vec<f64>, // layout per combo: [fisher row, signal row] each of length cols
-    pub rows: usize,      // 2 * combos.len()
+    pub values: Vec<f64>, 
+    pub rows: usize,      
     pub cols: usize,
     pub combos: Vec<FisherParams>,
 }
@@ -2598,7 +2598,7 @@ pub fn fisher_batch_unified_js(
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("fisher_batch_unified_js: rows*cols overflow"))?;
 
-    // Allocate combined buffer: fisher(rows*cols) + signal(rows*cols)
+    
     let mut fisher = vec![0.0; total_elems];
     let mut signal = vec![0.0; total_elems];
 
@@ -2613,7 +2613,7 @@ pub fn fisher_batch_unified_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Interleave per combo without extra allocs
+    
     let values_capacity = total_elems
         .checked_mul(2)
         .ok_or_else(|| JsValue::from_str("fisher_batch_unified_js: values capacity overflow"))?;
@@ -2666,11 +2666,11 @@ pub fn fisher_batch_into(
         let fisher_out = std::slice::from_raw_parts_mut(fisher_ptr, total_size);
         let signal_out = std::slice::from_raw_parts_mut(signal_ptr, total_size);
 
-        // Compute batch results directly into output buffers
+        
         let output = fisher_batch_inner(high, low, &sweep, Kernel::Auto, false)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Copy results to output buffers
+        
         fisher_out.copy_from_slice(&output.fisher);
         signal_out.copy_from_slice(&output.signal);
 

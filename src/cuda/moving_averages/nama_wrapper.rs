@@ -33,7 +33,7 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-// -------- Kernel selection policy (mirror ALMA surface) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -86,7 +86,7 @@ impl Default for ManySeriesKernelPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -131,10 +131,10 @@ pub struct CudaNama {
 }
 
 impl CudaNama {
-    // ---- Device/Driver helpers -------------------------------------------------
+    
     #[inline]
     fn query_max_grid_x(&self) -> usize {
-        // Prefer driver attribute; fallback to historical 65_535
+        
         let dev = Device::get_device(self.device_id).ok();
         if let Some(d) = dev {
             unsafe {
@@ -152,7 +152,7 @@ impl CudaNama {
         65_535
     }
 
-    // Return (default_per_block, optin_per_block). If opt-in isn't supported, returns (default, default).
+    
     #[inline]
     fn query_smem_per_block_limits(&self) -> (usize, usize) {
         let dev = match Device::get_device(self.device_id) {
@@ -173,7 +173,7 @@ impl CudaNama {
         (default, optin.max(default as i32) as usize)
     }
 
-    // Try to raise the per‑block dynamic smem limit for this function.
+    
     #[inline]
     fn try_enable_large_dynamic_smem(func: &Function, bytes: usize) {
         unsafe {
@@ -443,7 +443,7 @@ impl CudaNama {
             ));
         }
 
-        // Shared memory layout: [dq_max:int[cap] | dq_min:int[cap] | tr_ring:float[period]]
+        
         let shared_bytes = (chunk_max_period + 1)
             .checked_mul(2 * std::mem::size_of::<i32>())
             .ok_or_else(|| CudaNamaError::InvalidInput("shared memory size overflow".into()))?;
@@ -456,7 +456,7 @@ impl CudaNama {
                     })?,
             )
             .ok_or_else(|| CudaNamaError::InvalidInput("shared memory size overflow".into()))?;
-        // Select function (prefix or full) first
+        
         let (mut func, is_prefix) = if let Some(_) = d_prefix_tr {
             (
                 self
@@ -475,12 +475,12 @@ impl CudaNama {
             )
         };
 
-        // Shared/occupancy preferences
+        
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
         Self::try_enable_large_dynamic_smem(&func, shared_bytes);
 
-        // Block size: Auto uses driver suggestion, otherwise honor policy
+        
         let user_block = match self.policy.batch {
             BatchKernelPolicy::Auto => None,
             BatchKernelPolicy::Plain { block_x }
@@ -502,14 +502,14 @@ impl CudaNama {
         let grid: GridSize = (n_chunk as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // If available dynamic smem is still lower, try once more to opt-in
+        
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if shared_bytes > avail {
                 Self::try_enable_large_dynamic_smem(&func, shared_bytes);
             }
         }
 
-        // Launch
+        
         if is_prefix {
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
@@ -588,7 +588,7 @@ impl CudaNama {
             periods_i32.push(period as i32);
         }
 
-        // Decide once whether we’ll use the prefix kernel
+        
         let use_prefix = !has_ohlc && self.has_function("nama_batch_prefix_f32");
 
         let total_elems = n_combos
@@ -611,7 +611,7 @@ impl CudaNama {
         let out_bytes = total_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
-        // Budget prefix only when it will be used
+        
         let prefix_bytes = if use_prefix {
             (series_len + 1)
                 .checked_mul(std::mem::size_of::<f32>())
@@ -625,7 +625,7 @@ impl CudaNama {
             .and_then(|v| v.checked_add(out_bytes))
             .and_then(|v| v.checked_add(prefix_bytes))
             .ok_or_else(|| CudaNamaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaNamaError::OutOfMemory { required, free, headroom });
@@ -656,9 +656,9 @@ impl CudaNama {
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
                 .map_err(CudaNamaError::Cuda)?;
 
-        // Optional prefix path: only when no OHLC is provided and kernel exists
+        
         let d_prefix = if use_prefix {
-            // Build degenerate TR prefix (NaN-insensitive): prefix[0]=0, prefix[t]=sum_{k=1..t}|p[k]-p[k-1]|
+            
             let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
             prefix.push(0.0f32);
             let mut acc = 0.0f32;
@@ -673,20 +673,20 @@ impl CudaNama {
                 acc += diff;
                 prefix.push(acc);
             }
-            // pad to series_len + 1
+            
             prefix.push(acc);
             Some(DeviceBuffer::from_slice(&prefix).map_err(CudaNamaError::Cuda)?)
         } else {
             None
         };
 
-        // Launch in chunks to respect grid size limits
+        
         let max_grid_x = self.query_max_grid_x();
         let mut launched_any = false;
         let mut start = 0usize;
         while start < n_combos {
             let len = (n_combos - start).min(max_grid_x);
-            // Periods are generated in ascending order; last in chunk is max
+            
             let chunk_max_period = periods_i32[start + len - 1] as usize;
             self.launch_batch_kernel_chunk(
                 &d_prices,
@@ -1098,7 +1098,7 @@ impl CudaNama {
                 "period must be positive".into(),
             ));
         }
-        // Shared memory: two deques (int) + TR ring (float)
+        
         let shared_bytes = (period + 1)
             .checked_mul(2 * std::mem::size_of::<i32>())
             .ok_or_else(|| CudaNamaError::InvalidInput("shared memory size overflow".into()))?;
@@ -1116,12 +1116,12 @@ impl CudaNama {
             .get_function("nama_many_series_one_param_time_major_f32")
             .map_err(|_| CudaNamaError::MissingKernelSymbol { name: "nama_many_series_one_param_time_major_f32" })?;
 
-        // Preferences and opt-in
+        
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
         Self::try_enable_large_dynamic_smem(&func, shared_bytes);
 
-        // Policy block size or suggested
+        
         let user_block = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => None,
             ManySeriesKernelPolicy::OneD { block_x }
@@ -1143,7 +1143,7 @@ impl CudaNama {
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Check availability with this launch shape
+        
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if shared_bytes > avail {
                 Self::try_enable_large_dynamic_smem(&func, shared_bytes);
@@ -1190,7 +1190,7 @@ impl CudaNama {
     }
 }
 
-// ---- Optional pinned I/O helpers (additive, no API break) ---------------------
+
 impl CudaNama {
     /// Return page-locked output for batch, useful for overlapping copies.
     pub fn nama_batch_into_pinned_host_f32(
@@ -1244,7 +1244,7 @@ impl CudaNama {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

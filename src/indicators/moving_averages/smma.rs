@@ -212,7 +212,7 @@ pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput,
         SmmaData::Slice(sl) => sl,
     };
 
-    // Check for empty input first
+    
     if data.is_empty() {
         return Err(SmmaError::EmptyInputData);
     }
@@ -252,7 +252,7 @@ pub fn smma_with_kernel(input: &SmmaInput, kernel: Kernel) -> Result<SmmaOutput,
             Kernel::Avx2 | Kernel::Avx2Batch => smma_avx2(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => smma_avx512(data, period, first, &mut out),
-            _ => smma_scalar(data, period, first, &mut out), // Default to scalar
+            _ => smma_scalar(data, period, first, &mut out), 
         }
     }
     Ok(SmmaOutput { values: out })
@@ -263,9 +263,9 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let end = first + period;
 
-    // Fast path: period == 1 → output equals input from `first` onward
+    
     if period == 1 {
-        // Write element-wise to avoid bulk copies per repo conventions
+        
         out[first] = data[first];
         let mut i = first + 1;
         while i < len {
@@ -275,7 +275,7 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    // Initial SMA over [first .. end)
+    
     let mut sum = 0.0f64;
     for i in first..end {
         sum += data[i];
@@ -284,11 +284,11 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let pf64 = period as f64;
     let pm1 = pf64 - 1.0;
 
-    // First valid SMMA value at index end-1
+    
     let mut prev = sum / pf64;
     out[end - 1] = prev;
 
-    // Recursive smoothing: keep exact mul + add + div order (avoid FMA/1/pf64 mul)
+    
     for i in end..len {
         prev = (prev * pm1 + data[i]) / pf64;
         out[i] = prev;
@@ -298,20 +298,20 @@ pub fn smma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn smma_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Calculate initial average
+    
     let end = first + period;
     let sum: f64 = data[first..end].iter().sum();
     let mut prev = sum / period as f64;
     out[end - 1] = prev;
 
-    // SIMD constants
+    
     let period_f64 = period as f64;
     let period_minus_1 = period_f64 - 1.0;
     let inv_period = 1.0 / period_f64;
 
-    // Process scalar loop - SMMA is inherently sequential
-    // SIMD doesn't provide much benefit due to the dependency chain
-    // Each value depends on the previous one
+    
+    
+    
     for i in end..data.len() {
         prev = (prev * period_minus_1 + data[i]) * inv_period;
         out[i] = prev;
@@ -340,7 +340,7 @@ pub fn smma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    // Initial SMA – preserve left-to-right accumulation order
+    
     let mut sum = 0.0f64;
     let mut i = first;
     while i < end {
@@ -350,12 +350,12 @@ pub fn smma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
     let pf64 = period as f64;
     let pm1 = pf64 - 1.0;
-    let inv_p = 1.0 / pf64; // reciprocal multiply in the hot loop
+    let inv_p = 1.0 / pf64; 
 
     let mut prev = sum * inv_p;
     out[end - 1] = prev;
 
-    // Hot loop with fused multiply-add; relaxed rounding
+    
     let mut t = end;
     while t + 4 <= len {
         let x0 = data[t];
@@ -387,18 +387,18 @@ pub fn smma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn smma_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Route AVX512 to AVX2 implementation (same semantics here)
+    
     smma_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn smma_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Route AVX512 to AVX2 implementation (same semantics here)
+    
     smma_avx2(data, period, first, out)
 }
 
-// smma_avx2_relaxed_fma logic is now inlined in smma_avx2
+
 
 #[inline(always)]
 fn smma_prepare<'a>(
@@ -406,7 +406,7 @@ fn smma_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // period
         usize,
@@ -874,20 +874,20 @@ fn smma_batch_inner_into(
         .collect();
 
     // SAFETY: We're reinterpreting the output slice as MaybeUninit to use the efficient
-    // init_matrix_prefixes function. This is safe because:
-    // 1. MaybeUninit<T> has the same layout as T
-    // 2. We ensure all values are written before the slice is used again
+    
+    
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // Closure that writes one row
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Cast the row slice to f64
+        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
@@ -896,11 +896,11 @@ fn smma_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch => smma_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => smma_row_avx512(data, first, period, dst),
-            _ => smma_row_scalar(data, first, period, dst), // Default to scalar
+            _ => smma_row_scalar(data, first, period, dst), 
         }
     };
 
-    // Run every row kernel
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -931,7 +931,7 @@ pub unsafe fn smma_row_scalar(data: &[f64], first: usize, period: usize, out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn smma_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    // Reuse the AVX2 kernel directly
+    
     smma_avx2(data, period, first, out)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1078,7 +1078,7 @@ mod tests {
             test_name
         );
         if let Err(SmmaError::EmptyInputData) = res {
-            // Good, expected error type
+            
         } else {
             panic!(
                 "[{}] Expected EmptyInputData error, got {:?}",
@@ -1177,13 +1177,13 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Property test strategy: generate period and matching data length
-        let strat = (1usize..=100) // period (include 1 for edge case testing)
+        
+        let strat = (1usize..=100) 
             .prop_flat_map(|period| {
                 (
                     prop::collection::vec(
                         (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                        period.max(2)..400, // ensure we have at least 2 data points
+                        period.max(2)..400, 
                     ),
                     Just(period),
                 )
@@ -1195,18 +1195,18 @@ mod tests {
             };
             let input = SmmaInput::from_slice(&data, params);
 
-            // Get output for the kernel being tested
+            
             let output = smma_with_kernel(&input, kernel)?;
 
-            // Get scalar reference for cross-kernel validation
+            
             let reference = smma_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: Output length equals input length
+            
             prop_assert_eq!(output.values.len(), data.len());
             prop_assert_eq!(reference.values.len(), data.len());
 
-            // Property 2: First period-1 values are NaN (warmup period)
-            // Skip for period=1 since there's no warmup
+            
+            
             if period > 1 {
                 for i in 0..period - 1 {
                     prop_assert!(
@@ -1218,8 +1218,8 @@ mod tests {
                 }
             }
 
-            // Property 3: First valid SMMA value should be simple average of first period values
-            // For period=1, first valid is at index 0; otherwise at period-1
+            
+            
             let first_smma_idx = if period == 1 { 0 } else { period - 1 };
             let first_sum: f64 = data[0..period].iter().sum();
             let expected_first = first_sum / period as f64;
@@ -1232,15 +1232,15 @@ mod tests {
                 (actual_first - expected_first).abs()
             );
 
-            // Property 4: Verify recursive formula for subsequent values
-            // SMMA[i] = (SMMA[i-1] * (period - 1) + data[i]) / period
+            
+            
             if data.len() > period {
                 for i in period..data.len().min(period + 10) {
                     let prev_smma = output.values[i - 1];
                     let expected = (prev_smma * (period as f64 - 1.0) + data[i]) / period as f64;
                     let actual = output.values[i];
 
-                    // Allow small tolerance for floating-point arithmetic
+                    
                     prop_assert!(
                         (actual - expected).abs() < 1e-7,
                         "Recursive formula mismatch at index {}: expected {}, got {} (diff: {})",
@@ -1252,12 +1252,12 @@ mod tests {
                 }
             }
 
-            // Property 5: Cross-kernel validation - compare against scalar reference
+            
             for i in 0..output.values.len() {
                 let test_val = output.values[i];
                 let ref_val = reference.values[i];
 
-                // Both should be NaN or both should be finite
+                
                 if test_val.is_nan() && ref_val.is_nan() {
                     continue;
                 }
@@ -1271,12 +1271,12 @@ mod tests {
                 );
 
                 if test_val.is_finite() && ref_val.is_finite() {
-                    // Check ULP difference for floating-point precision
+                    
                     let test_bits = test_val.to_bits();
                     let ref_bits = ref_val.to_bits();
                     let ulp_diff = test_bits.abs_diff(ref_bits);
 
-                    // SMMA uses simple arithmetic; allow up to 10/20 ULPs or abs < 1e-7
+                    
                     let max_ulps = if matches!(kernel, Kernel::Avx512 | Kernel::Avx512Batch) {
                         20
                     } else {
@@ -1295,8 +1295,8 @@ mod tests {
                 }
             }
 
-            // Property 6: SMMA should be bounded by min/max of all data seen so far
-            // (not just the window, since SMMA has infinite memory)
+            
+            
             let start_idx = if period == 1 { 0 } else { period - 1 };
             for i in start_idx..output.values.len() {
                 let val = output.values[i];
@@ -1319,9 +1319,9 @@ mod tests {
                 }
             }
 
-            // Property 7: For constant data, SMMA should converge to that constant
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
-                // All data points are essentially the same
+                
                 let constant_val = data[0];
                 let check_start = if period == 1 { 0 } else { period - 1 };
                 for i in check_start..output.values.len() {
@@ -1336,7 +1336,7 @@ mod tests {
                 }
             }
 
-            // Property 8: Period = 1 edge case - output should equal input after warmup
+            
             if period == 1 {
                 prop_assert_eq!(
                     output.values[0],
@@ -1360,7 +1360,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_smma_no_poison(
         test_name: &str,
@@ -1371,18 +1371,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let test_periods = vec![
-            5,   // Small period
-            7,   // Default period
-            14,  // Medium period
-            50,  // Large period
-            100, // Very large period
-            200, // Extra large period
+            5,   
+            7,   
+            14,  
+            50,  
+            100, 
+            200, 
         ];
 
         for &period in &test_periods {
-            // Skip if period would be too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
@@ -1396,16 +1396,16 @@ mod tests {
             );
             let output = smma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1413,7 +1413,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1421,7 +1421,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1434,7 +1434,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_smma_no_poison(
         _test_name: &str,
@@ -1499,13 +1499,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In WASM builds, the native name is taken by the bindgen export; use slice variant.
+            
             smma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(out.len(), baseline.len());
 
-        // NaN-aware equality: treat NaN == NaN as equal; otherwise require exact match.
+        
         for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
             assert!(
@@ -1543,7 +1543,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1551,17 +1551,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to increase detection coverage
+        
         let batch_configs = vec![
-            (3, 7, 1),     // Small range with step 1
-            (10, 30, 10),  // Medium range with larger step
-            (5, 100, 5),   // Large range with step 5
-            (50, 200, 50), // Very large periods
-            (1, 10, 1),    // Edge case: starting from 1
+            (3, 7, 1),     
+            (10, 30, 10),  
+            (5, 100, 5),   
+            (50, 200, 50), 
+            (1, 10, 1),    
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip configurations that would exceed data length
+            
             if start > c.close.len() {
                 continue;
             }
@@ -1571,9 +1571,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1583,7 +1583,7 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1591,7 +1591,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1599,7 +1599,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1612,7 +1612,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1681,19 +1681,19 @@ pub fn smma_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
+    let kern = validate_kernel(kernel, false)?; 
 
     let params = SmmaParams {
         period: Some(period),
     };
     let smma_in = SmmaInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| smma_with_kernel(&smma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1752,12 +1752,12 @@ pub fn smma_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?; 
     let sweep = SmmaBatchRange {
         period: period_range,
     };
 
-    // Calculate dimensions (with robust expansion)
+    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err(format!(
@@ -1771,14 +1771,14 @@ pub fn smma_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1794,7 +1794,7 @@ pub fn smma_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1870,7 +1870,7 @@ pub fn smma_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32SmmaPy { inner: Some(inner) })
 }
 
-// ---------------- SMMA Python device handle (CAI v3 + DLPack) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Smma", unsendable)]
 pub struct DeviceArrayF32SmmaPy {

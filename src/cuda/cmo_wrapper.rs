@@ -42,7 +42,7 @@ pub enum CudaCmoError {
     NotImplemented,
 }
 
-// Minimal policy surface mirroring common wrappers
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -110,7 +110,7 @@ impl CudaCmo {
             }
         };
 
-        // Favor L1 (read-mostly working sets)
+        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -208,7 +208,7 @@ impl CudaCmo {
         }
     }
 
-    // ---- Batch path (one series × many params) ----
+    
 
     fn prepare_batch_inputs(
         prices: &[f32],
@@ -223,7 +223,7 @@ impl CudaCmo {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCmoError::InvalidInput("all values are NaN".into()))?;
 
-        // Expand period grid
+        
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
             if step == 0 || start == end {
                 return vec![start];
@@ -269,7 +269,7 @@ impl CudaCmo {
         Ok((combos, first_valid, len))
     }
 
-    // No longer needed (batch computes from prices). Kept for potential future use.
+    
 fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
     unimplemented!()
 }
@@ -288,11 +288,11 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .get_function("cmo_batch_f32")
             .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_batch_f32" })?;
 
-        // Prefer L1 for this function
+        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        // Heuristic default that maintains a healthy grid when n_combos is small.
-        // Accepts overrides via CMO_BLOCK_X (must be warp-multiple).
+        
+        
         let block_x: u32 = match std::env::var("CMO_BLOCK_X").ok().as_deref() {
             Some(s) if s != "auto" => s
                 .parse::<u32>()
@@ -305,7 +305,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             }
         };
 
-        // Kernel mapping: one warp per combo (block contains block_x/32 combos).
+        
         let warps_per_block = (block_x / 32).max(1);
         let grid_x = ((n_combos as u32) + warps_per_block - 1) / warps_per_block;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -315,7 +315,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
         }
 
-        // Record selection for debug/introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaCmo)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -350,7 +350,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
     ) -> Result<DeviceArrayF32, CudaCmoError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(prices, sweep)?;
 
-        // Rough VRAM estimate (prices + periods + out)
+        
         let rows = combos.len();
         let out_elems = rows
             .checked_mul(len)
@@ -360,7 +360,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .and_then(|b| b.checked_add(rows.checked_mul(std::mem::size_of::<i32>()).unwrap_or(usize::MAX)))
             .and_then(|b| b.checked_add(out_elems.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX)))
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(bytes, headroom) {
             let (free, _) = mem_get_info().unwrap_or((0, 0));
             return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
@@ -371,7 +371,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .map(|c| c.period.unwrap_or(14) as i32)
             .collect();
 
-        // Async path with pinned buffers
+        
         let h_prices = LockedBuffer::from_slice(prices)?;
         let h_p = LockedBuffer::from_slice(&periods_i32)?;
 
@@ -391,7 +391,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
     }
 
-    // ---- Many-series × one-param (time-major) ----
+    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -413,7 +413,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
                 "invalid period for many-series".into(),
             ));
         }
-        // First-valid per series (scan each column)
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -453,7 +453,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .get_function("cmo_many_series_one_param_f32")
             .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_many_series_one_param_f32" })?;
 
-        // Default 256; clamp to warp-multiple when cols is small
+        
         let block_x: u32 = match std::env::var("CMO_MS_BLOCK_X").ok().as_deref() {
             Some(s) if s != "auto" => s
                 .parse::<u32>()
@@ -472,7 +472,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
         }
 
-        // Record selection and maybe log
+        
         unsafe {
             (*(self as *const _ as *mut CudaCmo)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -509,7 +509,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM guard (inputs + first_valids + outputs) + 64MB headroom
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
@@ -524,7 +524,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
         }
 
-        // Pinned host buffers + async copies on our NON_BLOCKING stream
+        
         let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 

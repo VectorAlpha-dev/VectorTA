@@ -1,6 +1,6 @@
-// rolling VAR (variance) with nbdev scaling
-// Device uses float-only math with double-single (two-float) prefix diffs.
-// Compile to PTX as usual; no special flags required.
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -12,53 +12,53 @@
 
 __device__ __forceinline__ float dev_nan() { return __int_as_float(0x7fffffff); }
 
-// ---- double-single helpers (float-only) ----
-struct df32 { float hi, lo; };                // hi + lo ≈ value
+
+struct df32 { float hi, lo; };                
 __device__ __forceinline__ df32 make_df32(float2 a) { return {a.x, a.y}; }
 
-// Error-free subtraction s = a - b, e = exact error  (TwoDiff: Dekker/Møller/Kahan)
+
 __device__ __forceinline__ void two_diff(float a, float b, float &s, float &e) {
     s = a - b;
     float bb = s - a;
     e = (a - (s - bb)) - (b + bb);
 }
 
-// df subtraction with renormalization (float-only)
+
 __device__ __forceinline__ df32 df_sub(df32 a, df32 b) {
     float s, e;
     two_diff(a.hi, b.hi, s, e);
     e += a.lo - b.lo;
-    // fast-two-sum normalization
+    
     float t1 = s + e;
     float t2 = e - (t1 - s);
     return {t1, t2};
 }
 
-//---------------------------------------------------------------------------
-// ---------------- 1) One series × many params (row-major out) -------------
-//---------------------------------------------------------------------------
 
-// Tune once. 4 works well on Ada/SM89 for this memory pattern.
+
+
+
+
 #ifndef VAR_COMBO_TILE
 #define VAR_COMBO_TILE 4
 #endif
 
-// out layout: row-major [n_combos, len]
+
 extern "C" __global__ void var_batch_f32(
-    const float2* __restrict__ prefix_sum,     // len+1, float2 (hi, lo)
-    const float2* __restrict__ prefix_sum_sq,  // len+1, float2 (hi, lo)
-    const int*    __restrict__ prefix_nan,     // len+1
+    const float2* __restrict__ prefix_sum,     
+    const float2* __restrict__ prefix_sum_sq,  
+    const int*    __restrict__ prefix_nan,     
     int len,
     int first_valid,
-    const int*    __restrict__ periods,        // n_combos
-    const float*  __restrict__ nbdev2,         // n_combos (nbdev^2)
+    const int*    __restrict__ periods,        
+    const float*  __restrict__ nbdev2,         
     int n_combos,
-    float*        __restrict__ out)            // [n_combos, len]
+    float*        __restrict__ out)            
 {
     const int group   = blockIdx.y;
     const int co_base = group * VAR_COMBO_TILE;
 
-    // Cache per-group params in shared once per block
+    
     __shared__ int   s_period[VAR_COMBO_TILE];
     __shared__ int   s_warm[VAR_COMBO_TILE];
     __shared__ float s_scale[VAR_COMBO_TILE];
@@ -87,7 +87,7 @@ extern "C" __global__ void var_batch_f32(
     while (t < len) {
         const int e_idx = t + 1;
 
-        // Load "end" prefixes once per t and reuse over the tile of combos
+        
         const df32 end_sum   = make_df32(prefix_sum   [e_idx]);
         const df32 end_sum2  = make_df32(prefix_sum_sq[e_idx]);
         const int  end_bad   = prefix_nan[e_idx];
@@ -104,46 +104,46 @@ extern "C" __global__ void var_batch_f32(
                 const int start  = e_idx - p;
                 const int bad    = end_bad - prefix_nan[start];
                 if (bad == 0) {
-                    // Window starts: only per-combo loads
+                    
                     const df32 st_sum  = make_df32(prefix_sum   [start]);
                     const df32 st_sum2 = make_df32(prefix_sum_sq[start]);
 
-                    // Float-only, high-accuracy window differences
+                    
                     const df32 win_sum_df  = df_sub(end_sum,  st_sum);
                     const df32 win_sum2_df = df_sub(end_sum2, st_sum2);
                     const float sum  = win_sum_df.hi  + win_sum_df.lo;
                     const float sum2 = win_sum2_df.hi + win_sum2_df.lo;
 
-                    // var = (sum2 - sum*mean)/p; mean = sum/p
+                    
                     const float invden = s_invden[k];
                     const float mean   = sum * invden;
-                    float var = fmaf(-sum, mean, sum2) * invden;  // fused (sum2 - sum*mean) * invden
+                    float var = fmaf(-sum, mean, sum2) * invden;  
                     if (var < 0.0f) var = 0.0f;
                     out_val = var * s_scale[k];
                 }
             }
 
-            out[combo * len + t] = out_val; // row-major
+            out[combo * len + t] = out_val; 
         }
 
         t += stride;
     }
 }
 
-//---------------------------------------------------------------------------
-// --------- 2) Many series × one param (time-major prefixes/out) -----------
-//---------------------------------------------------------------------------
+
+
+
 
 extern "C" __global__ void var_many_series_one_param_f32(
-    const float2* __restrict__ prefix_sum_tm,     // rows*cols + 1 (time-major), float2
-    const float2* __restrict__ prefix_sum_sq_tm,  // rows*cols + 1 (time-major), float2
-    const int*    __restrict__ prefix_nan_tm,     // rows*cols + 1
+    const float2* __restrict__ prefix_sum_tm,     
+    const float2* __restrict__ prefix_sum_sq_tm,  
+    const int*    __restrict__ prefix_nan_tm,     
     int period,
-    int num_series,   // cols
-    int series_len,   // rows
-    const int*  __restrict__ first_valids,        // per series
+    int num_series,   
+    int series_len,   
+    const int*  __restrict__ first_valids,        
     float nbdev2,
-    float*      __restrict__ out_tm)              // time-major
+    float*      __restrict__ out_tm)              
 {
     const int series = blockIdx.y;
     if (series >= num_series) return;
@@ -156,11 +156,11 @@ extern "C" __global__ void var_many_series_one_param_f32(
     const int stride = gridDim.x * blockDim.x;
 
     while (t < series_len) {
-        const int idx = t * num_series + series; // time-major index
+        const int idx = t * num_series + series; 
         float out_val = dev_nan();
 
         if (t >= warm) {
-            const int start_pre_t = t - period;          // t0 - 1
+            const int start_pre_t = t - period;          
             const int w_end   = idx + 1;
             const int w_start = (start_pre_t >= 0) ? (start_pre_t * num_series + series + 1) : 0;
 

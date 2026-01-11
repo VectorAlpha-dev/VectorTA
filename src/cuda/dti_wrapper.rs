@@ -46,7 +46,7 @@ pub enum CudaDtiError {
     NotImplemented,
 }
 
-// Minimal policies aligned with other osc. wrappers
+
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -118,7 +118,7 @@ impl CudaDti {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        // Favor L1 cache for small working sets (x/ax streams)
+        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -255,9 +255,9 @@ impl CudaDti {
     }
 
     #[inline]
-    // removed duplicate helpers (consolidated below)
+    
 
-    // -------------------- Batch: one series Ã— many params --------------------
+    
     fn expand_grid(range: &DtiBatchRange) -> Vec<DtiParams> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = t;
@@ -354,7 +354,7 @@ impl CudaDti {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
-        // Record selection for debug introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaDti)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -434,7 +434,7 @@ impl CudaDti {
         let rows = combos.len();
         let start = first_valid + 1;
 
-        // VRAM estimate: x+ax + params + out (checked to avoid usize overflow)
+        
         let inputs_bytes = len
             .checked_mul(2)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
@@ -453,7 +453,7 @@ impl CudaDti {
             .checked_add(params_bytes)
             .and_then(|n| n.checked_add(out_bytes))
             .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_batch_dev".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaDtiError::OutOfMemory { required: bytes, free, headroom });
@@ -462,12 +462,12 @@ impl CudaDti {
             }
         }
 
-        // Precompute x and |x| directly into pinned memory (page-locked)
+        
         let mut hx  = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
         let mut hax = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
         Self::precompute_x_ax_into_locked(high_f32, low_f32, start, hx.as_mut_slice(), hax.as_mut_slice());
 
-        // Prepare params (i32) into pinned memory
+        
         let mut r_vec = Vec::with_capacity(rows);
         let mut s_vec = Vec::with_capacity(rows);
         let mut u_vec = Vec::with_capacity(rows);
@@ -498,7 +498,7 @@ impl CudaDti {
         Ok((DeviceArrayF32Dti { buf: d_out, rows, cols: len, ctx: Arc::clone(&self.context), device_id: self.device_id }, combos))
     }
 
-    // -------------------- Many series Ã— one param (time-major) --------------------
+    
     fn launch_many_series_kernel(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -585,7 +585,7 @@ impl CudaDti {
         let s = params.s.unwrap_or(10);
         let u = params.u.unwrap_or(5);
 
-        // Compute per-series first_valid
+        
         let mut first_valids = vec![rows as i32; cols];
         for series in 0..cols {
             let mut fv = rows as i32;
@@ -605,7 +605,7 @@ impl CudaDti {
             first_valids[series] = fv;
         }
 
-        // VRAM estimate: input + first_valids + out (checked)
+        
         let inputs_bytes = elems
             .checked_mul(2)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
@@ -628,12 +628,12 @@ impl CudaDti {
             }
         }
 
-        // Pinned host staging
+        
         let h_high  = LockedBuffer::from_slice(high_tm_f32)?;
         let h_low   = LockedBuffer::from_slice(low_tm_f32 )?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        // Async device allocations + async copies
+        
         let mut d_high  = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
         let mut d_low   = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
         let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
@@ -658,13 +658,13 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 180; // rÃ—sÃ—u combos typical order
+    const PARAM_SWEEP: usize = 180; 
     const MANY_SERIES_COLS: usize = 192;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); // high+low (for precompute)
-        let pre_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); // x + ax
+        let in_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); 
+        let pre_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); 
         let params = PARAM_SWEEP * 3 * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + pre_bytes + params + out_bytes + 64 * 1024 * 1024
@@ -717,7 +717,7 @@ pub mod benches {
             high[i] = x.max(prev) + 0.7;
             low[i] = x.min(prev) - 0.7;
         }
-        // modest sweep (cartesian product of 6Ã—5Ã—6 ~= 180)
+        
         let sweep = DtiBatchRange {
             r: (8, 18, 2),
             s: (6, 14, 2),
@@ -809,7 +809,7 @@ pub mod benches {
                 if m.is_nan() {
                     continue;
                 }
-                // synthesize high/low around mid
+                
                 high_tm[t * cols + s] = m + 0.6;
                 low_tm[t * cols + s] = m - 0.6;
             }

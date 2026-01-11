@@ -96,7 +96,7 @@ impl CudaAdx {
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
         .or_else(|_| Module::from_ptx(ptx, &[]))?;
-        // Prefer a high-priority NON_BLOCKING stream; if priorities unsupported, this is 0.
+        
         let pr = cust::context::CurrentContext::get_stream_priority_range()?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, Some(pr.greatest))?;
 
@@ -136,7 +136,7 @@ impl CudaAdx {
         let first_valid = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
             .ok_or_else(|| CudaAdxError::InvalidInput("all values are NaN".into()))?;
-        // Expand grid (robust rules: zero step => static, reversed bounds supported)
+        
         let (start, end, step) = sweep.period;
         let periods: Vec<usize> = if start == end || step == 0 {
             vec![start]
@@ -184,7 +184,7 @@ impl CudaAdx {
         let (combos, first_valid, len, _max_p) = Self::prepare_batch(high, low, close, sweep)?;
         let rows = combos.len();
 
-        // VRAM estimate: 3 inputs + periods + output
+        
         let el = std::mem::size_of::<f32>();
         let req = len
             .checked_mul(3)
@@ -198,7 +198,7 @@ impl CudaAdx {
             .checked_mul(len)
             .ok_or_else(|| CudaAdxError::InvalidInput("rows*len overflow".into()))?;
 
-        // Upload inputs
+        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..len], &self.stream) }?;
@@ -247,7 +247,7 @@ impl CudaAdx {
                 expected
             )));
         }
-        // Pinned host + async D→H ensures true async transfer; then memcpy into user slice.
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }?;
         self.stream.synchronize()?;
@@ -278,7 +278,7 @@ impl CudaAdx {
         let grid_x = Self::div_up(n_combos as u32, block_x);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Validate against device limits
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -327,7 +327,7 @@ impl CudaAdx {
         if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaAdxError::InvalidInput("matrix shape mismatch".into()));
         }
-        // Per-series first_valid
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -339,7 +339,7 @@ impl CudaAdx {
                 }
             }
         }
-        // Ensure each series has enough data
+        
         for &fv in &first_valids {
             if fv as usize + period >= rows {
                 return Err(CudaAdxError::InvalidInput(
@@ -460,7 +460,7 @@ impl CudaAdx {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -558,14 +558,14 @@ pub mod benches {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
             .unwrap_or(LEN_1M);
 
-        // 250 periods: 8..2000 step 8
+        
         let periods_host: Vec<i32> = (0..PARAM_SWEEP_250)
             .map(|i| (8 + 8 * i) as i32)
             .collect();
         let n_combos = periods_host.len();
 
-        // Use sync allocations here; the stream-ordered allocator can fail under WDDM
-        // for very large single buffers.
+        
+        
         let d_high = DeviceBuffer::from_slice(&high).unwrap();
         let d_low = DeviceBuffer::from_slice(&low).unwrap();
         let d_close = DeviceBuffer::from_slice(&close).unwrap();
@@ -590,7 +590,7 @@ pub mod benches {
 
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaAdx::new(0).expect("cuda adx");
-        // Build time-major matrices
+        
         let cols = COLS_512;
         let rows = ROWS_16K;
         let close_tm = {

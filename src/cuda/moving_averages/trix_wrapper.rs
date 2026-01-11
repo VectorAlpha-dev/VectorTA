@@ -295,7 +295,7 @@ impl CudaTrix {
 
     fn run_batch_kernel(&self, inputs: &BatchInputs) -> Result<DeviceArrayF32, CudaTrixError> {
         let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
-        // VRAM budget: logs + periods + outputs
+        
         let logs_bytes = inputs
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -331,7 +331,7 @@ impl CudaTrix {
             }
         }
 
-        // Host precompute: ln(prices) already prepared in inputs.logs
+        
         if trace {
             eprintln!(
                 "[TRACE] trix.run_batch_kernel: series_len={} combos={} first_valid={} (device={})",
@@ -359,10 +359,10 @@ impl CudaTrix {
             &mut d_out,
         )?;
 
-        // IMPORTANT: this wrapper returns a VRAM handle (`DeviceArrayF32`) but does not retain
-        // the input buffers. Because kernel launches and H2D/D2D ops are async on a NON_BLOCKING
-        // stream, we must synchronize before returning to avoid dropping inputs while the kernel
-        // is still reading them (can surface as CUDA_ERROR_ILLEGAL_ADDRESS).
+        
+        
+        
+        
         if trace {
             eprintln!("[TRACE] trix.run_batch_kernel: stream.synchronize (begin)");
         }
@@ -388,8 +388,8 @@ impl CudaTrix {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTrixError> {
         let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
-        // IMPORTANT: The warp-scan kernel is experimental and has exhibited hangs on some systems.
-        // Keep it opt-in only so default CI/dev remains stable.
+        
+        
         let warp_scan_enabled =
             std::env::var("TRIX_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
         let block_x: u32 = if warp_scan_enabled {
@@ -409,9 +409,9 @@ impl CudaTrix {
             1
         };
 
-        // Warp-scan fast path when block_x provides at least one warp.
+        
         if warp_scan_enabled && block_x >= 32 {
-            let block_x = (block_x / 32).max(1) * 32; // round down to a warp multiple
+            let block_x = (block_x / 32).max(1) * 32; 
             let warps_per_block = (block_x / 32).max(1) as usize;
             let grid_x = ((n_combos + warps_per_block - 1) / warps_per_block) as u32;
 
@@ -474,7 +474,7 @@ impl CudaTrix {
             .module
             .get_function("trix_batch_f32")
             .map_err(|_| CudaTrixError::MissingKernelSymbol { name: "trix_batch_f32" })?;
-        // Chunk grid.x to device limit
+        
         let mut launched = 0usize;
         while launched < n_combos {
             let chunk = (n_combos - launched).min(self.max_grid_x as usize);
@@ -487,7 +487,7 @@ impl CudaTrix {
             self.maybe_log_batch_debug();
 
             unsafe {
-                let mut logs_ptr = d_logs.as_device_ptr().as_raw() + 0u64; // logs always start at 0
+                let mut logs_ptr = d_logs.as_device_ptr().as_raw() + 0u64; 
                 let period_offset_bytes = launched
                     .checked_mul(core::mem::size_of::<i32>())
                     .ok_or_else(|| CudaTrixError::InvalidInput("periods offset overflow".into()))?;
@@ -620,8 +620,8 @@ impl CudaTrix {
             &mut d_out_tm,
         )?;
 
-        // Same rationale as batch: `d_prices_tm` / `d_first_valids` are owned by this function.
-        // Ensure the kernel completes before returning a VRAM handle that outlives those inputs.
+        
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -645,7 +645,7 @@ impl CudaTrix {
             ));
         }
 
-        // First valid index
+        
         let first_valid = prices
             .iter()
             .position(|v| !v.is_nan())
@@ -670,7 +670,7 @@ impl CudaTrix {
             max_period = max_period.max(period);
         }
 
-        // Validate sufficient data for the largest period
+        
         let needed = max_period
             .checked_sub(1)
             .and_then(|v| v.checked_mul(3))
@@ -684,14 +684,14 @@ impl CudaTrix {
             )));
         }
 
-        // Shared host precompute: ln(price)
+        
         let mut logs = vec![0f32; series_len];
         for i in 0..first_valid {
             logs[i] = 0.0;
         }
         for i in first_valid..series_len {
-            // Match scalar baseline more closely: scalar computes ln() in f64 on
-            // f32-rounded prices; round the f64 log back to f32 for device.
+            
+            
             logs[i] = (prices[i] as f64).ln() as f32;
         }
 
@@ -829,7 +829,7 @@ impl CudaTrix {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

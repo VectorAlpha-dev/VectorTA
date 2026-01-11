@@ -46,7 +46,7 @@ use std::f64::consts::PI;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// Input and Output Types
+
 
 #[derive(Debug, Clone)]
 pub enum SuperSmoother3PoleData<'a> {
@@ -117,7 +117,7 @@ impl<'a> SuperSmoother3PoleInput<'a> {
     }
 }
 
-// Builder Pattern
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct SuperSmoother3PoleBuilder {
@@ -197,7 +197,7 @@ pub enum SuperSmoother3PoleError {
     InvalidInput(String),
 }
 
-// Main Entrypoint
+
 
 #[inline]
 pub fn supersmoother_3_pole(
@@ -236,7 +236,7 @@ pub fn supersmoother_3_pole_with_kernel(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    // Use alloc_with_nan_prefix to ensure [0..first) is NaN
+    
     let mut out = alloc_with_nan_prefix(len, first);
 
     unsafe {
@@ -297,22 +297,22 @@ pub fn supersmoother_3_pole_into(
         });
     }
 
-    // Prefill warmup prefix with the crate's canonical quiet-NaN pattern.
+    
     for v in &mut out[..first] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute directly into the provided buffer using the existing into-slice helper.
+    
     supersmoother_3_pole_into_slice(out, input, Kernel::Auto)
 }
 
-// Compute function for SuperSmoother 3-pole respecting first index
+
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_compute_into(
     data: &[f64],
     period: usize,
     first: usize,
-    _warm_end: usize, // Not used, kept for API compatibility
+    _warm_end: usize, 
     out: &mut [f64],
 ) {
     let n = data.len();
@@ -320,9 +320,9 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         return;
     }
 
-    // ----- Coefficients (compute once) -----
-    // Structure and math follow the reference implementation; we only reduce
-    // duplicate work and enable FMA-friendly ordering.
+    
+    
+    
     let inv_p = 1.0 / (period as f64);
     let a = (-PI * inv_p).exp();
     let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
@@ -334,7 +334,7 @@ pub unsafe fn supersmoother_3_pole_compute_into(
     let coef_prev2 = -c - b * c;
     let coef_prev3 = c2;
 
-    // ----- Pass-through first 3 values from 'first' (preserve NaN prefix) -----
+    
     *out.get_unchecked_mut(first) = *data.get_unchecked(first);
     if first + 1 < n {
         *out.get_unchecked_mut(first + 1) = *data.get_unchecked(first + 1);
@@ -343,47 +343,47 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         *out.get_unchecked_mut(first + 2) = *data.get_unchecked(first + 2);
     }
 
-    // If nothing beyond the first three exists, we're done.
+    
     let mut i = first + 3;
     if i >= n {
         return;
     }
 
-    // Keep last 3 outputs hot in registers to avoid reloads
+    
     let mut y0 = *out.get_unchecked(first);
     let mut y1 = *out.get_unchecked(first + 1);
     let mut y2 = *out.get_unchecked(first + 2);
 
-    // Main loop: partially unrolled by 2 for better ILP and fewer loop overheads.
+    
     while i + 1 < n {
-        // step i
+        
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
         let t1 = coef_prev2.mul_add(y1, t0);
         let y3 = coef_prev3.mul_add(y0, t1);
         *out.get_unchecked_mut(i) = y3;
 
-        // rotate
+        
         y0 = y1;
         y1 = y2;
         y2 = y3;
         i += 1;
 
-        // step i (paired)
+        
         let di1 = *data.get_unchecked(i);
         let t0b = coef_prev1.mul_add(y2, coef_source * di1);
         let t1b = coef_prev2.mul_add(y1, t0b);
         let y4 = coef_prev3.mul_add(y0, t1b);
         *out.get_unchecked_mut(i) = y4;
 
-        // rotate
+        
         y0 = y1;
         y1 = y2;
         y2 = y4;
         i += 1;
     }
 
-    // Handle possible tail element
+    
     if i < n {
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
@@ -393,7 +393,7 @@ pub unsafe fn supersmoother_3_pole_compute_into(
     }
 }
 
-// Scalar kernel wrapper
+
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_scalar(
     data: &[f64],
@@ -426,7 +426,7 @@ pub unsafe fn supersmoother_3_pole_avx512(
     supersmoother_3_pole_scalar(data, period, first, out)
 }
 
-// Row functions (API parity)
+
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_row_scalar(
     data: &[f64],
@@ -496,18 +496,18 @@ pub unsafe fn supersmoother_3_pole_row_avx512_long(
     supersmoother_3_pole_row_scalar(data, first, period, stride, w_ptr, inv_n, out)
 }
 
-// Stream/Stateful
+
 
 #[derive(Debug, Clone)]
 pub struct SuperSmoother3PoleStream {
     period: usize,
-    // Last 3 outputs (oldest -> newest)
+    
     y0: f64,
     y1: f64,
     y2: f64,
-    // Warm-up counter (0..=3)
+    
     filled: u8,
-    // Precomputed coefficients
+    
     coef_source: f64,
     coef_prev1: f64,
     coef_prev2: f64,
@@ -522,7 +522,7 @@ impl SuperSmoother3PoleStream {
             return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: 0 });
         }
 
-        // Same coefficient math as batch kernel for strict consistency.
+        
         let inv_p = 1.0 / (period as f64);
         let a = (-PI * inv_p).exp();
         let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
@@ -535,7 +535,7 @@ impl SuperSmoother3PoleStream {
             y1: f64::NAN,
             y2: f64::NAN,
             filled: 0,
-            // Keep original expression to match batch/DC gain and rounding behavior
+            
             coef_source: 1.0 - c2 - b + b * c,
             coef_prev1: b + c,
             coef_prev2: -c - b * c,
@@ -549,7 +549,7 @@ impl SuperSmoother3PoleStream {
     pub fn update(&mut self, value: f64) -> f64 {
         let f = self.filled;
         if f < 3 {
-            // Warm-up: pass-through and advance the ring.
+            
             match f {
                 0 => self.y0 = value,
                 1 => self.y1 = value,
@@ -559,15 +559,15 @@ impl SuperSmoother3PoleStream {
             return value;
         }
 
-        // 3x fused multiply-add chain (same order as batch):
-        //   t0 = coef_prev1*y2 + coef_source*value
-        //   t1 = coef_prev2*y1 + t0
-        //   y  = coef_prev3*y0 + t1
+        
+        
+        
+        
         let t0 = self.coef_prev1.mul_add(self.y2, self.coef_source * value);
         let t1 = self.coef_prev2.mul_add(self.y1, t0);
         let y = self.coef_prev3.mul_add(self.y0, t1);
 
-        // Rotate state
+        
         self.y0 = self.y1;
         self.y1 = self.y2;
         self.y2 = y;
@@ -624,7 +624,7 @@ impl SuperSmoother3PoleStream {
     }
 }
 
-// Batch Range/Builder/Output
+
 
 #[derive(Clone, Debug)]
 pub struct SuperSmoother3PoleBatchRange {
@@ -737,19 +737,19 @@ impl SuperSmoother3PoleBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Zero step → static (single value). Supports reversed bounds too.
+        
         if step == 0 || start == end {
             return vec![start];
         }
         if start < end {
             return (start..=end).step_by(step).collect();
         }
-        // Reversed bounds: generate descending sequence.
+        
         let mut v = Vec::new();
         let mut cur = start;
         while cur >= end {
             v.push(cur);
-            // checked_sub to avoid panic on underflow
+            
             if let Some(next) = cur.checked_sub(step) {
                 if next == cur { break; }
                 cur = next;
@@ -820,7 +820,7 @@ fn supersmoother_3_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Guard potential overflow in rows * cols
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| SuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
@@ -830,18 +830,18 @@ fn supersmoother_3_pole_batch_inner(
             let p = c.period.unwrap();
             first
                 .checked_add(p - 1)
-                .unwrap_or(first) // on overflow, keep first; compute will revalidate bounds
+                .unwrap_or(first) 
         })
         .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // ---------- 2.  Row-level closure (accepts &mut [MaybeUninit<f64>]) ----
+    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // transmute just this row to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -879,7 +879,7 @@ fn supersmoother_3_pole_batch_inner(
         }
     };
 
-    // ---------- 3.  Run rows in serial / parallel --------------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -900,7 +900,7 @@ fn supersmoother_3_pole_batch_inner(
         }
     }
 
-    // ---------- 4.  Finalise: convert Vec<MaybeUninit<f64>> → Vec<f64> -----
+    
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(SuperSmoother3PoleBatchOutput {
         values,
@@ -921,7 +921,7 @@ pub fn supersmoother_3_pole_batch_inner_into(
     parallel: bool,
     output: &mut [f64],
 ) {
-    // Write directly to output slice - no validation needed
+    
     let mut raw = unsafe {
         std::slice::from_raw_parts_mut(
             output.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -930,11 +930,11 @@ pub fn supersmoother_3_pole_batch_inner_into(
     };
     unsafe { init_matrix_prefixes(&mut raw, cols, warm) };
 
-    // ---------- 2.  Row-level closure (accepts &mut [MaybeUninit<f64>]) ----
+    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // transmute just this row to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -972,7 +972,7 @@ pub fn supersmoother_3_pole_batch_inner_into(
         }
     };
 
-    // ---------- 3.  Run rows in serial / parallel --------------------------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -992,7 +992,7 @@ pub fn supersmoother_3_pole_batch_inner_into(
         }
     }
 
-    // No return value needed - everything is written to output
+    
 }
 
 #[cfg(test)]
@@ -1005,16 +1005,16 @@ mod tests {
 
     #[test]
     fn test_supersmoother_3_pole_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct input with a NaN warmup prefix and diverse finite values
+        
         let len = 256;
         let mut data = Vec::with_capacity(len);
-        // Warmup NaNs at the front
+        
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
-        // Fill the rest with a smooth but non-trivial signal
+        
         for i in 5..len {
             let t = i as f64 * 0.037;
             data.push((t.sin() * 100.0) + (0.3 * t).cos() * 10.0 + (i % 7) as f64);
@@ -1022,10 +1022,10 @@ mod tests {
 
         let input = SuperSmoother3PoleInput::from_slice(&data, SuperSmoother3PoleParams::default());
 
-        // Baseline using the existing Vec-returning API
+        
         let base = supersmoother_3_pole(&input)?.values;
 
-        // New zero-allocation API
+        
         let mut out = vec![0.0; len];
         supersmoother_3_pole_into(&input, &mut out)?;
 
@@ -1232,7 +1232,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: generate period first, then data of appropriate length
+        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1255,14 +1255,14 @@ mod tests {
                 let SuperSmoother3PoleOutput { values: ref_out } =
                     supersmoother_3_pole_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Since we don't inject NaN, first is always 0
+                
                 let first = 0;
                 let warmup = first + period;
 
-                // Property 1: Output length matches input length
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: First three values pass through directly
+                
                 if data.len() > 0 {
                     prop_assert!(
                         (out[0] - data[0]).abs() < f64::EPSILON,
@@ -1288,9 +1288,9 @@ mod tests {
                     );
                 }
 
-                // Property 3: Values from index 3 onwards are computed
-                // Note: The implementation computes from index 3 regardless of warmup
-                // This appears to be the actual behavior of the filter
+                
+                
+                
                 for i in 3..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1300,8 +1300,8 @@ mod tests {
                     );
                 }
 
-                // Property 4: Output remains finite (no NaN or Inf)
-                // Recursive filters can amplify significantly but should remain finite
+                
+                
                 for i in 3..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1311,8 +1311,8 @@ mod tests {
                     );
                 }
 
-                // Property 5: Smoothing property - should reduce variation
-                // Check from a stable point after initial transients
+                
+                
                 let stable_start = (period * 2).max(10).min(data.len() - 1);
                 if data.len() > stable_start + 10 {
                     let input_variation: f64 = data[stable_start..data.len() - 1]
@@ -1324,8 +1324,8 @@ mod tests {
                         .map(|w| (w[1] - w[0]).abs())
                         .sum::<f64>();
 
-                    // For a smoothing filter, output variation should generally be less
-                    // Allow up to 2x amplification for edge cases
+                    
+                    
                     if input_variation > 1e-9 {
                         let variation_ratio = output_variation / input_variation;
                         prop_assert!(
@@ -1338,10 +1338,10 @@ mod tests {
                     }
                 }
 
-                // Property 6: Constant input produces constant output
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
                     let constant_val = data[0];
-                    // Check from a stable point
+                    
                     let stable_start = period.max(3);
                     for i in stable_start..out.len() {
                         prop_assert!(
@@ -1354,9 +1354,9 @@ mod tests {
                     }
                 }
 
-                // Property 7: Period=1 special case
+                
                 if period == 1 {
-                    // Values from index 3 onwards should be computed
+                    
                     for i in 3..data.len() {
                         prop_assert!(
                             out[i].is_finite(),
@@ -1367,7 +1367,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Kernel consistency (all kernels should match since AVX forwards to scalar)
+                
                 for i in 0..out.len() {
                     if out[i].is_finite() && ref_out[i].is_finite() {
                         let diff = (out[i] - ref_out[i]).abs();
@@ -1422,7 +1422,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_supersmoother_3_pole_no_poison(
         test_name: &str,
@@ -1433,7 +1433,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to catch uninitialized memory reads
+        
         let test_periods = vec![5, 10, 14, 20, 30, 50, 100, 200];
 
         for period in test_periods {
@@ -1442,23 +1442,23 @@ mod tests {
             };
             let input = SuperSmoother3PoleInput::from_candles(&candles, "close", params);
 
-            // Skip if period is too large for the data
+            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = supersmoother_3_pole_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1466,7 +1466,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1474,7 +1474,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1487,7 +1487,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_supersmoother_3_pole_no_poison(
         _test_name: &str,
@@ -1560,7 +1560,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1568,17 +1568,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple different batch configurations to catch edge cases
+        
         let batch_configs = vec![
-            (5, 15, 5),    // Small periods
-            (10, 30, 10),  // Medium periods
-            (20, 100, 20), // Large periods
-            (7, 7, 1),     // Single period (edge case)
-            (3, 50, 1),    // Many periods
+            (5, 15, 5),    
+            (10, 30, 10),  
+            (20, 100, 20), 
+            (7, 7, 1),     
+            (3, 50, 1),    
         ];
 
         for (start, end, step) in batch_configs {
-            // Skip if the largest period exceeds data length
+            
             if end > c.close.len() {
                 continue;
             }
@@ -1588,9 +1588,9 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1604,7 +1604,7 @@ mod tests {
                     0
                 };
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1612,7 +1612,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1620,7 +1620,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1633,7 +1633,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1643,7 +1643,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1691,19 +1691,19 @@ pub fn supersmoother_3_pole_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
+    let kern = validate_kernel(kernel, false)?; 
 
     let params = SuperSmoother3PoleParams {
         period: Some(period),
     };
     let input = SuperSmoother3PoleInput::from_slice(slice_in, params);
 
-    // GOOD: Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| supersmoother_3_pole_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1767,7 +1767,7 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         period: period_range,
     };
 
-    // Pre-calculate everything outside allow_threads
+    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err("Invalid period range"));
@@ -1797,11 +1797,11 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL - no validation needed
+    
     py.allow_threads(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
@@ -1818,11 +1818,11 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         );
     });
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Periods array with zero-copy transfer
+    
     dict.set_item(
         "periods",
         combos
@@ -1853,7 +1853,7 @@ pub fn supersmoother_3_pole_cuda_batch_dev_py(
         period: period_range,
     };
 
-    // Create CUDA wrapper outside of allow_threads so we can capture context/stream
+    
     let cuda = CudaSupersmoother3Pole::new(device_id)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let stream = cuda.stream_handle();
@@ -1930,7 +1930,7 @@ pub fn supersmoother_3_pole_into_slice(
         });
     }
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(SuperSmoother3PoleError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
     }
@@ -1940,7 +1940,7 @@ pub fn supersmoother_3_pole_into_slice(
         other => other,
     };
 
-    // Compute SuperSmoother values directly into dst
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1959,7 +1959,7 @@ pub fn supersmoother_3_pole_into_slice(
     Ok(())
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -1977,10 +1977,10 @@ pub fn supersmoother_3_pole_js(data: &[f64], period: usize) -> Result<Vec<f64>, 
     };
     let input = SuperSmoother3PoleInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     supersmoother_3_pole_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2003,7 +2003,7 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
         period: config.period_range,
     };
 
-    // Pre-calculate everything
+    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(JsValue::from_str("Invalid period range"));
@@ -2027,7 +2027,7 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
     let cols = data.len();
     let mut output = vec![0.0; rows * cols];
 
-    // Compute batch
+    
     let chosen = detect_best_batch_kernel();
     let simd = match chosen {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2052,7 +2052,7 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
         &mut output,
     );
 
-    // Return result with metadata
+    
     let result = Object::new();
     Reflect::set(&result, &JsValue::from_str("values"), &to_value(&output)?)?;
     Reflect::set(
@@ -2086,7 +2086,7 @@ pub fn supersmoother_3_pole_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     supersmoother_3_pole_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2113,22 +2113,22 @@ pub fn supersmoother_3_pole_batch_metadata_js(
     Ok(metadata)
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2144,31 +2144,31 @@ pub fn supersmoother_3_pole_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
         let params = SuperSmoother3PoleParams {
             period: Some(period),
         };
         let input = SuperSmoother3PoleInput::from_slice(data, params);
 
-        // Handle aliasing - if input and output pointers are the same
+        
         if in_ptr == out_ptr {
-            // Need temporary buffer to avoid corruption
+            
             let mut temp = vec![0.0; len];
             supersmoother_3_pole_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy result back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct computation into output buffer
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             supersmoother_3_pole_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2178,7 +2178,7 @@ pub fn supersmoother_3_pole_into(
     }
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2201,7 +2201,7 @@ pub fn supersmoother_3_pole_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Pre-calculate everything
+        
         let combos = expand_grid(&sweep);
         if combos.is_empty() {
             return Err(JsValue::from_str("Invalid period range"));
@@ -2225,10 +2225,10 @@ pub fn supersmoother_3_pole_batch_into(
         let cols = data.len();
         let total_size = rows * cols;
 
-        // Create output slice
+        
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Compute batch
+        
         let chosen = detect_best_batch_kernel();
         let simd = match chosen {
             Kernel::Avx512Batch => Kernel::Avx512,

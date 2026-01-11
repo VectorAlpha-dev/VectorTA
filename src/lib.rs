@@ -33,7 +33,7 @@ pub mod bindings {
     pub mod wasm;
 }
 
-// Global WASM memory management functions
+
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
@@ -49,8 +49,8 @@ pub fn allocate_f64_array(len: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn deallocate_f64_array(ptr: *mut f64) {
-    // The JavaScript side is responsible for tracking the length
-    // This is a no-op as memory is managed by the WASM runtime
+    
+    
 }
 
 #[cfg(feature = "wasm")]
@@ -71,8 +71,8 @@ pub fn allocate_f64_matrix(rows: usize, cols: usize) -> *mut f64 {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn deallocate_f64_matrix(ptr: *mut f64) {
-    // The JavaScript side is responsible for tracking the size
-    // This is a no-op as memory is managed by the WASM runtime
+    
+    
 }
 
 #[cfg(feature = "wasm")]

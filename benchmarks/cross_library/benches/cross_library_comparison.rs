@@ -10,24 +10,24 @@ use my_project::indicators::{
     rsi, atr, bollinger_bands, macd, adx, cci, stoch, aroon,
     ao, cmo, di, mfi, mom, obv, ppo, roc,
     srsi, trix, willr,
-    // Additional momentum indicators
+    
     apo, dpo, rocr, rocp,
-    // Volume indicators
+    
     ad, adosc, emv,
-    // Other indicators
+    
     adxr, aroonosc, bop, dm, dx, fisher, fosc, kvo,
     linearreg_slope, linearreg_intercept, linearreg_angle, mass, medprice, midpoint, midprice,
     natr, nvi, pvi, qstick, stddev, stochf,
     tsf, ultosc, var, vosc, wad, vidya, wclprice,
-    // Additional new indicators
+    
     cvi, marketefi, minmax, msw, sar
 };
 use my_project::utilities::data_loader::Candles;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-// Work around broken-pipe panics when piping `-- --list` output into tools like
-// `Select-Object -First ...` (downstream closes stdout early).
+
+
 #[cfg(not(target_arch = "wasm32"))]
 #[ctor::ctor]
 fn __install_broken_pipe_panic_hook() {
@@ -56,7 +56,7 @@ fn __install_broken_pipe_panic_hook() {
     }));
 }
 
-// Data sizes to benchmark
+
 const DATA_SIZES: &[(&str, &str)] = &[
     ("4k", "../../src/data/4kCandles.csv"),
     ("10k", "../../src/data/10kCandles.csv"),
@@ -64,7 +64,7 @@ const DATA_SIZES: &[(&str, &str)] = &[
     ("1M", "../../src/data/1MillionCandles.csv"),
 ];
 
-// Indicator mappings between libraries
+
 struct IndicatorMapping {
     rust_name: &'static str,
     tulip_name: &'static str,
@@ -76,7 +76,7 @@ struct IndicatorMapping {
 
 fn get_indicator_mappings() -> Vec<IndicatorMapping> {
     vec![
-        // === Core Indicators (10) - Already implemented ===
+        
         IndicatorMapping {
             rust_name: "sma",
             tulip_name: "sma",
@@ -137,7 +137,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             rust_name: "adx",
             tulip_name: "adx",
             talib_name: Some("ADX"),
-            // Tulip ADX only requires high, low (no close)
+            
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
@@ -149,7 +149,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![14.0],
         },
 
-        // === Additional Moving Averages ===
+        
         IndicatorMapping {
             rust_name: "dema",
             tulip_name: "dema",
@@ -193,7 +193,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![14.0],
         },
 
-        // === Momentum Indicators ===
+        
         IndicatorMapping {
             rust_name: "apo",
             tulip_name: "apo",
@@ -211,7 +211,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
         IndicatorMapping {
             rust_name: "dpo",
             tulip_name: "dpo",
-            talib_name: None, // TA-LIB does not expose DPO in this build
+            talib_name: None, 
             inputs: vec!["close"],
             options: vec![14.0],
         },
@@ -251,7 +251,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![14.0],
         },
 
-        // === Volume Indicators ===
+        
         IndicatorMapping {
             rust_name: "ad",
             tulip_name: "ad",
@@ -281,7 +281,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![14.0],
         },
 
-        // === Other Common Indicators ===
+        
         IndicatorMapping {
             rust_name: "ao",
             tulip_name: "ao",
@@ -325,17 +325,17 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             options: vec![7.0, 14.0, 28.0],
         },
 
-        // === Additional indicators for full coverage ===
-        // ADXR
+        
+        
         IndicatorMapping {
             rust_name: "adxr",
             tulip_name: "adxr",
             talib_name: Some("ADXR"),
-            // Tulip ADXR only requires high, low
+            
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // DI variants (explicit plus/minus for TA-LIB parity)
+        
         IndicatorMapping {
             rust_name: "plus_di",
             tulip_name: "di",
@@ -350,7 +350,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        // AROONOSC
+        
         IndicatorMapping {
             rust_name: "aroonosc",
             tulip_name: "aroonosc",
@@ -358,7 +358,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // DI (Directional Indicator)
+        
         IndicatorMapping {
             rust_name: "di",
             tulip_name: "di",
@@ -366,7 +366,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        // DM (Directional Movement)
+        
         IndicatorMapping {
             rust_name: "dm",
             tulip_name: "dm",
@@ -374,7 +374,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // DM explicit variants for TA-LIB parity
+        
         IndicatorMapping {
             rust_name: "plus_dm",
             tulip_name: "dm",
@@ -389,7 +389,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // DX (Directional Movement Index)
+        
         IndicatorMapping {
             rust_name: "dx",
             tulip_name: "dx",
@@ -397,7 +397,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0],
         },
-        // FISHER
+        
         IndicatorMapping {
             rust_name: "fisher",
             tulip_name: "fisher",
@@ -405,7 +405,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // FOSC (Forecast Oscillator)
+        
         IndicatorMapping {
             rust_name: "fosc",
             tulip_name: "fosc",
@@ -413,7 +413,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // KVO (Klinger Volume Oscillator)
+        
         IndicatorMapping {
             rust_name: "kvo",
             tulip_name: "kvo",
@@ -421,7 +421,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close", "volume"],
             options: vec![34.0, 55.0],
         },
-        // LINREG (Linear Regression)
+        
         IndicatorMapping {
             rust_name: "linreg",
             tulip_name: "linreg",
@@ -429,15 +429,15 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // LINEARREG_ANGLE (TA-Lib only; no Tulip equivalent)
+        
         IndicatorMapping {
             rust_name: "linearreg_angle",
-            tulip_name: "linearreg_angle", // marker; Tulip does not provide this
+            tulip_name: "linearreg_angle", 
             talib_name: Some("LINEARREG_ANGLE"),
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // LINEARREG_SLOPE (added for full coverage)
+        
         IndicatorMapping {
             rust_name: "linearreg_slope",
             tulip_name: "linregslope",
@@ -445,7 +445,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // MASS (Mass Index)
+        
         IndicatorMapping {
             rust_name: "mass",
             tulip_name: "mass",
@@ -453,7 +453,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![25.0],
         },
-        // MEDPRICE (Median Price)
+        
         IndicatorMapping {
             rust_name: "medprice",
             tulip_name: "medprice",
@@ -461,7 +461,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![],
         },
-        // MIDPOINT
+        
         IndicatorMapping {
             rust_name: "midpoint",
             tulip_name: "midpoint",
@@ -469,7 +469,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // MIDPRICE
+        
         IndicatorMapping {
             rust_name: "midprice",
             tulip_name: "midprice",
@@ -477,7 +477,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![14.0],
         },
-        // NVI (Negative Volume Index)
+        
         IndicatorMapping {
             rust_name: "nvi",
             tulip_name: "nvi",
@@ -485,7 +485,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close", "volume"],
             options: vec![],
         },
-        // PVI (Positive Volume Index)
+        
         IndicatorMapping {
             rust_name: "pvi",
             tulip_name: "pvi",
@@ -493,7 +493,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close", "volume"],
             options: vec![],
         },
-        // QSTICK
+        
         IndicatorMapping {
             rust_name: "qstick",
             tulip_name: "qstick",
@@ -501,7 +501,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["open", "close"],
             options: vec![14.0],
         },
-        // ROCP (Rate of Change Percentage)
+        
         IndicatorMapping {
             rust_name: "rocp",
             tulip_name: "rocp",
@@ -509,7 +509,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // SAR (Parabolic SAR)
+        
         IndicatorMapping {
             rust_name: "sar",
             tulip_name: "psar",
@@ -517,7 +517,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low"],
             options: vec![0.02, 0.2],
         },
-        // STOCHF (Stochastic Fast)
+        
         IndicatorMapping {
             rust_name: "stochf",
             tulip_name: "stochf",
@@ -525,7 +525,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![14.0, 3.0],
         },
-        // STOCHRSI (Stochastic RSI)
+        
         IndicatorMapping {
             rust_name: "srsi",
             tulip_name: "stochrsi",
@@ -533,7 +533,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0, 14.0, 3.0, 3.0],
         },
-        // TRIX
+        
         IndicatorMapping {
             rust_name: "trix",
             tulip_name: "trix",
@@ -541,7 +541,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // TSF (Time Series Forecast)
+        
         IndicatorMapping {
             rust_name: "tsf",
             tulip_name: "tsf",
@@ -549,9 +549,9 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // VIDYA (Variable Index Dynamic Average)
-        // Tulip options: [short_period, long_period, alpha]
-        // Match Rust defaults used in benchmarks: short=2, long=5, alpha=0.2
+        
+        
+        
         IndicatorMapping {
             rust_name: "vidya",
             tulip_name: "vidya",
@@ -559,7 +559,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![2.0, 5.0, 0.2],
         },
-        // VOSC (Volume Oscillator)
+        
         IndicatorMapping {
             rust_name: "vosc",
             tulip_name: "vosc",
@@ -567,7 +567,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["volume"],
             options: vec![5.0, 10.0],
         },
-        // VWMA (Volume Weighted Moving Average)
+        
         IndicatorMapping {
             rust_name: "vwma",
             tulip_name: "vwma",
@@ -575,7 +575,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close", "volume"],
             options: vec![14.0],
         },
-        // WAD (Williams Accumulation/Distribution)
+        
         IndicatorMapping {
             rust_name: "wad",
             tulip_name: "wad",
@@ -583,7 +583,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![],
         },
-        // WCLPRICE (Weighted Close Price)
+        
         IndicatorMapping {
             rust_name: "wclprice",
             tulip_name: "wclprice",
@@ -591,7 +591,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["high", "low", "close"],
             options: vec![],
         },
-        // WILDERS (Wilders Smoothing)
+        
         IndicatorMapping {
             rust_name: "wilders",
             tulip_name: "wilders",
@@ -599,7 +599,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // ZLEMA (Zero Lag Exponential Moving Average)
+        
         IndicatorMapping {
             rust_name: "zlema",
             tulip_name: "zlema",
@@ -607,7 +607,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
             inputs: vec!["close"],
             options: vec![14.0],
         },
-        // Additional indicators with Tulip equivalents
+        
         IndicatorMapping {
             rust_name: "cvi",
             tulip_name: "cvi",
@@ -681,7 +681,7 @@ fn get_indicator_mappings() -> Vec<IndicatorMapping> {
     ]
 }
 
-// Helper function to create Candles from CandleData
+
 fn create_candles(data: &CandleData) -> Candles {
     let mut hl2 = vec![0.0; data.len()];
     let mut hlc3 = vec![0.0; data.len()];
@@ -719,13 +719,13 @@ fn benchmark_rust_indicator(
     let group_name = format!("{}/{}", indicator.rust_name, size_name);
     let mut group = c.benchmark_group(&group_name);
 
-    // Set throughput based on data size
+    
     group.throughput(Throughput::Elements(data.len() as u64));
     group.measurement_time(Duration::from_millis(900));
     group.warm_up_time(Duration::from_millis(150));
     group.sample_size(10);
 
-    // Benchmark Rust implementation (direct call)
+    
     match indicator.rust_name {
         "sma" => {
             let input = sma::SmaInput::from_slice(&data.close, sma::SmaParams { period: Some(14) });
@@ -878,7 +878,7 @@ fn benchmark_rust_indicator(
                 signal_period: Some(9),
                 ma_type: None,
             });
-            // Pre-allocate outputs once to avoid per-iter allocations
+            
             let mut macd_buf = vec![0.0; data.len()];
             let mut sig_buf = vec![0.0; data.len()];
             let mut hist_buf = vec![0.0; data.len()];
@@ -997,7 +997,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        // Additional moving averages
+        
         "dema" => {
             let input = dema::DemaInput::from_slice(&data.close, dema::DemaParams { period: Some(14) });
             let mut out = vec![0.0; data.len()];
@@ -1088,7 +1088,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        // Additional momentum indicators
+        
         "apo" => {
             let input = apo::ApoInput::from_slice(&data.close, apo::ApoParams { short_period: Some(12), long_period: Some(26) });
             let mut out = vec![0.0; data.len()];
@@ -1139,7 +1139,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        // Volume indicators
+        
         "ad" => {
             let input = ad::AdInput::from_candles(candles, ad::AdParams {});
             let mut out = vec![0.0; data.len()];
@@ -1190,7 +1190,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        // Other indicators
+        
         "adxr" => {
             let input = adxr::AdxrInput::from_candles(candles, adxr::AdxrParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
@@ -1420,7 +1420,7 @@ fn benchmark_rust_indicator(
                 });
             });
         }
-        // New indicator implementations
+        
         "cvi" => {
             let input = cvi::CviInput::from_candles(candles, cvi::CviParams { period: Some(14) });
             group.bench_with_input(BenchmarkId::new("rust", size_name), &input, |b, input| {
@@ -1462,8 +1462,8 @@ fn benchmark_rust_indicator(
             });
         }
         "avgprice" => {
-            // Average price (OHLC/4) - using utility function
-            // For avgprice, we can calculate it directly
+            
+            
             let avg_prices: Vec<f64> = (0..data.len())
                 .map(|i| (data.open[i] + data.high[i] + data.low[i] + data.close[i]) / 4.0)
                 .collect();
@@ -1474,7 +1474,7 @@ fn benchmark_rust_indicator(
             });
         }
         "typprice" => {
-            // Typical price (HLC/3)
+            
             let typ_prices: Vec<f64> = (0..data.len())
                 .map(|i| (data.high[i] + data.low[i] + data.close[i]) / 3.0)
                 .collect();
@@ -1485,8 +1485,8 @@ fn benchmark_rust_indicator(
             });
         }
         "tr" => {
-            // True Range - part of ATR calculation
-            // Calculate true range directly
+            
+            
             let mut tr_values = vec![0.0; data.len()];
             for i in 1..data.len() {
                 let hl = data.high[i] - data.low[i];
@@ -1511,7 +1511,7 @@ fn benchmark_rust_indicator(
         _ => {}
     }
 
-    // Benchmark Rust implementation (through FFI)
+    
     let mut rust_output = vec![0.0; data.len()];
     match indicator.rust_name {
         "sma" => {
@@ -2043,16 +2043,16 @@ fn benchmark_rust_indicator(
         _ => {}
     }
 
-    // Benchmark Tulip implementation (skip if no Tulip equivalent)
+    
     if indicator.rust_name != "linearreg_angle" {
     #[cfg(not(feature = "talib"))]
     let _has_talib = false;
     #[cfg(feature = "talib")]
     let _has_talib = std::env::var("TALIB_PATH").is_ok();
 
-    // Validate that this Tulip indicator exists before registering the bench.
-    // Without this guard, unmapped/missing names (e.g., stochf) would return
-    // immediately inside the bench closure and produce misleading nano-second timings.
+    
+    
+    
     let mut _tulip_available = true;
     unsafe {
         if let Err(e) = tulip::get_start_index(indicator.tulip_name, &indicator.options) {
@@ -2061,7 +2061,7 @@ fn benchmark_rust_indicator(
         }
     }
 
-    // Determine correct Tulip arity directly from Tulip metadata to avoid mismatches.
+    
     let (t_inputs, t_outputs) = unsafe { tulip::get_io_counts(indicator.tulip_name) } 
         .unwrap_or((indicator.inputs.len(), 1));
     if t_inputs != indicator.inputs.len() {
@@ -2085,7 +2085,7 @@ fn benchmark_rust_indicator(
     }).collect();
 
     if _tulip_available {
-        // Precompute Tulip metadata and IO pointer arrays once (avoid per-iter allocations).
+        
         let tulip_indicator = match unsafe { tulip::find_indicator(indicator.tulip_name) } {
             Ok(ptr) => ptr,
             Err(e) => {
@@ -2120,18 +2120,18 @@ fn benchmark_rust_indicator(
     }
     }
 
-    // Benchmark TA-LIB implementation if available
+    
     #[cfg(feature = "talib")]
     {
         if _has_talib && indicator.talib_name.is_some() {
             use cross_library_benchmark::talib_wrapper;
 
             let mut talib_outputs: Vec<Vec<f64>> = match indicator.tulip_name {
-                "bbands" => vec![vec![0.0; data.len()]; 3], // 3 outputs
-                "macd" => vec![vec![0.0; data.len()]; 3],   // 3 outputs
-                "stoch" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
-                "aroon" => vec![vec![0.0; data.len()]; 2],  // 2 outputs
-                _ => vec![vec![0.0; data.len()]; 1],        // 1 output
+                "bbands" => vec![vec![0.0; data.len()]; 3], 
+                "macd" => vec![vec![0.0; data.len()]; 3],   
+                "stoch" => vec![vec![0.0; data.len()]; 2],  
+                "aroon" => vec![vec![0.0; data.len()]; 2],  
+                _ => vec![vec![0.0; data.len()]; 1],        
             };
 
             group.bench_function("talib", |b| {
@@ -2275,7 +2275,7 @@ fn benchmark_rust_indicator(
                                     &data.close,
                                     indicator.options[0] as i32,
                                     indicator.options[1] as i32,
-                                    0, // MA type
+                                    0, 
                                     &mut talib_outputs[0],
                                 ).ok();
                             }
@@ -2298,7 +2298,7 @@ fn benchmark_rust_indicator(
                                     &data.close,
                                     indicator.options[0] as i32,
                                     indicator.options[1] as i32,
-                                    0, // MA type
+                                    0, 
                                     &mut talib_outputs[0],
                                 ).ok();
                             }
@@ -2391,7 +2391,7 @@ fn benchmark_rust_indicator(
                                 talib_wrapper::talib_stddev(
                                     &data.close,
                                     indicator.options[0] as i32,
-                                    1.0, // nb_dev
+                                    1.0, 
                                     &mut talib_outputs[0],
                                 ).ok();
                             }
@@ -2399,7 +2399,7 @@ fn benchmark_rust_indicator(
                                 talib_wrapper::talib_var(
                                     &data.close,
                                     indicator.options[0] as i32,
-                                    1.0, // nb_dev
+                                    1.0, 
                                     &mut talib_outputs[0],
                                 ).ok();
                             }
@@ -2528,8 +2528,8 @@ fn benchmark_rust_indicator(
                                 talib_wrapper::talib_sar(
                                     &data.high,
                                     &data.low,
-                                    indicator.options[0], // acceleration
-                                    indicator.options[1], // maximum
+                                    indicator.options[0], 
+                                    indicator.options[1], 
                                     &mut talib_outputs[0],
                                 ).ok();
                             }
@@ -2541,7 +2541,7 @@ fn benchmark_rust_indicator(
                                     &data.close,
                                     indicator.options[0] as i32,
                                     indicator.options[1] as i32,
-                                    0, // MA type
+                                    0, 
                                     &mut k[0],
                                     &mut d[0],
                                 ).ok();
@@ -2553,7 +2553,7 @@ fn benchmark_rust_indicator(
                                     indicator.options[0] as i32,
                                     indicator.options[1] as i32,
                                     indicator.options[2] as i32,
-                                    0, // MA type
+                                    0, 
                                     &mut k[0],
                                     &mut d[0],
                                 ).ok();
@@ -2627,7 +2627,7 @@ fn benchmark_rust_indicator(
                                 ).ok();
                             }
                             _ => {
-                                // For unimplemented indicators, just touch the data
+                                
                                 let _ = black_box(&data.close[0]);
                             }
                         }
@@ -2640,7 +2640,7 @@ fn benchmark_rust_indicator(
     group.finish();
 }
 
-// Helper struct to ensure JSON export on drop
+
 struct JsonExporter;
 
 impl Drop for JsonExporter {
@@ -2654,14 +2654,14 @@ impl Drop for JsonExporter {
 }
 
 fn setup_benchmarks(c: &mut Criterion) {
-    // Create exporter that will save JSON when dropped
+    
     let _json_exporter = JsonExporter;
 
     let collect_only = std::env::var("COLLECT_ONLY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    // Load mappings, allow alphabetical order and indicator filtering
+    
     let mut mappings = get_indicator_mappings();
     let sort_alpha = std::env::var("SORT_ALPHA")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -2710,9 +2710,9 @@ fn setup_benchmarks(c: &mut Criterion) {
             .expect(&format!("Failed to load {}", csv_path));
         let candles = create_candles(&data);
 
-        // Benchmark all indicators
+        
         for mapping in mappings.iter() {
-            // Measure and collect results
+            
             measure_and_collect(mapping, &data, &candles, size_name);
             if !collect_only {
                 benchmark_rust_indicator(c, mapping, &data, &candles, size_name);
@@ -2721,14 +2721,14 @@ fn setup_benchmarks(c: &mut Criterion) {
     }
 }
 
-// Custom function to measure and collect benchmark data
+
 fn measure_and_collect(
     indicator: &IndicatorMapping,
     data: &CandleData,
     candles: &Candles,
     _size_name: &str,
 ) {
-    // Min-time sampling to reduce noise for microsecond-scale indicators.
+    
     let warmup_iters: usize = std::env::var("COLLECT_WARMUP_ITERS")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -2750,7 +2750,7 @@ fn measure_and_collect(
         .unwrap_or(25);
     let min_total = Duration::from_millis(min_ms);
 
-    // Measure Rust Native - ALL indicators
+    
     let rust_supported = std::cell::Cell::new(true);
     let mut run_rust = |iterations: usize| {
         rust_supported.set(true);
@@ -3441,7 +3441,7 @@ fn measure_and_collect(
             }
         }
         _ => {
-            // Skip unmapped indicators
+            
             rust_supported.set(false);
         }
         }
@@ -3464,7 +3464,7 @@ fn measure_and_collect(
     };
     COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustNative, rust_duration_total, data.len(), iterations);
 
-    // Measure Rust via FFI (subset of indicators with wrappers)
+    
     let rust_ffi_supported = std::cell::Cell::new(true);
     let mut run_rust_ffi = |iterations: usize| {
         rust_ffi_supported.set(true);
@@ -3596,9 +3596,9 @@ fn measure_and_collect(
         COLLECTOR.add_measurement(indicator.rust_name, LibraryType::RustFFI, rust_ffi_duration_total, data.len(), iterations);
     }
 
-    // Measure Tulip
+    
     unsafe {
-        // Validate Tulip presence and IO arity before timing
+        
         if let Err(e) = tulip::get_start_index(indicator.tulip_name, &indicator.options) {
             eprintln!("[skip] Tulip indicator '{}' not found: {}", indicator.tulip_name, e);
             return;
@@ -3619,7 +3619,7 @@ fn measure_and_collect(
             return;
         }
 
-        // Prepare inputs and outputs from true Tulip arity
+        
         let inputs: Vec<&[f64]> = indicator.inputs.iter().map(|&input_name| {
             match input_name {
                 "open" => &data.open[..],
@@ -3651,7 +3651,7 @@ fn measure_and_collect(
             .map(|v| v.as_mut_ptr() as *mut cross_library_benchmark::TulipReal)
             .collect();
 
-        // Warmup
+        
         for _ in 0..warmup_iters {
             let _ = tulip::call_indicator_ptrs(
                 tulip_indicator,
@@ -3664,7 +3664,7 @@ fn measure_and_collect(
 
         let mut iterations = start_iters;
         let tulip_duration_total = loop {
-            // Match Rust Native JSON timing, which includes one-time output allocation per measurement.
+            
             let tulip_start = Instant::now();
             for _ in 0..iterations {
                 let _ = tulip::call_indicator_ptrs(
@@ -3684,7 +3684,7 @@ fn measure_and_collect(
         COLLECTOR.add_measurement(indicator.rust_name, LibraryType::TulipFFI, tulip_duration_total, data.len(), iterations);
     }
 
-    // Measure TA-LIB (if available and mapped)
+    
     #[cfg(not(feature = "talib"))]
     let _has_talib = false;
     #[cfg(feature = "talib")]
@@ -3694,12 +3694,12 @@ fn measure_and_collect(
     if _has_talib {
         if let Some(name) = indicator.talib_name {
             use cross_library_benchmark::talib_wrapper;
-            // Allocate outputs for multi-output indicators
+            
             let mut out1 = vec![0.0; data.len()];
             let mut out2 = vec![0.0; data.len()];
             let mut out3 = vec![0.0; data.len()];
 
-            // Warmup
+            
             for _ in 0..warmup_iters {
                 unsafe {
                     match name {

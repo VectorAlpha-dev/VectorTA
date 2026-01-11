@@ -15,7 +15,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu; // raw driver API for SM count and low-level opts
+use cust::sys as cu; 
 use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
@@ -71,7 +71,7 @@ impl CudaMedprice {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/medprice_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            // Keep the JIT at maximum optimization for these tiny kernels.
+            
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
@@ -137,7 +137,7 @@ impl CudaMedprice {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        // VRAM check: 2 inputs + 1 output + headroom
+        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -184,7 +184,7 @@ impl CudaMedprice {
             .get_function("medprice_kernel_f32")
             .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_kernel_f32" })?;
 
-        // SM-aware grid sizing for grid-stride loop
+        
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x, self.sm_count);
 
@@ -209,7 +209,7 @@ impl CudaMedprice {
         Ok(())
     }
 
-    // -------- Batch: one series × many params (rows=1 for medprice) --------
+    
     pub fn medprice_batch_dev(
         &self,
         high: &[f32],
@@ -223,7 +223,7 @@ impl CudaMedprice {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        // VRAM check (2 inputs + 1 output + small metadata + headroom)
+        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -247,11 +247,11 @@ impl CudaMedprice {
             .module
             .get_function("medprice_batch_f32")
             .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_batch_f32" })?;
-        // rows=1; grid.y <= 65_535 satisfied
+        
         let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain{block_x} => block_x.max(32) };
         let (grid, block) = grid_1d_for(len, block_x, self.sm_count);
 
-        // Skip building first_valids; pass null pointer to kernel (fv=0 fallback is correct for MEDPRICE)
+        
         let mut fv_ptr: u64 = 0;
 
         unsafe {
@@ -277,7 +277,7 @@ impl CudaMedprice {
         Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
     }
 
-    // -------- Many-series × one-param (time-major) --------
+    
     pub fn medprice_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -299,7 +299,7 @@ impl CudaMedprice {
             ));
         }
 
-        // VRAM check: 2*n inputs + n out + 64MB headroom (no first_valids allocation)
+        
         let elem = std::mem::size_of::<f32>();
         let bytes_inputs_outputs = 3usize
             .checked_mul(n)
@@ -323,7 +323,7 @@ impl CudaMedprice {
             let mut l = d_low.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
-            // Pass null for first_valids; kernel falls back to fv=0 (correct for MEDPRICE)
+            
             let mut fv: u64 = 0;
             let mut out_p = d_out.as_device_ptr().as_raw();
             let mut args: [*mut c_void; 6] = [
@@ -343,7 +343,7 @@ impl CudaMedprice {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -353,7 +353,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series() -> usize {
-        // 2 inputs + 1 output + 64MB headroom
+        
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
@@ -432,7 +432,7 @@ pub mod benches {
     }
 }
 
-// ---- Private helpers ----
+
 
 fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
     unsafe {
@@ -460,7 +460,7 @@ fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
 
 #[inline]
 fn grid_1d_for(n: usize, block_x: u32, sm_count: u32) -> (GridSize, BlockSize) {
-    // Heuristic: a few blocks per SM is typically sufficient for grid‑stride loops.
+    
     let full = ((n as u32).saturating_add(block_x - 1)) / block_x;
     let cap = sm_count.saturating_mul(4).max(1);
     let gx = full.min(cap).max(1);

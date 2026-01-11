@@ -255,7 +255,7 @@ fn cwma_prepare<'a>(
         });
     }
 
-    // CWMA with period=1 would have no weights, handle it as an error
+    
     if period == 1 {
         return Err(CwmaError::InvalidPeriod {
             period,
@@ -313,7 +313,7 @@ fn cwma_compute_into(
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
+                
                 cwma_scalar(data, weights, period, first, inv_norm, out)
             }
             _ => unreachable!(),
@@ -327,7 +327,7 @@ fn cwma_compute_into(
 pub fn cwma_into_slice(dst: &mut [f64], input: &CwmaInput, kern: Kernel) -> Result<(), CwmaError> {
     let (data, weights, period, first, inv_norm, warm, chosen) = cwma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(CwmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -335,10 +335,10 @@ pub fn cwma_into_slice(dst: &mut [f64], input: &CwmaInput, kern: Kernel) -> Resu
         });
     }
 
-    // Compute CWMA values directly into dst
+    
     cwma_compute_into(data, &weights, period, first, inv_norm, chosen, dst);
 
-    // Fill warmup period with NaN
+    
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -375,10 +375,10 @@ pub unsafe fn cwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    // Optimized scalar path:
-    // - Walk newest->oldest via raw pointers to avoid bounds checks
-    // - 8-way unrolling with independent accumulators for ILP
-    // - Fused mul_add for accuracy + throughput
+    
+    
+    
+    
     let wlen = weights.len();
     let wptr = weights.as_ptr();
     let first_out = first_val + wlen;
@@ -500,7 +500,7 @@ pub unsafe fn cwma_scalar(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    // Optimized scalar fallback (no mul_add): 8-way unrolled accumulators
+    
     let wlen = weights.len();
     let wptr = weights.as_ptr();
     let first_out = first_val + wlen;
@@ -673,9 +673,9 @@ pub fn cwma_avx512(
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    // Many targets downclock on AVX-512; for very small weight vectors the AVX2 kernel
-    // is consistently faster while staying within the existing strict accuracy checks.
-    // The long-kernel already falls back for wlen < 24; mirror that behavior here.
+    
+    
+    
     if weights.len() < 24 {
         unsafe { cwma_avx2(data, weights, period, first_valid, inv_norm, out) }
         return;
@@ -839,40 +839,40 @@ pub unsafe fn cwma_avx512_long(
 /// Matches warmup/NaN semantics of the batch kernels.
 #[derive(Debug, Clone)]
 pub struct CwmaStream {
-    // Public API invariants
-    period: usize, // user period (>= 2)
-    inv_norm: f64, // 1 / sum(weights) with weights = p^3, (p-1)^3, ..., 2^3
+    
+    period: usize, 
+    inv_norm: f64, 
 
-    // Internal window length actually used by kernels (N = period - 1)
+    
     n: usize,
 
-    // Ring buffer of last N values (newest is at (head + N - 1) % N)
+    
     ring: Vec<f64>,
-    head: usize,      // next write position in [0, N)
-    filled: usize,    // how many items have been written since first non-NaN (cap N)
-    nan_count: usize, // number of NaNs currently inside the active window
+    head: usize,      
+    filled: usize,    
+    nan_count: usize, 
 
-    // First-non-NaN tracking to mirror warmup behavior
+    
     total_count: usize,
     found_first: bool,
     first_idx: usize,
 
-    // Running moments over positions r=1..N where r=1 is newest:
-    // M0 = sum r^0 * x = sum x
-    // M1 = sum r^1 * x
-    // M2 = sum r^2 * x
-    // M3 = sum r^3 * x
+    
+    
+    
+    
+    
     m0: f64,
     m1: f64,
     m2: f64,
     m3: f64,
 
-    // Raw weighted sum S = sum_{r=1}^N (A - r)^3 * x_{t+1-r}, with A = N + 2
-    // We maintain S explicitly to avoid recomputing from the four moments if desired.
+    
+    
     s: f64,
 
-    // Precomputed constants for fast updates (all derivable from n):
-    // A = N + 2; w1 = (N + 1)^3; wN = 2^3; Δw_{s+1} = α0 + α1*s + α2*s^2
+    
+    
     a: f64,
     w1: f64,
     wn: f64,
@@ -882,10 +882,10 @@ pub struct CwmaStream {
 
     n_f: f64,
     n_sq: f64,
-    n_p1: f64,    // N + 1
-    n_p1_sq: f64, // (N + 1)^2
+    n_p1: f64,    
+    n_p1_sq: f64, 
 
-    // Whether the four moments (and S) are valid for the current window (nan_count==0)
+    
     moments_ready: bool,
 }
 
@@ -899,13 +899,13 @@ impl CwmaStream {
             });
         }
 
-        // Effective window length used by kernels is N = period - 1
+        
         let n = period - 1;
 
-        // Compute normalization to match batch kernels exactly:
-        // norm = sum_{k=0}^{period-2} (period - k)^3 = sum_{j=2}^{period} j^3
-        // We intentionally use the simple summation (not closed form) to mirror
-        // the existing rounding behavior.
+        
+        
+        
+        
         let mut norm = 0.0;
         for j in 2..=period {
             let jf = j as f64;
@@ -913,17 +913,17 @@ impl CwmaStream {
         }
         let inv_norm = 1.0 / norm;
 
-        // Precompute constants for O(1) updates
+        
         let n_f = n as f64;
         let n_p1 = (n + 1) as f64;
         let n_p1_sq = n_p1 * n_p1;
         let a = (n + 2) as f64;
 
-        let w1 = n_p1 * n_p1 * n_p1; // (N+1)^3
-        let wn = 8.0; // 2^3
+        let w1 = n_p1 * n_p1 * n_p1; 
+        let wn = 8.0; 
 
-        // Δw_{s+1} = (A-(s+1))^3 - (A-s)^3
-        //          = (-3*A^2 + 3*A - 1) + (6*A - 3)*s - 3*s^2
+        
+        
         let alpha0 = -3.0 * a * a + 3.0 * a - 1.0;
         let alpha1 = 6.0 * a - 3.0;
         let alpha2 = -3.0;
@@ -932,7 +932,7 @@ impl CwmaStream {
             period,
             inv_norm,
             n,
-            ring: vec![f64::NAN; n.max(1)], // allocate at least 1
+            ring: vec![f64::NAN; n.max(1)], 
             head: 0,
             filled: 0,
             nan_count: 0,
@@ -968,7 +968,7 @@ impl CwmaStream {
         let idx = self.total_count;
         self.total_count = idx + 1;
 
-        // Track the index of the first finite value to mirror warmup behavior.
+        
         if !self.found_first {
             if value.is_nan() {
                 return None;
@@ -978,69 +978,69 @@ impl CwmaStream {
             }
         }
 
-        // Determine the "old" value that leaves the window when we're full
+        
         let mut old = f64::NAN;
         if self.filled >= self.n {
             old = self.ring[self.head];
         }
 
-        // Update NaN count for the next window (after inserting `value` and removing `old`)
+        
         let new_nan = value.is_nan() as usize;
         let old_nan = (self.filled >= self.n && old.is_nan()) as usize;
 
-        // Write new value into ring and advance head
+        
         if self.n > 0 {
             self.ring[self.head] = value;
             self.head = (self.head + 1) % self.n;
         }
 
-        // Grow until we have N+1 samples after first finite; first output at idx = first + (N)
+        
         if self.filled <= self.n {
             self.filled += 1;
             self.nan_count += new_nan;
-            // When we cross to N+1 samples, drop the oldest from NaN count
+            
             if self.filled == self.n + 1 {
                 self.nan_count -= old_nan;
             }
 
-            // Still warming up until we've seen N+1 samples
+            
             if self.filled <= self.n {
                 return None;
             }
 
-            // Window just became clean/full (contains last N samples)
+            
             if self.nan_count > 0 {
                 self.moments_ready = false;
                 return Some(f64::NAN);
             }
 
-            // Initialize the moments and S in O(N) once.
+            
             self.rebuild_moments_and_sum();
             self.moments_ready = true;
             return Some(self.sum_weighted() * self.inv_norm);
         }
 
-        // From here on, the window size is constant (full).
-        // Update NaN bookkeeping for sliding window
+        
+        
         self.nan_count = self.nan_count + new_nan - old_nan;
 
-        // If any NaN lives inside the window: output NaN and mark moments dirty
+        
         if self.nan_count > 0 {
             self.moments_ready = false;
             return Some(f64::NAN);
         }
 
-        // If we just returned to a clean window (nan_count==0) after having NaNs,
-        // rebuild once to get exact parity back, then continue O(1).
+        
+        
         if !self.moments_ready {
             self.rebuild_moments_and_sum();
             self.moments_ready = true;
             return Some(self.sum_weighted() * self.inv_norm);
         }
 
-        // --- O(1) updates below (no NaNs in the window) ----------------------
+        
 
-        // Old window moments before sliding
+        
         let m0_prev = self.m0;
         let m1_prev = self.m1;
         let m2_prev = self.m2;
@@ -1049,11 +1049,11 @@ impl CwmaStream {
         let newv = value;
         let oldv = old;
 
-        // Update the moments themselves in O(1) (binomial recurrences):
-        // M0' = M0 + new - old
-        // M1' = M1 + M0 + new - (N+1)*old
-        // M2' = M2 + 2*M1 + M0 + new - (N+1)^2*old
-        // M3' = M3 + 3*M2 + 3*M1 + M0 + new - (N+1)^3*old
+        
+        
+        
+        
+        
         self.m0 = m0_prev + newv - oldv;
         self.m1 = (-self.n_p1).mul_add(oldv, m1_prev + m0_prev + newv);
         let tmp2 = m1_prev.mul_add(2.0, m2_prev + m0_prev + newv);
@@ -1063,9 +1063,9 @@ impl CwmaStream {
         let tmp3 = m1_prev.mul_add(3.0, tmp3);
         self.m3 = (-np13).mul_add(oldv, tmp3);
 
-        // Update S using finite-difference delta with FMAs to reduce error
-        // ΔS = w1*new - wN*old
-        //    + α0*(M0 - old) + α1*(M1 - N*old) + α2*(M2 - N^2*old)
+        
+        
+        
         let mut ds = newv.mul_add(self.w1, 0.0);
         ds = oldv.mul_add(-self.wn, ds);
         let t1 = self.alpha0.mul_add(m0_prev - oldv, ds);
@@ -1075,7 +1075,7 @@ impl CwmaStream {
         let delta_s = self.alpha2.mul_add(u2, t2);
         self.s += delta_s;
 
-        // Return normalized average (compute directly from ring for exact parity)
+        
         Some(self.sum_weighted() * self.inv_norm)
     }
 
@@ -1088,8 +1088,8 @@ impl CwmaStream {
         let mut m3 = 0.0;
         let mut s = 0.0;
 
-        // r = 1 is newest at index (head + N - 1) % N
-        // weights: w_r = (A - r)^3 with A = N + 2, r in 1..=N
+        
+        
         let a = self.a;
         for r in 1..=self.n {
             let idx = (self.head + self.n - r) % self.n;
@@ -1117,7 +1117,7 @@ impl CwmaStream {
 
     #[inline(always)]
     fn sum_weighted(&self) -> f64 {
-        // Compute S = sum_{r=1..N} (A - r)^3 * x_{t+1-r} using the ring order
+        
         let mut s = 0.0;
         let a = self.a;
         if self.n == 0 {
@@ -1293,7 +1293,7 @@ fn cwma_batch_inner(
     let combos = expand_grid(sweep);
     let cols = data.len();
     let rows = combos.len();
-    // Guard rows * cols multiplication for overflow
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(CwmaError::SizeOverflow { ctx: "rows*cols" })?;
@@ -1302,20 +1302,20 @@ fn cwma_batch_inner(
         return Err(CwmaError::EmptyInputData);
     }
 
-    // Check for NaN values first
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(CwmaError::AllValuesNaN)?;
 
-    // Calculate max period needed (rounded up to 8)
+    
     let max_p = combos
         .iter()
         .map(|c| round_up8(c.period.unwrap()))
         .max()
         .unwrap();
 
-    // Validate we have enough data
+    
     if (cols - first) < max_p {
         return Err(CwmaError::NotEnoughValidData {
             needed: max_p,
@@ -1323,28 +1323,28 @@ fn cwma_batch_inner(
         });
     }
 
-    // Step 1: Allocate uninitialized matrix using the helper
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Step 3: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Step 5: Compute into the buffer
+    
     cwma_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Step 6: Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1369,7 +1369,7 @@ fn cwma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<CwmaParams>, CwmaError> {
-    // Note: Input validation and warmup initialization already done in cwma_batch_inner
+    
     let combos = expand_grid(sweep);
 
     let first = data
@@ -1414,18 +1414,18 @@ fn cwma_batch_inner_into(
         inv_norms[row] = inv_norm;
     }
 
-    // Convert output slice to MaybeUninit for row processing
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Closure that fills one row
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
         let inv_n = *inv_norms.get_unchecked(row);
 
-        // cast just this row to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1442,7 +1442,7 @@ fn cwma_batch_inner_into(
         }
     };
 
-    // 3. run every row, writing directly into `out_uninit`
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1464,8 +1464,8 @@ fn cwma_batch_inner_into(
         }
     }
 
-    // No need to transmute - the memory is already initialized and we're just
-    // reinterpreting back to the original type
+    
+    
 
     Ok(combos)
 }
@@ -1621,16 +1621,16 @@ unsafe fn cwma_row_avx512_long(
 
     let start_idx = first + wlen;
     for i in start_idx..data.len().min(out.len()) {
-        // ------ window base pointer ------------------------------------------
-        let base_ptr = data.as_ptr().add(i - wlen); // oldest value in window
+        
+        let base_ptr = data.as_ptr().add(i - wlen); 
 
-        // ------ vector accumulators -----------------------------------------
+        
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
         let mut s3 = _mm512_setzero_pd();
 
-        // ------ four-chunk unrolled FMA loop ---------------------------------
+        
         let mut blk = 0;
         while blk + 3 < n_chunks {
             let d0 = _mm512_loadu_pd(base_ptr.add((blk + 0) * STEP));
@@ -1645,13 +1645,13 @@ unsafe fn cwma_row_avx512_long(
 
             blk += 4;
         }
-        // trailing complete 8-wide chunks
+        
         for r in blk..n_chunks {
             let d = _mm512_loadu_pd(base_ptr.add(r * STEP));
             s0 = _mm512_fmadd_pd(d, *wregs.get_unchecked(r), s0);
         }
 
-        // ------ tail shorter than 8 -----------------------------------------
+        
         let mut sum =
             _mm512_reduce_add_pd(_mm512_add_pd(_mm512_add_pd(s0, s1), _mm512_add_pd(s2, s3)));
 
@@ -1798,7 +1798,7 @@ pub fn cwma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize NaN prefixes for each row based on warmup period
+    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1823,7 +1823,7 @@ pub fn cwma_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            // Use the _into variant that writes directly to our pre-allocated buffer
+            
             cwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1842,7 +1842,7 @@ pub fn cwma_batch_py<'py>(
     Ok(dict)
 }
 
-// CWMA-specific CUDA device handle with CAI v3 and DLPack, context-guarded
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32CwmaPy {
@@ -2218,23 +2218,23 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_cwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prepare a small but non-trivial candle input (same dataset used by other tests)
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Build default input (close, default params)
+        
         let input = CwmaInput::with_default_candles(&candles);
 
-        // Compute baseline via Vec-returning API
+        
         let baseline = cwma(&input)?.values;
 
-        // Preallocate output buffer and compute into it (no allocations)
+        
         let mut out = vec![0.0; candles.close.len()];
         cwma_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // Equality helper: treat NaN == NaN
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -2498,7 +2498,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_cwma_no_poison(
         test_name: &str,
@@ -2509,25 +2509,25 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_params = vec![
-            // Default parameters
+            
             CwmaParams::default(),
-            // Small periods
+            
             CwmaParams { period: Some(2) },
             CwmaParams { period: Some(3) },
             CwmaParams { period: Some(5) },
-            // Medium periods
+            
             CwmaParams { period: Some(7) },
             CwmaParams { period: Some(10) },
             CwmaParams { period: Some(14) },
             CwmaParams { period: Some(20) },
-            // Large periods
+            
             CwmaParams { period: Some(30) },
             CwmaParams { period: Some(50) },
             CwmaParams { period: Some(100) },
             CwmaParams { period: Some(200) },
-            // Edge cases
+            
             CwmaParams { period: Some(250) },
         ];
 
@@ -2535,16 +2535,16 @@ mod tests {
             let input = CwmaInput::from_candles(&candles, "close", params.clone());
             let output = cwma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2557,7 +2557,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -2570,7 +2570,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -2588,7 +2588,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cwma_no_poison(
         _test_name: &str,
@@ -2606,17 +2606,17 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // 1 ─ Strategy: choose period first, then generate a ≥-period finite vector.
+        
         let strat = (2usize..=32).prop_flat_map(|period| {
             (
                 prop::collection::vec(
-                    (-1e6f64..1e6f64) // 100 % finite values
+                    (-1e6f64..1e6f64) 
                         .prop_filter("finite", |x| x.is_finite()),
                     period..400,
                 ),
                 Just(period),
                 (-1e3f64..1e3f64).prop_filter("finite a", |a| a.is_finite() && *a != 0.0),
-                -1e3f64..1e3f64, //  b may be zero
+                -1e3f64..1e3f64, 
             )
         });
 
@@ -2627,23 +2627,23 @@ mod tests {
                 };
                 let input = CwmaInput::from_slice(&data, params.clone());
 
-                // --- run both kernels, but DO NOT unwrap blindly -----------------
+                
                 let fast = cwma_with_kernel(&input, kernel);
                 let slow = cwma_with_kernel(&input, Kernel::Scalar);
 
                 match (fast, slow) {
-                    // ➊ Same error kind ⇒ property holds.
+                    
                     (Err(e1), Err(e2))
                         if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
                     {
                         return Ok(());
                     }
-                    // ➊′ *Different* error kinds → fail explicitly
+                    
                     (Err(e1), Err(e2)) => {
                         prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2)
                     }
 
-                    // ➋ Kernels disagree on success / error.
+                    
                     (Err(e1), Ok(_)) => {
                         prop_assert!(false, "fast errored {e1:?} but scalar succeeded")
                     }
@@ -2651,12 +2651,12 @@ mod tests {
                         prop_assert!(false, "scalar errored {e2:?} but fast succeeded")
                     }
 
-                    // ➌ Both succeeded – run full invariant suite.
+                    
                     (Ok(fast), Ok(reference)) => {
                         let CwmaOutput { values: out } = fast;
                         let CwmaOutput { values: rref } = reference;
 
-                        // Pre-compute streaming and affine-transformed outputs once.
+                        
                         let mut stream = CwmaStream::try_new(params.clone()).unwrap();
                         let mut s_out = Vec::with_capacity(data.len());
                         for &v in &data {
@@ -2667,7 +2667,7 @@ mod tests {
                         let t_out = cwma(&CwmaInput::from_slice(&transformed, params))?.values;
 
                         for i in (period - 1)..data.len() {
-                            // 1️⃣ Window-boundedness --------------------------------
+                            
                             let w = &data[i + 1 - period..=i];
                             let (lo, hi) = w
                                 .iter()
@@ -2684,17 +2684,17 @@ mod tests {
                                 "idx {i}: {y} ∉ [{lo}, {hi}]"
                             );
 
-                            // 2️⃣ Period-1 identity --------------------------------
+                            
                             if period == 1 && y.is_finite() {
                                 prop_assert!((y - data[i]).abs() <= f64::EPSILON);
                             }
 
-                            // 3️⃣ Constant-series invariance ------------------------
+                            
                             if w.iter().all(|v| *v == w[0]) {
                                 prop_assert!((y - w[0]).abs() <= 1e-9);
                             }
 
-                            // 4️⃣ Monotone preservation ----------------------------
+                            
                             if data[..=i].windows(2).all(|p| p[0] <= p[1])
                                 && y.is_finite()
                                 && out[i - 1].is_finite()
@@ -2702,12 +2702,12 @@ mod tests {
                                 prop_assert!(y >= out[i - 1] - 1e-12);
                             }
 
-                            // 5️⃣ Affine equivariance ------------------------------
+                            
                             {
                                 let expected = a * y + b;
                                 let diff = (yt - expected).abs();
-                                let tol_abs = 1e-9_f64; // tight near zero
-                                let tol_rel = expected.abs() * 1e-9; // scales with magnitude
+                                let tol_abs = 1e-9_f64; 
+                                let tol_rel = expected.abs() * 1e-9; 
                                 let ulp = yt.to_bits().abs_diff(expected.to_bits());
 
                                 prop_assert!(
@@ -2716,21 +2716,21 @@ mod tests {
                                 );
                             }
 
-                            // 6️⃣ Scalar ≡ fast (ULP ≤ 4 or abs ≤ 1e-9) ------------
+                            
                             let ulp = y.to_bits().abs_diff(yr.to_bits());
                             prop_assert!(
                                 (y - yr).abs() <= 1e-9 || ulp <= 4,
                                 "idx {i}: fast={y} ref={yr} ULP={ulp}"
                             );
 
-                            // 7️⃣ Streaming parity ---------------------------------
+                            
                             prop_assert!(
                                 (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
                                 "idx {i}: stream mismatch"
                             );
                         }
 
-                        // 9️⃣ Warm-up sentinel NaNs -------------------------------
+                        
                         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
                         let warm = first + period - 1;
                         prop_assert!(out[..warm].iter().all(|v| v.is_nan()));
@@ -2741,7 +2741,7 @@ mod tests {
             })
             .unwrap();
 
-        // 🔟 Error-path smoke tests (unchanged) -----------------------------------
+        
         assert!(cwma(&CwmaInput::from_slice(&[], CwmaParams::default())).is_err());
         assert!(cwma(&CwmaInput::from_slice(
             &[f64::NAN; 12],
@@ -2838,7 +2838,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2846,24 +2846,24 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small range
-            (2, 5, 1), // periods: 2, 3, 4, 5
-            // Medium range with gaps
-            (5, 25, 5), // periods: 5, 10, 15, 20, 25
-            // Large range
-            (10, 50, 10), // periods: 10, 20, 30, 40, 50
-            // Edge case: very small periods
-            (2, 4, 1), // periods: 2, 3, 4
-            // Edge case: large periods
-            (50, 150, 25), // periods: 50, 75, 100, 125, 150
-            // Dense range
-            (9, 21, 2), // periods: 9, 11, 13, 15, 17, 19, 21
-            // Original configuration
-            (9, 21, 4), // periods: 9, 13, 17, 21
-            // Very large periods
-            (100, 300, 50), // periods: 100, 150, 200, 250, 300
+            
+            (2, 5, 1), 
+            
+            (5, 25, 5), 
+            
+            (10, 50, 10), 
+            
+            (2, 4, 1), 
+            
+            (50, 150, 25), 
+            
+            (9, 21, 2), 
+            
+            (9, 21, 4), 
+            
+            (100, 300, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2872,9 +2872,9 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2884,7 +2884,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2900,7 +2900,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -2916,7 +2916,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -2937,7 +2937,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,

@@ -1,11 +1,11 @@
-// CUDA kernels for Damiani Volatmeter (dual-volatility: ATR ratio + stddev ratio with lag)
-// Optimized for FP32-only math with float-float (float2) prefix sums to avoid FP64 in hot paths.
-//
-// Math category: recurrence/time-scan per-parameter. Each block handles one
-// parameter row (batch) or one series (many-series). We scan sequentially in
-// thread 0 to preserve scalar semantics. Standard deviation windows are
-// computed from compensated prefix sums (S, SS) represented as float2 (hi,lo)
-// with NaN→0 policy to avoid per-thread rings and to reuse work across rows/series.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -25,7 +25,7 @@
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 __device__ __forceinline__ bool finite_f32(float x){ return isfinite(x); }
 
-// Kahan compensated add for FP32 (used for ATR seeding)
+
 __device__ __forceinline__ void kahan_add(float &sum, float &comp, float x){
     float y = x - comp;
     float t = sum + y;
@@ -33,9 +33,9 @@ __device__ __forceinline__ void kahan_add(float &sum, float &comp, float x){
     sum = t;
 }
 
-// ----- float-float (float2) helpers -----
-// Error-free transforms for float-float arithmetic (hi,lo) in a float2
-// References: Dekker/Muller/Shewchuk (2Sum/Fast2Sum/2Prod)
+
+
+
 __device__ __forceinline__ float2 ff_two_sum(float a, float b){
     float s  = a + b;
     float bb = s - a;
@@ -54,17 +54,17 @@ __device__ __forceinline__ float2 ff_sub(float2 x, float2 y){ return ff_add(x, f
 
 __device__ __forceinline__ float2 ff_two_prod(float a, float b){
     float p = a * b;
-    float e = fmaf(a, b, -p); // exact error term via one FMA
+    float e = fmaf(a, b, -p); 
     return make_float2(p, e);
 }
 
 __device__ __forceinline__ float2 ff_scale(float2 x, float s){
-    // scale both parts and renormalize
+    
     return ff_two_sum(x.x * s, x.y * s);
 }
 
 __device__ __forceinline__ float2 ff_mul(float2 x, float2 y){
-    // (xh+xl)*(yh+yl) = xh*yh + (xh*yl + xl*yh) + xl*yl
+    
     float2 p  = ff_two_prod(x.x, y.x);
     float cross = x.x * y.y + x.y * y.x;
     float2 s  = ff_two_sum(p.x, cross);
@@ -74,13 +74,13 @@ __device__ __forceinline__ float2 ff_mul(float2 x, float2 y){
 
 __device__ __forceinline__ float ff_to_f32(float2 x){ return x.x + x.y; }
 
-// Guard small/non-finite denominators
+
 __device__ __forceinline__ float safe_pos_den(float x){
-    const float EPS = 1.1920929e-7f; // ~FLT_EPSILON
+    const float EPS = 1.1920929e-7f; 
     return (finite_f32(x) && x > 0.0f) ? x : EPS;
 }
 
-// Stddev from compensated prefix sums over [t-win+1, t]
+
 __device__ __forceinline__ float std_from_ff_prefix(const float2 s_t, const float2 s_prev,
                                                     const float2 ss_t, const float2 ss_prev,
                                                     int win)
@@ -96,15 +96,15 @@ __device__ __forceinline__ float std_from_ff_prefix(const float2 s_t, const floa
     return sqrtf(var);
 }
 
-// One-series × many-params (batch) — close-only path
-// Inputs:
-//  - prices: length = series_len (time)
-//  - first_valid: first non-NaN index in prices
-//  - vis_atr/vis_std/sed_atr/sed_std/threshold: length = n_combos
-//  - s_prefix/ss_prefix: float2 prefix sums (hi,lo) with NaN→0 policy, length = series_len
-//  - tr: precomputed True Range vs previous close (close-only path), length = series_len
-// Output layout:
-//  - out has 2*n_combos rows stacked: row*2 = vol, row*2+1 = anti; each row has series_len columns
+
+
+
+
+
+
+
+
+
 extern "C" __global__
 void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                                   int series_len,
@@ -140,12 +140,12 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
 
         const int warm_end = min(series_len, first_valid + needed - 1);
 
-        // Wilder ATR state (FP32) with Kahan seed for initial window
+        
         float atr_vis = NAN, atr_sed = NAN;
         float sum_vis = 0.0f, c_vis = 0.0f;
         float sum_sed = 0.0f, c_sed = 0.0f;
 
-        // Keep lag history in registers; treat history as 0 before first writes
+        
         float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
         const float lag_s = 0.5f;
 
@@ -153,7 +153,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
             const float tr_t = LDG(&tr[t]);
             const int k = t - first_valid;
 
-            // Wilder ATR for vis
+            
             if (k < p_vis_atr) {
                 kahan_add(sum_vis, c_vis, tr_t);
                 if (k == p_vis_atr - 1) atr_vis = sum_vis / (float)p_vis_atr;
@@ -162,7 +162,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 atr_vis = fmaf(atr_vis, (1.0f - alpha), tr_t * alpha);
             }
 
-            // Wilder ATR for sed
+            
             if (k < p_sed_atr) {
                 kahan_add(sum_sed, c_sed, tr_t);
                 if (k == p_sed_atr - 1) atr_sed = sum_sed / (float)p_sed_atr;
@@ -171,16 +171,16 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 atr_sed = fmaf(atr_sed, (1.0f - alpha), tr_t * alpha);
             }
 
-            // Start outputs once every window is satisfied (includes warm_end)
+            
             if (k >= needed - 1) {
                 const float inv_sed = 1.0f / safe_pos_den(atr_sed);
                 const float base    = atr_vis * inv_sed;
                 const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
                 out[base_vol + (size_t)t] = vol_t;
-                // update lag ring after writing
+                
                 vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                // Anti only when both stddev windows are full
+                
                 if (k >= max(p_vis_std, p_sed_std) - 1) {
                     const int prev_v = t - p_vis_std;
                     const int prev_s = t - p_sed_std;
@@ -200,7 +200,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 }
             }
         }
-        // Re-assert NaN prefix exactly through warm_end for both outputs
+        
         for (int t = 0; t <= warm_end && t < series_len; ++t) {
             out[base_vol + (size_t)t] = nan_f32();
             out[base_anti + (size_t)t] = nan_f32();
@@ -208,12 +208,12 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Many-series × one-param (time-major). Uses HLC for ATR and close for StdDev.
-// Layouts:
-//  - high_tm/low_tm/close_tm: length = num_series * series_len, index = t*num_series + series
-//  - first_valids: per-series first valid index (based on close only)
-//  - s_tm/ss_tm: float2 prefix sums (NaN→0) with same layout/length as inputs
-//  - out_tm: 2 matrices stacked (vol then anti): dims = series_len x (2*num_series)
+
+
+
+
+
+
 extern "C" __global__
 void damiani_volatmeter_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
@@ -251,7 +251,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
         float prev_close = NAN;
         bool have_prev = false;
 
-        // lag history in registers
+        
         float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
 
         for (int t = fv; t < series_len; ++t) {
@@ -272,7 +272,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
             }
             if (finite_f32(c)) { prev_close = c; have_prev = true; }
 
-            // Wilder ATR vis
+            
             if (k < vis_atr) {
                 kahan_add(sum_vis, c_vis, tr);
                 if (k == vis_atr - 1) atr_vis = sum_vis / (float)vis_atr;
@@ -281,7 +281,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
                 atr_vis = fmaf(atr_vis, (1.0f - alpha), tr * alpha);
             }
 
-            // Wilder ATR sed
+            
             if (k < sed_atr) {
                 kahan_add(sum_sed, c_sed, tr);
                 if (k == sed_atr - 1) atr_sed = sum_sed / (float)sed_atr;
@@ -299,7 +299,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
 
                 vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                // Anti when both std windows full
+                
                 if (k >= max(vis_std, sed_std) - 1) {
                     const int prev_v = t - vis_std;
                     const int prev_s = t - sed_std;
@@ -320,7 +320,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
                 }
             }
         }
-        // Re-assert NaN prefix exactly through warm_end for this series
+        
         for (int t = 0; t <= warm_end && t < series_len; ++t) {
             const size_t out_row = (size_t)t * (size_t)(2 * stride);
             out_tm[out_row + (size_t)series] = nan_f32();

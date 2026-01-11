@@ -21,7 +21,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-  // Load WASM module
+  
   const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
   const importPath = process.platform === 'win32'
     ? 'file:///' + wasmPath.replace(/\\/g, '/')
@@ -41,7 +41,7 @@ test('EPMA accuracy (last 5 values)', () => {
   const out = wasm.epma_js(close, cfg.defaultParams.period, cfg.defaultParams.offset);
   assert.strictEqual(out.length, close.length);
 
-  // Match Rust tolerance: absolute 1e-1
+  
   const last5 = out.slice(-5);
   assertArrayClose(last5, cfg.lastFive, 1e-1, 'EPMA last 5 values mismatch');
 });
@@ -72,11 +72,11 @@ test('EPMA warmup NaNs then valid values', () => {
   const close = new Float64Array(testData.close.slice(0, 200));
   const { defaultParams, warmupPeriod } = EXPECTED_OUTPUTS.epma;
   const out = wasm.epma_js(close, defaultParams.period, defaultParams.offset);
-  // Warmup region should have NaNs
+  
   for (let i = 0; i < Math.min(out.length, warmupPeriod); i++) {
     assert.ok(isNaN(out[i]), `Expected NaN during warmup at index ${i}`);
   }
-  // After warmup values should be finite
+  
   for (let i = warmupPeriod; i < out.length; i++) {
     assert.ok(!isNaN(out[i]), `Unexpected NaN after warmup at index ${i}`);
   }

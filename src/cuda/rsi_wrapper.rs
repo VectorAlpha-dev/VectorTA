@@ -7,7 +7,7 @@
 
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; // shared device array handle
+use crate::cuda::moving_averages::DeviceArrayF32; 
 use crate::indicators::rsi::{RsiBatchRange, RsiParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -51,7 +51,7 @@ pub struct CudaRsi {
     _context: Context,
     device_id: u32,
     policy: CudaRsiPolicy,
-    max_grid_x: u32, // device limit for grid.x
+    max_grid_x: u32, 
 }
 
 impl CudaRsi {
@@ -70,7 +70,7 @@ impl CudaRsi {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Query device max grid.x and cache (fallback to legacy 65_535)
+        
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .unwrap_or(65_535) as u32;
@@ -133,7 +133,7 @@ impl CudaRsi {
         Ok(())
     }
 
-    // ---------- Batch (one series × many params) ----------
+    
     pub fn rsi_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -146,7 +146,7 @@ impl CudaRsi {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate (best-effort) with checked arithmetic
+        
         let out_elems = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaRsiError::InvalidInput("rows*cols overflow".into()))?;
@@ -169,7 +169,7 @@ impl CudaRsi {
             .ok_or_else(|| CudaRsiError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64usize * 1024 * 1024)?;
 
-        // Allocate device buffers and use pinned host + async copies
+        
         let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len)? };
         let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n_combos)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
@@ -193,7 +193,7 @@ impl CudaRsi {
             n_combos,
             &mut d_out,
         )?;
-        // Ensure all work/copies are completed before returning
+        
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -238,7 +238,7 @@ impl CudaRsi {
                     .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                 let mut series_len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let mut combos_i = this_chunk as i32; // combos processed this launch
+                let mut combos_i = this_chunk as i32; 
                 let mut out_ptr = d_out
                     .as_device_ptr()
                     .as_raw()
@@ -258,7 +258,7 @@ impl CudaRsi {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn rsi_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -281,7 +281,7 @@ impl CudaRsi {
             return Err(CudaRsiError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -298,7 +298,7 @@ impl CudaRsi {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate
+        
         let elem_bytes = std::mem::size_of::<f32>();
         let first_bytes = std::mem::size_of::<i32>();
         let two_n = expected
@@ -315,7 +315,7 @@ impl CudaRsi {
             .ok_or_else(|| CudaRsiError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Simpler synchronous copies are sufficient here; keep API synchronous
+        
         let d_prices = DeviceBuffer::from_slice(prices_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
@@ -369,7 +369,7 @@ impl CudaRsi {
         Ok(())
     }
 
-    // ---------- Helpers ----------
+    
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &RsiBatchRange,
@@ -378,7 +378,7 @@ impl CudaRsi {
         if len == 0 {
             return Err(CudaRsiError::InvalidInput("empty prices".into()));
         }
-        // expand grid (mirror CPU semantics: step=0 static, reversed bounds supported)
+        
         let (start, end, step) = sweep.period;
         let mut combos = Vec::new();
         if step == 0 || start == end {
@@ -428,7 +428,7 @@ impl CudaRsi {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -437,7 +437,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
-    const PARAM_SWEEP: usize = 200; // ~200 distinct periods
+    const PARAM_SWEEP: usize = 200; 
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();

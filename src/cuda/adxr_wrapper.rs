@@ -107,7 +107,7 @@ impl CudaAdxr {
         } else if start < end {
             (start..=end).step_by(step).collect()
         } else {
-            // reversed bounds
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -123,7 +123,7 @@ impl CudaAdxr {
     fn find_first_valid_close(close: &[f32]) -> Option<usize> {
         for (i, &v) in close.iter().enumerate() {
             if v == v {
-                // not NaN
+                
                 return Some(i);
             }
         }
@@ -149,7 +149,7 @@ impl CudaAdxr {
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
         if n - first < max_p + 1 { return Err(CudaAdxrError::InvalidInput(format!("not enough valid data: needed >= {}, have {}", max_p + 1, n - first))); }
 
-        // Memory estimate with headroom
+        
         let headroom = 64 * 1024 * 1024;
         let out_elems = n
             .checked_mul(combos.len())
@@ -161,23 +161,23 @@ impl CudaAdxr {
             .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
         Self::will_fit(bytes, headroom)?;
 
-        // Periods -> i32, async copy
+        
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let n_combos = periods_i32.len();
 
-        // Heuristic: prefer optimized kernel on large problems; otherwise use legacy batch kernel
+        
         const MIN_COMBOS_FOR_OPT: usize = 64;
         const MIN_SERIES_LEN_FOR_OPT: usize = 100_000;
         let use_opt = n_combos >= MIN_COMBOS_FOR_OPT || n >= MIN_SERIES_LEN_FOR_OPT;
 
         if use_opt {
-            // Global ring workspace sizing (n_combos × padded period)
+            
             let ring_pitch = Self::round_up(max_p, 32);
             let ring_elems = ring_pitch
                 .checked_mul(n_combos)
                 .ok_or_else(|| CudaAdxrError::InvalidInput("ring workspace overflow".into()))?;
 
-            // Memory fit check includes inputs + periods + ring + outputs
+            
             let headroom = 64 * 1024 * 1024;
             let out_elems2 = n_combos
                 .checked_mul(n)
@@ -190,7 +190,7 @@ impl CudaAdxr {
                 .ok_or_else(|| CudaAdxrError::InvalidInput("byte size overflow".into()))?;
             Self::will_fit(bytes, headroom)?;
 
-            // Upload inputs (async)
+            
             let d_high  = unsafe { DeviceBuffer::from_slice_async(high_f32,  &self.stream) }?;
             let d_low   = unsafe { DeviceBuffer::from_slice_async(low_f32,   &self.stream) }?;
             let d_close = unsafe { DeviceBuffer::from_slice_async(close_f32, &self.stream) }?;
@@ -203,27 +203,27 @@ impl CudaAdxr {
                 unsafe { DeviceBuffer::uninitialized_async(out_elems2, &self.stream) }
                     .map_err(|e| CudaAdxrError::Cuda(e))?;
 
-            // Optimized kernel with shared tiling
+            
             let mut func = self
                 .module
                 .get_function("adxr_one_series_many_params_f32_opt")
                 .map_err(|_| CudaAdxrError::MissingKernelSymbol { name: "adxr_one_series_many_params_f32_opt" })?;
 
-            // Hint: prefer shared memory over L1 for this kernel
+            
             func.set_cache_config(CacheConfig::PreferShared)?;
 
-            // Dynamic shared memory for two f32 tiles of length 256
+            
             let shmem_bytes: usize = 2 * 256 * core::mem::size_of::<f32>();
 
-            // For this recurrence kernel, prefer smaller blocks so we get enough
-            // concurrent blocks to utilize the GPU even for modest combo counts.
-            // Keep block_x as a multiple of warp size.
+            
+            
+            
             const TARGET_BLOCKS: u32 = 64;
             let mut block_x = ((n_combos as u32 + TARGET_BLOCKS - 1) / TARGET_BLOCKS).max(32);
             block_x = ((block_x + 31) / 32) * 32;
             if block_x > 256 { block_x = 256; }
 
-            // 1D launch: one thread per combo (period)
+            
             let blocks_x = ((n_combos as u32 + block_x - 1) / block_x).max(1);
             let grid: GridSize = (blocks_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -249,7 +249,7 @@ impl CudaAdxr {
 
             Ok((DeviceArrayF32 { buf: d_out, rows: n_combos, cols: n }, combos))
         } else {
-            // Legacy kernel path (no shared tiles, no global ring required)
+            
             let headroom = 64 * 1024 * 1024;
             let out_elems3 = n_combos
                 .checked_mul(n)
@@ -274,13 +274,13 @@ impl CudaAdxr {
                 .get_function("adxr_batch_f32")
                 .map_err(|_| CudaAdxrError::MissingKernelSymbol { name: "adxr_batch_f32" })?;
 
-            // Ask occupancy for a suggested block size; fall back to 128
+            
             let (_, suggested) = func
                 .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
                 .unwrap_or((0, 0));
             let block_x = if suggested > 0 { suggested } else { 128 } as u32;
 
-            // Chunk over grid.y so grid.y <= 65_535
+            
             let max_grid_y = 65_535usize;
             let mut launched = 0usize;
             while launched < n_combos {
@@ -289,7 +289,7 @@ impl CudaAdxr {
                 let block: BlockSize = (block_x, 1, 1).into();
                 let stream = &self.stream;
                 unsafe {
-                    // Offset periods and out by launched
+                    
                     let d_periods_off = d_periods.as_device_ptr().add(launched);
                     let d_out_off = d_out.as_device_ptr().add(launched * n);
                     launch!(
@@ -335,7 +335,7 @@ impl CudaAdxr {
         }
         if period == 0 || period > rows { return Err(CudaAdxrError::InvalidInput("invalid period".into())); }
 
-        // First-valid per series uses close only (match scalar semantics)
+        
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -365,7 +365,7 @@ impl CudaAdxr {
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }
                 .map_err(|e| CudaAdxrError::Cuda(e))?;
 
-        // Try optimized time-major kernel first; fall back to legacy signature if missing
+        
         if let Ok(func_opt) = self.module.get_function("adxr_many_series_one_param_time_major_f32_opt") {
             let ring_pitch = Self::round_up(period, 32);
             let mut d_ring: DeviceBuffer<f32> =
@@ -454,7 +454,7 @@ impl CudaAdxr {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -477,7 +477,7 @@ pub mod benches {
     }
     impl CudaBenchState for AdxrBatchDevBench {
         fn launch(&mut self) {
-            // Benchmark the optimized batch kernel directly to avoid per-iter allocs/H2D.
+            
             let func = self
                 .cuda
                 .module
@@ -525,7 +525,7 @@ pub mod benches {
     }
     impl CudaBenchState for AdxrManySeriesBench {
         fn launch(&mut self) {
-            // Mirror wrapper selection: try optimized time-major kernel first.
+            
             if let Ok(func_opt) = self
                 .cuda
                 .module
@@ -583,7 +583,7 @@ pub mod benches {
     }
 
     fn make_series(n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-        // Generate a plausible OHLC path (noisy sine) in f32
+        
         let mut h = vec![f32::NAN; n];
         let mut l = vec![f32::NAN; n];
         let mut c = vec![f32::NAN; n];
@@ -606,7 +606,7 @@ pub mod benches {
         let (h, l, c) = make_series(LEN_1M);
         let first_valid = c.iter().position(|v| v.is_finite()).unwrap_or(LEN_1M);
 
-        // 250 periods: 8..2000 step 8
+        
         let periods_host: Vec<i32> = (0..PARAM_SWEEP_250)
             .map(|i| (8 + 8 * i) as i32)
             .collect();
@@ -615,7 +615,7 @@ pub mod benches {
 
         let cuda = CudaAdxr::new(0).expect("cuda");
 
-        // Use sync allocations for large buffers (WDDM can fail stream-ordered allocs).
+        
         let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
         let d_low = DeviceBuffer::from_slice(&l).expect("d_low");
         let d_close = DeviceBuffer::from_slice(&c).expect("d_close");
@@ -708,7 +708,7 @@ pub mod benches {
         let bytes_batch_1m_x_250 =
             (1_000_000usize * 3 + 250usize * 1_000_000usize + (250usize * 2016usize)) * 4
                 + 64 * 1024 * 1024;
-        let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + out + firsts
+        let bytes_many = 128usize * 8192usize * 4usize * 4usize; 
         vec![
             CudaBenchScenario::new(
                 "adxr",

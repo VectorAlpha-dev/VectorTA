@@ -1,17 +1,17 @@
-// CUDA integration tests for Chande (Chandelier Exit)
 
-use my_project::indicators::chande::{
+
+use vector_ta::indicators::chande::{
     chande_batch_with_kernel, chande_with_kernel, ChandeBatchRange, ChandeInput, ChandeParams,
 };
-use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::data_loader::{read_candles_from_csv, Candles};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaChande;
+use vector_ta::cuda::CudaChande;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -37,7 +37,7 @@ fn chande_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Use dataset from repo to ensure realistic HLC
+    
     let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
     let candles: Candles = read_candles_from_csv(file)?;
     let high: Vec<f64> = candles.high.clone();
@@ -50,7 +50,7 @@ fn chande_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
     let dir = "long";
 
-    // Quantize CPU baseline to f32 to align with GPU FP32 inputs
+    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -60,7 +60,7 @@ fn chande_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let cpu =
         chande_batch_with_kernel(&high_q, &low_q, &close_q, &sweep, dir, Kernel::ScalarBatch)?;
 
-    // Reuse quantized f32 inputs
+    
     let mut cuda = CudaChande::new(0).expect("CudaChande::new");
     let dev = cuda
         .chande_batch_dev(&high_f32, &low_f32, &close_f32, &sweep, dir)
@@ -74,7 +74,7 @@ fn chande_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let (atol, rtol) = (1e-3, 1e-6);
     for idx in 0..(cpu.rows * cpu.cols) {
-        // Quantize CPU output to FP32 to match GPU result scale
+        
         let c = (cpu.values[idx] as f32) as f64;
         let g = host[idx] as f64;
         assert!(
@@ -96,9 +96,9 @@ fn chande_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 4096usize; // time
-                          // Synthesize HLC time-major arrays
+    let cols = 8usize; 
+    let rows = 4096usize; 
+                          
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -120,7 +120,7 @@ fn chande_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         }
     }
 
-    // CPU baseline per series using scalar kernel
+    
     let period = 22usize;
     let mult = 3.0f64;
     let direction = "long";

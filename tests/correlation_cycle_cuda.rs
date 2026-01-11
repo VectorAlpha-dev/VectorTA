@@ -1,17 +1,17 @@
-// Integration tests for CUDA Correlation Cycle kernels
 
-use my_project::indicators::correlation_cycle::{
+
+use vector_ta::indicators::correlation_cycle::{
     correlation_cycle_batch_with_kernel, correlation_cycle_with_kernel, CorrelationCycleBatchRange,
     CorrelationCycleInput, CorrelationCycleParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaCorrelationCycle;
+use vector_ta::cuda::moving_averages::CudaCorrelationCycle;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -45,7 +45,7 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
         period: (16, 64, 8),
         threshold: (9.0, 9.0, 0.0),
     };
-    // Quantize CPU baseline inputs to match the CUDA FP32 input domain.
+    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_q: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = correlation_cycle_batch_with_kernel(&price_q, &sweep, Kernel::ScalarBatch)?;
@@ -66,7 +66,7 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
     quad.angle.buf.copy_to(&mut g_ang)?;
     quad.state.buf.copy_to(&mut g_st)?;
 
-    // Period sweep includes small periods (e.g., 16) which are more numerically sensitive in FP32.
+    
     let tol = 1.25e-2;
     let tol_ang = 0.45f64;
     let state_eps = 0.1f64;
@@ -103,7 +103,7 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
                 tol_ang
             );
         }
-        // state is discrete, tolerate exact or NaN warmup
+        
         let cs = cpu.state[idx];
         let gs = g_st[idx] as f64;
         if cs.is_nan() && gs.is_nan() {
@@ -170,12 +170,12 @@ fn correlation_cycle_cuda_many_series_one_param_matches_cpu(
     let period = 32usize;
     let threshold = 9.0f64;
 
-    // CPU baseline per series
+    
     let mut cpu_real = vec![f64::NAN; cols * rows];
     let mut cpu_imag = vec![f64::NAN; cols * rows];
     let mut cpu_ang = vec![f64::NAN; cols * rows];
     let mut cpu_st = vec![f64::NAN; cols * rows];
-    // Quantize CPU inputs to match CUDA FP32 domain.
+    
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let price_tm_q: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     for s in 0..cols {

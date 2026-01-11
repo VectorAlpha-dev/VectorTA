@@ -319,7 +319,7 @@ pub fn donchian_scalar(
 
     let warmup = first_valid + period - 1;
 
-    // Fast path: period == 1 → echo inputs beyond warmup with NaN gating.
+    
     if period == 1 {
         let start = warmup;
         unsafe {
@@ -345,7 +345,7 @@ pub fn donchian_scalar(
         return;
     }
 
-    // Heuristic: for small periods, the direct window scan has lower constants
+    
     if period <= 32 {
         unsafe {
             let hp = high.as_ptr();
@@ -386,7 +386,7 @@ pub fn donchian_scalar(
         return;
     }
 
-    // Heuristic: for small periods, use direct window scan (lower constants)
+    
     if period <= 32 {
         unsafe {
             let hp = high.as_ptr();
@@ -427,7 +427,7 @@ pub fn donchian_scalar(
         return;
     }
 
-    // vHGW forward prefix on sanitized streams + validity bitmap
+    
     let mut g_max = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
     let mut g_min = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
     let mut valid: Vec<u8> = Vec::with_capacity(n);
@@ -472,7 +472,7 @@ pub fn donchian_scalar(
         }
     }
 
-    // Prefix sum of validity for O(1) all-valid window test
+    
     let mut ps: Vec<u32> = Vec::with_capacity(n + 1);
     unsafe {
         ps.set_len(n + 1);
@@ -486,7 +486,7 @@ pub fn donchian_scalar(
         }
     }
 
-    // Backward suffix pass and produce outputs
+    
     unsafe {
         let hp = high.as_ptr();
         let lp = low.as_ptr();
@@ -524,7 +524,7 @@ pub fn donchian_scalar(
                 continue;
             }
 
-            // All-valid window check in O(1)
+            
             let all_valid = {
                 let vcnt = *psp.add(i + 1) - *psp.add(i + 1 - period);
                 vcnt == period as u32
@@ -635,7 +635,7 @@ pub fn donchian_into_slice(
 
     let warmup_period = first_valid_idx + period - 1;
 
-    // Fill warmup period with NaN
+    
     for i in 0..warmup_period {
         upper_dst[i] = f64::NAN;
         middle_dst[i] = f64::NAN;
@@ -839,7 +839,7 @@ pub fn expand_grid(r: &DonchianBatchRange) -> Result<Vec<DonchianParams>, Donchi
         if start < end {
             Ok((start..=end).step_by(step).collect())
         } else {
-            // reversed bounds supported
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -915,13 +915,13 @@ fn donchian_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| DonchianError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Allocate uninitialized memory and set NaN prefixes
+    
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
@@ -930,7 +930,7 @@ fn donchian_batch_inner(
     init_matrix_prefixes(&mut middle_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut lower_mu, cols, &warmup_periods);
 
-    // Convert to mutable slices for computation
+    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut middle_guard = core::mem::ManuallyDrop::new(middle_mu);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
@@ -997,7 +997,7 @@ fn donchian_batch_inner(
         }
     }
 
-    // Convert back to Vec<f64> from ManuallyDrop
+    
     let upper = unsafe {
         Vec::from_raw_parts(
             upper_guard.as_mut_ptr() as *mut f64,
@@ -1046,7 +1046,7 @@ unsafe fn donchian_row_scalar(
     }
     let warmup = first + period - 1;
 
-    // Fast path for p == 1
+    
     if period == 1 {
         let hp = high.as_ptr();
         let lp = low.as_ptr();
@@ -1069,7 +1069,7 @@ unsafe fn donchian_row_scalar(
         return;
     }
 
-    // Heuristic: for small periods, use direct window scan
+    
     if period <= 32 {
         let hp = high.as_ptr();
         let lp = low.as_ptr();
@@ -1108,7 +1108,7 @@ unsafe fn donchian_row_scalar(
         return;
     }
 
-    // vHGW forward prefix on sanitized streams + validity bitmap
+    
     let mut g_max = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
     let mut g_min = AVec::<f64>::with_capacity(CACHELINE_ALIGN, n);
     let mut valid: Vec<u8> = Vec::with_capacity(n);
@@ -1150,7 +1150,7 @@ unsafe fn donchian_row_scalar(
         }
     }
 
-    // Backward suffix with rolling validity; produce outputs
+    
     let up = upper.as_mut_ptr();
     let mp = middle.as_mut_ptr();
     let lw = lower.as_mut_ptr();
@@ -1285,15 +1285,15 @@ pub unsafe fn donchian_row_avx512_long(
 pub struct DonchianStream {
     period: usize,
 
-    // Validity ring and rolling count to gate outputs exactly like batch scalar path.
-    valid_ring: Vec<u8>, // 0/1 flags, length == period
-    head: usize,         // write index into valid_ring
-    seen: usize,         // total samples seen so far
-    valid_count: usize,  // number of finite samples in the current window
+    
+    valid_ring: Vec<u8>, 
+    head: usize,         
+    seen: usize,         
+    valid_count: usize,  
 
-    // Monotonic deques (value, index). Index is the sample index (0..seen-1).
-    max_deque: VecDeque<(f64, usize)>, // descending by value
-    min_deque: VecDeque<(f64, usize)>, // ascending by value
+    
+    max_deque: VecDeque<(f64, usize)>, 
+    min_deque: VecDeque<(f64, usize)>, 
 }
 
 impl DonchianStream {
@@ -1318,7 +1318,7 @@ impl DonchianStream {
 
     #[inline(always)]
     fn evict_outdated(&mut self, window_start: usize) {
-        // Pop any candidates that fell out of the window.
+        
         while let Some(&(_, idx)) = self.max_deque.front() {
             if idx < window_start {
                 self.max_deque.pop_front();
@@ -1341,10 +1341,10 @@ impl DonchianStream {
     /// - `Some((upper, middle, lower))` thereafter; NaNs if any value in the window is non‑finite.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64, f64)> {
-        // 1) Validity bookkeeping (require both to be finite to count toward a valid window)
+        
         let ok = high.is_finite() & low.is_finite();
 
-        // Rolling window validity count: subtract flag that leaves, add new flag.
+        
         let leaving = self.valid_ring[self.head] as usize;
         self.valid_ring[self.head] = ok as u8;
         self.head += 1;
@@ -1353,18 +1353,18 @@ impl DonchianStream {
         }
         self.valid_count = self.valid_count + (ok as usize) - leaving;
 
-        // Time/index of this sample and new window start (inclusive).
+        
         let t = self.seen;
         self.seen = t + 1;
         let window_start = self.seen.saturating_sub(self.period);
 
-        // 2) Window maintenance for the deques (amortized O(1))
-        //    Evict expired from fronts first (based on index/time).
+        
+        
         self.evict_outdated(window_start);
 
-        //    Only push valid points to the deques (invalid points should not pollute extrema).
+        
         if ok {
-            // Max deque: keep it decreasing.
+            
             while let Some(&(v, _)) = self.max_deque.back() {
                 if v <= high {
                     self.max_deque.pop_back();
@@ -1374,7 +1374,7 @@ impl DonchianStream {
             }
             self.max_deque.push_back((high, t));
 
-            // Min deque: keep it increasing.
+            
             while let Some(&(v, _)) = self.min_deque.back() {
                 if v >= low {
                     self.min_deque.pop_back();
@@ -1385,18 +1385,18 @@ impl DonchianStream {
             self.min_deque.push_back((low, t));
         }
 
-        // 3) Emit:
-        // Warmup still in progress → no output yet (preserves existing streaming API contract).
+        
+        
         if self.seen < self.period {
             return None;
         }
 
-        // If any sample in the last `period` is non‑finite, gate to NaNs (matches batch behavior).
+        
         if self.valid_count != self.period {
             return Some((f64::NAN, f64::NAN, f64::NAN));
         }
 
-        // Otherwise the deques must be non‑empty and their fronts are the extrema.
+        
         debug_assert!(!self.max_deque.is_empty() && !self.min_deque.is_empty());
         let maxv = self.max_deque.front().unwrap().0;
         let minv = self.min_deque.front().unwrap().0;
@@ -1406,7 +1406,7 @@ impl DonchianStream {
     }
 }
 
-// --- TESTS ---
+
 
 #[cfg(test)]
 mod tests {
@@ -1546,26 +1546,26 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations for Donchian
+        
         let test_params = vec![
-            DonchianParams::default(),            // period: 20
-            DonchianParams { period: Some(2) },   // minimum viable period
-            DonchianParams { period: Some(5) },   // small period
-            DonchianParams { period: Some(10) },  // small-medium period
-            DonchianParams { period: Some(20) },  // default period
-            DonchianParams { period: Some(50) },  // medium period
-            DonchianParams { period: Some(100) }, // large period
-            DonchianParams { period: Some(200) }, // very large period
-            DonchianParams { period: Some(500) }, // extreme period
-            DonchianParams { period: Some(14) },  // common trading period
-            DonchianParams { period: Some(26) },  // another common period
+            DonchianParams::default(),            
+            DonchianParams { period: Some(2) },   
+            DonchianParams { period: Some(5) },   
+            DonchianParams { period: Some(10) },  
+            DonchianParams { period: Some(20) },  
+            DonchianParams { period: Some(50) },  
+            DonchianParams { period: Some(100) }, 
+            DonchianParams { period: Some(200) }, 
+            DonchianParams { period: Some(500) }, 
+            DonchianParams { period: Some(14) },  
+            DonchianParams { period: Some(26) },  
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = DonchianInput::from_candles(&candles, params.clone());
             let output = donchian_with_kernel(&input, kernel)?;
 
-            // Check all three bands for poison values
+            
             let bands = [
                 ("upperband", &output.upperband),
                 ("middleband", &output.middleband),
@@ -1575,12 +1575,12 @@ mod tests {
             for (band_name, band_values) in &bands {
                 for (i, &val) in band_values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; // NaN values are expected during warmup
+                        continue; 
                     }
 
                     let bits = val.to_bits();
 
-                    // Check all three poison patterns
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1619,7 +1619,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_donchian_tests {
@@ -1652,7 +1652,7 @@ mod tests {
         let mut high = vec![f64::NAN; n];
         let mut low = vec![f64::NAN; n];
 
-        // Valid data begins at index 5; add some interior NaNs for gating
+        
         for i in 5..n {
             let base = (i as f64).sin() * 10.0 + 100.0;
             high[i] = base + 2.0 + ((i % 7) as f64) * 0.1;
@@ -1698,17 +1698,17 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random realistic price data
+        
         let random_strat = (2usize..=64)
             .prop_flat_map(|period| {
                 (
-                    // Generate base prices and spreads
+                    
                     prop::collection::vec((50f64..5000f64, 0.1f64..50f64), period..400),
                     Just(period),
                 )
             })
             .prop_map(|(price_pairs, period)| {
-                // Create high/low arrays where high >= low
+                
                 let mut high = Vec::with_capacity(price_pairs.len());
                 let mut low = Vec::with_capacity(price_pairs.len());
                 for (base, spread) in price_pairs {
@@ -1718,7 +1718,7 @@ mod tests {
                 (high, low, period)
             });
 
-        // Strategy 2: Constant values
+        
         let constant_strat =
             (2usize..=64, 50f64..5000f64, 0f64..50f64).prop_map(|(period, base_price, spread)| {
                 let len = period + 50;
@@ -1727,7 +1727,7 @@ mod tests {
                 (high, low, period)
             });
 
-        // Strategy 3: Trending data (monotonic increasing)
+        
         let trending_strat = (2usize..=64).prop_map(|period| {
             let len = period + 100;
             let mut high = Vec::with_capacity(len);
@@ -1740,7 +1740,7 @@ mod tests {
             (high, low, period)
         });
 
-        // Strategy 4: Volatile data with large swings
+        
         let volatile_strat = (2usize..=64)
             .prop_flat_map(|period| {
                 (
@@ -1752,7 +1752,7 @@ mod tests {
                 let mut high = Vec::with_capacity(price_pairs.len());
                 let mut low = Vec::with_capacity(price_pairs.len());
                 for (i, (base, spread)) in price_pairs.iter().enumerate() {
-                    // Add volatility pattern
+                    
                     let volatility = if i % 3 == 0 { 2.0 } else { 0.5 };
                     low.push(base - spread * 0.1);
                     high.push(base + spread * volatility);
@@ -1760,7 +1760,7 @@ mod tests {
                 (high, low, period)
             });
 
-        // Strategy 5: Edge case - high == low (single price)
+        
         let single_price_strat = (2usize..=64, 50f64..5000f64).prop_map(|(period, price)| {
             let len = period + 50;
             let high = vec![price; len];
@@ -1768,7 +1768,7 @@ mod tests {
             (high, low, period)
         });
 
-        // Combine all strategies
+        
         let combined_strat = prop_oneof![
             random_strat,
             constant_strat,
@@ -1779,7 +1779,7 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&combined_strat, |(high, low, period)| {
-                // Validate input data: high should always be >= low
+                
                 for i in 0..high.len() {
                     prop_assert!(
                         high[i] >= low[i],
@@ -1795,11 +1795,11 @@ mod tests {
                 };
                 let input = DonchianInput::from_slices(&high, &low, params.clone());
 
-                // Compute with test kernel and reference (scalar) kernel
+                
                 let output = donchian_with_kernel(&input, kernel).unwrap();
                 let ref_output = donchian_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Verify warmup period
+                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         output.upperband[i].is_nan(),
@@ -1824,13 +1824,13 @@ mod tests {
                     );
                 }
 
-                // Verify properties for valid outputs
+                
                 for i in (period - 1)..high.len() {
                     let start = i + 1 - period;
                     let window_high = &high[start..=i];
                     let window_low = &low[start..=i];
 
-                    // Find actual max and min in windows
+                    
                     let expected_max = window_high
                         .iter()
                         .cloned()
@@ -1842,7 +1842,7 @@ mod tests {
                     let middle = output.middleband[i];
                     let lower = output.lowerband[i];
 
-                    // Property 1: Upperband should equal max of high values in window
+                    
                     prop_assert!(
                         (upper - expected_max).abs() < 1e-9,
                         "Upperband mismatch at idx {}: got {}, expected {} (period={})",
@@ -1852,7 +1852,7 @@ mod tests {
                         period
                     );
 
-                    // Property 2: Lowerband should equal min of low values in window
+                    
                     prop_assert!(
                         (lower - expected_min).abs() < 1e-9,
                         "Lowerband mismatch at idx {}: got {}, expected {} (period={})",
@@ -1862,7 +1862,7 @@ mod tests {
                         period
                     );
 
-                    // Property 3: Middleband should equal (upper + lower) / 2
+                    
                     prop_assert!(
                         (middle - expected_mid).abs() < 1e-9,
                         "Middleband mismatch at idx {}: got {}, expected {} (period={})",
@@ -1872,14 +1872,14 @@ mod tests {
                         period
                     );
 
-                    // Property 4: Ordering invariant
+                    
                     prop_assert!(
 						upper >= middle && middle >= lower,
 						"Band ordering violated at idx {}: upper={}, middle={}, lower={} (period={})",
 						i, upper, middle, lower, period
 					);
 
-                    // Property 5: Bands should be within the high/low range
+                    
                     let data_min = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
                     let data_max = window_high
                         .iter()
@@ -1891,9 +1891,9 @@ mod tests {
 						i, upper, lower, data_min, data_max
 					);
 
-                    // Property 6: Special cases
+                    
                     if period == 1 {
-                        // For period=1, bands should equal current values
+                        
                         prop_assert!(
                             (upper - high[i]).abs() < 1e-9,
                             "Period=1: upper should equal current high at idx {}: {} vs {}",
@@ -1910,14 +1910,14 @@ mod tests {
                         );
                     }
 
-                    // Check if all values in the window have high == low (single price scenario)
+                    
                     let window_is_single_price = window_high
                         .iter()
                         .zip(window_low.iter())
                         .all(|(h, l)| (h - l).abs() < f64::EPSILON);
 
                     if window_is_single_price {
-                        // When all high == low in window (single price), all bands should converge
+                        
                         prop_assert!(
 							(upper - lower).abs() < 1e-9,
 							"Single price window: bands should converge at idx {}: upper={}, lower={}",
@@ -1930,12 +1930,12 @@ mod tests {
 						);
                     }
 
-                    // Property 7: Check kernel consistency
+                    
                     let ref_upper = ref_output.upperband[i];
                     let ref_middle = ref_output.middleband[i];
                     let ref_lower = ref_output.lowerband[i];
 
-                    // Check for exact bit equality for NaN/Inf
+                    
                     if !upper.is_finite() || !ref_upper.is_finite() {
                         prop_assert!(
                             upper.to_bits() == ref_upper.to_bits(),
@@ -1945,7 +1945,7 @@ mod tests {
                             ref_upper
                         );
                     } else {
-                        // For finite values, check ULP difference
+                        
                         let ulp_diff = upper.to_bits().abs_diff(ref_upper.to_bits());
                         prop_assert!(
                             (upper - ref_upper).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1997,7 +1997,7 @@ mod tests {
                         );
                     }
 
-                    // Property 8: Check for poison values
+                    
                     for (band_name, val) in [("upper", upper), ("middle", middle), ("lower", lower)]
                     {
                         let bits = val.to_bits();
@@ -2096,16 +2096,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for Donchian
+        
         let test_configs = vec![
-            (2, 10, 2),     // Small periods with step 2
-            (10, 50, 10),   // Medium periods with step 10
-            (20, 100, 20),  // Common trading periods
-            (50, 150, 25),  // Large periods
-            (2, 5, 1),      // Dense small range
-            (100, 300, 50), // Very large periods
-            (14, 26, 4),    // Popular trading periods
-            (5, 20, 3),     // Mixed small to medium
+            (2, 10, 2),     
+            (10, 50, 10),   
+            (20, 100, 20),  
+            (50, 150, 25),  
+            (2, 5, 1),      
+            (100, 300, 50), 
+            (14, 26, 4),    
+            (5, 20, 3),     
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2114,7 +2114,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            // Check all three bands
+            
             let bands = [
                 ("upper", &output.upper),
                 ("middle", &output.middle),
@@ -2132,7 +2132,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2178,12 +2178,12 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 }
-// This file will be appended to donchian.rs
 
-// === Python Bindings ===
+
+
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2393,12 +2393,12 @@ pub fn donchian_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    // Pre-allocate output arrays
+    
     let upper_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let middle_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let lower_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
@@ -2407,7 +2407,7 @@ pub fn donchian_batch_py<'py>(
     let middle_slice = unsafe { middle_arr.as_slice_mut()? };
     let lower_slice = unsafe { lower_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -2415,7 +2415,7 @@ pub fn donchian_batch_py<'py>(
                 k => k,
             };
 
-            // Map batch kernels to regular kernels
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2436,7 +2436,7 @@ pub fn donchian_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("upper", upper_arr.reshape((rows, cols))?)?;
     dict.set_item("middle", middle_arr.reshape((rows, cols))?)?;
@@ -2453,14 +2453,14 @@ pub fn donchian_batch_py<'py>(
     Ok(dict)
 }
 
-// ================== WASM Bindings ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub struct DonchianResult {
-    values: Vec<f64>, // Flattened as [upper..., middle..., lower...]
-    rows: usize,      // 3 for donchian (upper, middle, lower)
-    cols: usize,      // data length
+    values: Vec<f64>, 
+    rows: usize,      
+    cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2490,7 +2490,7 @@ pub fn donchian_js(high: &[f64], low: &[f64], period: usize) -> Result<DonchianR
     };
     let input = DonchianInput::from_slices(high, low, params);
 
-    // Single allocation for each output
+    
     let len = high.len();
     let mut upper = vec![0.0; len];
     let mut middle = vec![0.0; len];
@@ -2505,7 +2505,7 @@ pub fn donchian_js(high: &[f64], low: &[f64], period: usize) -> Result<DonchianR
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Flatten outputs into single array
+    
     let mut values = Vec::with_capacity(len * 3);
     values.extend_from_slice(&upper);
     values.extend_from_slice(&middle);
@@ -2546,7 +2546,7 @@ pub fn donchian_into(
         };
         let input = DonchianInput::from_slices(high, low, params);
 
-        // Check for aliasing among all pointers
+        
         let need_temp = high_ptr == upper_ptr as *const f64
             || high_ptr == middle_ptr as *const f64
             || high_ptr == lower_ptr as *const f64
@@ -2558,7 +2558,7 @@ pub fn donchian_into(
             || middle_ptr == lower_ptr;
 
         if need_temp {
-            // Use temporary buffers when aliasing detected
+            
             let mut temp_upper = vec![0.0; len];
             let mut temp_middle = vec![0.0; len];
             let mut temp_lower = vec![0.0; len];
@@ -2580,7 +2580,7 @@ pub fn donchian_into(
             middle_out.copy_from_slice(&temp_middle);
             lower_out.copy_from_slice(&temp_lower);
         } else {
-            // Direct write when no aliasing
+            
             let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
             let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
             let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
@@ -2645,17 +2645,17 @@ pub fn donchian_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<J
         period: config.period_range,
     };
 
-    // Get dimensions
+    
     let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = high.len();
 
-    // Pre-allocate output arrays
+    
     let mut upper = vec![0.0; rows * cols];
     let mut middle = vec![0.0; rows * cols];
     let mut lower = vec![0.0; rows * cols];
 
-    // Compute batch without parallel processing in WASM
+    
     donchian_batch_inner_into(
         high,
         low,
@@ -2711,7 +2711,7 @@ pub fn donchian_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Calculate dimensions
+        
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
@@ -2736,7 +2736,7 @@ pub fn donchian_batch_into(
     }
 }
 
-// ========================= Python CUDA Bindings =========================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2874,7 +2874,7 @@ pub fn donchian_cuda_batch_dev_py<'py>(
     Ok(d)
 }
 
-// (tests live earlier in this file; parity test added to that module)
+
 
 
 #[cfg(all(feature = "python", feature = "cuda"))]

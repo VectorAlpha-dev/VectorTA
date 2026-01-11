@@ -240,7 +240,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
         });
     }
 
-    // ==== Revert to requiring period + 1 valid points =====
+    
     if (len - first) < (period + 1) {
         return Err(CgError::NotEnoughValidData {
             needed: period + 1,
@@ -248,7 +248,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
         });
     }
 
-    // Use helper function to allocate with NaN prefix only where needed
+    
     let mut out = alloc_with_nan_prefix(len, first + period);
 
     let chosen = match kernel {
@@ -270,7 +270,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     Ok(CgOutput { values: out })
 }
 
-// Pre-computed weights for common periods (1.0, 2.0, 3.0, ..., 64.0)
+
 const CG_WEIGHTS: [f64; 64] = [
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
     18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0,
@@ -278,10 +278,10 @@ const CG_WEIGHTS: [f64; 64] = [
     50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0,
 ];
 
-// Optimized scalar kernel: preserves exact accumulation order while avoiding bounds checks
-// via pointer-based iteration and small unrolled inner loops. For periods <= 65, uses
-// precomputed weights; otherwise computes weights on the fly. Only writes the computed
-// range [first + period, len), matching warmup handling done by callers (see alma.rs pattern).
+
+
+
+
 #[inline(always)]
 pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let start = first + period;
@@ -290,55 +290,55 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    let n_items = period - 1; // exactly period-1 bars
+    let n_items = period - 1; 
 
-    // Fast path: precomputed weights for common periods (<= 65 => up to 64 terms)
+    
     if period <= 65 {
-        // Unroll by 8 while preserving accumulation order exactly
+        
         #[inline(always)]
         unsafe fn dot_sum_precomputed(base_ptr: *const f64, n_items: usize) -> (f64, f64) {
             let mut num = 0.0;
             let mut den = 0.0;
             let mut k = 0usize;
-            let blocks = n_items & !7usize; // round down to multiple of 8
+            let blocks = n_items & !7usize; 
 
             while k < blocks {
-                // step 0
+                
                 let p0 = *base_ptr.sub(k);
                 let w0 = *CG_WEIGHTS.get_unchecked(k);
                 num += w0 * p0;
                 den += p0;
-                // step 1
+                
                 let p1 = *base_ptr.sub(k + 1);
                 let w1 = *CG_WEIGHTS.get_unchecked(k + 1);
                 num += w1 * p1;
                 den += p1;
-                // step 2
+                
                 let p2 = *base_ptr.sub(k + 2);
                 let w2 = *CG_WEIGHTS.get_unchecked(k + 2);
                 num += w2 * p2;
                 den += p2;
-                // step 3
+                
                 let p3 = *base_ptr.sub(k + 3);
                 let w3 = *CG_WEIGHTS.get_unchecked(k + 3);
                 num += w3 * p3;
                 den += p3;
-                // step 4
+                
                 let p4 = *base_ptr.sub(k + 4);
                 let w4 = *CG_WEIGHTS.get_unchecked(k + 4);
                 num += w4 * p4;
                 den += p4;
-                // step 5
+                
                 let p5 = *base_ptr.sub(k + 5);
                 let w5 = *CG_WEIGHTS.get_unchecked(k + 5);
                 num += w5 * p5;
                 den += p5;
-                // step 6
+                
                 let p6 = *base_ptr.sub(k + 6);
                 let w6 = *CG_WEIGHTS.get_unchecked(k + 6);
                 num += w6 * p6;
                 den += p6;
-                // step 7
+                
                 let p7 = *base_ptr.sub(k + 7);
                 let w7 = *CG_WEIGHTS.get_unchecked(k + 7);
                 num += w7 * p7;
@@ -358,7 +358,7 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
 
         for i in start..len {
-            // safe because i >= start >= period and we only subtract up to (period-1)
+            
             let base_ptr = unsafe { data.as_ptr().add(i) };
             let (num, den) = unsafe { dot_sum_precomputed(base_ptr, n_items) };
             out[i] = if den.abs() > f64::EPSILON {
@@ -370,7 +370,7 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    // Generic path: compute weights on the fly; unroll by 4 while preserving order
+    
     for i in start..len {
         unsafe {
             let base_ptr = data.as_ptr().add(i);
@@ -378,29 +378,29 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             let mut den = 0.0;
 
             let mut k = 0usize;
-            let blocks = n_items & !3usize; // multiple of 4
+            let blocks = n_items & !3usize; 
             let mut w = 1.0f64;
 
             while k < blocks {
-                // step 0
+                
                 let p0 = *base_ptr.sub(k);
                 num += w * p0;
                 den += p0;
                 w += 1.0;
 
-                // step 1
+                
                 let p1 = *base_ptr.sub(k + 1);
                 num += w * p1;
                 den += p1;
                 w += 1.0;
 
-                // step 2
+                
                 let p2 = *base_ptr.sub(k + 2);
                 num += w * p2;
                 den += p2;
                 w += 1.0;
 
-                // step 3
+                
                 let p3 = *base_ptr.sub(k + 3);
                 num += w * p3;
                 den += p3;
@@ -466,7 +466,7 @@ pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
         let blocks = n_items & !(VL - 1);
         let mut k = 0usize;
 
-        // Use descending weight vector [k+3 .. k]
+        
         let step_r = _mm256_setr_pd(3.0, 2.0, 1.0, 0.0);
         while k < blocks {
             let p = _mm256_loadu_pd(base_ptr.sub(k + (VL - 1)));
@@ -502,7 +502,7 @@ pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
 #[inline]
 #[target_feature(enable = "fma")]
 pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Treat the same as long; short is a hint for future specialization
+    
     const VL: usize = 8;
     let start = first + period;
     let len = data.len();
@@ -532,7 +532,7 @@ pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &m
         let blocks = n_items & !(VL - 1);
         let mut k = 0usize;
 
-        // descending step [7..0]
+        
         let step_r = _mm512_setr_pd(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
         while k < blocks {
             let p = _mm512_loadu_pd(base_ptr.sub(k + (VL - 1)));
@@ -594,7 +594,7 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
         });
     }
 
-    // ==== Revert to requiring period + 1 valid points =====
+    
     if (len - first) < (period + 1) {
         return Err(CgError::NotEnoughValidData {
             needed: period + 1,
@@ -622,7 +622,7 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
         }
     }
 
-    // Fill warmup with NaN
+    
     for v in &mut dst[..first + period] {
         *v = f64::NAN;
     }
@@ -636,7 +636,7 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn cg_into(input: &CgInput, out: &mut [f64]) -> Result<(), CgError> {
-    // Delegate to the slice-based helper with Kernel::Auto dispatch, matching cg().
+    
     cg_into_slice(out, input, Kernel::Auto)
 }
 
@@ -646,8 +646,8 @@ pub struct CgStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    weighted_sum: f64, // Running weighted sum (numerator)
-    price_sum: f64,    // Running sum of prices (denominator)
+    weighted_sum: f64, 
+    price_sum: f64,    
 }
 
 impl CgStream {
@@ -685,23 +685,23 @@ impl CgStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         debug_assert!(self.period >= 2);
 
-        // Write new value at current head, then advance head.
+        
         let pos = self.head;
         self.buffer[pos] = value;
         let next = if pos + 1 == self.period { 0 } else { pos + 1 };
 
-        // Not filled yet? Keep warm-up semantics identical to existing behavior.
+        
         if !self.filled {
             self.head = next;
 
-            // Just completed the first `period` writes -> initialize running sums
-            // for the (period - 1)-wide window and still return None now.
+            
+            
             if self.head == 0 {
                 let mut num = 0.0;
                 let mut den = 0.0;
                 let mut idx = self.head;
-                // Accumulate in the same order as cg_scalar for the first window:
-                // newest (weight 1) to oldest (weight n).
+                
+                
                 for k in 0..(self.period - 1) {
                     idx = if idx == 0 { self.period - 1 } else { idx - 1 };
                     let p = self.buffer[idx];
@@ -715,22 +715,22 @@ impl CgStream {
             return None;
         }
 
-        // Once filled: O(1) update using the recurrence.
-        // The value leaving the (period-1)-wide window is at `next` after we advanced.
+        
+        
         let last_old = self.buffer[next];
 
         let den_old = self.price_sum;
         let num_old = self.weighted_sum;
 
         let den_new = den_old - last_old + value;
-        // period as f64 used once; avoid repeated casts
+        
         let num_new = num_old + den_old + value - (self.period as f64) * last_old;
 
         self.price_sum = den_new;
         self.weighted_sum = num_new;
         self.head = next;
 
-        // Match scalar behavior: guard divide-by-zero and return 0.0 in that case.
+        
         let out = if den_new.abs() > f64::EPSILON {
             -num_new / den_new
         } else {
@@ -740,7 +740,7 @@ impl CgStream {
     }
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32 as CudaDeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1436,7 +1436,7 @@ mod tests {
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1444,7 +1444,7 @@ mod tests {
 					);
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1452,7 +1452,7 @@ mod tests {
 					);
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1465,7 +1465,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cg_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1526,7 +1526,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1534,15 +1534,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CgBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 50, 5) // Test periods from 5 to 50 in steps of 5
+            .period_range(5, 50, 5) 
             .apply_candles(&c, "close")?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -1552,7 +1552,7 @@ mod tests {
             let col = idx % output.cols;
             let period = output.combos[row].period.unwrap_or(10);
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1560,7 +1560,7 @@ mod tests {
                 );
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1568,7 +1568,7 @@ mod tests {
                 );
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1580,7 +1580,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1618,18 +1618,18 @@ mod tests {
 
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random price data with realistic period ranges
+        
         let random_data_strat = (2usize..=30).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 10..400, // Ensure enough data for warmup
+                    period + 10..400, 
                 ),
                 Just(period),
             )
         });
 
-        // Strategy 2: Constant data (CG should converge to a specific value)
+        
         let constant_data_strat = (2usize..=20).prop_flat_map(|period| {
             (
                 (1f64..1000f64).prop_flat_map(move |value| Just(vec![value; period + 50])),
@@ -1637,7 +1637,7 @@ mod tests {
             )
         });
 
-        // Strategy 3: Trending data (linear increase/decrease)
+        
         let trending_data_strat = (2usize..=25).prop_flat_map(|period| {
             (
                 (-100f64..100f64).prop_flat_map(move |start| {
@@ -1651,7 +1651,7 @@ mod tests {
             )
         });
 
-        // Strategy 4: Edge cases with small periods
+        
         let edge_case_strat = (2usize..=5).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1662,7 +1662,7 @@ mod tests {
             )
         });
 
-        // Combine all strategies
+        
         let combined_strat = prop_oneof![
             random_data_strat.clone(),
             constant_data_strat,
@@ -1677,12 +1677,12 @@ mod tests {
                 };
                 let input = CgInput::from_slice(&data, params);
 
-                // Get output from the kernel under test
+                
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
-                // Get reference output from scalar kernel
+                
                 let CgOutput { values: ref_out } = cg_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Validate warmup period
+                
                 for i in 0..period {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1692,12 +1692,12 @@ mod tests {
                     );
                 }
 
-                // Validate computed values
+                
                 for i in period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 1: Output should be finite (not infinity)
+                    
                     if !y.is_nan() {
                         prop_assert!(
                             y.is_finite(),
@@ -1707,9 +1707,9 @@ mod tests {
                         );
                     }
 
-                    // Property 2: For constant data, CG should equal a specific value
-                    // When all prices are the same, CG = -sum(k*p)/sum(p) where k goes from 1 to period-1
-                    // This simplifies to -sum(k)/count where count = period-1
+                    
+                    
+                    
                     if i >= period
                         && data[i - period + 1..=i]
                             .windows(2)
@@ -1717,8 +1717,8 @@ mod tests {
                     {
                         let constant_val = data[i];
                         if constant_val.abs() > f64::EPSILON {
-                            // Calculate expected CG for constant data
-                            // sum of 1 + 2 + ... + (period-1) = (period-1)*period/2
+                            
+                            
                             let weight_sum = ((period - 1) * period) as f64 / 2.0;
                             let expected_cg = -weight_sum / (period - 1) as f64;
                             prop_assert!(
@@ -1731,13 +1731,13 @@ mod tests {
                         }
                     }
 
-                    // Property 3: For period=2, verify the degenerate case
-                    // When period=2, CG uses only 1 bar (period-1 = 1), resulting in a constant -1.0
-                    // This is a mathematical artifact but worth validating for completeness
+                    
+                    
+                    
                     if period == 2 && i >= 2 {
-                        let p0 = data[i]; // Most recent price (weight = 1)
+                        let p0 = data[i]; 
                         if p0.abs() > f64::EPSILON {
-                            // For period=2: CG = -(1*p0)/(p0) = -1.0
+                            
                             prop_assert!(
                                 (y - (-1.0)).abs() < 1e-9,
                                 "Period=2 should always yield -1.0, got {} at index {}",
@@ -1745,7 +1745,7 @@ mod tests {
                                 i
                             );
                         } else {
-                            // When price is effectively 0, CG should be 0
+                            
                             prop_assert!(
                                 y.abs() < 1e-9,
                                 "Period=2 with zero price should yield 0, got {} at index {}",
@@ -1755,14 +1755,14 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Verify CG produces valid output for non-zero data
-                    // For data with non-zero values, CG should produce non-zero results
+                    
+                    
                     if period > 2 && i >= period + 2 {
                         let window = &data[i - period + 1..=i];
                         let all_nonzero = window.iter().all(|&x| x.abs() > f64::EPSILON);
 
                         if all_nonzero && !y.is_nan() {
-                            // When all values in the window are non-zero, CG should be non-zero
+                            
                             prop_assert!(
 								y.abs() > f64::EPSILON,
 								"CG should be non-zero when all input values are non-zero at index {}, got {}", i, y
@@ -1770,7 +1770,7 @@ mod tests {
                         }
                     }
 
-                    // Property 5: Kernel consistency - all kernels should produce identical results
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1787,8 +1787,8 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                     let tol = match kernel {
-                        // Allow slightly looser tolerance for SIMD kernels due to different
-                        // reduction order / fused mul-add behavior.
+                        
+                        
                         Kernel::Avx2 | Kernel::Avx512 => 1e-5,
                         _ => 1e-9,
                     };
@@ -1807,7 +1807,7 @@ mod tests {
             })
             .unwrap();
 
-        // Additional focused test for mathematical properties
+        
         let math_test_strat = (2usize..=10, prop::collection::vec(1f64..100f64, 20..50));
 
         proptest::test_runner::TestRunner::default()
@@ -1818,13 +1818,13 @@ mod tests {
                 let input = CgInput::from_slice(&data, params);
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
 
-                // Verify that CG calculation uses exactly period-1 bars
+                
                 for i in period..data.len() {
                     if out[i].is_nan() {
                         continue;
                     }
 
-                    // Manually calculate CG using the exact formula
+                    
                     let mut num = 0.0;
                     let mut denom = 0.0;
                     for count in 0..(period - 1) {
@@ -1850,12 +1850,12 @@ mod tests {
             })
             .unwrap();
 
-        // Volatility response test - verify CG responds appropriately to alternating values
+        
         let volatility_test_strat = (3usize..=15).prop_flat_map(|period| {
             (
                 (10f64..100f64).prop_flat_map(move |base| {
                     (1f64..50f64).prop_map(move |amplitude| {
-                        // Create alternating high/low pattern
+                        
                         let mut data = Vec::with_capacity(period + 50);
                         for i in 0..(period + 50) {
                             if i % 2 == 0 {
@@ -1879,17 +1879,17 @@ mod tests {
                 let input = CgInput::from_slice(&data, params);
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
 
-                // For alternating data, CG should oscillate but remain bounded
+                
                 for i in (period + 2)..data.len() {
                     if out[i].is_nan() {
                         continue;
                     }
 
-                    // CG should respond to the alternating pattern
-                    // The exact behavior depends on period (odd vs even)
+                    
+                    
                     if period % 2 == 0 {
-                        // For even periods with alternating data, CG should be relatively stable
-                        // because the weights balance out symmetrically
+                        
+                        
                         if i >= period + 4 {
                             let variation = (out[i] - out[i - 1]).abs();
                             prop_assert!(
@@ -1899,11 +1899,11 @@ mod tests {
                         }
                     }
 
-                    // Verify CG remains bounded relative to the amplitude
-                    let base = (data[i] + data[i - 1]) / 2.0; // Approximate base value
+                    
+                    let base = (data[i] + data[i - 1]) / 2.0; 
                     let relative_cg = (out[i] / base).abs();
                     prop_assert!(
-                        relative_cg < 10.0, // CG shouldn't exceed 10x the base value
+                        relative_cg < 10.0, 
                         "CG magnitude too large relative to data at index {}: CG={}, base={}",
                         i,
                         out[i],
@@ -1918,20 +1918,20 @@ mod tests {
         Ok(())
     }
 
-    // Ensures the no-allocation API matches the Vec-returning API exactly (including NaN warmups)
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_cg_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with an initial NaN prefix
+        
         let mut data = vec![f64::NAN; 3];
         data.extend((0..256).map(|i| (i as f64).sin() * 0.5 + (i as f64) * 0.01));
 
         let input = CgInput::from_slice(&data, CgParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = cg_with_kernel(&input, Kernel::Auto)?.values;
 
-        // Preallocate output and compute via into API
+        
         let mut out = vec![0.0; data.len()];
         cg_into(&input, &mut out)?;
 
@@ -1972,12 +1972,12 @@ pub fn cg_py<'py>(
     let params = CgParams { period };
     let cg_in = CgInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function using zero-copy pattern
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| cg_with_kernel(&cg_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2024,14 +2024,14 @@ pub fn cg_batch_py<'py>(
         period: period_range,
     };
 
-    // Allocate output
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Warm-up prefix init (NaN) – only the prefixes, nothing beyond
+    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -2044,7 +2044,7 @@ pub fn cg_batch_py<'py>(
         }
     }
 
-    // Compute into the same buffer
+    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -2061,7 +2061,7 @@ pub fn cg_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2084,7 +2084,7 @@ pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = CgInput::from_slice(data, params);
 
-    // Use uninitialized memory for better performance
+    
     let mut output = Vec::with_capacity(data.len());
     unsafe {
         output.set_len(data.len());
@@ -2096,7 +2096,7 @@ pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-// New ergonomic WASM API
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct CgBatchConfig {
@@ -2122,7 +2122,7 @@ pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
         period: config.period_range,
     };
 
-    // Mirror alma.rs: pass non-batch kernel here
+    
     let output = cg_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2181,7 +2181,7 @@ pub fn cg_into(
         let input = CgInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing case - use temporary buffer with uninitialized memory
+            
             let mut temp = Vec::with_capacity(len);
             unsafe {
                 temp.set_len(len);
@@ -2191,7 +2191,7 @@ pub fn cg_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing - write directly to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             cg_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2228,7 +2228,7 @@ pub fn cg_batch_into(
             .ok_or_else(|| JsValue::from_str("cg_batch_into: rows*cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total_elems);
 
-        // Warm-up prefix init (NaN) per row
+        
         let first = data
             .iter()
             .position(|x| !x.is_nan())
@@ -2241,7 +2241,7 @@ pub fn cg_batch_into(
             }
         }
 
-        // Compute (non-batch kernel, matching alma.rs)
+        
         cg_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

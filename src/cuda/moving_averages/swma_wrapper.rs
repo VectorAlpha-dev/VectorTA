@@ -735,7 +735,7 @@ impl CudaSwma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(total_elems) }.map_err(CudaSwmaError::Cuda)?;
 
-        // Only pass a device weights pointer when not using constant memory
+        
         let d_weights_opt = if self.has_const_weights {
             None
         } else {
@@ -773,7 +773,7 @@ impl CudaSwma {
                 "period, num_series, and series_len must be positive".into(),
             ));
         }
-        // If constant-memory is available, stage device weights to host and upload to constant
+        
         if self.has_const_weights {
             let mut host_w = vec![0f32; period as usize];
             d_weights.copy_to(&mut host_w).map_err(CudaSwmaError::Cuda)?;
@@ -804,7 +804,7 @@ impl CudaSwma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate: prices + [weights if not const] + first_valids + out (with overflow guards)
+        
         let sb = std::mem::size_of::<f32>();
         let si = std::mem::size_of::<i32>();
         let elems = cols.checked_mul(rows).ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -845,7 +845,7 @@ impl CudaSwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

@@ -1,14 +1,14 @@
-// Integration tests for CUDA SAR kernels
 
-use my_project::indicators::sar::{sar_with_kernel, SarBatchBuilder, SarInput, SarParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::sar::{sar_with_kernel, SarBatchBuilder, SarInput, SarParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaSar;
+use vector_ta::cuda::CudaSar;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -48,12 +48,12 @@ fn sar_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = base[i] - off;
     }
 
-    let sweep = my_project::indicators::sar::SarBatchRange {
+    let sweep = vector_ta::indicators::sar::SarBatchRange {
         acceleration: (0.01, 0.05, 0.01),
         maximum: (0.1, 0.3, 0.1),
     };
-    // Match the exact sweep used for CUDA to ensure apples-to-apples
-    let cpu = my_project::indicators::sar::sar_batch_with_kernel(
+    
+    let cpu = vector_ta::indicators::sar::sar_batch_with_kernel(
         &high,
         &low,
         &sweep,
@@ -72,13 +72,13 @@ fn sar_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 3e-1; // loosened tolerance: FP32 GPU warp-synchronous kernel vs f64 CPU
+    let tol = 3e-1; 
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
         if !approx_eq(c, g, tol) {
             eprintln!("first mismatch at {}: cpu={} gpu={}", idx, c, g);
-            // Dump a small window around the mismatch for row 0
+            
             let len = len;
             let r = idx / len;
             let t = idx % len;
@@ -127,7 +127,7 @@ fn sar_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series
+    
     let params = SarParams {
         acceleration: Some(0.02),
         maximum: Some(0.2),

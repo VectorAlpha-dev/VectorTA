@@ -732,45 +732,45 @@ impl ZscoreStream {
         self.sum = self.sum + new_c - old_c;
         self.sum2 = self.sum2 + new_c * new_c - old_c * old_c;
 
-        // WMA weighted-sum update (weights shift by -1; newest gets weight n)
-        // s2' = s2 - s1_old + n * new
+        
+        
         self.wsum = self.wsum - sum_prev + (self.period as f64) * new_c;
 
         if !self.filled {
-            return None; // warmup
+            return None; 
         }
 
-        // devtype==0 fast-paths; otherwise use the slow but correct path
+        
         if self.devtype == 0 && self.nbdev != 0.0 && self.nan_count == 0 {
-            // pick mean based on MA kind
+            
             let mean = match self.kind {
                 MaKind::Sma => {
-                    // SMA: μ = E[x]
+                    
                     self.sum * self.inv_period
                 }
                 MaKind::Ema => {
-                    // EMA seed: first full window uses SMA; then EMA updates each tick
+                    
                     if !self.ema_inited {
                         self.ema = self.sum * self.inv_period;
                         self.ema_inited = true;
                         self.ema
                     } else {
-                        let alpha = 2.0 / ((self.period as f64) + 1.0); // α = 2/(n+1)
+                        let alpha = 2.0 / ((self.period as f64) + 1.0); 
                         self.ema = self.ema.mul_add(1.0 - alpha, alpha * new_c);
                         self.ema
                     }
                 }
                 MaKind::Wma => {
-                    // WMA mean with linear weights (1..n), newest has weight n
+                    
                     self.wsum * self.inv_wma_denom
                 }
                 MaKind::Other => {
-                    // Not optimized in O(1)
+                    
                     return Some(self.compute_zscore_slow());
                 }
             };
 
-            // population variance / MSE around chosen mean
+            
             let ex = self.sum * self.inv_period;
             let ex2 = self.sum2 * self.inv_period;
 
@@ -795,7 +795,7 @@ impl ZscoreStream {
                 return Some(f64::NAN);
             }
 
-            // latest value is the one just written (at head-1)
+            
             let last_idx = if self.head == 0 {
                 self.period - 1
             } else {
@@ -806,7 +806,7 @@ impl ZscoreStream {
             return Some(z);
         }
 
-        // Fallback: non-stddev, nbdev==0, NaNs in window, or unknown ma_type
+        
         Some(self.compute_zscore_slow())
     }
 
@@ -814,7 +814,7 @@ impl ZscoreStream {
     /// It recreates the ordered window and delegates to `ma()` + `deviation()`.
     #[inline(always)]
     fn compute_zscore_slow(&self) -> f64 {
-        // Reconstruct the window in time order [oldest..newest]
+        
         let mut ordered = vec![0.0; self.period];
         let mut idx = self.head;
         for i in 0..self.period {
@@ -822,13 +822,13 @@ impl ZscoreStream {
             idx = (idx + 1) % self.period;
         }
 
-        // mean from requested MA type
+        
         let means = match ma(&self.ma_type, MaData::Slice(&ordered), self.period) {
             Ok(m) => m,
             Err(_) => return f64::NAN,
         };
 
-        // deviation per requested devtype
+        
         let dev_input = DevInput {
             data: DeviationData::Slice(&ordered),
             params: DevParams {
@@ -1175,10 +1175,10 @@ fn zscore_batch_inner(
         step: 0.0,
     })?;
 
-    // Use uninitialized memory like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination using checked arithmetic
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1194,10 +1194,10 @@ fn zscore_batch_inner(
         })
         .collect::<Result<_, _>>()?;
 
-    // Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Create a guard to manage the buffer
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1370,9 +1370,9 @@ unsafe fn zscore_row_scalar(
     devtype: usize,
     out: &mut [f64],
 ) {
-    // Check for classic kernel optimization
+    
     if devtype == 0 {
-        // Standard deviation only
+        
         if ma_type == "sma" {
             zscore_row_scalar_classic_sma(data, first, period, nbdev, out);
             return;
@@ -1382,11 +1382,11 @@ unsafe fn zscore_row_scalar(
         }
     }
 
-    // Fall back to regular implementation for other MA types or deviation types
+    
     let means = match ma(ma_type, MaData::Slice(data), period) {
         Ok(m) => m,
         Err(_) => {
-            // If MA fails, fill output with NaN
+            
             out.fill(f64::NAN);
             return;
         }
@@ -1401,7 +1401,7 @@ unsafe fn zscore_row_scalar(
     let mut sigmas = match deviation(&dev_input) {
         Ok(d) => d.values,
         Err(_) => {
-            // If deviation fails, fill output with NaN
+            
             out.fill(f64::NAN);
             return;
         }
@@ -1422,7 +1422,7 @@ unsafe fn zscore_row_scalar(
     }
 }
 
-// Classic row kernel with inline SMA and standard deviation for batch processing
+
 #[inline(always)]
 unsafe fn zscore_row_scalar_classic_sma(
     data: &[f64],
@@ -1433,7 +1433,7 @@ unsafe fn zscore_row_scalar_classic_sma(
 ) {
     let warmup_end = first + period - 1;
 
-    // Initial rolling sums
+    
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
     for j in first..=warmup_end {
@@ -1832,7 +1832,7 @@ impl RowWriter {
     }
 }
 
-// Classic row kernel with inline EMA mean + population stddev around EMA (O(1) per step) for batch processing
+
 #[inline(always)]
 unsafe fn zscore_row_scalar_classic_ema(
     data: &[f64],
@@ -1852,7 +1852,7 @@ unsafe fn zscore_row_scalar_classic_ema(
     let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Initialize rolling sums and seed EMA with SMA
+    
     let mut sum = 0.0;
     let mut sum2 = 0.0;
     {
@@ -1866,7 +1866,7 @@ unsafe fn zscore_row_scalar_classic_ema(
     }
     let mut ema = sum / den;
 
-    // Initial stddev around EMA using window sums
+    
     let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
     if mse < 0.0 {
         mse = 0.0;
@@ -1879,7 +1879,7 @@ unsafe fn zscore_row_scalar_classic_ema(
         (data[warmup_end] - ema) / sd
     };
 
-    // Rolling updates
+    
     let mut i = warmup_end + 1;
     while i < n {
         let new = data[i];
@@ -2020,8 +2020,8 @@ pub fn zscore_batch_inner_into(
         });
     }
 
-    // Initialize warmup prefixes (NaN) in the output buffer so that all rows/columns
-    // are initialized before being exposed via Python/WASM.
+    
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -2211,7 +2211,7 @@ pub fn zscore_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
-// -------- CUDA Python handle: CAI v3 + DLPack v1.x --------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct ZscoreDeviceArrayF32Py {
@@ -2507,7 +2507,7 @@ pub fn zscore_batch_py<'py>(
     Ok(dict)
 }
 
-// WASM helper functions
+
 
 /// Write zscore directly to output slice - no allocations
 pub fn zscore_into_slice(
@@ -2550,7 +2550,7 @@ pub fn zscore_into_slice(
     let devtype = input.get_devtype();
 
     let chosen = match kern {
-        // Match zscore_with_kernel's Auto selection behavior.
+        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx2,
             other => other,
@@ -2612,9 +2612,9 @@ unsafe fn zscore_compute_into_scalar(
         return Ok(());
     }
 
-    // Fast paths for devtype 0 (standard deviation)
+    
     if devtype == 0 {
-        // SMA mean + population stddev via rolling sums (match classic kernel exactly)
+        
         if ma_type == "sma" {
             let inv = 1.0 / (period as f64);
             let mut sum = 0.0f64;
@@ -2669,7 +2669,7 @@ unsafe fn zscore_compute_into_scalar(
             return Ok(());
         }
 
-        // EMA mean + population stddev around EMA via window sums and EMA updates (match classic)
+        
         if ma_type == "ema" {
             let den = period as f64;
             let inv = 1.0 / den;
@@ -2736,7 +2736,7 @@ unsafe fn zscore_compute_into_scalar(
         }
     }
 
-    // Generic fallback for all other MA types or devtypes
+    
     let means = ma(ma_type, MaData::Slice(data), period)
         .map_err(|e| ZscoreError::MaError(e.to_string()))?;
     let dev_input = DevInput {
@@ -2792,7 +2792,7 @@ unsafe fn zscore_compute_into_avx512(
     zscore_compute_into_scalar(data, period, first, ma_type, nbdev, devtype, out)
 }
 
-// WASM bindings
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2864,7 +2864,7 @@ pub fn zscore_into(
         let input = ZscoreInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Aliasing check
+            
             let mut temp = vec![0.0; len];
             zscore_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -3092,14 +3092,14 @@ mod tests {
         let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
         let result = zscore_with_kernel(&input, kernel)?;
 
-        // NOTE: These are the actual values from our Rust implementation.
-        // Python reference values were:
-        // [-0.48296332772534434, -0.7213074913423706, -0.8458037396726564,
-        //  -0.18072921072693846, -1.670775998772587]
-        //
-        // The discrepancy is due to different standard deviation calculations:
-        // - Our implementation uses population std dev (σ = √(Σ(x-μ)²/n))
-        // - Python's talib.STDDEV uses sample std dev (σ = √(Σ(x-μ)²/(n-1)))
+        
+        
+        
+        
+        
+        
+        
+        
         let expected_last_five = [
             -0.3040683926967643,
             -0.41042159719064014,
@@ -3153,18 +3153,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             ZscoreParams::default(),
-            // Minimum viable period
+            
             ZscoreParams {
                 period: Some(2),
                 ma_type: Some("sma".to_string()),
                 nbdev: Some(1.0),
                 devtype: Some(0),
             },
-            // Small periods with different MA types
+            
             ZscoreParams {
                 period: Some(5),
                 ma_type: Some("ema".to_string()),
@@ -3177,20 +3177,20 @@ mod tests {
                 nbdev: Some(2.0),
                 devtype: Some(0),
             },
-            // Medium periods with different deviation types
+            
             ZscoreParams {
                 period: Some(20),
                 ma_type: Some("sma".to_string()),
                 nbdev: Some(1.5),
-                devtype: Some(1), // mean abs dev
+                devtype: Some(1), 
             },
             ZscoreParams {
                 period: Some(30),
                 ma_type: Some("ema".to_string()),
                 nbdev: Some(2.5),
-                devtype: Some(2), // median abs dev
+                devtype: Some(2), 
             },
-            // Large periods
+            
             ZscoreParams {
                 period: Some(50),
                 ma_type: Some("wma".to_string()),
@@ -3203,7 +3203,7 @@ mod tests {
                 nbdev: Some(1.0),
                 devtype: Some(1),
             },
-            // Edge cases with different nbdev values
+            
             ZscoreParams {
                 period: Some(14),
                 ma_type: Some("ema".to_string()),
@@ -3222,23 +3222,23 @@ mod tests {
                 nbdev: Some(4.0),
                 devtype: Some(1),
             },
-            // Mixed parameter combinations
+            
             ZscoreParams {
                 period: Some(7),
                 ma_type: Some("ema".to_string()),
-                nbdev: Some(1.618), // golden ratio
+                nbdev: Some(1.618), 
                 devtype: Some(0),
             },
             ZscoreParams {
                 period: Some(21),
                 ma_type: Some("sma".to_string()),
-                nbdev: Some(2.718), // e
+                nbdev: Some(2.718), 
                 devtype: Some(1),
             },
             ZscoreParams {
                 period: Some(42),
                 ma_type: Some("wma".to_string()),
-                nbdev: Some(3.14159), // pi
+                nbdev: Some(3.14159), 
                 devtype: Some(2),
             },
         ];
@@ -3249,12 +3249,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -3310,7 +3310,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_zscore_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -3322,20 +3322,20 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: Generate data with wider range to test numerical stability
+        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
-                // Generate wider range data to test edge cases
+                
                 prop::collection::vec(
                     (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 10..400, // Ensure we have enough data after warmup
+                    period + 10..400, 
                 ),
                 Just(period),
-                // MA type selection
+                
                 prop::sample::select(vec!["sma", "ema", "wma"]),
-                // nbdev: typical range for deviation multipliers
+                
                 0.5f64..3.0f64,
-                // devtype: 0=stddev, 1=mean abs dev, 2=median abs dev
+                
                 0usize..=2,
             )
         });
@@ -3351,15 +3351,15 @@ mod tests {
                 };
                 let input = ZscoreInput::from_slice(&data, params.clone());
 
-                // Run with specified kernel
+                
                 let ZscoreOutput { values: out } = zscore_with_kernel(&input, kernel)?;
-                // Run with scalar as reference
+                
                 let ZscoreOutput { values: ref_out } = zscore_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length matches input
+                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Property 2: Warmup period handling - first period-1 values should be NaN
+                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -3369,14 +3369,14 @@ mod tests {
                     );
                 }
 
-                // Property 3: Check kernel consistency for all values
+                
                 for i in (period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 4: Kernel consistency - compare with scalar reference
+                    
                     if !y.is_finite() || !r.is_finite() {
-                        // Both should be NaN/infinite in same cases
+                        
                         prop_assert_eq!(
                             y.to_bits(),
                             r.to_bits(),
@@ -3386,7 +3386,7 @@ mod tests {
                             r
                         );
                     } else {
-                        // For finite values, check ULP difference
+                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
@@ -3402,11 +3402,11 @@ mod tests {
                     }
                 }
 
-                // Property 6: Special case - constant data should produce NaN zscore (stddev = 0)
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
                     for i in (period - 1)..data.len() {
                         prop_assert!(
-                            out[i].is_nan() || devtype != 0, // Only stddev (devtype=0) should give NaN for constant data
+                            out[i].is_nan() || devtype != 0, 
                             "Expected NaN for constant data with stddev at index {}, got {}",
                             i,
                             out[i]
@@ -3414,7 +3414,7 @@ mod tests {
                     }
                 }
 
-                // Property 7: When period = 2 and using stddev, verify basic zscore calculation
+                
                 if period == 2 && devtype == 0 && ma_type == "sma" {
                     for i in 1..data.len() {
                         if out[i].is_finite() {
@@ -3497,18 +3497,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step, nbdev_start, nbdev_end, nbdev_step, devtype)
-            (2, 10, 2, 0.5, 2.0, 0.5, 0), // Small periods, standard deviation
-            (5, 25, 5, 1.0, 3.0, 1.0, 1), // Medium periods, mean abs dev
-            (10, 50, 10, 1.5, 3.5, 1.0, 2), // Large periods, median abs dev
-            (2, 5, 1, 0.1, 1.0, 0.3, 0),  // Dense small range
-            (14, 14, 0, 1.0, 4.0, 0.5, 0), // Single period, multiple nbdev
-            (20, 40, 10, 2.0, 2.0, 0.0, 1), // Multiple periods, single nbdev
+            
+            (2, 10, 2, 0.5, 2.0, 0.5, 0), 
+            (5, 25, 5, 1.0, 3.0, 1.0, 1), 
+            (10, 50, 10, 1.5, 3.5, 1.0, 2), 
+            (2, 5, 1, 0.1, 1.0, 0.3, 0),  
+            (14, 14, 0, 1.0, 4.0, 0.5, 0), 
+            (20, 40, 10, 2.0, 2.0, 0.0, 1), 
         ];
 
-        // Test with different MA types
+        
         let ma_types = vec!["sma", "ema", "wma"];
 
         for (
@@ -3519,24 +3519,24 @@ mod tests {
             for ma_type in &ma_types {
                 let mut builder = ZscoreBatchBuilder::new().kernel(kernel);
 
-                // Configure period range
+                
                 if period_step > 0 {
                     builder = builder.period_range(period_start, period_end, period_step);
                 } else {
                     builder = builder.period_static(period_start);
                 }
 
-                // Configure nbdev range
+                
                 if nbdev_step > 0.0 {
                     builder = builder.nbdev_range(nbdev_start, nbdev_end, nbdev_step);
                 } else {
                     builder = builder.nbdev_static(nbdev_start);
                 }
 
-                // Configure MA type
+                
                 builder = builder.ma_type_static(ma_type.to_string());
 
-                // Configure devtype
+                
                 builder = builder.devtype_static(devtype);
 
                 let output = builder.apply_candles(&c, "close")?;
@@ -3551,7 +3551,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {} (MA: {}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3591,7 +3591,7 @@ mod tests {
             }
         }
 
-        // Additional test with all devtypes
+        
         let devtype_test = ZscoreBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 10)
@@ -3645,7 +3645,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     gen_batch_tests!(check_batch_default_row);
@@ -3653,17 +3653,17 @@ mod tests {
 
     #[test]
     fn test_zscore_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the same CSV as other tests for realistic coverage
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Default params match existing tests
+        
         let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = zscore(&input)?.values;
 
-        // Preallocate output and call the no-allocation API
+        
         let mut out = vec![0.0; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -3671,15 +3671,15 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, use the slice variant to avoid symbol clash
+            
             zscore_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Treat NaN == NaN; otherwise require exact or tight epsilon equality
-        // Allow a very small epsilon to account for FMA vs non-FMA differences
-        // that can appear in release vs debug or across CPU targets.
+        
+        
+        
         let eq_or_both_nan = |a: f64, b: f64| -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-9)
         };

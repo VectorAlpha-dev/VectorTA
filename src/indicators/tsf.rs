@@ -221,7 +221,7 @@ pub fn tsf(input: &TsfInput) -> Result<TsfOutput, TsfError> {
 /// - Uses `Kernel::Auto` (short-circuited to `Scalar` for TSF) for computation.
 #[cfg(not(feature = "wasm"))]
 pub fn tsf_into(input: &TsfInput, out: &mut [f64]) -> Result<(), TsfError> {
-    // Resolve input slice
+    
     let data: &[f64] = match &input.data {
         TsfData::Candles { candles, source } => source_type(candles, source),
         TsfData::Slice(sl) => sl,
@@ -232,7 +232,7 @@ pub fn tsf_into(input: &TsfInput, out: &mut [f64]) -> Result<(), TsfError> {
         return Err(TsfError::EmptyInputData);
     }
 
-    // First non-NaN and params (mirror tsf_with_kernel validations)
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -261,20 +261,20 @@ pub fn tsf_into(input: &TsfInput, out: &mut [f64]) -> Result<(), TsfError> {
         });
     }
 
-    // Prefill NaN warmup to match alloc_with_nan_prefix's quiet-NaN pattern
+    
     let warmup_end = first + period - 1;
     let nanq = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup_end] {
         *v = nanq;
     }
 
-    // Select kernel: Auto → Scalar for TSF (see tsf_with_kernel)
+    
     let chosen = match Kernel::Auto {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // Compute into caller buffer (kernels do not write warmup prefix)
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => tsf_scalar(data, period, first, out),
@@ -321,8 +321,8 @@ pub fn tsf_with_kernel(input: &TsfInput, kernel: Kernel) -> Result<TsfOutput, Ts
         });
     }
 
-    // Short-circuit Auto to Scalar: AVX2/AVX512 underperform for TSF's sequential recurrence.
-    // Explicit Avx2/Avx512 requests are still honored for testing.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -400,7 +400,7 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
         _ => unreachable!(),
     }
 
-    // Fill warmup with quiet-NaN (match alloc_with_nan_prefix)
+    
     let warmup_end = first + period - 1;
     let nanq = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
@@ -412,7 +412,7 @@ pub fn tsf_into_slice(dst: &mut [f64], input: &TsfInput, kern: Kernel) -> Result
 
 #[inline(always)]
 pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Closed-form sums over x = 0..p-1
+    
     let p = period;
     let n = data.len();
     if n == 0 {
@@ -420,7 +420,7 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
     }
 
     let pf = p as f64;
-    // Match streaming path numerics: compute ∑x and ∑x² via loops
+    
     let mut sum_x = 0.0f64;
     let mut sum_x2 = 0.0f64;
     for x in 0..p {
@@ -429,22 +429,22 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
         sum_x2 += xf * xf;
     }
     let divisor = pf * sum_x2 - sum_x * sum_x;
-    // Precompute reciprocals (Tulip-style). The streaming path uses the same order to keep
-    // batch and streaming outputs consistent.
+    
+    
     let inv_div = 1.0 / divisor;
     let inv_pf = 1.0 / pf;
     let pf_over_div = pf * inv_div;
     let sumx_over_div = sum_x * inv_div;
     let p_minus_mean_x = pf - sum_x * inv_pf;
 
-    // First index we are allowed to write (warmup prefix handled by caller)
+    
     let mut base = first_val;
     let mut i = base + p - 1;
     if i >= n {
         return;
     }
 
-    // --- initialize S0 = ∑y, S1 = ∑(j*y) for window [base .. base+p-1] ---
+    
     let mut s0 = 0.0f64;
     let mut s1 = 0.0f64;
     let mut nan_count = 0usize;
@@ -462,7 +462,7 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
         }
     }
 
-    // write forecast for the first full window
+    
     if nan_count == 0 {
         let m = s1 * pf_over_div - s0 * sumx_over_div;
         unsafe { *out.get_unchecked_mut(i) = s0 * inv_pf + m * p_minus_mean_x; }
@@ -472,7 +472,7 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
         unsafe { *out.get_unchecked_mut(i) = f64::NAN; }
     }
 
-    // --- slide window in O(1): S0' = S0 - y_old + y_new ; S1' = S1 + p*y_new - S0' ---
+    
     while i + 1 < n {
         let y_old = unsafe { *data.get_unchecked(base) };
         let y_new = unsafe { *data.get_unchecked(base + p) };
@@ -489,13 +489,13 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
 
         if nan_count == 0 {
             if prev_nan == 0 {
-                // fast O(1) update
+                
                 let new_s0 = s0 + (y_new - y_old);
                 let new_s1 = pf * y_new + s1 - new_s0;
                 s0 = new_s0;
                 s1 = new_s1;
             } else {
-                // Window just became clean: recover sums once.
+                
                 let mut r0 = 0.0f64;
                 let mut r1 = 0.0f64;
                 for j in 0..p {
@@ -510,7 +510,7 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
             let m = s1 * pf_over_div - s0 * sumx_over_div;
             unsafe { *out.get_unchecked_mut(i) = s0 * inv_pf + m * p_minus_mean_x; }
         } else {
-            // Window contains at least one NaN -> forecast is NaN; keep sums poisoned.
+            
             s0 = f64::NAN;
             s1 = f64::NAN;
             unsafe { *out.get_unchecked_mut(i) = f64::NAN; }
@@ -543,7 +543,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
         let p = period;
         let pf = p as f64;
 
-        // Compute ∑x and ∑x² via loops to match scalar/streaming numerics
+        
         let mut sum_x = 0.0f64;
         let mut sum_x2 = 0.0f64;
         for x in 0..p {
@@ -563,7 +563,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             return;
         }
 
-        // Initialize S0, S1 for the first window [base .. base+p-1]
+        
         let mut s0 = 0.0f64;
         let mut s1 = 0.0f64;
         let mut ok = true;
@@ -579,7 +579,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             s1 += (j as f64) * v;
         }
 
-        // Emit first value (scalar arithmetic for exact parity)
+        
         if ok {
             let m = (pf * s1 - sum_x * s0) / divisor;
             let b = (s0 - m * sum_x) / pf;
@@ -588,18 +588,18 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             *out.get_unchecked_mut(i) = f64::NAN;
         }
 
-        // Main loop: process 4 outputs per iteration.
-        // We advance the streaming state sequentially for 4 steps, then compute
-        // the 4 results with AVX2 to accelerate the expensive divides.
+        
+        
+        
         while i + 4 < n {
-            // Precompute S0/S1 for the next 4 windows (i+1 .. i+4)
+            
             let mut s0_buf = [0.0f64; 4];
             let mut s1_buf = [0.0f64; 4];
             let mut s0_k = s0;
             let mut s1_k = s1;
 
-            // Step t = 0..3 produces window at i + (t+1)
-            // t = 0
+            
+            
             let y_old0 = *data.get_unchecked(base);
             let y_new0 = *data.get_unchecked(base + p);
             if s0_k.is_finite() && s1_k.is_finite() && y_old0.is_finite() && y_new0.is_finite() {
@@ -630,7 +630,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             s0_buf[0] = s0_k;
             s1_buf[0] = s1_k;
 
-            // t = 1
+            
             let y_old1 = *data.get_unchecked(base + 1);
             let y_new1 = *data.get_unchecked(base + p + 1);
             if s0_k.is_finite() && s1_k.is_finite() && y_old1.is_finite() && y_new1.is_finite() {
@@ -661,7 +661,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             s0_buf[1] = s0_k;
             s1_buf[1] = s1_k;
 
-            // t = 2
+            
             let y_old2 = *data.get_unchecked(base + 2);
             let y_new2 = *data.get_unchecked(base + p + 2);
             if s0_k.is_finite() && s1_k.is_finite() && y_old2.is_finite() && y_new2.is_finite() {
@@ -692,7 +692,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             s0_buf[2] = s0_k;
             s1_buf[2] = s1_k;
 
-            // t = 3
+            
             let y_old3 = *data.get_unchecked(base + 3);
             let y_new3 = *data.get_unchecked(base + p + 3);
             if s0_k.is_finite() && s1_k.is_finite() && y_old3.is_finite() && y_new3.is_finite() {
@@ -723,7 +723,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             s0_buf[3] = s0_k;
             s1_buf[3] = s1_k;
 
-            // Vector compute 4 outputs for i+1..i+4
+            
             let s0v = _mm256_loadu_pd(s0_buf.as_ptr());
             let s1v = _mm256_loadu_pd(s1_buf.as_ptr());
             let num = _mm256_sub_pd(_mm256_mul_pd(pfv, s1v), _mm256_mul_pd(sumxv, s0v));
@@ -732,14 +732,14 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
             let outv = _mm256_add_pd(bv, _mm256_mul_pd(mv, pfv));
             _mm256_storeu_pd(out.as_mut_ptr().add(i + 1), outv);
 
-            // Advance base/i and set current state to window at i+4
+            
             s0 = s0_k;
             s1 = s1_k;
             base += 4;
             i += 4;
         }
 
-        // Tail: advance one-by-one (scalar O(1) update)
+        
         while i + 1 < n {
             let y_old = *data.get_unchecked(base);
             let y_new = *data.get_unchecked(base + p);
@@ -759,7 +759,7 @@ pub fn tsf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]
                 let mut r1 = 0.0f64;
                 let mut clean = true;
                 for j in 0..p {
-                    let v = *data.get_unchecked(base + j - 1); // base already advanced
+                    let v = *data.get_unchecked(base + j - 1); 
                     if v.is_nan() {
                         r0 = f64::NAN;
                         r1 = f64::NAN;
@@ -802,22 +802,22 @@ pub struct TsfStream {
     head: usize,
     filled: bool,
 
-    // precomputed invariants for x = 0..p-1
-    pf: f64,    // p as f64
-    sum_x: f64, // ∑ x
+    
+    pf: f64,    
+    sum_x: f64, 
     sum_x_sqr: f64,
-    divisor: f64, // p*∑x² - (∑x)²
+    divisor: f64, 
     inv_pf: f64,
     inv_divisor: f64,
     pf_over_div: f64,
     sumx_over_div: f64,
     p_minus_mean_x: f64,
 
-    // sliding accumulators (when window is clean)
-    s0: f64, // ∑ y
-    s1: f64, // ∑ (j*y)
+    
+    s0: f64, 
+    s1: f64, 
 
-    // counts NaNs currently inside the window (valid only after filled==true)
+    
     nan_count: usize,
 }
 
@@ -828,7 +828,7 @@ impl TsfStream {
             return Err(TsfError::PeriodTooSmall { period });
         }
 
-        // Precompute ∑x and ∑x² for x = 0..period-1 (loop form to mirror scalar path numerics)
+        
         let pf = period as f64;
         let mut sum_x = 0.0f64;
         let mut sum_x_sqr = 0.0f64;
@@ -866,14 +866,14 @@ impl TsfStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // 1) Warmup: fill the ring; when full, initialize sums once and return first forecast
+        
         if !self.filled {
             self.buffer[self.head] = value;
             self.advance_head();
             if self.head == 0 {
                 self.filled = true;
 
-                // Compute S0/S1 once from ring and initialize nan_count.
+                
                 let (s0, s1, nan_count) = self.recompute_from_ring_checked();
                 self.s0 = s0;
                 self.s1 = s1;
@@ -883,19 +883,19 @@ impl TsfStream {
                     return Some(f64::NAN);
                 }
 
-                // First forecast after warmup: forecast = mean_y + m*(p - mean_x)
+                
                 let m = self.s1 * self.pf_over_div - self.s0 * self.sumx_over_div;
                 return Some(self.s0 * self.inv_pf + m * self.p_minus_mean_x);
             }
             return None;
         }
 
-        // 2) Steady state: slide the window by one.
+        
         let y_old = self.buffer[self.head];
         let y_new = value;
         self.buffer[self.head] = y_new;
 
-        // Maintain NaN count in O(1).
+        
         let prev_nan_count = self.nan_count;
         if y_old.is_nan() {
             self.nan_count = self.nan_count.saturating_sub(1);
@@ -905,31 +905,31 @@ impl TsfStream {
         }
 
         let out = if self.nan_count == 0 {
-            // Window is clean now.
+            
             if prev_nan_count == 0
                 && self.s0.is_finite()
                 && self.s1.is_finite()
                 && y_old.is_finite()
                 && y_new.is_finite()
             {
-                // O(1) update for S0 and S1
+                
                 let new_s0 = self.s0 + (y_new - y_old);
-                // S1' = S1 + p*y_new - S0'   (with j=0..p-1 indexing)
+                
                 let new_s1 = self.pf * y_new + self.s1 - new_s0;
                 self.s0 = new_s0;
                 self.s1 = new_s1;
             } else {
-                // Window just became clean (or state was contaminated): one O(p) recovery.
+                
                 let (s0, s1) = self.recompute_from_ring_clean();
                 self.s0 = s0;
                 self.s1 = s1;
             }
 
-            // Forecast = mean_y + m*(p - mean_x)
+            
             let m = self.s1 * self.pf_over_div - self.s0 * self.sumx_over_div;
             self.s0 * self.inv_pf + m * self.p_minus_mean_x
         } else {
-            // Window contains at least one NaN → forecast is NaN; keep S0/S1 in a poisoned state.
+            
             self.s0 = f64::NAN;
             self.s1 = f64::NAN;
             f64::NAN
@@ -941,14 +941,14 @@ impl TsfStream {
 
     #[inline(always)]
     fn advance_head(&mut self) {
-        // Branchy wrap avoids a modulo in the hot path.
+        
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
     }
 
-    // Recompute assuming the window is clean (no NaNs) – faster than the checked version.
+    
     #[inline(always)]
     fn recompute_from_ring_clean(&self) -> (f64, f64) {
         let mut s0 = 0.0;
@@ -956,7 +956,7 @@ impl TsfStream {
         let mut idx = self.head;
         for j in 0..self.period {
             let v = self.buffer[idx];
-            // under contract: no NaNs here
+            
             s0 += v;
             s1 += (j as f64) * v;
             idx += 1;
@@ -967,7 +967,7 @@ impl TsfStream {
         (s0, s1)
     }
 
-    // Recompute with NaN detection; returns (S0,S1,nan_count).
+    
     #[inline(always)]
     fn recompute_from_ring_checked(&self) -> (f64, f64, usize) {
         let mut s0 = 0.0;
@@ -1055,7 +1055,7 @@ pub fn tsf_batch_with_kernel(
     k: Kernel,
 ) -> Result<TsfBatchOutput, TsfError> {
     let kernel = match k {
-        // Short-circuit to ScalarBatch for TSF: SIMD underperforms for the sequential recurrence.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(TsfError::InvalidKernelForBatch(other)),
@@ -1172,19 +1172,19 @@ fn tsf_batch_inner(
         other => return Err(TsfError::InvalidKernelForBatch(other)),
     };
 
-    // Build the list of TsfParams to run over
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (start, end, step) = sweep.period;
         return Err(TsfError::InvalidRange { start, end, step });
     }
 
-    // Find first non‐NaN index
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TsfError::AllValuesNaN)?;
-    // Compute the maximum period required by any combo (and validate periods)
+    
     let mut max_p = 0usize;
     for prm in &combos {
         let p = prm.period.unwrap();
@@ -1221,7 +1221,7 @@ fn tsf_batch_inner(
     let mut sum_xs = vec![0.0; rows];
     let mut divisors = vec![0.0; rows];
 
-    // Precompute ∑x and divisor for each "period = combos[row].period"
+    
     for (row, prm) in combos.iter().enumerate() {
         let period = prm.period.unwrap();
         let sum_x = (0..period).map(|x| x as f64).sum::<f64>();
@@ -1231,23 +1231,23 @@ fn tsf_batch_inner(
         divisors[row] = divisor;
     }
 
-    // Use uninitialized memory like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Compute warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Use ManuallyDrop pattern for safe conversion
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Closure that computes one row into out_row
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         let sum_x = sum_xs[row];
@@ -1287,7 +1287,7 @@ fn tsf_batch_inner(
         }
     }
 
-    // Convert back to Vec using ManuallyDrop pattern
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1304,7 +1304,7 @@ fn tsf_batch_inner(
     })
 }
 
-// Helper function for Python batch bindings - writes directly to the provided buffer
+
 #[inline(always)]
 fn tsf_batch_inner_into(
     data: &[f64],
@@ -1324,14 +1324,14 @@ fn tsf_batch_inner_into(
         other => return Err(TsfError::InvalidKernelForBatch(other)),
     };
 
-    // Build combos
+    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (start, end, step) = sweep.period;
         return Err(TsfError::InvalidRange { start, end, step });
     }
 
-    // First valid index and max window
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1376,7 +1376,7 @@ fn tsf_batch_inner_into(
         });
     }
 
-    // Precompute ∑x and divisor per row
+    
     let mut sum_xs = vec![0.0; rows];
     let mut divisors = vec![0.0; rows];
     for (row, prm) in combos.iter().enumerate() {
@@ -1387,7 +1387,7 @@ fn tsf_batch_inner_into(
         divisors[row] = (p as f64 * sum_x2) - (sum_x * sum_x);
     }
 
-    // Initialize only warmup prefixes to NaN using helper, zero extra writes
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1397,7 +1397,7 @@ fn tsf_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Row kernel
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
         let sum_x = sum_xs[row];
@@ -1414,7 +1414,7 @@ fn tsf_batch_inner_into(
         }
     };
 
-    // Compute rows into output
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1438,7 +1438,7 @@ fn tsf_batch_inner_into(
     Ok(combos)
 }
 
-// 2) tsf_row_scalar (fixed indexing so j=0→oldest, j=period−1→newest)
+
 #[inline(always)]
 unsafe fn tsf_row_scalar(
     data: &[f64],
@@ -1448,7 +1448,7 @@ unsafe fn tsf_row_scalar(
     divisor: f64,
     out: &mut [f64],
 ) {
-    // Keep signature unsafe (module contract), but use safe indexing internally.
+    
     let n = data.len();
     if n == 0 {
         return;
@@ -1456,16 +1456,16 @@ unsafe fn tsf_row_scalar(
 
     let p = period;
     let pf = p as f64;
-    // Use direct divisions to mirror streaming path numerics
+    
 
-    // First full window index
+    
     let mut base = first;
     let mut i = base + p - 1;
     if i >= n {
         return;
     }
 
-    // Initialize S0, S1 on the first full window
+    
     let mut s0 = 0.0f64;
     let mut s1 = 0.0f64;
     let mut ok = true;
@@ -1489,7 +1489,7 @@ unsafe fn tsf_row_scalar(
         out[i] = f64::NAN;
     }
 
-    // Slide across the row
+    
     while i + 1 < n {
         let y_old = data[base];
         let y_new = data[base + p];
@@ -1506,7 +1506,7 @@ unsafe fn tsf_row_scalar(
             let b = (s0 - m * sum_x) / pf;
             out[i] = b + m * pf;
         } else {
-            // Recompute to recover from NaNs
+            
             let mut r0 = 0.0f64;
             let mut r1 = 0.0f64;
             let mut clean = true;
@@ -1545,7 +1545,7 @@ unsafe fn tsf_row_avx2(
     divisor: f64,
     out: &mut [f64],
 ) {
-    // Vectorized arithmetic for 4-at-a-time outputs; sliding updates remain sequential for correctness.
+    
     let n = data.len();
     if n == 0 {
         return;
@@ -1563,7 +1563,7 @@ unsafe fn tsf_row_avx2(
         return;
     }
 
-    // Init sums for the first window
+    
     let mut s0 = 0.0f64;
     let mut s1 = 0.0f64;
     let mut ok = true;
@@ -1592,7 +1592,7 @@ unsafe fn tsf_row_avx2(
         let mut s0_k = s0;
         let mut s1_k = s1;
 
-        // t = 0
+        
         let y_old0 = *data.get_unchecked(base);
         let y_new0 = *data.get_unchecked(base + p);
         if s0_k.is_finite() && s1_k.is_finite() && y_old0.is_finite() && y_new0.is_finite() {
@@ -1623,7 +1623,7 @@ unsafe fn tsf_row_avx2(
         s0_buf[0] = s0_k;
         s1_buf[0] = s1_k;
 
-        // t = 1
+        
         let y_old1 = *data.get_unchecked(base + 1);
         let y_new1 = *data.get_unchecked(base + p + 1);
         if s0_k.is_finite() && s1_k.is_finite() && y_old1.is_finite() && y_new1.is_finite() {
@@ -1654,7 +1654,7 @@ unsafe fn tsf_row_avx2(
         s0_buf[1] = s0_k;
         s1_buf[1] = s1_k;
 
-        // t = 2
+        
         let y_old2 = *data.get_unchecked(base + 2);
         let y_new2 = *data.get_unchecked(base + p + 2);
         if s0_k.is_finite() && s1_k.is_finite() && y_old2.is_finite() && y_new2.is_finite() {
@@ -1685,7 +1685,7 @@ unsafe fn tsf_row_avx2(
         s0_buf[2] = s0_k;
         s1_buf[2] = s1_k;
 
-        // t = 3
+        
         let y_old3 = *data.get_unchecked(base + 3);
         let y_new3 = *data.get_unchecked(base + p + 3);
         if s0_k.is_finite() && s1_k.is_finite() && y_old3.is_finite() && y_new3.is_finite() {
@@ -1716,7 +1716,7 @@ unsafe fn tsf_row_avx2(
         s0_buf[3] = s0_k;
         s1_buf[3] = s1_k;
 
-        // Vector compute and store for i+1..i+4
+        
         let s0v = _mm256_loadu_pd(s0_buf.as_ptr());
         let s1v = _mm256_loadu_pd(s1_buf.as_ptr());
         let num = _mm256_sub_pd(_mm256_mul_pd(pfv, s1v), _mm256_mul_pd(sumxv, s0v));
@@ -1731,7 +1731,7 @@ unsafe fn tsf_row_avx2(
         i += 4;
     }
 
-    // Tail
+    
     while i + 1 < n {
         let y_old = *data.get_unchecked(base);
         let y_new = *data.get_unchecked(base + p);
@@ -1817,9 +1817,9 @@ unsafe fn tsf_row_avx512_long(
     tsf_row_scalar(data, first, period, sum_x, divisor, out)
 }
 
-// ================================
-// Python Bindings
-// ================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "tsf")]
@@ -1931,9 +1931,9 @@ pub fn tsf_batch_py<'py>(
     Ok(dict)
 }
 
-// ================================
-// WASM Bindings
-// ================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1991,7 +1991,7 @@ pub fn tsf_into(
 
         let kernel = detect_best_kernel();
         if in_ptr == out_ptr {
-            // Handle aliasing case
+            
             let mut temp = vec![0.0; len];
             tsf_into_slice(&mut temp, &input, kernel)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2035,7 +2035,7 @@ pub fn tsf_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Fallback for WASM
+        _ => Kernel::Scalar, 
     };
     let output = tsf_batch_inner(data, &sweep, simd, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2204,8 +2204,8 @@ mod tests {
         let params = TsfParams { period: Some(3) };
         let input = TsfInput::from_slice(&input_data, params);
 
-        // Destination slice has wrong length
-        let mut dst = vec![0.0; 10]; // Wrong size (should be 5)
+        
+        let mut dst = vec![0.0; 10]; 
         let res = tsf_into_slice(&mut dst, &input, kernel);
 
         assert!(
@@ -2344,9 +2344,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            TsfParams::default(), // period: 14
+            TsfParams::default(), 
             TsfParams { period: Some(1) },
             TsfParams { period: Some(2) },
             TsfParams { period: Some(5) },
@@ -2365,12 +2365,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2417,7 +2417,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_tsf_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -2429,8 +2429,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate random parameter combinations and corresponding data vectors
-        // Period must be at least 2 for meaningful regression (period=1 would have no regression)
+        
+        
         let strat = (2usize..=30).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2448,16 +2448,16 @@ mod tests {
                 };
                 let input = TsfInput::from_slice(&data, params);
 
-                // Get outputs from the kernel under test and scalar reference
+                
                 let TsfOutput { values: out } = tsf_with_kernel(&input, kernel).unwrap();
                 let TsfOutput { values: ref_out } =
                     tsf_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first non-NaN index (warmup period)
+                
                 let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first + period - 1;
 
-                // Property 1: Warmup period validation - first period-1 values should be NaN
+                
                 for i in 0..warmup_end {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2468,12 +2468,12 @@ mod tests {
                     );
                 }
 
-                // Property 2: Kernel consistency - compare with scalar reference
+                
                 for i in warmup_end..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Handle NaN/infinite values
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2486,7 +2486,7 @@ mod tests {
                         continue;
                     }
 
-                    // ULP comparison for finite values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -2502,7 +2502,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: Constant data property - TSF should predict the same constant
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
                     for i in warmup_end..data.len() {
                         if out[i].is_finite() {
@@ -2518,16 +2518,16 @@ mod tests {
                     }
                 }
 
-                // Property 4: Bounded output range
-                // TSF predictions should be within reasonable bounds of the input data
-                // Since TSF extrapolates, we allow for some extension beyond the data range
+                
+                
+                
                 let data_min = data[first..].iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 let data_max = data[first..]
                     .iter()
                     .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                 let data_range = data_max - data_min;
 
-                // Allow TSF to extrapolate up to 2x the data range beyond min/max
+                
                 let bound_factor = 2.0;
                 let lower_bound = data_min - bound_factor * data_range;
                 let upper_bound = data_max + bound_factor * data_range;
@@ -2546,12 +2546,12 @@ mod tests {
                     }
                 }
 
-                // Property 5: Monotonic trend validation (improved)
+                
                 let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
                 let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
 
                 if is_monotonic_inc || is_monotonic_dec {
-                    // For monotonic data, check trend direction at a few points
+                    
                     let test_points =
                         vec![warmup_end, (warmup_end + data.len()) / 2, data.len() - 1];
 
@@ -2561,7 +2561,7 @@ mod tests {
                             let window_start = i.saturating_sub(period - 1);
 
                             if is_monotonic_inc {
-                                // For increasing data, TSF should predict >= last value
+                                
                                 prop_assert!(
                                     out[i] >= data[window_end] - 1e-6,
                                     "[{}] Monotonic increasing: TSF at {} = {} < last value {}",
@@ -2571,7 +2571,7 @@ mod tests {
                                     data[window_end]
                                 );
                             } else if is_monotonic_dec {
-                                // For decreasing data, TSF should predict <= last value
+                                
                                 prop_assert!(
                                     out[i] <= data[window_end] + 1e-6,
                                     "[{}] Monotonic decreasing: TSF at {} = {} > last value {}",
@@ -2585,15 +2585,15 @@ mod tests {
                     }
                 }
 
-                // Property 6: Edge case - period = 2 (minimum valid period)
-                // Only test once at the first valid output position
+                
+                
                 if period == 2 && warmup_end < data.len() {
                     let i = warmup_end;
                     if out[i].is_finite() {
-                        // With period=2, TSF fits a line through the last 2 points and extrapolates
-                        let x0 = data[i - 1]; // older point at x=0
-                        let x1 = data[i]; // newer point at x=1
-                                          // Linear extrapolation to x=2: 2*x1 - x0
+                        
+                        let x0 = data[i - 1]; 
+                        let x1 = data[i]; 
+                                          
                         let expected = 2.0 * x1 - x0;
                         prop_assert!(
                             (out[i] - expected).abs() <= 1e-6,
@@ -2606,8 +2606,8 @@ mod tests {
                     }
                 }
 
-                // Property 7: Clean input produces clean output (no NaN injection)
-                // After warmup, all outputs should be finite for finite inputs
+                
+                
                 for i in warmup_end..data.len() {
                     if data[i.saturating_sub(period - 1)..=i]
                         .iter()
@@ -2673,15 +2673,15 @@ mod tests {
 
     #[test]
     fn test_tsf_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare a realistic dataset used by other TSF tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = TsfInput::from_candles(&candles, "close", TsfParams::default());
 
-        // Baseline using the Vec-returning API
+        
         let baseline = tsf(&input)?.values;
 
-        // Preallocate output and compute via new into API
+        
         let mut out = vec![0.0; candles.close.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2689,7 +2689,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // The native tsf_into is not available under wasm feature; skip
+            
             return Ok(());
         }
 
@@ -2749,17 +2749,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (20, 50, 10),   // Large periods
-            (2, 5, 1),      // Dense small range
-            (14, 14, 0),    // Single value (default period)
-            (30, 60, 15),   // Mixed range
-            (50, 100, 25),  // Very large periods
-            (100, 200, 50), // Extra large periods
+            
+            (2, 10, 2),     
+            (5, 25, 5),     
+            (20, 50, 10),   
+            (2, 5, 1),      
+            (14, 14, 0),    
+            (30, 60, 15),   
+            (50, 100, 25),  
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2778,7 +2778,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2831,7 +2831,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {

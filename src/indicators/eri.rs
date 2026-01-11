@@ -277,7 +277,7 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
     let mut bull = alloc_with_nan_prefix(source_data.len(), warmup_period);
     let mut bear = alloc_with_nan_prefix(source_data.len(), warmup_period);
 
-    // Dispatch to classic kernels for common cases
+    
     if ma_type == "sma" || ma_type == "SMA" {
         unsafe {
             eri_scalar_classic_sma(
@@ -306,7 +306,7 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
         return Ok(EriOutput { bull, bear });
     }
 
-    // Fall back to general implementation
+    
     let full_ma = ma(&ma_type, MaData::Slice(&source_data), period)
         .map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
@@ -369,7 +369,7 @@ pub fn eri_scalar(
         return;
     }
 
-    // Unroll by 4, then 2, then tail
+    
     while i + 4 <= n {
         let m0 = ma[i + 0];
         bull[i + 0] = high[i + 0] - m0;
@@ -432,7 +432,7 @@ pub fn eri_avx2(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    // Prefer SIMD when available; otherwise fall back to scalar
+    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     unsafe {
         return eri_avx2_core(high, low, ma, period, first_valid, bull, bear);
@@ -761,7 +761,7 @@ impl EriBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EriBatchRange) -> Result<Vec<EriParams>, EriError> {
     let (start, end, step) = r.period;
-    // Treat zero step as static; support start==end
+    
     if step == 0 {
         return Ok(vec![EriParams {
             period: Some(start),
@@ -794,19 +794,19 @@ fn expand_grid(r: &EriBatchRange) -> Result<Vec<EriParams>, EriError> {
             }
         }
     } else {
-        // Reversed bounds
+        
         let mut p = start;
         while p >= end {
             out.push(EriParams {
                 period: Some(p),
                 ma_type: Some(r.ma_type.clone()),
             });
-            // guard underflow
+            
             if p < step { break; }
             p -= step;
             if p == usize::MAX { break; }
         }
-        // Ensure last included 'end' if exactly on step boundary; else accept as-is
+        
         if out.is_empty() {
             return Err(EriError::InvalidRange { start, end, step });
         }
@@ -848,7 +848,7 @@ fn eri_batch_inner(
     parallel: bool,
 ) -> Result<EriBatchOutput, EriError> {
     let combos = expand_grid(sweep)?;
-    // Use triple-validity check to match single path
+    
     let first = high
         .iter()
         .zip(low.iter())
@@ -868,11 +868,11 @@ fn eri_batch_inner(
         .checked_mul(cols)
         .ok_or(EriError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    // Use uninitialized memory for batch processing
+    
     let mut buf_bull = make_uninit_matrix(rows, cols);
     let mut buf_bear = make_uninit_matrix(rows, cols);
 
-    // Initialize prefixes with NaN based on warmup periods
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -880,11 +880,11 @@ fn eri_batch_inner(
     init_matrix_prefixes(&mut buf_bull, cols, &warmup_periods);
     init_matrix_prefixes(&mut buf_bear, cols, &warmup_periods);
 
-    // Wrap buffers in ManuallyDrop to prevent premature drop
+    
     let mut buf_bull_guard = std::mem::ManuallyDrop::new(buf_bull);
     let mut buf_bear_guard = std::mem::ManuallyDrop::new(buf_bear);
 
-    // Convert to initialized slices
+    
     let mut bull = unsafe {
         std::slice::from_raw_parts_mut(buf_bull_guard.as_mut_ptr() as *mut f64, total)
     };
@@ -940,8 +940,8 @@ fn eri_batch_inner(
         }
     }
 
-    // Create output with owned data
-    // SAFETY: We're taking ownership of the allocated memory from make_uninit_matrix
+    
+    
     let bull_vec = unsafe {
         Vec::from_raw_parts(
             buf_bull_guard.as_mut_ptr() as *mut f64,
@@ -978,7 +978,7 @@ pub fn eri_batch_inner_into(
     bear_out: &mut [f64],
 ) -> Result<Vec<EriParams>, EriError> {
     let combos = expand_grid(sweep)?;
-    // Use triple-validity check to match single path
+    
     let first = high
         .iter()
         .zip(low.iter())
@@ -996,7 +996,7 @@ pub fn eri_batch_inner_into(
     let rows = combos.len();
     let cols = source.len();
 
-    // Verify output slices have correct length
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(EriError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
@@ -1186,7 +1186,7 @@ unsafe fn eri_row_avx512_long(
     eri_avx512_core(high, low, ma, period, first, bull, bear)
 }
 
-// Decision note: Streaming enabled; O(1) for SMA/EMA/RMA/DEMA/TEMA/WMA; fallback to generic O(n) only when needed.
+
 #[derive(Debug, Clone)]
 pub struct EriStream {
     period: usize,
@@ -1220,7 +1220,7 @@ struct EmaState {
     n: usize,
     alpha: f64,
     beta: f64,
-    // warmup via SMA on first n points
+    
     init_sum: f64,
     init_count: usize,
     ema: f64,
@@ -1233,8 +1233,8 @@ struct DemaState {
     beta: f64,
     init_sum: f64,
     init_count: usize,
-    e1: f64, // EMA
-    e2: f64, // EMA(EMA)
+    e1: f64, 
+    e2: f64, 
 }
 
 #[derive(Debug, Clone)]
@@ -1244,20 +1244,20 @@ struct TemaState {
     beta: f64,
     init_sum: f64,
     init_count: usize,
-    e1: f64, // EMA
-    e2: f64, // EMA(EMA)
-    e3: f64, // EMA(EMA(EMA))
+    e1: f64, 
+    e2: f64, 
+    e3: f64, 
 }
 
 #[derive(Debug, Clone)]
 struct WmaState {
     n: usize,
-    den_inv: f64, // 1 / (n(n+1)/2)
+    den_inv: f64, 
     buf: Vec<f64>,
     pos: usize,
     count: usize,
-    s: f64,  // sum of last n values
-    ws: f64, // weighted sum with weights 1..n (oldest=1, newest=n)
+    s: f64,  
+    ws: f64, 
 }
 
 #[derive(Debug, Clone)]
@@ -1266,7 +1266,7 @@ struct GenericState {
     buf: Vec<f64>,
     pos: usize,
     count: usize,
-    scratch: Vec<f64>, // reused to reorder buf chronologically
+    scratch: Vec<f64>, 
 }
 
 impl EriStream {
@@ -1813,9 +1813,9 @@ pub fn eri_into(
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct EriResult {
-    pub values: Vec<f64>, // [bull..., bear...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -1841,7 +1841,7 @@ pub fn eri_js_flat(
     eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // flatten [bull..., bear...]
+    
     let mut values = bull;
     values.extend_from_slice(&bear);
 
@@ -1863,7 +1863,7 @@ pub fn eri_js(
     period: usize,
     ma_type: &str,
 ) -> Result<Vec<f64>, JsValue> {
-    // Validate lengths match
+    
     if high.len() != low.len() || high.len() != source.len() {
         return Err(JsValue::from_str(
             "high, low, and source arrays must have the same length",
@@ -1876,7 +1876,7 @@ pub fn eri_js(
     };
     let input = EriInput::from_slices(high, low, source, params);
 
-    // Single allocation for both outputs
+    
     let total = source
         .len()
         .checked_mul(2)
@@ -1890,7 +1890,7 @@ pub fn eri_js(
     Ok(output)
 }
 
-// ----- Python CUDA bindings -----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::eri_wrapper::CudaEri;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1993,7 +1993,7 @@ pub fn eri_into(
         };
         let input = EriInput::from_slices(high, low, source, params);
 
-        // Check for aliasing - any output pointer matches any input pointer
+        
         let needs_temp = bull_ptr as *const f64 == high_ptr
             || bull_ptr as *const f64 == low_ptr
             || bull_ptr as *const f64 == source_ptr
@@ -2003,19 +2003,19 @@ pub fn eri_into(
             || bull_ptr == bear_ptr;
 
         if needs_temp {
-            // Allocate temporary buffers
+            
             let mut temp_bull = vec![0.0; len];
             let mut temp_bear = vec![0.0; len];
             eri_into_slice(&mut temp_bull, &mut temp_bear, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy to output
+            
             let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
             let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
             bull_out.copy_from_slice(&temp_bull);
             bear_out.copy_from_slice(&temp_bear);
         } else {
-            // Direct write to output
+            
             let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
             let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
             eri_into_slice(bull_out, bear_out, &input, Kernel::Auto)
@@ -2055,10 +2055,10 @@ pub struct EriBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct EriBatchJsOutput {
-    pub values: Vec<f64>,    // [row0..., row1..., ...] where row= bull or bear
-    pub rows: usize,         // combos * 2
-    pub cols: usize,         // len
-    pub periods: Vec<usize>, // length = combos
+    pub values: Vec<f64>,    
+    pub rows: usize,         
+    pub cols: usize,         
+    pub periods: Vec<usize>, 
 }
 
 #[cfg(feature = "wasm")]
@@ -2069,7 +2069,7 @@ pub fn eri_batch_js(
     source: &[f64],
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
-    // Validate lengths match
+    
     if high.len() != low.len() || high.len() != source.len() {
         return Err(JsValue::from_str(
             "high, low, and source arrays must have the same length",
@@ -2093,17 +2093,17 @@ pub fn eri_batch_js(
         .ok_or_else(|| JsValue::from_str("rows overflow"))?;
     let cols = output.cols;
 
-    // flatten as bull rows first then bear rows
+    
     let cap = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
     let mut values = Vec::with_capacity(cap);
-    // bull block
+    
     for r in 0..output.rows {
         let start = r * cols;
         values.extend_from_slice(&output.bull[start..start + cols]);
     }
-    // bear block
+    
     for r in 0..output.rows {
         let start = r * cols;
         values.extend_from_slice(&output.bear[start..start + cols]);
@@ -2134,26 +2134,26 @@ pub unsafe fn eri_scalar_classic_sma(
 ) -> Result<(), EriError> {
     let start_idx = first_valid_idx + period - 1;
 
-    // Calculate initial SMA
+    
     let mut sum = 0.0;
     for i in 0..period {
         sum += source[first_valid_idx + i];
     }
     let mut sma = sum / period as f64;
 
-    // Calculate first ERI values
+    
     bull[start_idx] = high[start_idx] - sma;
     bear[start_idx] = low[start_idx] - sma;
 
-    // Rolling window calculations
+    
     for i in (start_idx + 1)..source.len() {
-        // Update SMA with rolling window
+        
         let old_val = source[i - period];
         let new_val = source[i];
         sum = sum - old_val + new_val;
         sma = sum / period as f64;
 
-        // Calculate ERI values
+        
         bull[i] = high[i] - sma;
         bear[i] = low[i] - sma;
     }
@@ -2176,23 +2176,23 @@ pub unsafe fn eri_scalar_classic_ema(
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    // Calculate initial SMA for EMA startup
+    
     let mut sum = 0.0;
     for i in 0..period {
         sum += source[first_valid_idx + i];
     }
     let mut ema = sum / period as f64;
 
-    // Calculate first ERI values
+    
     bull[start_idx] = high[start_idx] - ema;
     bear[start_idx] = low[start_idx] - ema;
 
-    // EMA and ERI calculations
+    
     for i in (start_idx + 1)..source.len() {
-        // Update EMA
+        
         ema = alpha * source[i] + beta * ema;
 
-        // Calculate ERI values
+        
         bull[i] = high[i] - ema;
         bear[i] = low[i] - ema;
     }
@@ -2490,16 +2490,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             EriParams::default(),
-            // Minimum period
+            
             EriParams {
                 period: Some(2),
                 ma_type: Some("ema".to_string()),
             },
-            // Small periods with different MA types
+            
             EriParams {
                 period: Some(5),
                 ma_type: Some("sma".to_string()),
@@ -2512,7 +2512,7 @@ mod tests {
                 period: Some(10),
                 ma_type: Some("wma".to_string()),
             },
-            // Medium periods
+            
             EriParams {
                 period: Some(13),
                 ma_type: Some("ema".to_string()),
@@ -2525,7 +2525,7 @@ mod tests {
                 period: Some(30),
                 ma_type: Some("ema".to_string()),
             },
-            // Large periods
+            
             EriParams {
                 period: Some(50),
                 ma_type: Some("sma".to_string()),
@@ -2534,7 +2534,7 @@ mod tests {
                 period: Some(100),
                 ma_type: Some("ema".to_string()),
             },
-            // Edge cases
+            
             EriParams {
                 period: Some(3),
                 ma_type: Some("hma".to_string()),
@@ -2553,15 +2553,15 @@ mod tests {
             let input = EriInput::from_candles(&candles, "close", params.clone());
             let output = eri_with_kernel(&input, kernel)?;
 
-            // Check bull values
+            
             for (i, &val) in output.bull.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bull index {} \
@@ -2605,15 +2605,15 @@ mod tests {
                 }
             }
 
-            // Check bear values
+            
             for (i, &val) in output.bear.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bear index {} \
@@ -2666,10 +2666,10 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
-    // Macro to generate kernel-variant tests as in alma.rs
+    
     macro_rules! generate_all_eri_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2751,7 +2751,7 @@ mod tests {
 
     #[test]
     fn test_eri_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prepare a small but non-trivial synthetic dataset
+        
         let len = 256usize;
         let mut high = vec![0.0; len];
         let mut low = vec![0.0; len];
@@ -2766,10 +2766,10 @@ mod tests {
         let params = EriParams { period: Some(13), ma_type: Some("ema".to_string()) };
         let input = EriInput::from_slices(&high, &low, &src, params);
 
-        // Baseline via Vec-returning API
+        
         let baseline = eri(&input)?;
 
-        // Preallocate outputs and call into API
+        
         let mut bull = vec![0.0; len];
         let mut bear = vec![0.0; len];
         #[cfg(not(feature = "wasm"))]
@@ -2778,7 +2778,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // wasm build doesn't expose the native eri_into; use the slice variant for parity
+            
             eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)?;
         }
 
@@ -2818,16 +2818,16 @@ mod tests {
         let low = c.select_candle_field("low").unwrap();
         let src = c.select_candle_field("close").unwrap();
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (10, 20, 2),  // Medium dense range
-            (20, 50, 10), // Large sparse range
-            (13, 13, 0),  // Single period (default)
+            
+            (2, 10, 2),   
+            (5, 25, 5),   
+            (30, 60, 15), 
+            (2, 5, 1),    
+            (10, 20, 2),  
+            (20, 50, 10), 
+            (13, 13, 0),  
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2836,7 +2836,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_slices(high, low, src)?;
 
-            // Check bull values
+            
             for (idx, &val) in output.bull.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2847,7 +2847,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.params[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2897,7 +2897,7 @@ mod tests {
                 }
             }
 
-            // Check bear values
+            
             for (idx, &val) in output.bear.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2908,7 +2908,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.params[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2979,38 +2979,38 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate realistic OHLC data
-        let strat = (2usize..=50) // ERI requires minimum period of 2
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    100.0f64..5000.0f64, // Base price
-                    (period + 20)..400,  // Data length
-                    0.001f64..0.05f64,   // Volatility factor
-                    -0.01f64..0.01f64,   // Trend factor
+                    100.0f64..5000.0f64, 
+                    (period + 20)..400,  
+                    0.001f64..0.05f64,   
+                    -0.01f64..0.01f64,   
                     Just(period),
-                    prop::sample::select(vec!["ema", "sma", "wma"]), // MA types - simpler ones that don't need excessive warmup
+                    prop::sample::select(vec!["ema", "sma", "wma"]), 
                 )
             })
             .prop_map(
                 |(base_price, data_len, volatility, trend, period, ma_type)| {
-                    // Generate synthetic OHLC data with realistic constraints
+                    
                     let mut high = Vec::with_capacity(data_len);
                     let mut low = Vec::with_capacity(data_len);
                     let mut close = Vec::with_capacity(data_len);
 
                     let mut price = base_price;
                     for i in 0..data_len {
-                        // Add trend and volatility
+                        
                         price *= 1.0 + trend + (i as f64 * 0.0001 * trend);
                         let daily_vol = volatility * price;
 
-                        // Generate OHLC with proper constraints
+                        
                         let c = price + daily_vol * ((i as f64).sin() * 0.3);
                         let h = c + daily_vol * (0.5 + (i as f64 * 0.7).cos().abs() * 0.5);
                         let l = c - daily_vol * (0.5 + (i as f64 * 0.7).sin().abs() * 0.5);
 
                         high.push(h);
-                        low.push(l.min(c)); // Ensure low <= close
+                        low.push(l.min(c)); 
                         close.push(c);
                     }
 
@@ -3026,12 +3026,12 @@ mod tests {
                 };
                 let input = EriInput::from_slices(&high, &low, &close, params.clone());
 
-                // Run with specified kernel - handle MA errors gracefully
+                
                 let result = match eri_with_kernel(&input, kernel) {
                     Ok(r) => r,
                     Err(e) => {
-                        // DEMA and TEMA need approximately 2*period and 3*period data respectively
-                        // These errors are expected when testing with shorter data lengths
+                        
+                        
                         match e {
                             EriError::MaCalculationError(msg)
                                 if msg.contains("Not enough data") =>
@@ -3044,13 +3044,13 @@ mod tests {
                     }
                 };
 
-                // Also run with scalar as reference
+                
                 let reference = match eri_with_kernel(&input, Kernel::Scalar) {
                     Ok(r) => r,
-                    Err(_) => return Ok(()), // If scalar fails, kernel would too
+                    Err(_) => return Ok(()), 
                 };
 
-                // Calculate expected warmup period
+                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -3059,7 +3059,7 @@ mod tests {
                     .unwrap_or(0);
                 let warmup_period = first_valid_idx + period - 1;
 
-                // Property 1: Check warmup period - values before warmup should be NaN
+                
                 for i in 0..warmup_period.min(high.len()) {
                     prop_assert!(
                         result.bull[i].is_nan(),
@@ -3077,7 +3077,7 @@ mod tests {
                     );
                 }
 
-                // Property 2: Check values after warmup are not NaN (unless input was NaN)
+                
                 for i in warmup_period..high.len() {
                     if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
                         prop_assert!(
@@ -3095,7 +3095,7 @@ mod tests {
                     }
                 }
 
-                // Property 3: Bear should always be <= Bull (since low <= high)
+                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                         prop_assert!(
@@ -3111,14 +3111,14 @@ mod tests {
                     }
                 }
 
-                // Property 4: Kernel consistency - all kernels should produce identical results
+                
                 for i in 0..high.len() {
                     let bull_val = result.bull[i];
                     let bear_val = result.bear[i];
                     let ref_bull = reference.bull[i];
                     let ref_bear = reference.bear[i];
 
-                    // Check bull consistency
+                    
                     if bull_val.is_finite() && ref_bull.is_finite() {
                         let bull_diff = (bull_val - ref_bull).abs();
                         let bull_ulp = bull_val.to_bits().abs_diff(ref_bull.to_bits());
@@ -3144,7 +3144,7 @@ mod tests {
                         );
                     }
 
-                    // Check bear consistency
+                    
                     if bear_val.is_finite() && ref_bear.is_finite() {
                         let bear_diff = (bear_val - ref_bear).abs();
                         let bear_ulp = bear_val.to_bits().abs_diff(ref_bear.to_bits());
@@ -3171,7 +3171,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Constant price test - with constant prices, values converge to exact constants
+                
                 let all_high_same = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_low_same = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_close_same = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
@@ -3181,12 +3181,12 @@ mod tests {
                     && all_close_same
                     && high.len() > warmup_period + 2 * period
                 {
-                    // With constant prices, MA converges to the constant close value
-                    // So bull = high[0] - close[0] and bear = low[0] - close[0]
+                    
+                    
                     let expected_bull = high[0] - close[0];
                     let expected_bear = low[0] - close[0];
 
-                    // After sufficient warmup (2*period), values should converge
+                    
                     for i in (warmup_period + 2 * period)..high.len() {
                         if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                             prop_assert!(
@@ -3209,9 +3209,9 @@ mod tests {
                     }
                 }
 
-                // Property 6: Mathematical definition check
-                // Bull = High - MA, Bear = Low - MA
-                // So Bull - Bear = High - Low
+                
+                
+                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                         let expected_diff = high[i] - low[i];
@@ -3227,12 +3227,12 @@ mod tests {
                     }
                 }
 
-                // Property 7: Impossible state check
-                // Since bull = high - MA and bear = low - MA, and high >= low,
-                // it's impossible for bull < 0 while bear > 0
+                
+                
+                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                        // The only impossible combination
+                        
                         if result.bull[i] < 0.0 && result.bear[i] > 0.0 {
                             prop_assert!(
 								false,
@@ -3243,13 +3243,13 @@ mod tests {
                     }
                 }
 
-                // Property 8: Period boundary test
+                
                 if period == 1 {
-                    // With period=1, most MAs should give MA ≈ close[i]
-                    // So bull ≈ high[i] - close[i] and bear ≈ low[i] - close[i]
+                    
+                    
                     for i in warmup_period..high.len().min(warmup_period + 10) {
                         if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                            // Just check the relationship holds
+                            
                             let expected_diff = high[i] - low[i];
                             let actual_diff = result.bull[i] - result.bear[i];
                             prop_assert!(
@@ -3264,15 +3264,15 @@ mod tests {
                     }
                 }
 
-                // Property 9: Bounds check - bull/bear values should be within reasonable range
-                // They shouldn't exceed the price range in the data
+                
+                
                 let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
                 let price_range = max_price - min_price;
 
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                        // Bull and bear represent deviations from MA, so they should be bounded
+                        
                         prop_assert!(
                             result.bull[i].abs() <= price_range * 2.0,
                             "[{}] Bull {} exceeds reasonable bounds (price range: {}) at index {}",
@@ -3292,9 +3292,9 @@ mod tests {
                     }
                 }
 
-                // Property 10: Edge case - period close to data length
+                
                 if period >= high.len() - 5 && period < high.len() {
-                    // With period very close to data length, we should still get at least one valid value
+                    
                     let valid_count = result
                         .bull
                         .iter()

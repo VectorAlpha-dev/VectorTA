@@ -12,12 +12,12 @@ use crate::indicators::moving_averages::mwdx::{expand_grid_mwdx, MwdxBatchRange,
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::AsyncCopyDestination; // for async_copy_to on DeviceBuffer
+use cust::memory::AsyncCopyDestination; 
 use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu; // raw CUDA driver API
+use cust::sys as cu; 
 use std::ffi::c_void;
 use std::fmt;
 use thiserror::Error;

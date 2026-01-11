@@ -39,7 +39,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-// AVec and CACHELINE_ALIGN removed - not needed with current implementation
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -52,13 +52,13 @@ use pyo3::types::{PyDict, PyList};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
-// rayon imported inline where needed
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ======== Input Data ========
+
 
 #[derive(Debug, Clone)]
 pub enum KdjData<'a> {
@@ -124,7 +124,7 @@ impl<'a> KdjInput<'a> {
     }
 }
 
-// ======== Parameters ========
+
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
@@ -148,7 +148,7 @@ impl Default for KdjParams {
     }
 }
 
-// ======== Output ========
+
 
 #[derive(Debug, Clone)]
 pub struct KdjOutput {
@@ -157,7 +157,7 @@ pub struct KdjOutput {
     pub j: Vec<f64>,
 }
 
-// ======== Error Type ========
+
 
 #[derive(Debug, Error)]
 pub enum KdjError {
@@ -185,7 +185,7 @@ pub enum KdjError {
     MaError(#[from] Box<dyn Error + Send + Sync>),
 }
 
-// ======== Main Function/Dispatch ========
+
 
 #[inline]
 pub fn kdj(input: &KdjInput) -> Result<KdjOutput, KdjError> {
@@ -250,9 +250,9 @@ pub fn kdj_with_kernel(input: &KdjInput, kernel: Kernel) -> Result<KdjOutput, Kd
         other => other,
     };
 
-    // Default params (9,3,3 + SMA/SMA) are dominated by rolling max/min + EMA-style recurrences,
-    // and the current scalar fast-path outperforms the SIMD variants at typical sizes. Prefer
-    // scalar when `Kernel::Auto` is requested to avoid a regression on AVX-capable CPUs.
+    
+    
+    
     if matches!(kernel, Kernel::Auto)
         && fast_k_period == 9
         && slow_k_period == 3
@@ -350,7 +350,7 @@ pub fn kdj_scalar(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    // Allocate outputs up-front and compute directly into them
+    
     let len = high.len();
     let mut k: Vec<f64> = Vec::with_capacity(len);
     let mut d: Vec<f64> = Vec::with_capacity(len);
@@ -379,7 +379,7 @@ pub fn kdj_scalar(
     Ok(KdjOutput { k, d, j })
 }
 
-// =========== In-place Core API ===========
+
 
 #[inline]
 pub fn kdj_into_slices(
@@ -471,8 +471,8 @@ pub fn kdj_into_slices(
         ),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 | Kernel::Avx2Batch => {
-            // TODO: Implement AVX2-specific compute_into function
-            // For now, fall back to scalar
+            
+            
             kdj_compute_into_scalar(
                 high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, k_out,
                 d_out, j_out,
@@ -480,15 +480,15 @@ pub fn kdj_into_slices(
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 | Kernel::Avx512Batch => {
-            // TODO: Implement AVX512-specific compute_into function
-            // For now, fall back to scalar
+            
+            
             kdj_compute_into_scalar(
                 high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, k_out,
                 d_out, j_out,
             )
         }
         _ => {
-            // Fallback for non-x86_64 or when nightly-avx is not enabled
+            
             kdj_compute_into_scalar(
                 high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, k_out,
                 d_out, j_out,
@@ -523,11 +523,11 @@ fn kdj_compute_into_scalar(
     let k_warm = stoch_warm + slow_k - 1;
     let d_warm = k_warm + slow_d - 1;
 
-    // Fast paths: fully fused single pass for SMA/SMA and EMA/EMA
+    
     let sma_k = slow_k_ma.eq_ignore_ascii_case("sma");
     let sma_d = slow_d_ma.eq_ignore_ascii_case("sma");
     if sma_k && sma_d {
-        // Init NaN prefixes
+        
         for i in 0..k_warm.min(len) {
             k_out[i] = f64::NAN;
         }
@@ -536,7 +536,7 @@ fn kdj_compute_into_scalar(
             j_out[i] = f64::NAN;
         }
 
-        // Use fixed-size monotonic queues (ring buffers) instead of VecDeque to reduce overhead.
+        
         let cap = fast_k + 1;
         let mut max_idx = vec![0usize; cap];
         let mut max_val = vec![0.0f64; cap];
@@ -562,13 +562,13 @@ fn kdj_compute_into_scalar(
         let mut sum_d = 0.0f64;
         let mut cnt_d: usize = 0;
 
-        // Avoid `%` in the hot path: positions only start being used from their warmups onward,
-        // and then advance contiguously by 1 each iteration.
+        
+        
         let mut pos_k = stoch_warm % slow_k;
         let mut pos_d = k_warm % slow_d;
 
         for i in first..len {
-            // update max deque
+            
             let hi = unsafe { *high.get_unchecked(i) };
             while max_cnt > 0 {
                 let back = dec(max_tail, cap);
@@ -588,7 +588,7 @@ fn kdj_compute_into_scalar(
                 max_cnt -= 1;
             }
 
-            // update min deque
+            
             let lo = unsafe { *low.get_unchecked(i) };
             while min_cnt > 0 {
                 let back = dec(min_tail, cap);
@@ -612,7 +612,7 @@ fn kdj_compute_into_scalar(
                 continue;
             }
 
-            // compute stoch
+            
             let hh = max_val[max_head];
             let ll = min_val[min_head];
             let denom = hh - ll;
@@ -623,7 +623,7 @@ fn kdj_compute_into_scalar(
                 100.0 * ((c - ll) / denom)
             };
 
-            // feed K SMA
+            
             let old_st = stoch_ring[pos_k];
             if !old_st.is_nan() {
                 sum_k -= old_st;
@@ -647,7 +647,7 @@ fn kdj_compute_into_scalar(
                 };
                 unsafe { *k_out.get_unchecked_mut(i) = k_val };
 
-                // feed D SMA
+                
                 let old_k = k_ring[pos_d];
                 if !old_k.is_nan() {
                     sum_d -= old_k;
@@ -686,7 +686,7 @@ fn kdj_compute_into_scalar(
     let ema_k = slow_k_ma.eq_ignore_ascii_case("ema");
     let ema_d = slow_d_ma.eq_ignore_ascii_case("ema");
     if ema_k && ema_d {
-        // Init NaN prefixes
+        
         for i in 0..k_warm.min(len) {
             k_out[i] = f64::NAN;
         }
@@ -712,7 +712,7 @@ fn kdj_compute_into_scalar(
         let mut ema_dv = f64::NAN;
 
         for i in first..len {
-            // update deques
+            
             let hi = unsafe { *high.get_unchecked(i) };
             while let Some(&idx) = maxdq.back() {
                 if unsafe { *high.get_unchecked(idx) } <= hi {
@@ -781,7 +781,7 @@ fn kdj_compute_into_scalar(
                 continue;
             }
 
-            // i > k_warm
+            
             if !stoch_i.is_nan() && !ema_kv.is_nan() {
                 ema_kv = stoch_i.mul_add(alpha_k, om_alpha_k * ema_kv);
             } else if !stoch_i.is_nan() && ema_kv.is_nan() {
@@ -812,7 +812,7 @@ fn kdj_compute_into_scalar(
                 continue;
             }
 
-            // i > d_warm
+            
             if !ema_kv.is_nan() && !ema_dv.is_nan() {
                 ema_dv = ema_kv.mul_add(alpha_d, om_alpha_d * ema_dv);
             } else if !ema_kv.is_nan() && ema_dv.is_nan() {
@@ -830,7 +830,7 @@ fn kdj_compute_into_scalar(
         return Ok(());
     }
 
-    // Generic MA path: build stochastic once using fused deques, then apply dynamic MA
+    
     let mut stoch = alloc_with_nan_prefix(len, stoch_warm);
 
     let mut maxdq: VecDeque<usize> = VecDeque::with_capacity(fast_k + 1);
@@ -909,7 +909,7 @@ fn kdj_compute_into_scalar(
     Ok(())
 }
 
-// =========== SIMD Stubs ===========
+
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -967,8 +967,8 @@ pub fn kdj_avx2(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    // TODO: Implement actual AVX2 SIMD optimizations for KDJ calculation
-    // AVX2 stub, points to scalar
+    
+    
     kdj_scalar(
         high,
         low,
@@ -995,8 +995,8 @@ pub unsafe fn kdj_avx512_short(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    // TODO: Implement actual AVX512 SIMD optimizations for KDJ calculation (short period)
-    // AVX512 short stub, points to scalar
+    
+    
     kdj_scalar(
         high,
         low,
@@ -1023,8 +1023,8 @@ pub unsafe fn kdj_avx512_long(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    // TODO: Implement actual AVX512 SIMD optimizations for KDJ calculation (long period)
-    // AVX512 long stub, points to scalar
+    
+    
     kdj_scalar(
         high,
         low,
@@ -1038,7 +1038,7 @@ pub unsafe fn kdj_avx512_long(
     )
 }
 
-// ========== SIMD128 (WASM) ==========
+
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
@@ -1053,8 +1053,8 @@ pub fn kdj_simd128(
     slow_d_ma_type: &str,
     first_valid_idx: usize,
 ) -> Result<KdjOutput, KdjError> {
-    // SIMD128 doesn't provide significant benefits for KDJ due to the MA calls
-    // and the rolling min/max operations. Delegate to scalar implementation.
+    
+    
     kdj_scalar(
         high,
         low,
@@ -1068,7 +1068,7 @@ pub fn kdj_simd128(
     )
 }
 
-// ========== Builder/Stream ==========
+
 
 #[derive(Clone, Debug)]
 pub struct KdjBuilder {
@@ -1173,47 +1173,47 @@ impl KdjBuilder {
     }
 }
 
-// ========= Stream Processing (drop-in replacement) ==========
-// Decision: Streaming uses monotonic deques + O(1) SMA/EMA smoothing; matches scalar warmups.
+
+
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct KdjStream {
-    // --- config ---
+    
     fast_k_period: usize,
     slow_k_period: usize,
     slow_d_period: usize,
-    // lowercased selectors cached as booleans
+    
     k_is_sma: bool,
     k_is_ema: bool,
     d_is_sma: bool,
     d_is_ema: bool,
 
-    // --- sliding window for HH/LL via monotonic deques (amortized O(1)) ---
-    i: usize,                      // monotonically increasing update index
-    maxdq: VecDeque<(usize, f64)>, // (idx, high) non-increasing
-    mindq: VecDeque<(usize, f64)>, // (idx, low) non-decreasing
+    
+    i: usize,                      
+    maxdq: VecDeque<(usize, f64)>, 
+    mindq: VecDeque<(usize, f64)>, 
 
-    // --- stage counters (to reproduce batch warm-ups) ---
-    have_fast: bool,      // true once i+1 >= fast_k_period
-    stoch_samples: usize, // # of stoch values since have_fast
-    k_samples: usize,     // # of K values since K warm-up completed
+    
+    have_fast: bool,      
+    stoch_samples: usize, 
+    k_samples: usize,     
 
-    // --- smoothing state: SMA for K ---
+    
     stoch_ring: Vec<f64>,
     stoch_pos: usize,
     sum_k: f64,
     cnt_k: usize,
     stoch_filled: bool,
 
-    // --- smoothing state: SMA for D ---
+    
     k_ring: Vec<f64>,
     k_pos: usize,
     sum_d: f64,
     cnt_d: usize,
     k_filled: bool,
 
-    // --- smoothing state: EMA for K ---
+    
     alpha_k: f64,
     om_alpha_k: f64,
     ema_k: f64,
@@ -1221,7 +1221,7 @@ pub struct KdjStream {
     init_sum_k: f64,
     init_cnt_k: usize,
 
-    // --- smoothing state: EMA for D ---
+    
     alpha_d: f64,
     om_alpha_d: f64,
     ema_d: f64,
@@ -1229,7 +1229,7 @@ pub struct KdjStream {
     init_sum_d: f64,
     init_cnt_d: usize,
 
-    // --- small LUTs for SMA reciprocals (avoid divides) ---
+    
     inv_cnt_k: Vec<f64>,
     inv_cnt_d: Vec<f64>,
 }
@@ -1266,13 +1266,13 @@ impl KdjStream {
         let d_is_sma = slow_d_ma_type.eq_ignore_ascii_case("sma");
         let d_is_ema = slow_d_ma_type.eq_ignore_ascii_case("ema");
 
-        // EMA coefficients
+        
         let alpha_k = 2.0 / (slow_k_period as f64 + 1.0);
         let om_alpha_k = 1.0 - alpha_k;
         let alpha_d = 2.0 / (slow_d_period as f64 + 1.0);
         let om_alpha_d = 1.0 - alpha_d;
 
-        // Precompute 1/c for c in 1..=period
+        
         fn build_inv(n: usize) -> Vec<f64> {
             let mut v = vec![f64::NAN; n + 1];
             for c in 1..=n {
@@ -1334,7 +1334,7 @@ impl KdjStream {
         let idx = self.i;
         self.i = idx + 1;
 
-        // ---- Update monotonic deques for HH/LL (ignore NaNs) ----
+        
         if !high.is_nan() {
             while let Some(&(_, v)) = self.maxdq.back() {
                 if v <= high {
@@ -1356,7 +1356,7 @@ impl KdjStream {
             self.mindq.push_back((idx, low));
         }
 
-        // Expire old entries: keep [idx - fast_k + 1, idx]
+        
         let expire_before = idx + 1 - self.fast_k_period;
         while let Some(&(j, _)) = self.maxdq.front() {
             if j < expire_before {
@@ -1373,7 +1373,7 @@ impl KdjStream {
             }
         }
 
-        // ---- Enough samples to emit a stochastic reading? ----
+        
         if !self.have_fast && (idx + 1) >= self.fast_k_period {
             self.have_fast = true;
         }
@@ -1381,7 +1381,7 @@ impl KdjStream {
             return None;
         }
 
-        // Stochastic (%K_fast) for this tick
+        
         let stoch = if close.is_nan() || self.maxdq.is_empty() || self.mindq.is_empty() {
             f64::NAN
         } else {
@@ -1397,12 +1397,12 @@ impl KdjStream {
         };
         self.stoch_samples += 1;
 
-        // ---- Smooth into %K_slow ----
+        
         let mut k_val = f64::NAN;
         let k_now_available: bool;
 
         if self.k_is_sma || (!self.k_is_ema && !self.k_is_sma) {
-            // SMA K
+            
             let pos = self.stoch_pos;
             let old = self.stoch_ring[pos];
             if !old.is_nan() {
@@ -1430,7 +1430,7 @@ impl KdjStream {
                 k_now_available = false;
             }
         } else {
-            // EMA K
+            
             if !self.k_ema_inited {
                 if !stoch.is_nan() {
                     self.init_sum_k += stoch;
@@ -1459,7 +1459,7 @@ impl KdjStream {
             }
         }
 
-        // ---- Smooth K into %D_slow ----
+        
         if !k_now_available {
             return None;
         }
@@ -1468,7 +1468,7 @@ impl KdjStream {
         let d_now_available: bool;
 
         if self.d_is_sma || (!self.d_is_ema && !self.d_is_sma) {
-            // SMA D
+            
             let pos = self.k_pos;
             let old_k = self.k_ring[pos];
             if !old_k.is_nan() {
@@ -1496,7 +1496,7 @@ impl KdjStream {
                 d_now_available = false;
             }
         } else {
-            // EMA D
+            
             if !self.d_ema_inited {
                 self.k_samples += 1;
                 if !k_val.is_nan() {
@@ -1527,7 +1527,7 @@ impl KdjStream {
         }
 
         if !self.d_is_ema {
-            // If D is SMA, count K samples after consuming one K
+            
             self.k_samples = self.k_samples.saturating_add(1);
         }
 
@@ -1535,7 +1535,7 @@ impl KdjStream {
             return None;
         }
 
-        // J = 3*K - 2*D
+        
         let j_val = if k_val.is_nan() || d_val.is_nan() {
             f64::NAN
         } else {
@@ -1546,7 +1546,7 @@ impl KdjStream {
     }
 }
 
-// ========== Batch API ==========
+
 
 #[derive(Clone, Debug)]
 pub struct KdjBatchRange {
@@ -1832,12 +1832,12 @@ fn kdj_batch_inner(
             step: sweep.fast_k_period.2,
         })?;
 
-    // Use make_uninit_matrix instead of vec! for zero-copy
+    
     let mut k_mu = make_uninit_matrix(rows, cols);
     let mut d_mu = make_uninit_matrix(rows, cols);
     let mut j_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1857,12 +1857,12 @@ fn kdj_batch_inner(
         })
         .collect::<Result<Vec<usize>, KdjError>>()?;
 
-    // Initialize prefixes with NaN
+    
     init_matrix_prefixes(&mut k_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut d_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut j_mu, cols, &warmup_periods);
 
-    // Safe &mut [f64] views over MaybeUninit<f64>
+    
     let mut k_guard = core::mem::ManuallyDrop::new(k_mu);
     let mut d_guard = core::mem::ManuallyDrop::new(d_mu);
     let mut j_guard = core::mem::ManuallyDrop::new(j_mu);
@@ -1879,11 +1879,11 @@ fn kdj_batch_inner(
         k => k,
     };
 
-    // If multiple rows share the same fast_k, precompute stochastic once per unique fast_k and reuse
+    
     let unique_fast: std::collections::BTreeSet<usize> =
         combos.iter().map(|c| c.fast_k_period.unwrap()).collect();
 
-    // Build a cache when reuse exists; otherwise fall back to per-row compute
+    
     let use_stoch_cache = unique_fast.len() < combos.len();
     let mut stoch_cache: std::collections::HashMap<usize, Vec<f64>> =
         std::collections::HashMap::new();
@@ -1965,14 +1965,14 @@ fn kdj_batch_inner(
                 .get(&fast_k)
                 .expect("stoch cache missing fast_k");
             let stoch_warm = first + fast_k - 1;
-            // Prefer classic kernels for common types
+            
             if slow_k_ma.eq_ignore_ascii_case("sma") && slow_d_ma.eq_ignore_ascii_case("sma") {
                 return kdj_classic_sma(stoch, slow_k, slow_d, stoch_warm, out_k, out_d, out_j);
             }
             if slow_k_ma.eq_ignore_ascii_case("ema") && slow_d_ma.eq_ignore_ascii_case("ema") {
                 return kdj_classic_ema(stoch, slow_k, slow_d, stoch_warm, out_k, out_d, out_j);
             }
-            // Generic MA path
+            
             let k_vec = ma(slow_k_ma, MaData::Slice(stoch), slow_k)
                 .map_err(|e| KdjError::MaError(e.to_string().into()))?;
             let d_vec = ma(slow_d_ma, MaData::Slice(&k_vec), slow_d)
@@ -1993,7 +1993,7 @@ fn kdj_batch_inner(
             return Ok(());
         }
 
-        // Fall back to original per-row kernel selection
+        
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => kdj_row_scalar(
                 high, low, close, first, fast_k, slow_k, slow_k_ma, slow_d, slow_d_ma, out_k,
@@ -2052,7 +2052,7 @@ fn kdj_batch_inner(
         }
     }
 
-    // Move out Vec<f64> without copy
+    
     let k_vec = unsafe {
         Vec::from_raw_parts(
             k_guard.as_mut_ptr() as *mut f64,
@@ -2085,7 +2085,7 @@ fn kdj_batch_inner(
     })
 }
 
-// ========== Row Scalar/AVX ==========
+
 
 #[inline(always)]
 fn kdj_row_scalar(
@@ -2102,7 +2102,7 @@ fn kdj_row_scalar(
     out_d: &mut [f64],
     out_j: &mut [f64],
 ) -> Result<(), KdjError> {
-    // Delegate to the new kdj_compute_into_scalar function
+    
     kdj_compute_into_scalar(
         high,
         low,
@@ -2135,7 +2135,7 @@ unsafe fn kdj_row_avx2(
     out_d: &mut [f64],
     out_j: &mut [f64],
 ) -> Result<(), KdjError> {
-    // TODO: Implement actual AVX2 SIMD optimizations for batch row processing
+    
     kdj_row_scalar(
         high,
         low,
@@ -2217,7 +2217,7 @@ unsafe fn kdj_row_avx512_short(
     out_d: &mut [f64],
     out_j: &mut [f64],
 ) -> Result<(), KdjError> {
-    // TODO: Implement actual AVX512 SIMD optimizations for batch row processing (short period)
+    
     kdj_row_scalar(
         high,
         low,
@@ -2250,7 +2250,7 @@ unsafe fn kdj_row_avx512_long(
     out_d: &mut [f64],
     out_j: &mut [f64],
 ) -> Result<(), KdjError> {
-    // TODO: Implement actual AVX512 SIMD optimizations for batch row processing (long period)
+    
     kdj_row_scalar(
         high,
         low,
@@ -2267,7 +2267,7 @@ unsafe fn kdj_row_avx512_long(
     )
 }
 
-// ========== Unit Tests ==========
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2278,12 +2278,12 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_kdj_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build small but non-trivial OHLC with leading NaNs to exercise warmups
+        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
         let mut close = Vec::with_capacity(n);
-        // 4 NaN prefixes so first-valid > 0
+        
         for _ in 0..4 { high.push(f64::NAN); low.push(f64::NAN); close.push(f64::NAN); }
         for i in 0..(n - 4) {
             let i_f = i as f64;
@@ -2296,16 +2296,16 @@ mod tests {
         let params = KdjParams::default();
         let input = KdjInput::from_slices(&high, &low, &close, params);
 
-        // Baseline Vec-returning API
+        
         let baseline = kdj(&input)?;
 
-        // Zero-allocation into API
+        
         let mut k = vec![0.0; close.len()];
         let mut d = vec![0.0; close.len()];
         let mut j = vec![0.0; close.len()];
         kdj_into(&input, &mut k, &mut d, &mut j)?;
 
-        // Parity: exact or both-NaN equality element-wise
+        
         assert_eq!(baseline.k.len(), k.len());
         assert_eq!(baseline.d.len(), d.len());
         assert_eq!(baseline.j.len(), j.len());
@@ -2634,7 +2634,7 @@ mod tests {
             let input = KdjInput::from_candles(&candles, params.clone());
             let output = kdj_with_kernel(&input, kernel)?;
 
-            // Check K values
+            
             for (i, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2694,7 +2694,7 @@ mod tests {
                 }
             }
 
-            // Check D values
+            
             for (i, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2754,7 +2754,7 @@ mod tests {
                 }
             }
 
-            // Check J values
+            
             for (i, &val) in output.j.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2832,11 +2832,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic KDJ parameters and price data
+        
         let strat = (5usize..=21, 2usize..=5, 2usize..=5).prop_flat_map(
             |(fast_k_period, slow_k_period, slow_d_period)| {
                 (
-                    // Generate base price, volatility, and data length
+                    
                     (
                         100f64..10000f64,
                         0.01f64..0.05f64,
@@ -2844,15 +2844,15 @@ mod tests {
                         0u8..100u8,
                     )
                         .prop_flat_map(move |(base_price, volatility, data_len, scenario_type)| {
-                            // Generate random changes for price movement
+                            
                             (
                                 Just(base_price),
                                 Just(volatility),
                                 Just(data_len),
                                 Just(scenario_type),
                                 prop::collection::vec((-1f64..1f64), data_len),
-                                prop::collection::vec((0.001f64..0.02f64), data_len), // Spread factors
-                                prop::collection::vec(prop::bool::ANY, data_len), // Zero spread flags
+                                prop::collection::vec((0.001f64..0.02f64), data_len), 
+                                prop::collection::vec(prop::bool::ANY, data_len), 
                             )
                         })
                         .prop_map(
@@ -2865,19 +2865,19 @@ mod tests {
                                 spread_factors,
                                 zero_spread_flags,
                             )| {
-                                // Generate synthetic high/low/close data with realistic movement
+                                
                                 let mut high = Vec::with_capacity(data_len);
                                 let mut low = Vec::with_capacity(data_len);
                                 let mut close = Vec::with_capacity(data_len);
                                 let mut current_price = base_price;
 
-                                // Scenario types: 0-70 = normal, 70-85 = uptrend, 85-95 = downtrend, 95-100 = flat/zero-spread
+                                
                                 for i in 0..data_len {
                                     let (h, l, c) = if scenario_type >= 95 && i > fast_k_period {
-                                        // Flat/zero-spread scenario (5% chance)
+                                        
                                         (current_price, current_price, current_price)
                                     } else if scenario_type >= 85 && scenario_type < 95 {
-                                        // Strong downtrend scenario (10% chance)
+                                        
                                         current_price = (current_price * 0.99).max(10.0);
                                         let spread = current_price * spread_factors[i] * 0.5;
                                         (
@@ -2886,7 +2886,7 @@ mod tests {
                                             current_price - spread * 0.7,
                                         )
                                     } else if scenario_type >= 70 && scenario_type < 85 {
-                                        // Strong uptrend scenario (15% chance)
+                                        
                                         current_price = current_price * 1.01;
                                         let spread = current_price * spread_factors[i] * 0.5;
                                         (
@@ -2895,11 +2895,11 @@ mod tests {
                                             current_price + spread * 0.7,
                                         )
                                     } else {
-                                        // Normal random walk (70% chance)
+                                        
                                         let change = price_changes[i] * volatility * current_price;
                                         current_price = (current_price + change).max(10.0);
 
-                                        // Occasionally inject zero-spread periods
+                                        
                                         if zero_spread_flags[i] && i % 10 == 0 {
                                             (current_price, current_price, current_price)
                                         } else {
@@ -2950,13 +2950,13 @@ mod tests {
                     j: ref_j,
                 } = kdj_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length should match input length
+                
                 prop_assert_eq!(k.len(), high.len(), "K length mismatch");
                 prop_assert_eq!(d.len(), high.len(), "D length mismatch");
                 prop_assert_eq!(j.len(), high.len(), "J length mismatch");
 
-                // Property 2: Warmup period - should have NaN values at the beginning
-                // KDJ has complex warmup: stoch warmup + slow_k smoothing + slow_d smoothing
+                
+                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -2967,7 +2967,7 @@ mod tests {
                 let k_warmup = stoch_warmup + slow_k_period - 1;
                 let d_warmup = k_warmup + slow_d_period - 1;
 
-                // K should be NaN before k_warmup
+                
                 for i in 0..k_warmup.min(k.len()) {
                     prop_assert!(
                         k[i].is_nan(),
@@ -2976,7 +2976,7 @@ mod tests {
                         k[i]
                     );
                 }
-                // D should be NaN before d_warmup
+                
                 for i in 0..d_warmup.min(d.len()) {
                     prop_assert!(
                         d[i].is_nan(),
@@ -2985,7 +2985,7 @@ mod tests {
                         d[i]
                     );
                 }
-                // J should be NaN before d_warmup (since J depends on both K and D)
+                
                 for i in 0..d_warmup.min(j.len()) {
                     prop_assert!(
                         j[i].is_nan(),
@@ -2995,7 +2995,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: K and D values should be in [0, 100] range (stochastic oscillator bounds)
+                
                 for i in k_warmup..k.len() {
                     if !k[i].is_nan() {
                         prop_assert!(
@@ -3017,7 +3017,7 @@ mod tests {
                     }
                 }
 
-                // Property 4: J = 3*K - 2*D relationship should hold
+                
                 for i in d_warmup..j.len() {
                     if !k[i].is_nan() && !d[i].is_nan() && !j[i].is_nan() {
                         let expected_j = 3.0 * k[i] - 2.0 * d[i];
@@ -3033,17 +3033,17 @@ mod tests {
                     }
                 }
 
-                // Property 5: With zero spread (high=low), stochastic should produce NaN
-                // This tests the mathematical edge case where the denominator becomes 0
+                
+                
                 for i in stoch_warmup..high.len().min(stoch_warmup + fast_k_period * 2) {
-                    // Check windows where all highs equal all lows in the period
+                    
                     if i >= fast_k_period {
                         let window_start = i + 1 - fast_k_period;
                         let all_zero_spread =
                             (window_start..=i).all(|j| (high[j] - low[j]).abs() < 1e-10);
 
                         if all_zero_spread && i >= k_warmup {
-                            // When hh - ll = 0, K should be NaN
+                            
                             prop_assert!(
                                 k[i].is_nan(),
                                 "K[{}] should be NaN when high=low in window, but was {}",
@@ -3054,14 +3054,14 @@ mod tests {
                     }
                 }
 
-                // Property 7: J can exceed [0, 100] bounds (this is valid behavior)
-                // J = 3*K - 2*D, so if K=90 and D=30, J=210 which is valid
+                
+                
                 let mut j_outside_bounds_found = false;
                 for i in d_warmup..j.len() {
                     if !j[i].is_nan() {
                         if j[i] < -1e-9 || j[i] > 100.0 + 1e-9 {
                             j_outside_bounds_found = true;
-                            // Verify this is consistent with the formula
+                            
                             let expected_j = 3.0 * k[i] - 2.0 * d[i];
                             prop_assert!(
                                 (j[i] - expected_j).abs() <= 1e-9,
@@ -3072,10 +3072,10 @@ mod tests {
                         }
                     }
                 }
-                // Note: We don't require j_outside_bounds_found to be true as it depends on data
+                
 
-                // Property 8: Trend behavior validation
-                // Check if we have a strong trend scenario
+                
+                
                 let mut trend_sum = 0.0;
                 for i in 1..high.len().min(50) {
                     trend_sum += close[i] - close[i - 1];
@@ -3085,9 +3085,9 @@ mod tests {
                     let avg_change = trend_sum / (high.len().min(50) - 1) as f64;
                     let first_close = close[0];
 
-                    // Strong uptrend: average change > 0.5% of initial price
+                    
                     if avg_change > first_close * 0.005 {
-                        // In strong uptrend, K should tend toward higher values
+                        
                         let last_valid_k = k
                             .iter()
                             .rev()
@@ -3095,16 +3095,16 @@ mod tests {
                             .copied()
                             .unwrap_or(0.0);
 
-                        // We expect K to be above 50 in a strong uptrend (not strict, just tendency)
+                        
                         if last_valid_k < 30.0 {
-                            // This is a soft check - log but don't fail
-                            // Strong uptrends should generally push K higher
+                            
+                            
                         }
                     }
 
-                    // Strong downtrend: average change < -0.5% of initial price
+                    
                     if avg_change < -first_close * 0.005 {
-                        // In strong downtrend, K should tend toward lower values
+                        
                         let last_valid_k = k
                             .iter()
                             .rev()
@@ -3112,16 +3112,16 @@ mod tests {
                             .copied()
                             .unwrap_or(100.0);
 
-                        // We expect K to be below 50 in a strong downtrend (not strict, just tendency)
+                        
                         if last_valid_k > 70.0 {
-                            // This is a soft check - log but don't fail
-                            // Strong downtrends should generally push K lower
+                            
+                            
                         }
                     }
                 }
 
-                // Property 6: Kernel consistency - different kernels should produce same results
-                // Allow for small floating-point differences (ULP comparison)
+                
+                
                 for i in 0..k.len() {
                     let k_bits = k[i].to_bits();
                     let ref_k_bits = ref_k[i].to_bits();
@@ -3131,7 +3131,7 @@ mod tests {
                     let ref_j_bits = ref_j[i].to_bits();
 
                     if k[i].is_nan() && ref_k[i].is_nan() {
-                        // Both NaN is fine
+                        
                     } else if !k[i].is_nan() && !ref_k[i].is_nan() {
                         let ulp_diff = if k_bits > ref_k_bits {
                             k_bits - ref_k_bits
@@ -3152,7 +3152,7 @@ mod tests {
                     }
 
                     if d[i].is_nan() && ref_d[i].is_nan() {
-                        // Both NaN is fine
+                        
                     } else if !d[i].is_nan() && !ref_d[i].is_nan() {
                         let ulp_diff = if d_bits > ref_d_bits {
                             d_bits - ref_d_bits
@@ -3173,7 +3173,7 @@ mod tests {
                     }
 
                     if j[i].is_nan() && ref_j[i].is_nan() {
-                        // Both NaN is fine
+                        
                     } else if !j[i].is_nan() && !ref_j[i].is_nan() {
                         let ulp_diff = if j_bits > ref_j_bits {
                             j_bits - ref_j_bits
@@ -3181,7 +3181,7 @@ mod tests {
                             ref_j_bits - j_bits
                         };
                         prop_assert!(
-                            ulp_diff <= 10, // J has more computation, allow slightly more ULP difference
+                            ulp_diff <= 10, 
                             "J[{}]: kernel {} gives {} but scalar gives {} (ULP diff: {})",
                             i,
                             kernel as u8,
@@ -3248,7 +3248,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_kdj_tests!(check_kdj_property);
 
-    // Batch test, matches alma batch style
+    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -3262,7 +3262,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Just check presence, no golden values in this batch stub.
+        
         for &v in &row[row.len().saturating_sub(5)..] {
             assert!(!v.is_nan(), "[{test}] default-row unexpected NaN at tail");
         }
@@ -3276,23 +3276,23 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
-        // Each tuple: (fast_k_start, fast_k_end, fast_k_step, slow_k_start, slow_k_end, slow_k_step,
-        //              slow_d_start, slow_d_end, slow_d_step, slow_k_ma_type, slow_d_ma_type)
+        
+        
+        
         let test_configs = vec![
-            // Small periods with default MA types
+            
             (2, 10, 2, 2, 6, 2, 2, 6, 2, "sma", "sma"),
-            // Medium periods with EMA
+            
             (5, 25, 5, 3, 9, 3, 3, 9, 3, "ema", "ema"),
-            // Large periods with mixed MA types
+            
             (30, 60, 15, 5, 15, 5, 5, 15, 5, "sma", "ema"),
-            // Dense small range with WMA
+            
             (2, 5, 1, 2, 4, 1, 2, 4, 1, "wma", "wma"),
-            // Edge case: minimum periods
+            
             (2, 2, 0, 2, 2, 0, 2, 2, 0, "sma", "sma"),
-            // Common trading setup
+            
             (9, 15, 3, 3, 6, 3, 3, 6, 3, "sma", "sma"),
-            // Large periods with HMA
+            
             (50, 100, 25, 10, 20, 10, 10, 20, 10, "hma", "hma"),
         ];
 
@@ -3322,7 +3322,7 @@ mod tests {
                 .slow_d_ma_type_static(sd_ma)
                 .apply_candles(&c)?;
 
-            // Check K values
+            
             for (idx, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3394,7 +3394,7 @@ mod tests {
                 }
             }
 
-            // Check D values
+            
             for (idx, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3466,7 +3466,7 @@ mod tests {
                 }
             }
 
-            // Check J values
+            
             for (idx, &val) in output.j.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3571,7 +3571,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// ========== Python Bindings ==========
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "kdj")]
@@ -3700,13 +3700,13 @@ pub fn kdj_batch_py<'py>(
     let rows;
     let cols = c.len();
 
-    let k_arr = unsafe { PyArray1::<f64>::new(py, [1], false) }; // placeholder shape
+    let k_arr = unsafe { PyArray1::<f64>::new(py, [1], false) }; 
     let d_arr = unsafe { PyArray1::<f64>::new(py, [1], false) };
     let j_arr = unsafe { PyArray1::<f64>::new(py, [1], false) };
 
     let (k_vec, d_vec, j_vec, cmbs, rws) = py
         .allow_threads(|| {
-            // Use the batch helper that allocates with make_uninit_matrix and returns Vecs without extra copy.
+            
             let out = kdj_batch_inner(
                 h,
                 l,
@@ -3761,7 +3761,7 @@ pub fn kdj_batch_py<'py>(
             .into_pyarray(py),
     )?;
 
-    // Add full combos for API parity with ALMA
+    
     let combo_list = PyList::new(
         py,
         combos.iter().map(|c| {
@@ -3795,13 +3795,13 @@ pub fn kdj_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaKdj};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyReadonlyArray1 and PyValueError already imported earlier in this module.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kdj_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, fast_k_range, slow_k_range, slow_k_ma_range, slow_d_range, slow_d_ma_range, device_id=0))]
@@ -3882,14 +3882,14 @@ pub fn kdj_cuda_many_series_one_param_dev_py(
     Ok((k, d, j))
 }
 
-// ========== WASM Bindings ==========
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KdjJsOutput {
-    pub values: Vec<f64>, // [k..., d..., j...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -4011,10 +4011,10 @@ pub struct KdjBatchConfig {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct KdjBatchJsOutput {
-    pub values: Vec<f64>, // concatenated per combo: [k..., d..., j..., k..., d..., j..., ...]
+    pub values: Vec<f64>, 
     pub combos: Vec<KdjParams>,
-    pub rows: usize, // combos * 3
-    pub cols: usize, // len
+    pub rows: usize, 
+    pub cols: usize, 
 }
 
 #[cfg(feature = "wasm")]
@@ -4062,9 +4062,9 @@ pub fn kdj_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-// kdj_batch_into removed - use kdj_batch instead
 
-// === Classic Kernel Implementations ===
+
+
 
 /// Classic kernel with inline SMA calculations for both K and D smoothing
 #[inline]
@@ -4079,17 +4079,17 @@ fn kdj_classic_sma(
 ) -> Result<(), KdjError> {
     let len = stoch.len();
 
-    // Initialize K output with NaN prefix
+    
     let k_warm = stoch_warm + slow_k - 1;
     for i in 0..k_warm.min(len) {
         k_out[i] = f64::NAN;
     }
 
-    // Calculate %K (SMA of stochastic)
+    
     let mut sum_k = 0.0;
     let mut count_k = 0;
 
-    // Initialize first SMA for K
+    
     for i in stoch_warm..(stoch_warm + slow_k).min(len) {
         if !stoch[i].is_nan() {
             sum_k += stoch[i];
@@ -4104,7 +4104,7 @@ fn kdj_classic_sma(
             f64::NAN
         };
 
-        // Rolling SMA for K
+        
         for i in (k_warm + 1)..len {
             let old_val = stoch[i - slow_k];
             let new_val = stoch[i];
@@ -4124,17 +4124,17 @@ fn kdj_classic_sma(
         }
     }
 
-    // Initialize D output with NaN prefix
+    
     let d_warm = k_warm + slow_d - 1;
     for i in 0..d_warm.min(len) {
         d_out[i] = f64::NAN;
     }
 
-    // Calculate %D (SMA of %K)
+    
     let mut sum_d = 0.0;
     let mut count_d = 0;
 
-    // Initialize first SMA for D
+    
     for i in k_warm..(k_warm + slow_d).min(len) {
         if !k_out[i].is_nan() {
             sum_d += k_out[i];
@@ -4149,7 +4149,7 @@ fn kdj_classic_sma(
             f64::NAN
         };
 
-        // Rolling SMA for D
+        
         for i in (d_warm + 1)..len {
             let old_val = k_out[i - slow_d];
             let new_val = k_out[i];
@@ -4169,7 +4169,7 @@ fn kdj_classic_sma(
         }
     }
 
-    // Calculate J = 3K - 2D
+    
     for i in 0..d_warm.min(len) {
         j_out[i] = f64::NAN;
     }
@@ -4197,17 +4197,17 @@ fn kdj_classic_ema(
 ) -> Result<(), KdjError> {
     let len = stoch.len();
 
-    // Initialize K output with NaN prefix
+    
     let k_warm = stoch_warm + slow_k - 1;
     for i in 0..k_warm.min(len) {
         k_out[i] = f64::NAN;
     }
 
-    // Calculate %K (EMA of stochastic)
+    
     let alpha_k = 2.0 / (slow_k as f64 + 1.0);
     let one_minus_alpha_k = 1.0 - alpha_k;
 
-    // Initialize EMA for K with SMA
+    
     let mut sum_k = 0.0;
     let mut count_k = 0;
     for i in stoch_warm..(stoch_warm + slow_k).min(len) {
@@ -4224,7 +4224,7 @@ fn kdj_classic_ema(
         }
         k_out[k_warm] = ema_k;
 
-        // Continue EMA for K
+        
         for i in (k_warm + 1)..len {
             let st = stoch[i];
             if !st.is_nan() {
@@ -4238,17 +4238,17 @@ fn kdj_classic_ema(
         }
     }
 
-    // Initialize D output with NaN prefix
+    
     let d_warm = k_warm + slow_d - 1;
     for i in 0..d_warm.min(len) {
         d_out[i] = f64::NAN;
     }
 
-    // Calculate %D (EMA of %K)
+    
     let alpha_d = 2.0 / (slow_d as f64 + 1.0);
     let one_minus_alpha_d = 1.0 - alpha_d;
 
-    // Initialize EMA for D with SMA
+    
     let mut sum_d = 0.0;
     let mut count_d = 0;
     for i in k_warm..(k_warm + slow_d).min(len) {
@@ -4265,7 +4265,7 @@ fn kdj_classic_ema(
         }
         d_out[d_warm] = ema_d;
 
-        // Continue EMA for D
+        
         for i in (d_warm + 1)..len {
             let kv = k_out[i];
             if !kv.is_nan() {
@@ -4279,7 +4279,7 @@ fn kdj_classic_ema(
         }
     }
 
-    // Calculate J = 3K - 2D
+    
     for i in 0..d_warm.min(len) {
         j_out[i] = f64::NAN;
     }

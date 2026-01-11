@@ -284,7 +284,7 @@ fn net_myrsi_compute_into(
 /// MyRSI calculation based on John F. Ehlers' formula
 #[inline(always)]
 fn compute_myrsi_from(data: &[f64], period: usize, first: usize, out_myrsi: &mut [f64]) {
-    let start = first + period; // need period+1 actual values
+    let start = first + period; 
     let len = data.len();
 
     for i in start..len {
@@ -330,7 +330,7 @@ fn compute_net_from(myrsi: &[f64], period: usize, first: usize, out: &mut [f64])
     }
 }
 
-// ==================== OPTIMIZED KERNELS ====================
+
 #[inline(always)]
 fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
@@ -338,28 +338,28 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
         return;
     }
 
-    // ---- Rolling MyRSI state (O(1) per step) ----
+    
     let mut cu = 0.0f64;
     let mut cd = 0.0f64;
     let mut diffs = vec![0.0f64; period];
     let mut d_head = 0usize;
     let mut d_count = 0usize;
 
-    // ---- Rolling NET state (O(period) per step) ----
+    
     let mut myr = vec![0.0f64; period];
     let mut m_head = 0usize;
     let mut m_count = 0usize;
     let mut num: i32 = 0;
     let denom = (period * (period - 1)) as f64 * 0.5;
 
-    // Warmup parity: first computable NET index is (first + period - 1)
+    
     let warm = first + period - 1;
     if warm < out.len() {
-        // Match original semantics for period==1 (denom == 0): NaN at warmup index
+        
         out[warm] = if period > 1 { 0.0 } else { f64::NAN };
     }
 
-    // Helper: sum over slice of (#(v < s) - #(v > s))
+    
     #[inline(always)]
     fn lt_minus_gt_scalar(slice: &[f64], s: f64) -> i32 {
         let mut lt: i32 = 0;
@@ -371,14 +371,14 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
         lt - gt
     }
 
-    // Streaming pass
+    
     let mut i = first + 1;
     while i < len {
         let newer = data[i];
         let older = data[i - 1];
         let diff = newer - older;
 
-        // add newest diff
+        
         cu += ((diff > 0.0) as i32 as f64) * diff;
         cd += ((diff < 0.0) as i32 as f64) * (-diff);
 
@@ -405,7 +405,7 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
             let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
 
             if m_count < period {
-                // add pairs (older, r) for all existing
+                
                 let add = lt_minus_gt_scalar(&myr[..m_head], r);
                 num += add;
                 myr[m_head] = r;
@@ -415,7 +415,7 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
                 }
                 m_count += 1;
             } else {
-                // remove pairs contributed by oldest element z
+                
                 let z = myr[m_head];
                 let rm1 = if m_head + 1 < period {
                     lt_minus_gt_scalar(&myr[m_head + 1..period], z)
@@ -429,7 +429,7 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
                 };
                 num += rm1 + rm2;
 
-                // add pairs contributed by new r
+                
                 let ad1 = if m_head + 1 < period {
                     lt_minus_gt_scalar(&myr[m_head + 1..period], r)
                 } else {
@@ -835,24 +835,24 @@ pub fn net_myrsi_into(input: &NetMyrsiInput, out: &mut [f64]) -> Result<(), NetM
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern as alloc_with_nan_prefix
+    
     let warm = first + period - 1;
     let warm = warm.min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute into caller buffer using the selected kernel
+    
     net_myrsi_compute_into(data, period, first, out, chosen);
     Ok(())
 }
 
-// ==================== STREAMING SUPPORT ====================
+
 #[derive(Debug, Clone)]
 pub struct NetMyrsiStream {
     period: usize,
-    price: Vec<f64>, // len = period + 1
-    myrsi: Vec<f64>, // len = period
+    price: Vec<f64>, 
+    myrsi: Vec<f64>, 
     head: usize,
     filled_prices: bool,
     filled_myrsi: bool,
@@ -880,13 +880,13 @@ impl NetMyrsiStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // price ring
+        
         self.price[self.head % (self.period + 1)] = value;
         if !self.filled_prices && self.head + 1 >= self.period + 1 {
             self.filled_prices = true;
         }
 
-        // compute MyRSI when we have period+1 prices
+        
         if self.filled_prices {
             let mut cu = 0.0;
             let mut cd = 0.0;
@@ -909,7 +909,7 @@ impl NetMyrsiStream {
             }
         }
 
-        // compute NET once we have period MyRSI values
+        
         let out = if self.filled_myrsi {
             let denom = (self.period * (self.period - 1)) as f64 / 2.0;
             let mut num = 0.0;
@@ -935,7 +935,7 @@ impl NetMyrsiStream {
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct NetMyrsiBatchRange {
     pub period: (usize, usize, usize),
@@ -996,7 +996,7 @@ impl NetMyrsiBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct NetMyrsiBatchOutput {
-    pub values: Vec<f64>, // row-major (rows * cols)
+    pub values: Vec<f64>, 
     pub combos: Vec<NetMyrsiParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1020,12 +1020,12 @@ impl NetMyrsiBatchOutput {
 
 #[inline(always)]
 fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, NetMyrsiError> {
-    // Step == 0 → treat as a static value; identical bounds also collapse.
+    
     if step == 0 || start == end {
         return Ok(vec![start]);
     }
 
-    // Forward range
+    
     if start < end {
         let mut v = Vec::new();
         let mut x = start;
@@ -1050,7 +1050,7 @@ fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Result<Vec<u
         return Ok(v);
     }
 
-    // Reversed bounds: walk downwards using an isize accumulator.
+    
     let mut v = Vec::new();
     let mut x = start as isize;
     let end_i = end as isize;
@@ -1106,14 +1106,14 @@ fn net_myrsi_batch_inner(
     let cols = data.len();
     let rows = combos.len();
 
-    // Guard rows * cols against overflow so helpers never panic.
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| NetMyrsiError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
 
-    // validate all periods upfront
+    
     let max_needed = combos
         .iter()
         .map(|c| c.period.unwrap_or(14) + 1)
@@ -1126,25 +1126,25 @@ fn net_myrsi_batch_inner(
         });
     }
 
-    // allocate row-major matrix with poison-safe helpers
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // row-specific warmup (first + period - 1)
+    
     let warms: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap_or(14) - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // produce mutable &[f64] view
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // per-row compute (scalar; kern kept for parity)
+    
     for (row, slice) in out.chunks_mut(cols).enumerate() {
         let p = combos[row].period.unwrap_or(14);
-        // compute into slice directly through helper
+        
         net_myrsi_compute_into(data, p, first, slice, kern);
     }
 
@@ -1181,7 +1181,7 @@ fn net_myrsi_batch_inner_into(
     let cols = data.len();
     let rows = combos.len();
 
-    // out must be rows * cols to hold all combinations.
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| NetMyrsiError::InvalidRange {
@@ -1196,7 +1196,7 @@ fn net_myrsi_batch_inner_into(
         });
     }
 
-    // upfront validation
+    
     let max_needed = combos
         .iter()
         .map(|c| c.period.unwrap_or(14) + 1)
@@ -1209,13 +1209,13 @@ fn net_myrsi_batch_inner_into(
         });
     }
 
-    // single reusable scratch row
+    
     let mut tmp_mu = make_uninit_matrix(1, cols);
 
     for (row, dst) in out.chunks_mut(cols).enumerate() {
         let p = combos[row].period.unwrap_or(14);
         let warm = first + p - 1;
-        // Initialize dst prefix with NaNs
+        
         for i in 0..warm {
             dst[i] = f64::NAN;
         }
@@ -1226,11 +1226,11 @@ fn net_myrsi_batch_inner_into(
         compute_net_from(tmp, p, first, dst);
     }
 
-    let _ = tmp_mu; // drop
+    let _ = tmp_mu; 
     Ok(())
 }
 
-// Legacy batch function for compatibility
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn net_myrsi_batch(
     data: &[Vec<f64>],
@@ -1250,7 +1250,7 @@ pub fn net_myrsi_batch(
     results
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction]
 #[pyo3(name = "net_myrsi")]
@@ -1307,7 +1307,7 @@ pub fn net_myrsi_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        // no SIMD specialization needed, keep signature parity
+        
         net_myrsi_batch_inner_into(slice_in, &combos, actual, out_slice)
     })
     .map_err(|e: NetMyrsiError| PyValueError::new_err(e.to_string()))?;
@@ -1325,7 +1325,7 @@ pub fn net_myrsi_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "net_myrsi_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1753,8 +1753,8 @@ mod tests {
         assert_eq!(result.values.len(), data.len());
 
         // For NET MyRSI, NaN in middle doesn't necessarily propagate to same index
-        // due to the lookback nature of the calculation
-        // Just verify that we handle NaN gracefully and produce output
+        
+        
         let non_nan_count = result.values.iter().filter(|v| !v.is_nan()).count();
         assert!(
             non_nan_count > 0,
@@ -1875,18 +1875,18 @@ mod tests {
                 assert_eq!(out.len(), ref_out.len());
                 assert_eq!(out.len(), data.len());
 
-                // Find first valid index
+                
                 let first_valid = ref_out
                     .iter()
                     .position(|v| !v.is_nan())
                     .unwrap_or(ref_out.len());
 
-                // All values before first valid should be NaN
+                
                 for i in 0..first_valid {
                     assert!(out[i].is_nan(), "Expected NaN at index {}", i);
                 }
 
-                // Compare valid values
+                
                 for i in first_valid..out.len() {
                     if ref_out[i].is_nan() {
                         assert!(out[i].is_nan(), "Expected NaN at index {}", i);
@@ -1961,7 +1961,7 @@ mod tests {
         check_net_myrsi_property
     );
 
-    // Batch processing tests
+    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2019,11 +2019,11 @@ mod tests {
             .kernel(kernel)
             .period_range(10, 20, 5)
             .apply_candles(&c, "close")?;
-        assert_eq!(out.rows, 3); // 10, 15, 20
+        assert_eq!(out.rows, 3); 
         assert_eq!(out.cols, c.close.len());
         assert_eq!(out.values.len(), out.rows * out.cols);
 
-        // Verify parameter combinations
+        
         assert_eq!(out.combos.len(), 3);
         assert_eq!(out.combos[0].period, Some(10));
         assert_eq!(out.combos[1].period, Some(15));
@@ -2059,7 +2059,7 @@ mod tests {
 
     #[test]
     fn test_net_myrsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with an initial NaN prefix
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..(256 - 3) {
@@ -2069,13 +2069,13 @@ mod tests {
 
         let input = NetMyrsiInput::from_slice(&data, NetMyrsiParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = net_myrsi(&input)?.values;
 
-        // Preallocated output buffer
+        
         let mut out = vec![0.0; data.len()];
 
-        // Use native into API when available; fallback to into_slice under wasm builds
+        
         #[cfg(not(feature = "wasm"))]
         {
             net_myrsi_into(&input, &mut out)?;

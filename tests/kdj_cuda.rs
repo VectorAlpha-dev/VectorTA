@@ -1,13 +1,13 @@
 #![cfg(feature = "cuda")]
 
 use cust::memory::CopyDestination;
-use my_project::cuda::cuda_available;
-use my_project::cuda::CudaKdj;
-use my_project::indicators::kdj::{
+use vector_ta::cuda::cuda_available;
+use vector_ta::cuda::CudaKdj;
+use vector_ta::indicators::kdj::{
     kdj_batch_with_kernel, kdj_with_kernel, KdjBatchRange, KdjInput, KdjParams,
 };
-use my_project::utilities::data_loader::Candles;
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::data_loader::Candles;
+use vector_ta::utilities::enums::Kernel;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -50,7 +50,7 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (high, low) = synth_from_close(&close);
 
-    // CPU baseline (batch) – use f32-rounded inputs to mirror GPU path
+    
     let high_f32_round: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let low_f32_round: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let close_f32_round: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -92,7 +92,7 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_d.buf.copy_to(&mut d)?;
     dev_j.buf.copy_to(&mut j)?;
 
-    // Loose validation: shapes and finite ratio on the tail region
+    
     let mut cpu_finite = 0usize;
     let mut gpu_finite = 0usize;
     for i in (cpu.cols / 2)..(cpu.rows * cpu.cols) {
@@ -103,7 +103,7 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             gpu_finite += 1;
         }
     }
-    // GPU should produce a substantial portion of finite values where CPU does
+    
     assert!(
         gpu_finite * 2 >= cpu_finite,
         "GPU finite ratio too low: gpu={} cpu={}",
@@ -142,7 +142,7 @@ fn kdj_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU per-series baseline
+    
     let mut cpu_k_tm = vec![f64::NAN; cols * rows];
     let mut cpu_d_tm = vec![f64::NAN; cols * rows];
     let mut cpu_j_tm = vec![f64::NAN; cols * rows];
@@ -174,7 +174,7 @@ fn kdj_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let h_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let l_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let c_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

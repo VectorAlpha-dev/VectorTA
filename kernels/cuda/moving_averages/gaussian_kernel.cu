@@ -1,13 +1,13 @@
-// CUDA kernels for the Gaussian moving average (optimized).
-//
-// FP32 inputs/outputs with FP64 intermediates preserved.
-// Each thread processes exactly one series/parameter-combo sequentially
-// (grid-stride loops for scalability). Control flow and arithmetic within
-// a series remain identical to the CPU path.
-//
-// CUDA 13 / Ada+ focused.
-//
-// Optional: define GAUSS_USE_STREAMING_STORES=1 to use st.global.cs stores.
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -16,9 +16,9 @@
  #include <cuda_runtime.h>
  #include <math.h>
 
- // ----------------------------------------------
- // Tunables
- // ----------------------------------------------
+ 
+ 
+ 
  #ifndef GAUSS_BLOCK_DIM
  #define GAUSS_BLOCK_DIM 256
  #endif
@@ -27,17 +27,17 @@
  #define GAUSS_USE_STREAMING_STORES 0
  #endif
 
- // ----------------------------------------------
- // Small helpers
- // ----------------------------------------------
+ 
+ 
+ 
  static __device__ __forceinline__ float qnan_f() {
-     return __int_as_float(0x7fffffff); // quiet NaN
+     return __int_as_float(0x7fffffff); 
  }
 
  static __device__ __forceinline__ void store_out(float* __restrict__ p, float v) {
  #if GAUSS_USE_STREAMING_STORES
-     // Streaming global store: prefer L2, minimize L1 pollution.
-     // PTX cache operator .cs = streaming
+     
+     
      asm volatile("st.global.cs.f32 [%0], %1;" :: "l"(p), "f"(v));
  #else
      *p = v;
@@ -48,11 +48,11 @@
      return (x < lo) ? lo : (x > hi ? hi : x);
  }
 
- // ----------------------------------------------
- // Recurrence runners (no per-iteration branching)
- // valid = number of leading samples to write as NaN
- // (i.e., valid = clamp(max(start, warm), 0..series_len))
- // ----------------------------------------------
+ 
+ 
+ 
+ 
+ 
  static __device__ __forceinline__ void gaussian_run_poles1(
      const float* __restrict__ prices,
      float* __restrict__ out,
@@ -67,13 +67,13 @@
      int idx = 0;
      int t = 0;
 
-     // Prolog: update state, write NaN
+     
      for (; t < valid && t < series_len; ++t, idx += stride) {
          const double x = static_cast<double>(prices[idx]);
          y_prev = c1 * y_prev + c0 * x;
          store_out(out + idx, nan_f);
      }
-     // Main: update state, write y
+     
      for (; t < series_len; ++t, idx += stride) {
          const double x = static_cast<double>(prices[idx]);
          y_prev = c1 * y_prev + c0 * x;
@@ -92,8 +92,8 @@
      double c1,
      double c2)
  {
-     double p1 = 0.0; // y[n-1]
-     double p0 = 0.0; // y[n-2]
+     double p1 = 0.0; 
+     double p0 = 0.0; 
      int idx = 0;
      int t = 0;
 
@@ -123,9 +123,9 @@
      double c2,
      double c3)
  {
-     double p2 = 0.0; // y[n-1]
-     double p1 = 0.0; // y[n-2]
-     double p0 = 0.0; // y[n-3]
+     double p2 = 0.0; 
+     double p1 = 0.0; 
+     double p0 = 0.0; 
      int idx = 0;
      int t = 0;
 
@@ -156,10 +156,10 @@
      double c3,
      double c4)
  {
-     double p3 = 0.0; // y[n-1]
-     double p2 = 0.0; // y[n-2]
-     double p1 = 0.0; // y[n-3]
-     double p0 = 0.0; // y[n-4]
+     double p3 = 0.0; 
+     double p2 = 0.0; 
+     double p1 = 0.0; 
+     double p0 = 0.0; 
      int idx = 0;
      int t = 0;
 
@@ -177,10 +177,10 @@
      }
  }
 
- // ----------------------------------------------
- // Batch kernel: many parameter combos on one series
- // Grid-stride: one thread per combo
- // ----------------------------------------------
+ 
+ 
+ 
+ 
  extern "C" __global__ void gaussian_batch_f32(
      const float* __restrict__ prices,
      const int* __restrict__ periods,
@@ -194,7 +194,7 @@
  {
      const float nan_f = qnan_f();
 
-     // Grid-stride over combos
+     
      for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
           combo < n_combos;
           combo += gridDim.x * blockDim.x)
@@ -202,11 +202,11 @@
          const int period = periods[combo];
          const int pole   = poles[combo];
 
-         // Validate (rarely taken)
+         
          if (period < 2 || pole < 1 || pole > 4 || series_len <= 0) {
-             // Optionally fill row with NaNs if invalid combos are possible
-             // float* out_row = out + combo * series_len;
-             // for (int i = 0; i < series_len; ++i) out_row[i] = nan_f;
+             
+             
+             
              continue;
          }
 
@@ -214,11 +214,11 @@
 
          int start = first_valid;
          start = clampi(start, 0, series_len);
-         // keep original semantics: warm = first_valid + period
+         
          int warm = first_valid + period;
          warm = clampi(warm, 0, series_len);
 
-         // First index where output may be valid
+         
          int valid = warm > start ? warm : start;
          valid = clampi(valid, 0, series_len);
 
@@ -247,10 +247,10 @@
      }
  }
 
- // ----------------------------------------------
- // Many-series kernel: one parameter set across many series
- // Grid-stride: one thread per series; time-major layout → coalesced
- // ----------------------------------------------
+ 
+ 
+ 
+ 
  extern "C" __global__ void gaussian_many_series_one_param_f32(
      const float* __restrict__ prices_tm,
      const float* __restrict__ coeffs,
@@ -270,7 +270,7 @@
      const double c4 = static_cast<double>(coeffs[4]);
      const float nan_f = qnan_f();
 
-     // Grid-stride over series
+     
      for (int s = blockIdx.x * blockDim.x + threadIdx.x;
           s < num_series;
           s += gridDim.x * blockDim.x)
@@ -278,7 +278,7 @@
          int start = first_valids[s];
          start = clampi(start, 0, series_len);
 
-         // keep original semantics: warm = first_valids[s] + period
+         
          int warm = first_valids[s] + period;
          warm = clampi(warm, 0, series_len);
 

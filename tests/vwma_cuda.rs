@@ -1,16 +1,16 @@
-// Integration tests for CUDA VWMA kernels
 
-use my_project::indicators::moving_averages::vwma::{
+
+use vector_ta::indicators::moving_averages::vwma::{
     vwma_batch_with_kernel, VwmaBatchRange, VwmaBuilder,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVwma;
+use vector_ta::cuda::moving_averages::CudaVwma;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,10 +46,10 @@ fn vwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = VwmaBatchRange { period: (6, 30, 4) };
 
-    // CPU baseline (scalar batch)
+    
     let cpu = vwma_batch_with_kernel(&prices, &volumes, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU execution
+    
     let cuda = CudaVwma::new(0).expect("CudaVwma::new");
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
@@ -79,7 +79,7 @@ fn vwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Spot-check single-series builder to ensure CPU path unaffected
+    
     let cpu_single = VwmaBuilder::new()
         .period(14)
         .apply_slice(&prices, &volumes)?
@@ -124,7 +124,7 @@ fn vwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 18usize;
 
-    // CPU baseline per series (row-major output)
+    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series_idx in 0..num_series {
         let mut prices_series = vec![f64::NAN; series_len];
@@ -144,7 +144,7 @@ fn vwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    // GPU execution
+    
     let cuda = CudaVwma::new(0).expect("CudaVwma::new");
     let prices_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes_tm.iter().map(|&v| v as f32).collect();

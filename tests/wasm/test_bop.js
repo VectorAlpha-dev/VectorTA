@@ -24,7 +24,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module (prefer pkg ESM; fallback to bundled CJS wrapper when ESM import fails)
+    
     const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
     const pkgImport = process.platform === 'win32'
         ? 'file:///' + pkgPath.replace(/\\/g, '/')
@@ -32,7 +32,7 @@ test.before(async () => {
 
     async function tryImport(p) {
         const mod = await import(p);
-        // If CommonJS, Node returns { default: exports }. Normalize to a plain object
+        
         return mod && mod.default && (mod.bop_js === undefined && mod.default.bop_js !== undefined)
             ? mod.default
             : mod;
@@ -41,7 +41,7 @@ test.before(async () => {
     try {
         wasm = await tryImport(pkgImport);
     } catch (esmErr) {
-        // Fallback to pre-bundled CommonJS wrapper in tests/wasm
+        
         try {
             const cjsPath = path.join(__dirname, 'my_project.js');
             const cjsImport = process.platform === 'win32'
@@ -60,22 +60,22 @@ test.before(async () => {
 });
 
 test('BOP partial params', () => {
-    // Test with standard parameters - mirrors check_bop_partial_params
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // BOP has no parameters, just OHLC inputs
+    
     const result = wasm.bop_js(open, high, low, close);
     assert.strictEqual(result.length, close.length);
 });
 
 test('BOP accuracy', async () => {
-    // Test BOP matches expected values from Rust tests - mirrors check_bop_accuracy
-    // Expected values from src/indicators/bop.rs::check_bop_accuracy:
-    // [0.045454545454545456, -0.32398753894080995, -0.3844086021505376,
-    //  0.3547400611620795, -0.5336179295624333]
+    
+    
+    
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
@@ -86,7 +86,7 @@ test('BOP accuracy', async () => {
     
     assert.strictEqual(result.length, close.length);
     
-    // Check last 5 values match expected from Rust tests
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -95,12 +95,12 @@ test('BOP accuracy', async () => {
         "BOP last 5 values mismatch"
     );
     
-    // Compare full output with Rust
+    
     await compareWithRust('bop', result, 'ohlc', expected.defaultParams);
 });
 
 test('BOP default candles', () => {
-    // Test BOP with default parameters - mirrors check_bop_default_candles
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
@@ -111,7 +111,7 @@ test('BOP default candles', () => {
 });
 
 test('BOP with empty data', () => {
-    // Test BOP fails with empty data - mirrors check_bop_with_empty_data
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -120,9 +120,9 @@ test('BOP with empty data', () => {
 });
 
 test('BOP with inconsistent lengths', () => {
-    // Test BOP fails with inconsistent input lengths - mirrors check_bop_with_inconsistent_lengths
+    
     const open = new Float64Array([1.0, 2.0, 3.0]);
-    const high = new Float64Array([1.5, 2.5]);  // Wrong length
+    const high = new Float64Array([1.5, 2.5]);  
     const low = new Float64Array([0.8, 1.8, 2.8]);
     const close = new Float64Array([1.2, 2.2, 3.2]);
     
@@ -132,7 +132,7 @@ test('BOP with inconsistent lengths', () => {
 });
 
 test('BOP very small dataset', () => {
-    // Test BOP with single data point - mirrors check_bop_very_small_dataset
+    
     const open = new Float64Array([10.0]);
     const high = new Float64Array([12.0]);
     const low = new Float64Array([9.5]);
@@ -140,27 +140,27 @@ test('BOP very small dataset', () => {
     
     const result = wasm.bop_js(open, high, low, close);
     assert.strictEqual(result.length, 1);
-    // (11.0 - 10.0) / (12.0 - 9.5) = 1.0 / 2.5 = 0.4
+    
     assertClose(result[0], 0.4, 1e-10, "BOP single value calculation");
 });
 
 test('BOP with slice data reinput', () => {
-    // Test BOP with slice data re-input - mirrors check_bop_with_slice_data_reinput
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // First pass
+    
     const firstResult = wasm.bop_js(open, high, low, close);
     assert.strictEqual(firstResult.length, close.length);
     
-    // Second pass - use first result as close, zeros for others
+    
     const dummy = new Float64Array(firstResult.length);
     const secondResult = wasm.bop_js(dummy, dummy, dummy, firstResult);
     assert.strictEqual(secondResult.length, firstResult.length);
     
-    // All values should be 0.0 since (first_result - 0) / (0 - 0) = 0.0
+    
     for (let i = 0; i < secondResult.length; i++) {
         assertClose(secondResult[i], 0.0, 1e-15, 
                    `Expected BOP=0.0 for dummy data at idx ${i}`);
@@ -168,7 +168,7 @@ test('BOP with slice data reinput', () => {
 });
 
 test('BOP NaN handling', () => {
-    // Test BOP handles values correctly without NaN - mirrors check_bop_nan_handling
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
@@ -177,28 +177,28 @@ test('BOP NaN handling', () => {
     const result = wasm.bop_js(open, high, low, close);
     assert.strictEqual(result.length, close.length);
     
-    // BOP should not produce NaN values after any warmup period
+    
     if (result.length > 240) {
         for (let i = 240; i < result.length; i++) {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
         }
     }
     
-    // Actually, BOP has no warmup period - it calculates from the first value
+    
     assertNoNaN(result, "BOP should not produce any NaN values");
 });
 
 test('BOP zero range handling', () => {
-    // Test BOP when high equals low (zero range)
-    // When high == low, BOP should return 0.0
+    
+    
     const open = new Float64Array([10.0, 20.0, 30.0]);
     const high = new Float64Array([15.0, 25.0, 35.0]);
-    const low = new Float64Array([15.0, 25.0, 35.0]);  // Same as high
+    const low = new Float64Array([15.0, 25.0, 35.0]);  
     const close = new Float64Array([15.0, 25.0, 35.0]);
     
     const result = wasm.bop_js(open, high, low, close);
     
-    // All values should be 0.0 since denominator is 0
+    
     for (let i = 0; i < result.length; i++) {
         assertClose(result[i], 0.0, 1e-15, 
                    `Expected BOP=0.0 when high=low at idx ${i}`);
@@ -206,16 +206,16 @@ test('BOP zero range handling', () => {
 });
 
 test('BOP batch single', () => {
-    // Test batch processing with BOP (no parameters)
+    
     const open = new Float64Array(testData.open);
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // BOP has no parameters, so batch is just regular calculation
+    
     const batchResult = wasm.bop_batch_js(open, high, low, close);
     
-    // Should match single calculation
+    
     const singleResult = wasm.bop_js(open, high, low, close);
     
     assert.strictEqual(batchResult.length, singleResult.length);
@@ -223,38 +223,38 @@ test('BOP batch single', () => {
 });
 
 test('BOP batch metadata', () => {
-    // Test metadata function returns empty array (no parameters)
+    
     const metadata = wasm.bop_batch_metadata_js();
     
-    // BOP has no parameters, so metadata should be empty
+    
     assert.strictEqual(metadata.length, 0);
 });
 
 test('BOP batch unified API', () => {
-    // Test unified batch API with config object
+    
     const open = new Float64Array(testData.open.slice(0, 100));
     const high = new Float64Array(testData.high.slice(0, 100));
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
     
-    // BOP has no parameters, but we pass empty config for API consistency
-    const config = {};  // Empty config for BOP
+    
+    const config = {};  
     
     const result = wasm.bop_batch(open, high, low, close, config);
     
-    // Should have structure with values, rows, cols
+    
     assert(result.values);
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, 100);
     assert.strictEqual(result.values.length, 100);
     
-    // Values should match regular calculation
+    
     const regularResult = wasm.bop_js(open, high, low, close);
     assertArrayClose(result.values, regularResult, 1e-10, "Unified API mismatch");
 });
 
 test('BOP extreme values', () => {
-    // Test BOP with extreme price movements
+    
     const open = new Float64Array([100.0, 1000.0, 10.0]);
     const high = new Float64Array([200.0, 2000.0, 20.0]);
     const low = new Float64Array([50.0, 500.0, 5.0]);
@@ -262,19 +262,19 @@ test('BOP extreme values', () => {
     
     const result = wasm.bop_js(open, high, low, close);
     
-    // Calculate expected values manually
-    // BOP = (close - open) / (high - low)
+    
+    
     const expected = [
-        (150.0 - 100.0) / (200.0 - 50.0),   // 50/150 = 0.333...
-        (1500.0 - 1000.0) / (2000.0 - 500.0), // 500/1500 = 0.333...
-        (15.0 - 10.0) / (20.0 - 5.0)         // 5/15 = 0.333...
+        (150.0 - 100.0) / (200.0 - 50.0),   
+        (1500.0 - 1000.0) / (2000.0 - 500.0), 
+        (15.0 - 10.0) / (20.0 - 5.0)         
     ];
     
     assertArrayClose(result, expected, 1e-10, "Extreme values mismatch");
 });
 
 test('BOP negative values', () => {
-    // Test BOP when close < open (negative BOP)
+    
     const open = new Float64Array([100.0, 200.0, 300.0]);
     const high = new Float64Array([110.0, 210.0, 310.0]);
     const low = new Float64Array([80.0, 180.0, 280.0]);
@@ -282,14 +282,14 @@ test('BOP negative values', () => {
     
     const result = wasm.bop_js(open, high, low, close);
     
-    // All should be negative: (90-100)/(110-80) = -10/30 = -0.333...
+    
     for (let i = 0; i < result.length; i++) {
         assert(result[i] < 0, `Expected negative BOP at index ${i}`);
         assertClose(result[i], -1/3, 1e-10, `BOP value at index ${i}`);
     }
 });
 
-// Fast API tests
+
 test('BOP zero-copy API (bop_into)', () => {
     const data = new Float64Array([
         10.0, 20.0, 30.0, 40.0, 50.0,
@@ -308,7 +308,7 @@ test('BOP zero-copy API (bop_into)', () => {
         12.5, 22.5, 32.5, 42.5, 52.5
     ]);
     
-    // Allocate buffers
+    
     const openPtr = wasm.bop_alloc(data.length);
     const highPtr = wasm.bop_alloc(data.length);
     const lowPtr = wasm.bop_alloc(data.length);
@@ -322,33 +322,33 @@ test('BOP zero-copy API (bop_into)', () => {
     assert(outPtr !== 0, 'Failed to allocate output buffer');
     
     try {
-        // Create views into WASM memory
+        
         const openView = new Float64Array(wasm.__wasm.memory.buffer, openPtr, data.length);
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, data.length);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, data.length);
         const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, data.length);
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data.length);
         
-        // Copy data into WASM memory
+        
         openView.set(data);
         highView.set(high);
         lowView.set(low);
         closeView.set(close);
         
-        // Compute BOP using fast API
+        
         wasm.bop_into(openPtr, highPtr, lowPtr, closePtr, outPtr, data.length);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.bop_js(data, high, low, close);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(outView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - outView[i]) < 1e-10,
                    `Fast API mismatch at index ${i}: regular=${regularResult[i]}, fast=${outView[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.bop_free(openPtr, data.length);
         wasm.bop_free(highPtr, data.length);
         wasm.bop_free(lowPtr, data.length);
@@ -371,7 +371,7 @@ test('BOP in-place computation with aliasing', () => {
         11.5, 21.5, 31.5, 41.5, 51.5
     ]);
     
-    // Test aliasing with close buffer
+    
     const closePtr = wasm.bop_alloc(data.length);
     const highPtr = wasm.bop_alloc(data.length);
     const lowPtr = wasm.bop_alloc(data.length);
@@ -383,26 +383,26 @@ test('BOP in-place computation with aliasing', () => {
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, data.length);
         const openView = new Float64Array(wasm.__wasm.memory.buffer, openPtr, data.length);
         
-        // Copy data
+        
         closeView.set(close);
         highView.set(high);
         lowView.set(low);
         openView.set(data);
         
-        // Store original close values for comparison
+        
         const originalClose = Array.from(close);
         
-        // Compute BOP in-place (output overwrites close)
+        
         wasm.bop_into(openPtr, highPtr, lowPtr, closePtr, closePtr, data.length);
         
-        // Recreate view in case memory moved
+        
         const resultView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, data.length);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.bop_js(data, high, low, originalClose);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(resultView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - resultView[i]) < 1e-10,
                    `Aliasing mismatch at index ${i}: regular=${regularResult[i]}, aliased=${resultView[i]}`);
@@ -416,20 +416,20 @@ test('BOP in-place computation with aliasing', () => {
 });
 
 test('BOP memory management', () => {
-    // Test multiple allocations and frees
+    
     const sizes = [10, 100, 1000, 10000];
     
     for (const size of sizes) {
         const ptrs = [];
         
-        // Allocate 4 buffers (open, high, low, close)
+        
         for (let i = 0; i < 4; i++) {
             const ptr = wasm.bop_alloc(size);
             assert(ptr !== 0, `Failed to allocate buffer ${i} of size ${size}`);
             ptrs.push(ptr);
         }
         
-        // Write test pattern to verify memory integrity
+        
         for (let i = 0; i < ptrs.length; i++) {
             const view = new Float64Array(wasm.__wasm.memory.buffer, ptrs[i], size);
             for (let j = 0; j < Math.min(10, size); j++) {
@@ -437,7 +437,7 @@ test('BOP memory management', () => {
             }
         }
         
-        // Verify patterns
+        
         for (let i = 0; i < ptrs.length; i++) {
             const view = new Float64Array(wasm.__wasm.memory.buffer, ptrs[i], size);
             for (let j = 0; j < Math.min(10, size); j++) {
@@ -446,7 +446,7 @@ test('BOP memory management', () => {
             }
         }
         
-        // Free all buffers
+        
         for (const ptr of ptrs) {
             wasm.bop_free(ptr, size);
         }
@@ -454,12 +454,12 @@ test('BOP memory management', () => {
 });
 
 test('BOP fast API error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.bop_into(0, 0, 0, 0, 0, 10);
     }, /Null pointer/i);
     
-    // Test with one valid pointer
+    
     const ptr = wasm.bop_alloc(10);
     try {
         assert.throws(() => {
@@ -471,28 +471,28 @@ test('BOP fast API error handling', () => {
 });
 
 test('BOP all NaN input', () => {
-    // Test BOP with all NaN values - mirrors ALMA's test
+    
     const size = 100;
     const allNaN = new Float64Array(size);
     for (let i = 0; i < size; i++) {
         allNaN[i] = NaN;
     }
     
-    // BOP should handle all NaN gracefully - likely returning all NaN
+    
     const result = wasm.bop_js(allNaN, allNaN, allNaN, allNaN);
     assert.strictEqual(result.length, size);
     assertAllNaN(result, "Expected all NaN output for all NaN input");
 });
 
 test('BOP with NaN in middle', () => {
-    // Test BOP handles NaN values in the middle of data
+    
     const size = 200;
     const open = new Float64Array(size);
     const high = new Float64Array(size);
     const low = new Float64Array(size);
     const close = new Float64Array(size);
     
-    // Fill with valid data
+    
     for (let i = 0; i < size; i++) {
         open[i] = 100.0;
         high[i] = 110.0;
@@ -500,7 +500,7 @@ test('BOP with NaN in middle', () => {
         close[i] = 105.0;
     }
     
-    // Inject NaN in the middle (indices 100-110)
+    
     for (let i = 100; i < 110; i++) {
         open[i] = NaN;
         high[i] = NaN;
@@ -511,13 +511,13 @@ test('BOP with NaN in middle', () => {
     const result = wasm.bop_js(open, high, low, close);
     assert.strictEqual(result.length, size);
     
-    // Check that NaN appears where expected
+    
     for (let i = 100; i < 110; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
     
-    // Check that values before and after NaN region are calculated
-    // BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
+    
+    
     if (!isNaN(result[99])) {
         assertClose(result[99], 0.25, 1e-10, "Value before NaN region");
     }
@@ -527,7 +527,7 @@ test('BOP with NaN in middle', () => {
 });
 
 test('BOP with leading NaN', () => {
-    // Test BOP with leading NaN values (warmup period simulation)
+    
     const size = 100;
     const nanPeriod = 10;
     const open = new Float64Array(size);
@@ -535,7 +535,7 @@ test('BOP with leading NaN', () => {
     const low = new Float64Array(size);
     const close = new Float64Array(size);
     
-    // Fill with valid data
+    
     for (let i = 0; i < size; i++) {
         open[i] = 100.0;
         high[i] = 110.0;
@@ -543,7 +543,7 @@ test('BOP with leading NaN', () => {
         close[i] = 105.0;
     }
     
-    // Set first 10 values to NaN
+    
     for (let i = 0; i < nanPeriod; i++) {
         open[i] = NaN;
         high[i] = NaN;
@@ -554,13 +554,13 @@ test('BOP with leading NaN', () => {
     const result = wasm.bop_js(open, high, low, close);
     assert.strictEqual(result.length, size);
     
-    // First 10 values should be NaN
+    
     for (let i = 0; i < nanPeriod; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
     
-    // After NaN period, values should be calculated
-    // BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
+    
+    
     const expectedValue = 0.25;
     for (let i = nanPeriod; i < size; i++) {
         assertClose(result[i], expectedValue, 1e-10, 
@@ -569,12 +569,12 @@ test('BOP with leading NaN', () => {
 });
 
 test('BOP formula edge cases', () => {
-    // Test BOP formula edge cases and boundary conditions
-    // Test when close == open (BOP should be 0)
+    
+    
     const openEqual = new Float64Array([100.0, 200.0, 300.0]);
     const high = new Float64Array([110.0, 210.0, 310.0]);
     const low = new Float64Array([90.0, 190.0, 290.0]);
-    const closeEqual = new Float64Array([100.0, 200.0, 300.0]);  // Same as open
+    const closeEqual = new Float64Array([100.0, 200.0, 300.0]);  
     
     let result = wasm.bop_js(openEqual, high, low, closeEqual);
     for (let i = 0; i < result.length; i++) {
@@ -582,9 +582,9 @@ test('BOP formula edge cases', () => {
                    `Expected BOP=0 when close==open at index ${i}`);
     }
     
-    // Test maximum BOP (close at high, open at low)
-    const openAtLow = new Float64Array([90.0, 190.0, 290.0]);  // At low
-    const closeAtHigh = new Float64Array([110.0, 210.0, 310.0]);  // At high
+    
+    const openAtLow = new Float64Array([90.0, 190.0, 290.0]);  
+    const closeAtHigh = new Float64Array([110.0, 210.0, 310.0]);  
     
     result = wasm.bop_js(openAtLow, high, low, closeAtHigh);
     for (let i = 0; i < result.length; i++) {
@@ -592,9 +592,9 @@ test('BOP formula edge cases', () => {
                    `Expected BOP=1 when close=high and open=low at index ${i}`);
     }
     
-    // Test minimum BOP (close at low, open at high)
-    const openAtHigh = new Float64Array([110.0, 210.0, 310.0]);  // At high
-    const closeAtLow = new Float64Array([90.0, 190.0, 290.0]);  // At low
+    
+    const openAtHigh = new Float64Array([110.0, 210.0, 310.0]);  
+    const closeAtLow = new Float64Array([90.0, 190.0, 290.0]);  
     
     result = wasm.bop_js(openAtHigh, high, low, closeAtLow);
     for (let i = 0; i < result.length; i++) {
@@ -610,7 +610,7 @@ test('BOP large dataset performance', () => {
     const low = new Float64Array(size);
     const close = new Float64Array(size);
     
-    // Generate test data
+    
     for (let i = 0; i < size; i++) {
         const base = 100 + Math.sin(i * 0.01) * 50;
         low[i] = base - Math.random() * 5;
@@ -619,7 +619,7 @@ test('BOP large dataset performance', () => {
         close[i] = low[i] + Math.random() * (high[i] - low[i]);
     }
     
-    // Allocate large buffers
+    
     const openPtr = wasm.bop_alloc(size);
     const highPtr = wasm.bop_alloc(size);
     const lowPtr = wasm.bop_alloc(size);
@@ -630,25 +630,25 @@ test('BOP large dataset performance', () => {
            'Failed to allocate large buffers');
     
     try {
-        // Create views
+        
         const openView = new Float64Array(wasm.__wasm.memory.buffer, openPtr, size);
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, size);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, size);
         const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, size);
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, size);
         
-        // Copy data
+        
         openView.set(open);
         highView.set(high);
         lowView.set(low);
         closeView.set(close);
         
-        // Time the fast API
+        
         const startFast = performance.now();
         wasm.bop_into(openPtr, highPtr, lowPtr, closePtr, outPtr, size);
         const timeFast = performance.now() - startFast;
         
-        // Time the regular API
+        
         const startRegular = performance.now();
         const regularResult = wasm.bop_js(open, high, low, close);
         const timeRegular = performance.now() - startRegular;
@@ -658,10 +658,10 @@ test('BOP large dataset performance', () => {
         console.log(`  Regular API: ${timeRegular.toFixed(2)}ms`);
         console.log(`  Speedup: ${(timeRegular / timeFast).toFixed(2)}x`);
         
-        // Recreate the view after potential memory growth from regular API call
+        
         const outViewFinal = new Float64Array(wasm.__wasm.memory.buffer, outPtr, size);
         
-        // Verify first few values match
+        
         for (let i = 0; i < 100; i++) {
             if (isNaN(regularResult[i]) && isNaN(outViewFinal[i])) {
                 continue;
@@ -683,6 +683,6 @@ test.after(() => {
 });
 
 if (process.argv.includes('--run')) {
-    // This allows running the file directly with node
+    
     test.run();
 }

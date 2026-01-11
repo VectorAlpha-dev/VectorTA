@@ -323,7 +323,7 @@ pub fn rsx_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
 #[inline]
 pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // State registers
+    
     let mut f0 = 0.0;
     let mut f8 = 0.0;
     let mut f18 = 0.0;
@@ -348,7 +348,7 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    // Hoist invariants and initialize at warmup boundary
+    
     f90 = 1.0;
     f0 = 0.0;
     f88 = if period >= 6 {
@@ -361,17 +361,17 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     f20 = 1.0 - f18;
     out[start] = f64::NAN;
 
-    // Main loop after warmup boundary
+    
     for i in (start + 1)..data.len() {
-        // counter saturating/incrementing
+        
         f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
 
-        // Price delta (scaled)
+        
         let prev = f8;
         f8 = 100.0 * data[i];
         let v8 = f8 - prev;
 
-        // IIR smoothing chain
+        
         f28 = f20 * f28 + f18 * v8;
         f30 = f18 * f28 + f20 * f30;
         let v_c = f28 * 1.5 - f30 * 0.5;
@@ -397,7 +397,7 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         f80 = f18 * f78 + f20 * f80;
         let v20_ = f78 * 1.5 - f80 * 0.5;
 
-        // Warmup latch logic
+        
         if f88 >= f90 && f8 != prev {
             f0 = 1.0;
         }
@@ -405,7 +405,7 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             f90 = 0.0;
         }
 
-        // Final RSX value with clamp
+        
         if f88 < f90 && v20_ > 1e-10 {
             let mut v4 = (v14 / v20_ + 1.0) * 50.0;
             if v4 > 100.0 {
@@ -430,7 +430,7 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         return;
     }
 
-    // Constants and state
+    
     let mut f0 = 0.0;
     let mut f8 = 100.0 * *data.get_unchecked(start);
     let f18 = 3.0 / (period as f64 + 2.0);
@@ -456,7 +456,7 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 
     *out.get_unchecked_mut(start) = f64::NAN;
 
-    // Hot loop with unchecked indexing and FMA via mul_add
+    
     for i in (start + 1)..len {
         f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
 
@@ -464,7 +464,7 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         f8 = 100.0 * *data.get_unchecked(i);
         let v8 = f8 - prev;
 
-        // cascade
+        
         f28 = f18.mul_add(v8, f20 * f28);
         f30 = f18.mul_add(f28, f20 * f30);
         let v_c = 1.5f64.mul_add(f28, -0.5 * f30);
@@ -511,24 +511,24 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rsx_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Reuse AVX2 FMA-enabled scalar for AVX512. RSX is recurrence-bound;
-    // keeping identical math with mul_add here preserves performance gains
-    // without cross-time lane parallelism.
+    
+    
+    
     rsx_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rsx_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Same rationale as short-period variant.
+    
     rsx_avx2(data, period, first, out)
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn rsx_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // For now, use scalar implementation
-    // TODO: Implement actual SIMD128 optimizations
+    
+    
     rsx_scalar(data, period, first, out)
 }
 
@@ -536,21 +536,21 @@ unsafe fn rsx_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]
 pub struct RsxStream {
     period: usize,
 
-    // Warm-up bookkeeping
+    
     seen: usize,
     init_done: bool,
 
-    // Constants
-    alpha: f64, // 3 / (period + 2)
-    beta: f64,  // 1 - alpha
-    f88: f64,   // warm-up target: max(period-1, 5)
-    f90: f64,   // warm-up counter
+    
+    alpha: f64, 
+    beta: f64,  
+    f88: f64,   
+    f90: f64,   
 
-    // Latch and last price (scaled by 100)
+    
     f0: f64,
     f8: f64,
 
-    // IIR chain state registers
+    
     f28: f64,
     f30: f64,
     f38: f64,
@@ -609,15 +609,15 @@ impl RsxStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Count this tick
+        
         self.seen += 1;
 
-        // Before warm-up boundary: return None
+        
         if !self.init_done && self.seen < self.period {
             return None;
         }
 
-        // Exactly at warm-up boundary: latch initial state and return NaN
+        
         if !self.init_done {
             self.init_done = true;
             self.f0 = 0.0;
@@ -625,7 +625,7 @@ impl RsxStream {
             return Some(f64::NAN);
         }
 
-        // Post warm-up: O(1) recursive update
+        
         self.f90 = if self.f88 <= self.f90 {
             self.f88 + 1.0
         } else {
@@ -636,7 +636,7 @@ impl RsxStream {
         self.f8 = 100.0 * value;
         let v8 = self.f8 - prev;
 
-        // IIR smoothing chain (matches batch scalar math)
+        
         self.f28 = self.beta * self.f28 + self.alpha * v8;
         self.f30 = self.alpha * self.f28 + self.beta * self.f30;
         let v_c = self.f28 * 1.5 - self.f30 * 0.5;
@@ -662,7 +662,7 @@ impl RsxStream {
         self.f80 = self.alpha * self.f78 + self.beta * self.f80;
         let v20_ = self.f78 * 1.5 - self.f80 * 0.5;
 
-        // Warm-up latch logic (unchanged)
+        
         if self.f88 >= self.f90 && self.f8 != prev {
             self.f0 = 1.0;
         }
@@ -670,7 +670,7 @@ impl RsxStream {
             self.f90 = 0.0;
         }
 
-        // Final RSX value with clamp
+        
         let y = if self.f88 < self.f90 && v20_ > 1e-10 {
             let v4 = (v14 / v20_ + 1.0) * 50.0;
             v4.max(0.0).min(100.0)
@@ -801,7 +801,7 @@ fn expand_grid(r: &RsxBatchRange) -> Result<Vec<RsxParams>, RsxError> {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -883,32 +883,32 @@ fn rsx_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Guard rows*cols overflow for matrix allocation
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| RsxError::InvalidRange {
         start: rows.to_string(),
         end: cols.to_string(),
         step: "rows*cols".into(),
     })?;
 
-    // Resolve kernel selection
+    
     let actual_kernel = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    // Use uninitialized memory like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to initialized memory
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, rows * cols) };
@@ -950,7 +950,7 @@ fn rsx_batch_inner(
         }
     }
 
-    // Convert ManuallyDrop back to Vec
+    
     let values = unsafe {
         Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
     };
@@ -1000,16 +1000,16 @@ mod tests {
 
     #[test]
     fn test_rsx_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use existing CSV fixtures for parity, consistent with other RSX tests
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
         let input = RsxInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let RsxOutput { values: expected } = rsx(&input)?;
 
-        // Preallocate output buffer and compute via into() API
+        
         let mut out = vec![0.0; candles.close.len()];
 
         #[cfg(not(feature = "wasm"))]
@@ -1018,13 +1018,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // Fallback for wasm builds of tests to avoid symbol clash
+            
             rsx_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(expected.len(), out.len());
 
-        // Value parity: NaN == NaN; finite values equal (identical paths)
+        
         for i in 0..out.len() {
             let a = expected[i];
             let b = out[i];
@@ -1300,20 +1300,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            RsxParams::default(),            // period: 14
-            RsxParams { period: Some(2) },   // minimum viable
-            RsxParams { period: Some(7) },   // small
-            RsxParams { period: Some(21) },  // medium
-            RsxParams { period: Some(50) },  // large
-            RsxParams { period: Some(100) }, // very large
-            RsxParams { period: Some(200) }, // extra large
-            RsxParams { period: Some(5) },   // another small
-            RsxParams { period: Some(10) },  // round number
-            RsxParams { period: Some(20) },  // another round number
-            RsxParams { period: Some(30) },  // medium-large
-            RsxParams { period: Some(40) },  // another medium-large
+            RsxParams::default(),            
+            RsxParams { period: Some(2) },   
+            RsxParams { period: Some(7) },   
+            RsxParams { period: Some(21) },  
+            RsxParams { period: Some(50) },  
+            RsxParams { period: Some(100) }, 
+            RsxParams { period: Some(200) }, 
+            RsxParams { period: Some(5) },   
+            RsxParams { period: Some(10) },  
+            RsxParams { period: Some(20) },  
+            RsxParams { period: Some(30) },  
+            RsxParams { period: Some(40) },  
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1322,12 +1322,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1377,7 +1377,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1389,7 +1389,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // RSX period typically ranges from 2 to 64
+        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1411,7 +1411,7 @@ mod tests {
                 let RsxOutput { values: ref_out } =
                     rsx_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: RSX values must be bounded between 0 and 100
+                
                 for i in period..data.len() {
                     let y = out[i];
                     if !y.is_nan() {
@@ -1422,7 +1422,7 @@ mod tests {
                     }
                 }
 
-                // Property 2: Warmup period should be exactly period (includes initialization NaN)
+                
                 for i in 0..period.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1431,7 +1431,7 @@ mod tests {
                     );
                 }
 
-                // Property 3: First valid value should be at index period
+                
                 if data.len() > period {
                     prop_assert!(
                         !out[period].is_nan(),
@@ -1440,11 +1440,11 @@ mod tests {
                     );
                 }
 
-                // Property 4: Constant data should produce RSX around 50.0
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                     && data.len() > period
                 {
-                    // For constant data, RSX should converge to 50.0
+                    
                     for i in period..data.len() {
                         prop_assert!(
                             (out[i] - 50.0).abs() <= 1e-9,
@@ -1454,10 +1454,10 @@ mod tests {
                     }
                 }
 
-                // Property 5: Strictly increasing prices should produce RSX > 50 (after stabilization)
+                
                 let is_strictly_increasing = data.windows(2).all(|w| w[1] > w[0]);
                 if is_strictly_increasing && data.len() >= period + 10 {
-                    // Check after some stabilization
+                    
                     for i in (period + 10)..data.len() {
                         prop_assert!(
                             out[i] > 50.0 || (out[i] - 50.0).abs() < 1e-9,
@@ -1467,10 +1467,10 @@ mod tests {
                     }
                 }
 
-                // Property 6: Strictly decreasing prices should produce RSX < 50 (after stabilization)
+                
                 let is_strictly_decreasing = data.windows(2).all(|w| w[1] < w[0]);
                 if is_strictly_decreasing && data.len() >= period + 10 {
-                    // Check after some stabilization
+                    
                     for i in (period + 10)..data.len() {
                         prop_assert!(
                             out[i] < 50.0 || (out[i] - 50.0).abs() < 1e-9,
@@ -1480,7 +1480,7 @@ mod tests {
                     }
                 }
 
-                // Property 7: Kernel consistency - compare with scalar implementation
+                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1493,7 +1493,7 @@ mod tests {
                         continue;
                     }
 
-                    // RSX should be deterministic and consistent across kernels
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1504,8 +1504,8 @@ mod tests {
                     );
                 }
 
-                // Property 8: RSX should be deterministic - same input always produces same output
-                // Run the same calculation again and verify identical results
+                
+                
                 let RsxOutput { values: out2 } = rsx_with_kernel(&input, kernel).unwrap();
                 for i in 0..data.len() {
                     prop_assert!(
@@ -1601,16 +1601,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods
-            (5, 25, 5),    // Medium periods
-            (30, 60, 15),  // Large periods
-            (2, 5, 1),     // Dense small range
-            (10, 100, 10), // Wide range with large step
-            (14, 28, 7),   // Multiples of default
-            (3, 9, 3),     // Small odd periods
-            (50, 150, 25), // Very large periods
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (30, 60, 15),  
+            (2, 5, 1),     
+            (10, 100, 10), 
+            (14, 28, 7),   
+            (3, 9, 3),     
+            (50, 150, 25), 
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -1629,7 +1629,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1685,7 +1685,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     gen_batch_tests!(check_batch_default_row);
@@ -1711,12 +1711,12 @@ pub fn rsx_py<'py>(
     };
     let input = RsxInput::from_slice(slice_in, params);
 
-    // GOOD: Get Vec<f64> from Rust function
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| rsx_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
+    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1763,7 +1763,7 @@ pub fn rsx_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
+    
     let combos =
         expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
@@ -1772,14 +1772,14 @@ pub fn rsx_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Pre-allocate output array (OK for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
+    
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1796,11 +1796,11 @@ pub fn rsx_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // For single-parameter indicators:
+    
     dict.set_item(
         "periods",
         combos
@@ -1813,7 +1813,7 @@ pub fn rsx_batch_py<'py>(
     Ok(dict)
 }
 
-// Helper function for batch computation
+
 #[cfg(any(feature = "python", feature = "wasm"))]
 #[inline(always)]
 fn rsx_batch_inner_into(
@@ -1851,7 +1851,7 @@ fn rsx_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    // prefix NaNs using helper on the *provided* buffer
+    
     unsafe {
         let out_mu =
             std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
@@ -1862,7 +1862,7 @@ fn rsx_batch_inner_into(
         init_matrix_prefixes(out_mu, cols, &warm);
     }
 
-    // select scalar/placeholder SIMD kernel
+    
     let actual = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -2011,7 +2011,7 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    // mirror ALMA: build rows*cols buffer using helpers
+    
     let combos =
         expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
@@ -2020,7 +2020,7 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-    // allocate rows×cols uninit and prefix-init via helper
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = data
         .iter()
@@ -2032,7 +2032,7 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // cast to f64 and compute into place
+    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -2096,7 +2096,7 @@ pub fn rsx_batch_into(
     }
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]

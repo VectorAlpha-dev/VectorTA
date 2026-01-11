@@ -859,7 +859,7 @@ fn emv_batch_inner_into(
         });
     }
 
-    // Treat NumPy-owned memory as MaybeUninit to set only warm prefixes
+    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -868,7 +868,7 @@ fn emv_batch_inner_into(
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .ok_or(EmvError::AllValuesNaN)?;
 
-    // Validate we have at least two valid points, matching emv_batch_inner
+    
     let valid = (first..len)
         .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .count();
@@ -879,10 +879,10 @@ fn emv_batch_inner_into(
         });
     }
 
-    // Warm prefix NaNs without extra passes
+    
     init_matrix_prefixes(out_mu, len, &[first + 1]);
 
-    // Reinterpret back to f64 for compute
+    
     let out_f: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
@@ -1726,7 +1726,7 @@ impl EmvDeviceArrayF32Py {
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         let ptr_val = inner.buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr_val, false))?;
-        // Producer stream is synchronized before returning the handle, so we omit "stream".
+        
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1744,7 +1744,7 @@ impl EmvDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
+        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1765,7 +1765,7 @@ impl EmvDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(

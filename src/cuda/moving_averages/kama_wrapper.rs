@@ -77,7 +77,7 @@ impl CudaKama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kama_kernel.ptx"));
-        // Match ALMA loader behavior: prefer DetermineTargetFromContext + O2, fallback progressively.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -137,7 +137,7 @@ impl CudaKama {
 
     #[inline]
     fn grid_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
-        const MAX: usize = 65_535; // launch limit per grid dimension
+        const MAX: usize = 65_535; 
         (0..total).step_by(MAX).map(move |start| {
             let len = (total - start).min(MAX);
             (start, len)
@@ -191,7 +191,7 @@ impl CudaKama {
         } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
         } else {
-            // reversed bounds supported by stepping down
+            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
@@ -268,15 +268,15 @@ impl CudaKama {
             .get_function("kama_batch_f32")
             .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_f32" })?;
 
-        // Record selection for introspection/debug
+        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
         }
         self.maybe_log_batch_debug();
 
-        // Limit grid dimension; launch in chunks of <= 65_535 combos.
-        // One warp per block is optimal for these sequential recurrences.
+        
+        
         const BLOCK_X: u32 = 32;
         for (start, len) in Self::grid_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -321,7 +321,7 @@ impl CudaKama {
             .get_function("kama_batch_prefix_f32")
             .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_prefix_f32" })?;
 
-        // Record selection for introspection/debug (same OneD shape)
+        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
@@ -361,7 +361,7 @@ impl CudaKama {
 
     #[inline]
     fn build_roc1_prefix_bytes(series_len: usize) -> usize {
-        // prefix length = series_len + 1
+        
         (series_len + 1) * std::mem::size_of::<f32>()
     }
 
@@ -387,11 +387,11 @@ impl CudaKama {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaKamaError::InvalidInput("out byte size overflow".into()))?;
 
-        // The prefix kernel is the optimized path (warp-scan). Prefer it whenever available.
+        
         let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
         let use_prefix = have_prefix_kernel;
 
-        // Only budget prefix memory when we actually use the prefix path.
+        
         let prefix_bytes = if use_prefix {
             Self::build_roc1_prefix_bytes(series_len)
         } else {
@@ -402,7 +402,7 @@ impl CudaKama {
             .and_then(|x| x.checked_add(out_bytes))
             .and_then(|x| x.checked_add(prefix_bytes))
             .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB cushion (match ALMA default)
+        let headroom = 64 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let (free, _total) = mem_get_info().unwrap_or((0, 0));
             return Err(CudaKamaError::OutOfMemory { required, free, headroom });
@@ -414,7 +414,7 @@ impl CudaKama {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         if use_prefix {
-            // Host-precompute Σ|Δp| prefix (NaN-insensitive accumulation) only when beneficial.
+            
             let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
             prefix.push(0.0f32);
             let mut acc = 0.0f32;
@@ -430,7 +430,7 @@ impl CudaKama {
                 prefix.push(acc);
                 prev = cur;
             }
-            // pad last element to length = series_len + 1
+            
             prefix.push(acc);
             let d_prefix = DeviceBuffer::from_slice(&prefix)?;
             self.launch_batch_kernel_with_prefix(
@@ -578,8 +578,8 @@ impl CudaKama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        // One warp per series (sequential recurrence handled by lane 0).
-        // Default to 32; allow override via env for experiments.
+        
+        
         let block_x = std::env::var("KAMA_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -592,7 +592,7 @@ impl CudaKama {
             .get_function("kama_many_series_one_param_time_major_f32")
             .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_many_series_one_param_time_major_f32" })?;
 
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -643,7 +643,7 @@ impl CudaKama {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
-        let headroom = 16 * 1024 * 1024; // 16MB cushion
+        let headroom = 16 * 1024 * 1024; 
         if !Self::will_fit(required, headroom) {
             let (free, _total) = mem_get_info().unwrap_or((0, 0));
             return Err(CudaKamaError::OutOfMemory { required, free, headroom });
@@ -722,7 +722,7 @@ impl CudaKama {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -877,7 +877,7 @@ pub mod benches {
     }
 }
 
-// ---------- Minimal policy + introspection to mirror ALMA API ----------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {

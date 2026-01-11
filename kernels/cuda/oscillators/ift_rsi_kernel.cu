@@ -1,7 +1,7 @@
-// CUDA kernels for IFT RSI (Inverse Fisher Transform of RSI) in FP32.
-//
-// Drop-in FP32 rewrite: removes FP64 from hot paths, adds compensated
-// summation for LWMA, and uses warp-parallel seeding where available.
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,15 +18,15 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
-// --------- small utils ---------
+
 static __device__ __forceinline__ float f32_qnan() { return __int_as_float(0x7fffffff); }
 static __device__ __forceinline__ int   imax(int a,int b){ return a>b? a:b; }
 static __device__ __forceinline__ int   imin(int a,int b){ return a<b? a:b; }
 
-// Kahan-style compensated adder for FP32
+
 struct KahanF32 {
     float sum;
-    float c; // compensation
+    float c; 
     __device__ __forceinline__ void init(float s = 0.f){ sum=s; c=0.f; }
     __device__ __forceinline__ void add(float x){
         float y = x - c;
@@ -36,10 +36,10 @@ struct KahanF32 {
     }
 };
 
-// warp reduction (sum) over up to 32-lane warp
+
 static __device__ __forceinline__ float warp_sum(float v) {
     unsigned mask = __activemask();
-    // tree reduce
+    
     v += __shfl_down_sync(mask, v, 16);
     v += __shfl_down_sync(mask, v,  8);
     v += __shfl_down_sync(mask, v,  4);
@@ -48,9 +48,9 @@ static __device__ __forceinline__ float warp_sum(float v) {
     return v;
 }
 
-// ------------------ KERNEL 1: one series × many params ------------------
-// - Each block (ideally one warp) processes multiple combos in a grid-stride loop.
-// - Lane 0 executes the sequential recurrence; other lanes help seed RSI.
+
+
+
 extern "C" __global__ void ift_rsi_batch_f32(
     const float* __restrict__ data,
     int series_len,
@@ -60,14 +60,14 @@ extern "C" __global__ void ift_rsi_batch_f32(
     const int* __restrict__ wma_periods,
     float* __restrict__ out_values)
 {
-    // grid-stride over combos to keep device busy when n_combos is small
+    
     for (int combo = blockIdx.x; combo < n_combos; combo += gridDim.x) {
 
         const int rp = rsi_periods[combo];
         const int wp = wma_periods[combo];
         const int base = combo * series_len;
 
-        // basic arg checks
+        
         if (UNLIKELY(rp <= 0 || wp <= 0 || rp > series_len || wp > series_len)) {
             for (int t = threadIdx.x; t < series_len; t += blockDim.x) out_values[base + t] = f32_qnan();
             continue;
@@ -87,13 +87,13 @@ extern "C" __global__ void ift_rsi_batch_f32(
         const int warm = first_valid + rp + wp - 1;
         for (int t = threadIdx.x; t < imin(warm, series_len); t += blockDim.x) out_values[base + t] = f32_qnan();
 
-        // dynamic shared memory ring buffer: host must pass max_wp*sizeof(float)
+        
         extern __shared__ float shmem[];
-        float* ring = shmem; // ring[0..wp-1] per block
-        // we unconditionally require ring memory
-        if (UNLIKELY(wp <= 0)) continue; // already screened; defensive
+        float* ring = shmem; 
+        
+        if (UNLIKELY(wp <= 0)) continue; 
 
-        // -------- seed Wilder's SMMA over the first rp diffs --------
+        
         const int lane = threadIdx.x & 31;
         const int seed_start = first_valid + 1;
         const int seed_end   = seed_start + rp - 1;
@@ -101,7 +101,7 @@ extern "C" __global__ void ift_rsi_batch_f32(
         float gain_seed = 0.f, loss_seed = 0.f;
 
         if (blockDim.x >= 32) {
-            // strided over [seed_start .. seed_end]; each lane sums its slice
+            
             float gain_part = 0.f, loss_part = 0.f;
             for (int i = seed_start + lane; i <= seed_end; i += 32) {
                 float cur  = data[i];
@@ -109,11 +109,11 @@ extern "C" __global__ void ift_rsi_batch_f32(
                 float d = cur - prev;
                 if (d > 0.f) gain_part += d; else loss_part += -d;
             }
-            // warp reduction
+            
             gain_seed = warp_sum(gain_part);
             loss_seed = warp_sum(loss_part);
         } else {
-            // Fallback for tiny blocks: compute seed on lane 0 sequentially
+            
             if (threadIdx.x == 0) {
                 float g = 0.f, l = 0.f;
                 for (int i = seed_start; i <= seed_end; ++i) {
@@ -124,7 +124,7 @@ extern "C" __global__ void ift_rsi_batch_f32(
             }
         }
 
-        // lane 0 finalizes seed and runs the sequential recurrences
+        
         if (lane == 0) {
             const float rp_rcp = 1.0f / (float)rp;
             float avg_gain = gain_seed * rp_rcp;
@@ -132,17 +132,17 @@ extern "C" __global__ void ift_rsi_batch_f32(
             const float alpha = rp_rcp;
             const float beta  = 1.0f - alpha;
 
-            // LWMA state for x = 0.1*(RSI - 50)
+            
             const float wp_f = (float)wp;
             const float denom_rcp = 2.0f / (wp_f * (wp_f + 1.0f));
             int head = 0, filled = 0;
             float S1 = 0.0f;
             float S2 = 0.0f;
 
-            // initialize streaming prev to avoid 2nd load per step
+            
             float prev = data[first_valid + rp];
 
-            // iterate absolute offset i = rp..(tail-1), abs_t = first_valid + i
+            
             for (int i = rp; i < tail; ++i) {
                 if (i > rp) {
                     const int abs_idx = first_valid + i;
@@ -151,12 +151,12 @@ extern "C" __global__ void ift_rsi_batch_f32(
                     prev = curr;
                     float g = (d > 0.f) ? d : 0.f;
                     float l = (d > 0.f) ? 0.f : -d;
-                    // Wilder SMMA recurrence in FP32 with FMA
+                    
                     avg_gain = __fmaf_rn(alpha, g, beta * avg_gain);
                     avg_loss = __fmaf_rn(alpha, l, beta * avg_loss);
                 }
 
-                // RSI -> x
+                
                 float rs  = (avg_loss != 0.f) ? (avg_gain / avg_loss) : 100.f;
                 float rsi = 100.f - 100.f / (1.f + rs);
                 float x   = 0.1f * (rsi - 50.f);
@@ -190,11 +190,11 @@ extern "C" __global__ void ift_rsi_batch_f32(
     }
 }
 
-// ------------------ KERNEL 2: many series × one param (time-major) ------------------
-// Each thread handles one series. Uses per-thread slice in shared memory for the ring.
+
+
 extern "C" __global__ void ift_rsi_many_series_one_param_f32(
-    const float* __restrict__ data_tm,     // time-major [row * num_series + series]
-    const int*   __restrict__ first_valids,// per-series first valid index
+    const float* __restrict__ data_tm,     
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int rsi_period,
@@ -226,7 +226,7 @@ extern "C" __global__ void ift_rsi_many_series_one_param_f32(
     const int warm = first + rp + wp - 1;
     for (int r = 0; r < imin(warm, series_len); ++r) out_tm[r * num_series + series] = f32_qnan();
 
-    // seed Wilder over [first+1 .. first+rp]
+    
     float gain_part = 0.f, loss_part = 0.f;
     const int seed_start = first + 1;
     const int seed_end   = seed_start + rp - 1;
@@ -242,7 +242,7 @@ extern "C" __global__ void ift_rsi_many_series_one_param_f32(
     const float alpha = rp_rcp;
     const float beta  = 1.0f - alpha;
 
-    // LWMA state
+    
     const float wp_f = (float)wp;
     const float denom_rcp = 2.0f / (wp_f * (wp_f + 1.0f));
     int head = 0, filled = 0;
@@ -252,7 +252,7 @@ extern "C" __global__ void ift_rsi_many_series_one_param_f32(
     extern __shared__ float shbuf[];
     float* ring = shbuf + threadIdx.x * wp;
 
-    // streaming prev
+    
     float prev = data_tm[(first + rp) * num_series + series];
 
     for (int r = first + rp; r < series_len; ++r) {

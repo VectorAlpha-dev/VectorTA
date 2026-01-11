@@ -1,16 +1,16 @@
-// Integration tests for CUDA CoRa Wave kernels
 
-use my_project::indicators::cora_wave::{
+
+use vector_ta::indicators::cora_wave::{
     cora_wave_batch_with_kernel, CoraWaveBatchRange, CoraWaveBuilder, CoraWaveParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaCoraWave;
+use vector_ta::cuda::moving_averages::CudaCoraWave;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -58,7 +58,7 @@ fn cora_wave_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std
     let mut gpu_host = vec![0f32; gpu.len()];
     gpu.buf.copy_to(&mut gpu_host)?;
 
-    let tol = 5e-3; // smoothing + geometric weights → allow slightly looser
+    let tol = 5e-3; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -96,7 +96,7 @@ fn cora_wave_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         smooth: Some(true),
     };
 
-    // CPU reference per series
+    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];

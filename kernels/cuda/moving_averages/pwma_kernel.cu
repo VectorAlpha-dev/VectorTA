@@ -1,11 +1,11 @@
-// CUDA kernels for Pascal Weighted Moving Average (PWMA).
-//
-// The batch kernel assigns one block per parameter combination. Each block
-// stages the pre-normalized Pascal weights for its period into shared memory
-// and has threads stride across the timeline applying the weighted sum. A
-// second kernel handles the many-series × one-parameter path using time-major
-// input with shared weights. Optional 2D tiled variants are provided to mirror
-// the ALMA/CWMA naming and launch geometry when available.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -79,8 +79,8 @@ extern "C" __global__
 void pwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const float* __restrict__ weights,
                                      int period,
-                                     // retained for signature symmetry with ALMA/CWMA; weights are
-                                     // pre-normalized on host for PWMA, so this parameter is unused
+                                     
+                                     
                                      float /*inv_norm*/,
                                      int num_series,
                                      int series_len,
@@ -122,11 +122,11 @@ void pwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 }
 }
 
-// -------------------- 1D tiled async batch kernel --------------------------
-// Each block handles a time tile for one parameter combination. The tile
-// (TILE + period - 1) floats is staged into shared using cuda::pipeline and
-// cuda::memcpy_async (lowering to cp.async on SM80+), and then reused for TX
-// overlapping windows.
+
+
+
+
+
 
 extern "C" __global__
 void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
@@ -143,9 +143,9 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     if (period <= 0 || period > max_period) return;
 
-    const int TILE = PWMA_TILE_TX;             // must match blockDim.x
-    const int wlen = period;                   // full-length weights for PWMA
-    const int total = TILE + wlen - 1;         // elements per tile
+    const int TILE = PWMA_TILE_TX;             
+    const int wlen = period;                   
+    const int total = TILE + wlen - 1;         
 
     const int warm = warm_indices[combo];
     const int base_out = combo * series_len;
@@ -153,11 +153,11 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
 
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w = reinterpret_cast<float*>(shraw + off);           // [wlen]
+    float* w = reinterpret_cast<float*>(shraw + off);           
     off = pwma_align_up_sz(off + size_t(max_period) * sizeof(float), 16);
-    float* tile = reinterpret_cast<float*>(shraw + off);         // [STAGES * (TILE + wlen - 1)]
+    float* tile = reinterpret_cast<float*>(shraw + off);         
 
-    // Load weights for this combo into shared
+    
     const float* wsrc = weights_flat + combo * max_period;
     for (int i = threadIdx.x; i < wlen; i += blockDim.x) {
         w[i] = wsrc[i];
@@ -175,7 +175,7 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
     int t_base = blockIdx.x * TILE;
     int stage  = 0;
 
-    // Prime: preload up to STAGES tiles
+    
     for (int s = 0; s < STAGES; ++s) {
         pipe.producer_acquire();
         const int t0 = t_base + s * grid_tile_stride;
@@ -191,19 +191,19 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
         pipe.producer_commit();
     }
 
-    // Main loop over this CTA's tiles
+    
     while (t_base < series_len) {
         pipe.consumer_wait();
         __syncthreads();
 
-        // Compute outputs for this tile from shared
+        
         const float* tbuf = &tile[stage * total];
         const int t = t_base + lane;
         if (t < series_len) {
             if (t < warm) {
                 out[base_out + t] = nan_f;
             } else {
-                int start = lane; // within tile
+                int start = lane; 
                 const float* xptr = &tbuf[start];
                 float acc = 0.0f;
 #pragma unroll 8
@@ -217,11 +217,11 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
         __syncthreads();
         pipe.consumer_release();
 
-        // Preload the next tile STAGES*stride ahead
+        
         pipe.producer_acquire();
         const int next_t0 = t_base + STAGES * grid_tile_stride;
         const int next_p0 = next_t0 - (wlen - 1);
-        const int next_stage = stage; // rotate into the slot just freed
+        const int next_stage = stage; 
 
         for (int dt = lane; dt < total; dt += blockDim.x) {
             const int tcur = next_p0 + dt;
@@ -238,8 +238,8 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
     }
 }
 
-// -------------------- 2D tiled many-series variants ------------------------
-// Mirrors ALMA/CWMA tiled mapping for time-major inputs with shared weights.
+
+
 
 __device__ __forceinline__ size_t pwma_align_up(size_t x, size_t a) {
     return (x + (a - 1)) & ~(a - 1);
@@ -250,7 +250,7 @@ __device__ __forceinline__
 void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
                           const float* __restrict__ weights,
                           int period,
-                          float /*inv_norm_unused*/, // kept for symmetry
+                          float /*inv_norm_unused*/, 
                           int num_series,
                           int series_len,
                           const int* __restrict__ first_valids,
@@ -259,19 +259,19 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     const int s0 = blockIdx.y * TY;
     if (t0 >= series_len || s0 >= num_series) return;
 
-    // Shared: weights + tile [ (TX+period-1) x (TY+1) ] to avoid bank conflicts
+    
     const int total = TX + period - 1;
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
     float* w = reinterpret_cast<float*>(shraw + off);
     off = pwma_align_up(off + size_t(period) * sizeof(float), 16);
-    const int LD = TY + 1; // padded leading dimension (bank-conflict hardening)
+    const int LD = TY + 1; 
     float* tile = reinterpret_cast<float*>(shraw + off);
 
-    // Load weights into shared (vectorized if aligned)
+    
     uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
     if ((waddr & 0xF) == 0) {
-        int ve = period >> 2; // period / 4
+        int ve = period >> 2; 
         for (int vi = threadIdx.y * blockDim.x + threadIdx.x; vi < ve; vi += blockDim.x * blockDim.y) {
             reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(weights)[vi];
         }
@@ -286,7 +286,7 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    // Cooperative load of tile across series and time
+    
     const bool vec_ok = (TY == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
     const int p0 = t0 - (period - 1);
     for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
@@ -312,7 +312,7 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    // Compute outputs for this CTA
+    
     int s = s0 + threadIdx.y;
     int t = t0 + threadIdx.x;
     if (s >= num_series || t >= series_len) return;
@@ -324,14 +324,14 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
         return;
     }
 
-    int start = threadIdx.x; // within tile
+    int start = threadIdx.x; 
     const float* xptr = &tile[start * LD + threadIdx.y];
     float acc = 0.f;
 #pragma unroll 8
     for (int i = 0; i < period; ++i) {
         acc = fmaf(xptr[i * LD], w[i], acc);
     }
-    // Weights are pre-normalized on host for PWMA
+    
     out_tm[out_idx] = acc;
 }
 
@@ -345,11 +345,11 @@ extern "C" __global__ void NAME(                                                
                                num_series, series_len, first_valids, out_tm);   \
 }
 
-// Expose the two tiled variants used by wrappers
+
 DEFINE_PWMA_MS1P_TILED(pwma_ms1p_tiled_f32_tx128_ty2, 128, 2)
 DEFINE_PWMA_MS1P_TILED(pwma_ms1p_tiled_f32_tx128_ty4, 128, 4)
 
-// ---------------- Optional: constant-memory weights path -------------------
+
 #ifndef PWMA_MAX_PERIOD_CONST
 #define PWMA_MAX_PERIOD_CONST 4096
 #endif

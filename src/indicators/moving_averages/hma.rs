@@ -732,19 +732,19 @@ struct LinWma {
     buffer: Vec<f64>, // circular buffer (oldest at head)
     head: usize,      // next position to overwrite (oldest element)
     filled: bool,     // true once we've pushed >= period samples
-    count: usize,     // samples seen so far (<= period during warmup)
+    count: usize,     
 
-    // O(1) state
-    sum: f64,         // simple sum over the window
-    wsum: f64,        // weighted numerator: Σ_{i=1..n} i * x_{oldest+i-1}
-    nan_count: usize, // number of NaNs currently in the window
-    dirty: bool,      // sums/weights invalid due to NaN; rebuild on next clean window
+    
+    sum: f64,         
+    wsum: f64,        
+    nan_count: usize, 
+    dirty: bool,      
 }
 
 impl LinWma {
     #[inline(always)]
     fn new(period: usize) -> Self {
-        // Triangular normalization; multiply by inv_norm instead of dividing each time.
+        
         let norm = (period as f64) * ((period as f64) + 1.0) * 0.5;
         Self {
             period,
@@ -774,7 +774,7 @@ impl LinWma {
             if v.is_nan() {
                 self.nan_count += 1;
             } else {
-                // weights are 1..n from oldest->newest (oldest is at head)
+                
                 self.sum += v;
                 self.wsum = (i as f64 + 1.0).mul_add(v, self.wsum);
             }
@@ -790,7 +790,7 @@ impl LinWma {
     fn update(&mut self, value: f64) -> Option<f64> {
         let n = self.period as f64;
 
-        // Insert new value, overwriting the oldest
+        
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = if self.head + 1 == self.period {
@@ -799,7 +799,7 @@ impl LinWma {
             self.head + 1
         };
 
-        // Warm-up path (filling < period)
+        
         if !self.filled {
             self.count += 1;
 
@@ -807,14 +807,14 @@ impl LinWma {
                 self.nan_count += 1;
                 self.dirty = true;
             } else {
-                // weights for partial fill are 1..count with newest weight = count
+                
                 self.sum += value;
                 self.wsum = (self.count as f64).mul_add(value, self.wsum);
             }
 
             if self.count == self.period {
                 self.filled = true;
-                // first full window becomes valid here
+                
                 return Some(if self.nan_count > 0 {
                     f64::NAN
                 } else {
@@ -824,8 +824,8 @@ impl LinWma {
             return None;
         }
 
-        // Steady-state path (already filled)
-        // Maintain NaN accounting
+        
+        
         if old.is_nan() {
             self.nan_count = self.nan_count.saturating_sub(1);
         }
@@ -833,13 +833,13 @@ impl LinWma {
             self.nan_count += 1;
         }
 
-        // Any NaN inside the window => output NaN (parity with dot_product semantics)
+        
         if self.nan_count > 0 {
-            self.dirty = true; // sums are unreliable while NaNs are present
+            self.dirty = true; 
             return Some(f64::NAN);
         }
 
-        // If window just became clean, rebuild exact sums once, then continue O(1)
+        
         if self.dirty {
             self.rebuild();
             self.dirty = false;
@@ -847,12 +847,12 @@ impl LinWma {
             return Some(self.wsum * self.inv_norm);
         }
 
-        // Fast O(1) update:
-        //  - sum_{t+1} = sum_t + value - old
-        //  - wsum_{t+1} = wsum_t - sum_t + n * value   (uses previous sum_t)
+        
+        
+        
         let prev_sum = self.sum;
         self.sum = prev_sum + value - old;
-        self.wsum = n.mul_add(value, self.wsum - prev_sum); // FMA: wsum += n*value - prev_sum
+        self.wsum = n.mul_add(value, self.wsum - prev_sum); 
 
         Some(self.wsum * self.inv_norm)
     }
@@ -897,7 +897,7 @@ impl HmaStream {
         let half = self.wma_half.update(value);
 
         if let (Some(f), Some(h)) = (full, half) {
-            // Intermediate x_t = 2*WMA_half - WMA_full
+            
             let x = 2.0f64.mul_add(h, -f);
             self.wma_sqrt.update(x)
         } else {
@@ -1004,11 +1004,11 @@ impl HmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &HmaBatchRange) -> Vec<HmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // zero step or identical bounds => singleton
+        
         if step == 0 || start == end {
             return vec![start];
         }
-        // normalize possibly reversed bounds
+        
         let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
         let mut v = Vec::new();
         let mut x = lo;
@@ -1016,7 +1016,7 @@ fn expand_grid(r: &HmaBatchRange) -> Vec<HmaParams> {
             v.push(x);
             match x.checked_add(step) {
                 Some(nx) => x = nx,
-                None => break, // stop on overflow – values accumulated so far are valid
+                None => break, 
             }
         }
         v
@@ -1073,28 +1073,28 @@ fn hma_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // one warm-prefix per row so batch + streaming agree
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
             let s = (p as f64).sqrt().floor() as usize;
-            first + p + s - 2 // first_out index for each period
+            first + p + s - 2 
         })
         .collect();
 
-    // -------- allocate rows×cols uninitialised -----------
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // -------- per-row worker closure -----------
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // cast this row into &mut [f64] once we’re ready to write real numbers
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1108,7 +1108,7 @@ fn hma_batch_inner(
         }
     };
 
-    // -------- run every row -----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1129,7 +1129,7 @@ fn hma_batch_inner(
         }
     }
 
-    // finalize like ALMA
+    
     let rows = combos.len();
     let cols = data.len();
     let _ = rows
@@ -1180,7 +1180,7 @@ fn hma_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Ensure output buffer is the correct size
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
@@ -1188,23 +1188,23 @@ fn hma_batch_inner_into(
         return Err(HmaError::OutputLengthMismatch { expected, got: out.len() });
     }
 
-    // one warm-prefix per row so batch + streaming agree
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
             let s = (p as f64).sqrt().floor() as usize;
-            first + p + s - 2 // first_out index for each period
+            first + p + s - 2 
         })
         .collect();
 
-    // Cast output to MaybeUninit for initialization
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // -------- per-row worker closure -----------
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
@@ -1218,7 +1218,7 @@ fn hma_batch_inner_into(
         }
     };
 
-    // -------- run every row -----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1241,7 +1241,7 @@ fn hma_batch_inner_into(
     Ok((combos, rows, cols))
 }
 
-// --- row variants (all AVX point to scalar, as per your pattern) ---
+
 
 #[inline(always)]
 pub unsafe fn hma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -1265,7 +1265,7 @@ fn expand_grid_hma(r: &HmaBatchRange) -> Vec<HmaParams> {
     expand_grid(r)
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1394,12 +1394,12 @@ pub fn hma_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
-    // CUDA Array Interface v3 helper metadata for consumers; no sync performed here.
+    
     dict.set_item("cai_version", 3u64)?;
-    dict.set_item("cai_typestr", "<f4")?; // little-endian f32
+    dict.set_item("cai_typestr", "<f4")?; 
     dict.set_item("cai_shape", (inner.rows as u64, inner.cols as u64))?;
     dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
-    dict.set_item("stream", stream_u64)?; // non-zero CUstream per CAI v3
+    dict.set_item("stream", stream_u64)?; 
 
     Ok((DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64), dict))
 }
@@ -1464,7 +1464,7 @@ impl HmaStreamPy {
     }
 }
 
-// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Hma", unsendable)]
 pub struct DeviceArrayF32HmaPy {
@@ -1665,7 +1665,7 @@ pub fn hma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Legacy batch API for backward compatibility
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_batch_js(
@@ -1678,7 +1678,7 @@ pub fn hma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Force scalar kernel for WASM since it doesn't support SIMD
+    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::ScalarBatch
     } else {
@@ -1707,22 +1707,22 @@ pub fn hma_batch_metadata_js(
     periods.iter().map(|&p| p as f64).collect()
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn hma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1738,38 +1738,38 @@ pub fn hma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to hma_into"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Calculate HMA
+        
         let params = HmaParams {
             period: Some(period),
         };
         let input = HmaInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
+        
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
+            
             let mut temp = vec![0.0; len];
             hma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             hma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1806,14 +1806,14 @@ pub fn hma_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Force scalar kernel for WASM since it doesn't support SIMD
+        
         let kernel = if cfg!(target_arch = "wasm32") {
             Kernel::ScalarBatch
         } else {
             Kernel::Auto
         };
 
-        // Use optimized batch processing
+        
         hma_batch_inner_into(data, &sweep, kernel, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1821,7 +1821,7 @@ pub fn hma_batch_into(
     }
 }
 
-// ==================== PYTHON MODULE REGISTRATION ====================
+
 #[cfg(feature = "python")]
 pub fn register_hma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hma_py, m)?)?;
@@ -2191,7 +2191,7 @@ mod tests {
                             // This is intentional for lag reduction, so we only check it's finite
                             prop_assert!(y.is_finite(), "HMA output at {} is not finite: {}", i, y);
 
-                            // For constant data, HMA should converge to that constant
+                            
                             if i >= period * 2 {
                                 let window_start = i.saturating_sub(period);
                                 let window = &data_slice[window_start..=i];
@@ -2210,9 +2210,9 @@ mod tests {
                             }
                         }
 
-                        // Edge case: period = 2 (minimum valid)
+                        
                         if period == 2 {
-                            // HMA should still produce valid output after warmup
+                            
                             let min_valid_idx = expected_warmup;
                             if out.len() > min_valid_idx {
                                 prop_assert!(
@@ -2226,7 +2226,7 @@ mod tests {
                         Ok(())
                     }
                     (Err(e1), Err(_e2)) => {
-                        // Both kernels failed - this is expected for insufficient data
+                        
                         prop_assert!(
                             format!("{:?}", e1).contains("NotEnoughValidData")
                                 || format!("{:?}", e1).contains("InvalidPeriod"),
@@ -2236,7 +2236,7 @@ mod tests {
                         Ok(())
                     }
                     (Ok(_), Err(e)) | (Err(e), Ok(_)) => {
-                        // Kernels should agree on success/failure
+                        
                         prop_assert!(
                             false,
                             "Kernel consistency failure: one succeeded, one failed with {:?}",
@@ -2248,15 +2248,15 @@ mod tests {
             })
             .unwrap();
 
-        // Additional edge case testing with synthetic data
+        
         let edge_cases = vec![
-            // Minimum period with small data
+            
             (vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
-            // Constant data
+            
             (vec![42.0; 100], 10),
-            // Monotonic increasing
+            
             ((0..100).map(|i| i as f64).collect::<Vec<_>>(), 15),
-            // Monotonic decreasing
+            
             ((0..100).map(|i| 100.0 - i as f64).collect::<Vec<_>>(), 20),
         ];
 
@@ -2268,7 +2268,7 @@ mod tests {
 
             match hma_with_kernel(&input, kernel) {
                 Ok(out) => {
-                    // Just verify it produces some valid output
+                    
                     let has_valid = out.values.iter().any(|&x| x.is_finite() && !x.is_nan());
                     assert!(
                         has_valid || data.len() < period + 2,
@@ -2278,7 +2278,7 @@ mod tests {
                     );
                 }
                 Err(_) => {
-                    // Error is acceptable for edge cases with insufficient data
+                    
                 }
             }
         }
@@ -2286,7 +2286,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_hma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2294,26 +2294,26 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_params = vec![
-            // Default parameters
+            
             HmaParams::default(),
-            // Small periods
+            
             HmaParams { period: Some(2) },
             HmaParams { period: Some(3) },
             HmaParams { period: Some(4) },
             HmaParams { period: Some(5) },
-            // Medium periods
+            
             HmaParams { period: Some(7) },
             HmaParams { period: Some(10) },
             HmaParams { period: Some(14) },
             HmaParams { period: Some(20) },
-            // Large periods
+            
             HmaParams { period: Some(30) },
             HmaParams { period: Some(50) },
             HmaParams { period: Some(100) },
             HmaParams { period: Some(200) },
-            // Edge cases
+            
             HmaParams { period: Some(1) },
             HmaParams { period: Some(250) },
         ];
@@ -2322,16 +2322,16 @@ mod tests {
             let input = HmaInput::from_candles(&candles, "close", params.clone());
             let output = hma_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2344,7 +2344,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -2357,7 +2357,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -2375,7 +2375,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_hma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2447,7 +2447,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2455,24 +2455,24 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small range
-            (2, 5, 1), // periods: 2, 3, 4, 5
-            // Medium range with gaps
-            (5, 25, 5), // periods: 5, 10, 15, 20, 25
-            // Large range
-            (10, 50, 10), // periods: 10, 20, 30, 40, 50
-            // Edge case: very small periods
-            (2, 4, 1), // periods: 2, 3, 4
-            // Edge case: large periods
-            (50, 150, 25), // periods: 50, 75, 100, 125, 150
-            // Dense range
-            (10, 30, 2), // periods: 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30
-            // Original configuration
-            (10, 30, 10), // periods: 10, 20, 30
-            // Very large periods
-            (100, 300, 50), // periods: 100, 150, 200, 250, 300
+            
+            (2, 5, 1), 
+            
+            (5, 25, 5), 
+            
+            (10, 50, 10), 
+            
+            (2, 4, 1), 
+            
+            (50, 150, 25), 
+            
+            (10, 30, 2), 
+            
+            (10, 30, 10), 
+            
+            (100, 300, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2481,9 +2481,9 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2493,7 +2493,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2509,7 +2509,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -2525,7 +2525,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -2546,7 +2546,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())

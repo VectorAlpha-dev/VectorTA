@@ -360,7 +360,7 @@ pub fn alligator_with_kernel(
         });
     }
 
-    // Ensure enough valid data after first non-NaN to seed the largest period
+    
     let needed = jaw_period.max(teeth_period).max(lips_period);
     let valid = len - first;
     if valid < needed {
@@ -368,7 +368,7 @@ pub fn alligator_with_kernel(
     }
 
     let chosen = match kernel {
-        // Scalar is the "best" kernel for Alligator single-series (see SIMD_SCALAR_SELECTION_TRACKER.md).
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -425,12 +425,12 @@ pub unsafe fn alligator_scalar(
     first: usize,
     len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    // Calculate warmup periods for each line (including offset)
+    
     let jaw_warmup = first + jaw_period - 1 + jaw_offset;
     let teeth_warmup = first + teeth_period - 1 + teeth_offset;
     let lips_warmup = first + lips_period - 1 + lips_offset;
 
-    // Use zero-copy memory allocation
+    
     let mut jaw = alloc_with_nan_prefix(len, jaw_warmup);
     let mut teeth = alloc_with_nan_prefix(len, teeth_warmup);
     let mut lips = alloc_with_nan_prefix(len, lips_warmup);
@@ -465,7 +465,7 @@ pub unsafe fn alligator_avx2(
     first: usize,
     len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    // API parity only; forward to scalar
+    
     alligator_scalar(
         data,
         jaw_period,
@@ -532,7 +532,7 @@ pub unsafe fn alligator_avx512_short(
     first: usize,
     len: usize,
 ) -> Result<AlligatorOutput, AlligatorError> {
-    // API stub: forwards to scalar
+    
     alligator_scalar(
         data,
         jaw_period,
@@ -672,22 +672,22 @@ pub unsafe fn alligator_smma_scalar(
     (jaw_smma_val, teeth_smma_val, lips_smma_val)
 }
 
-// Streaming variant for tick-by-tick mode (drop-in; preserves API)
-// Internal helper for one SMMA line (period p, forward offset k).
+
+
 #[derive(Debug, Clone)]
 struct Smmaline {
-    // Params
+    
     period: usize,
     offset: usize,
-    inv: f64, // 1.0 / period
+    inv: f64, 
 
-    // State
-    seeded: bool, // true once the first SMA seed is complete
-    count: usize, // samples seen during seeding
-    sum: f64,     // running sum used only until seeded
-    value: f64,   // last SMMA value
+    
+    seeded: bool, 
+    count: usize, 
+    sum: f64,     
+    value: f64,   
 
-    // Forward shift (k bars into the future): ring buffer of size = offset
+    
     off_head: usize,
     off_filled: bool,
     off_buf: Vec<f64>,
@@ -697,9 +697,9 @@ impl Smmaline {
     #[inline(always)]
     fn new(period: usize, offset: usize) -> Self {
         debug_assert!(period > 0);
-        // Allocate only what's needed for the forward shift.
+        
         let off_buf = if offset > 0 {
-            // The contents don't matter; we gate on off_filled.
+            
             vec![0.0_f64; offset]
         } else {
             Vec::new()
@@ -718,39 +718,39 @@ impl Smmaline {
         }
     }
 
-    // O(1) update that returns the *unshifted* SMMA once the line is seeded.
+    
     #[inline(always)]
     fn update_unshifted(&mut self, x: f64) -> Option<f64> {
         if !self.seeded {
-            // Build the initial SMA seed in O(1) per tick with a running sum.
+            
             self.sum += x;
             self.count += 1;
             if self.count == self.period {
-                self.value = self.sum * self.inv; // SMA seed
+                self.value = self.sum * self.inv; 
                 self.seeded = true;
                 Some(self.value)
             } else {
                 None
             }
         } else {
-            // SMMA recurrence: v += (x - v) / period
-            // Use FMA if available via mul_add.
+            
+            
             let delta = x - self.value;
-            // self.value = self.value + delta * self.inv;
+            
             self.value = delta.mul_add(self.inv, self.value);
             Some(self.value)
         }
     }
 
-    // O(1) update that returns the *shifted* (forward) output.
-    // First returns Some after both the seed is ready and the forward queue is "full".
+    
+    
     #[inline(always)]
     fn update_shifted(&mut self, x: f64) -> Option<f64> {
         let y = self.update_unshifted(x)?;
         if self.offset == 0 {
             return Some(y);
         }
-        // Pop from ring only after it has wrapped once.
+        
         let out = if self.off_filled {
             Some(self.off_buf[self.off_head])
         } else {
@@ -841,7 +841,7 @@ impl AlligatorStream {
     }
 }
 
-// Batch parameter grid
+
 #[derive(Clone, Debug)]
 pub struct AlligatorBatchRange {
     pub jaw_period: (usize, usize, usize),
@@ -934,7 +934,7 @@ pub fn alligator_batch_with_kernel(
         other if other.is_batch() => other,
         non_batch => return Err(AlligatorError::InvalidKernelForBatch(non_batch)),
     };
-    // Pass the batch kernel through without conversion
+    
     alligator_batch_par_slice(data, sweep, kernel)
 }
 
@@ -987,7 +987,7 @@ fn expand_grid(r: &AlligatorBatchRange) -> Result<Vec<AlligatorParams>, Alligato
             }
             Ok(v)
         } else {
-            // reversed bounds
+            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
@@ -1100,7 +1100,7 @@ fn alligator_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Allocate uninitialized matrices for zero-copy memory
+    
     let _rc = rows.checked_mul(cols).ok_or(AlligatorError::InvalidRange {
         start: rows as i64,
         end: cols as i64,
@@ -1110,7 +1110,7 @@ fn alligator_batch_inner(
     let mut teeth_mu = make_uninit_matrix(rows, cols);
     let mut lips_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each combination (including offset)
+    
     let jaw_warmups: Vec<usize> = combos
         .iter()
         .map(|c| first + c.jaw_period.unwrap() - 1 + c.jaw_offset.unwrap())
@@ -1124,12 +1124,12 @@ fn alligator_batch_inner(
         .map(|c| first + c.lips_period.unwrap() - 1 + c.lips_offset.unwrap())
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut jaw_mu, cols, &jaw_warmups);
     init_matrix_prefixes(&mut teeth_mu, cols, &teeth_warmups);
     init_matrix_prefixes(&mut lips_mu, cols, &lips_warmups);
 
-    // Convert to mutable slices
+    
     let mut jaw_guard = std::mem::ManuallyDrop::new(jaw_mu);
     let mut teeth_guard = std::mem::ManuallyDrop::new(teeth_mu);
     let mut lips_guard = std::mem::ManuallyDrop::new(lips_mu);
@@ -1144,9 +1144,9 @@ fn alligator_batch_inner(
         core::slice::from_raw_parts_mut(lips_guard.as_mut_ptr() as *mut f64, lips_guard.len())
     };
 
-    // Use the new alligator_batch_inner_into function
+    
     let combos = alligator_batch_inner_into(data, sweep, kern, parallel, jaw, teeth, lips)?;
-    // Reclaim as Vec<f64> (takes ownership from ManuallyDrop)
+    
     let jaw_vec = unsafe {
         Vec::from_raw_parts(
             jaw_guard.as_mut_ptr() as *mut f64,
@@ -1516,7 +1516,7 @@ mod tests {
     
     #[test]
     fn test_alligator_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let mut data = Vec::with_capacity(256);
         for _ in 0..7 { data.push(f64::NAN); }
         for i in 0..249 {
@@ -1526,10 +1526,10 @@ mod tests {
 
         let input = AlligatorInput::from_slice(&data, AlligatorParams::default());
 
-        // Baseline via Vec-returning API
+        
         let AlligatorOutput { jaw: bj, teeth: bt, lips: bl } = alligator(&input)?;
 
-        // Preallocate outputs and compute via into API
+        
         let mut oj = vec![0.0; data.len()];
         let mut ot = vec![0.0; data.len()];
         let mut ol = vec![0.0; data.len()];
@@ -1539,7 +1539,7 @@ mod tests {
         assert_eq!(ot.len(), bt.len());
         assert_eq!(ol.len(), bl.len());
 
-        // Helper: NaN equals NaN; finite within tight epsilon
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -1702,26 +1702,26 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic parameter ranges for the three SMMA lines
+        
         let strat = (6usize..=50).prop_flat_map(|max_period| {
-            // Offsets are validated against the full input length, so ensure the generated
-            // series is always long enough for the maximum offset we generate below.
+            
+            
             let min_len = max_period + 10;
             (
-                // Data vector with length sufficient for the largest period
+                
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     min_len..400,
                 ),
-                // Jaw parameters (typically the slowest/longest)
-                ((max_period / 2).max(2)..=max_period), // jaw_period
-                (0usize..=10),                          // jaw_offset
-                // Teeth parameters (typically medium)
-                ((max_period / 3).max(2)..=(max_period * 2 / 3).max(2)), // teeth_period
-                (0usize..=8),                                            // teeth_offset
-                // Lips parameters (typically the fastest/shortest)
-                (2usize..=(max_period / 3).max(2)), // lips_period
-                (0usize..=5),                       // lips_offset
+                
+                ((max_period / 2).max(2)..=max_period), 
+                (0usize..=10),                          
+                
+                ((max_period / 3).max(2)..=(max_period * 2 / 3).max(2)), 
+                (0usize..=8),                                            
+                
+                (2usize..=(max_period / 3).max(2)), 
+                (0usize..=5),                       
             )
         });
 
@@ -1758,15 +1758,15 @@ mod tests {
                         lips: ref_lips,
                     } = alligator_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Find first valid index in data
+                    
                     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-                    // Calculate warmup periods for each line
+                    
                     let jaw_warmup = first + jaw_period - 1 + jaw_offset;
                     let teeth_warmup = first + teeth_period - 1 + teeth_offset;
                     let lips_warmup = first + lips_period - 1 + lips_offset;
 
-                    // Verify warmup periods have NaN values
+                    
                     for i in 0..jaw_warmup.min(out_jaw.len()) {
                         prop_assert!(
                             out_jaw[i].is_nan(),
@@ -1789,10 +1789,10 @@ mod tests {
                         );
                     }
 
-                    // Verify that offset shifts output correctly
-                    // The SMMA value calculated at position i should appear at output position i + offset
+                    
+                    
                     if jaw_warmup > 0 && jaw_warmup < data.len() {
-                        // Check the first non-NaN value appears at the correct position
+                        
                         prop_assert!(
                             out_jaw[jaw_warmup].is_finite(),
                             "Expected first jaw value at index {} after warmup",
@@ -1835,9 +1835,9 @@ mod tests {
                         }
                     }
 
-                    // Check consistency between kernels for all values
+                    
                     for i in 0..data.len() {
-                        // Check jaw kernel consistency
+                        
                         let y_jaw = out_jaw[i];
                         let r_jaw = ref_jaw[i];
                         if !y_jaw.is_finite() || !r_jaw.is_finite() {
@@ -1860,7 +1860,7 @@ mod tests {
                             );
                         }
 
-                        // Check teeth kernel consistency
+                        
                         let y_teeth = out_teeth[i];
                         let r_teeth = ref_teeth[i];
                         if !y_teeth.is_finite() || !r_teeth.is_finite() {
@@ -1883,7 +1883,7 @@ mod tests {
                             );
                         }
 
-                        // Check lips kernel consistency
+                        
                         let y_lips = out_lips[i];
                         let r_lips = ref_lips[i];
                         if !y_lips.is_finite() || !r_lips.is_finite() {
@@ -1907,10 +1907,10 @@ mod tests {
                         }
                     }
 
-                    // SMMA-specific property: smoothness check
-                    // SMMA output should be smoother (less volatile) than input
+                    
+                    
                     if data.len() > jaw_warmup + 10 {
-                        // Calculate variance of a segment of input data
+                        
                         let segment_start = jaw_warmup;
                         let segment_end = (jaw_warmup + 20).min(data.len());
 
@@ -1951,17 +1951,17 @@ mod tests {
                             0.0
                         };
 
-                        // SMMA should reduce variance (be smoother) for non-constant data
+                        
                         if input_variance > 1e-10 && output_variance > 1e-10 {
                             prop_assert!(
-							output_variance <= input_variance * 1.1, // Allow 10% tolerance for numerical errors
+							output_variance <= input_variance * 1.1, 
 							"SMMA should smooth the data: output variance {} > input variance {}",
 							output_variance, input_variance
 						);
                         }
                     }
 
-                    // Special case: when period is 1 and offset is 0, output should match input
+                    
                     if jaw_period == 1 && jaw_offset == 0 {
                         for i in first..data.len() {
                             prop_assert!(
@@ -1990,19 +1990,19 @@ mod tests {
                         }
                     }
 
-                    // If all input values are the same constant, SMMA should converge to that constant
+                    
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                         && !data.is_empty()
                     {
                         let constant = data[first];
-                        // For SMMA convergence, we need many iterations relative to the period
-                        // Check convergence only if we have enough data (at least 5x the period)
+                        
+                        
                         if data.len() >= jaw_warmup + jaw_period * 5 {
-                            // Check the last few values for convergence
+                            
                             let check_start = data.len().saturating_sub(5);
                             for i in check_start..data.len() {
                                 if i >= jaw_warmup && i < out_jaw.len() {
-                                    // SMMA converges asymptotically, so use a more relaxed tolerance
+                                    
                                     prop_assert!(
                                         (out_jaw[i] - constant).abs() <= 1e-4,
                                         "jaw should converge to constant {} at idx {}, got {}",
@@ -2109,7 +2109,7 @@ mod tests {
             let input = AlligatorInput::from_candles(&candles, "hl2", params.clone());
             let output = alligator_with_kernel(&input, kernel)?;
 
-            // Check jaw values
+            
             for (i, &val) in output.jaw.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2169,7 +2169,7 @@ mod tests {
                 }
             }
 
-            // Check teeth values
+            
             for (i, &val) in output.teeth.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2229,7 +2229,7 @@ mod tests {
                 }
             }
 
-            // Check lips values
+            
             for (i, &val) in output.lips.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2426,7 +2426,7 @@ mod tests {
                 .lips_offset_range(lo_start, lo_end, lo_step)
                 .apply_candles(&c, "hl2")?;
 
-            // Check jaw values
+            
             for (idx, &val) in output.jaw.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2501,7 +2501,7 @@ mod tests {
                 }
             }
 
-            // Check teeth values
+            
             for (idx, &val) in output.teeth.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2576,7 +2576,7 @@ mod tests {
                 }
             }
 
-            // Check lips values
+            
             for (idx, &val) in output.lips.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2678,18 +2678,18 @@ mod tests {
             lips_offset: (1, 1, 0),
         };
 
-        // Test that non-batch kernels are rejected with proper error
+        
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(result, Err(AlligatorError::InvalidKernelForBatch(Kernel::Scalar))));
 
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::Avx2);
         assert!(matches!(result, Err(AlligatorError::InvalidKernelForBatch(Kernel::Avx2))));
 
-        // Test that batch kernels work
+        
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch);
         assert!(result.is_ok());
 
-        // Test that Auto works
+        
         let result = alligator_batch_with_kernel(&data, &sweep, Kernel::Auto);
         assert!(result.is_ok());
     }
@@ -2799,7 +2799,7 @@ pub fn alligator_batch_py<'py>(
         lips_offset: lips_offset_range,
     };
 
-    // Map domain errors to Python exceptions to satisfy PyResult
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
@@ -2892,7 +2892,7 @@ pub fn alligator_into_slice(
     input: &AlligatorInput,
     kern: Kernel,
 ) -> Result<(), AlligatorError> {
-    // Extract data and validate parameters
+    
     let data: &[f64] = match &input.data {
         AlligatorData::Candles { candles, source } => source_type(candles, source),
         AlligatorData::Slice(sl) => sl,
@@ -2905,7 +2905,7 @@ pub fn alligator_into_slice(
 
     let len = data.len();
 
-    // Validate destination slice lengths
+    
     if jaw_dst.len() != len {
         return Err(AlligatorError::OutputLengthMismatch {
             expected: len,
@@ -2925,7 +2925,7 @@ pub fn alligator_into_slice(
         });
     }
 
-    // Get parameters
+    
     let jaw_period = input.get_jaw_period();
     let jaw_offset = input.get_jaw_offset();
     let teeth_period = input.get_teeth_period();
@@ -2933,7 +2933,7 @@ pub fn alligator_into_slice(
     let lips_period = input.get_lips_period();
     let lips_offset = input.get_lips_offset();
 
-    // Validate parameters
+    
     if jaw_period == 0 || jaw_period > len {
         return Err(AlligatorError::InvalidJawPeriod {
             period: jaw_period,
@@ -2971,12 +2971,12 @@ pub fn alligator_into_slice(
         });
     }
 
-    // Calculate warmup periods for each line (including offset)
+    
     let jaw_warmup = first + jaw_period - 1 + jaw_offset;
     let teeth_warmup = first + teeth_period - 1 + teeth_offset;
     let lips_warmup = first + lips_period - 1 + lips_offset;
 
-    // Fill warmup periods with NaN
+    
     for v in &mut jaw_dst[..jaw_warmup] {
         *v = f64::NAN;
     }
@@ -2987,7 +2987,7 @@ pub fn alligator_into_slice(
         *v = f64::NAN;
     }
 
-    // Compute SMMA values directly into the output slices
+    
     unsafe {
         alligator_smma_scalar(
             data,
@@ -3008,7 +3008,7 @@ pub fn alligator_into_slice(
     Ok(())
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaAlligator};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3081,7 +3081,7 @@ pub fn alligator_cuda_batch_dev_py<'py>(
                     lp,
                     lo,
                     res.outputs.device_id,
-                    // retain context while Python holds buffers
+                    
                     res.outputs._ctx.clone(),
                 ),
             )
@@ -3258,7 +3258,7 @@ pub fn alligator_into_slices(
         });
     }
 
-    // Warmup NaN prefixes only, no bulk fill
+    
     let jw = first + jp - 1 + jo;
     let tw = first + tp - 1 + to;
     let lw = first + lp - 1 + lo;
@@ -3273,7 +3273,7 @@ pub fn alligator_into_slices(
     }
 
     let chosen = match kern {
-        // Scalar is the "best" kernel for Alligator single-series (see SIMD_SCALAR_SELECTION_TRACKER.md).
+        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -3342,7 +3342,7 @@ pub fn alligator_js(
     let out = alligator_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return flattened array: [jaw, teeth, lips]
+    
     let total = data
         .len()
         .checked_mul(3)
@@ -3404,7 +3404,7 @@ pub fn alligator_into(
         };
         let input = AlligatorInput::from_slice(data, params);
 
-        // Check for aliasing - need to check all combinations
+        
         let aliased = in_ptr == jaw_ptr as *const f64
             || in_ptr == teeth_ptr as *const f64
             || in_ptr == lips_ptr as *const f64
@@ -3413,7 +3413,7 @@ pub fn alligator_into(
             || teeth_ptr == lips_ptr;
 
         if aliased {
-            // Use temporary buffers when aliasing detected
+            
             let mut temp_jaw = vec![0.0; len];
             let mut temp_teeth = vec![0.0; len];
             let mut temp_lips = vec![0.0; len];
@@ -3427,7 +3427,7 @@ pub fn alligator_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results to output pointers
+            
             let jaw_out = std::slice::from_raw_parts_mut(jaw_ptr, len);
             let teeth_out = std::slice::from_raw_parts_mut(teeth_ptr, len);
             let lips_out = std::slice::from_raw_parts_mut(lips_ptr, len);
@@ -3436,7 +3436,7 @@ pub fn alligator_into(
             teeth_out.copy_from_slice(&temp_teeth);
             lips_out.copy_from_slice(&temp_lips);
         } else {
-            // Direct write when no aliasing
+            
             let jaw_out = std::slice::from_raw_parts_mut(jaw_ptr, len);
             let teeth_out = std::slice::from_raw_parts_mut(teeth_ptr, len);
             let lips_out = std::slice::from_raw_parts_mut(lips_ptr, len);
@@ -3481,10 +3481,10 @@ pub fn alligator_batch_js(
         lips_offset: (lips_offset_start, lips_offset_end, lips_offset_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     alligator_batch_inner(data, &sweep, Kernel::ScalarBatch, false)
         .map(|output| {
-            // Flatten all three arrays into one for JS compatibility
+            
             let mut result =
                 Vec::with_capacity((output.jaw.len() + output.teeth.len() + output.lips.len()));
             result.extend_from_slice(&output.jaw);
@@ -3549,8 +3549,8 @@ pub struct AlligatorBatchJsOutput {
     pub teeth: Vec<f64>,
     pub lips: Vec<f64>,
     pub combos: Vec<AlligatorParams>,
-    pub rows: usize, // number of parameter combinations
-    pub cols: usize, // data length
+    pub rows: usize, 
+    pub cols: usize, 
 }
 
 #[cfg(feature = "wasm")]
@@ -3619,7 +3619,7 @@ pub fn alligator_batch_into(
     teeth_out_ptr: *mut f64,
     lips_out_ptr: *mut f64,
     len: usize,
-    // ranges
+    
     jp_s: usize,
     jp_e: usize,
     jp_step: usize,

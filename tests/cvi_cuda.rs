@@ -1,16 +1,16 @@
-// CUDA integration tests for CVI (Chaikin's Volatility)
 
-use my_project::indicators::cvi::{
+
+use vector_ta::indicators::cvi::{
     cvi_batch_with_kernel, cvi_with_kernel, CviBatchRange, CviData, CviInput, CviParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaCvi;
+use vector_ta::cuda::CudaCvi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -118,7 +118,7 @@ fn cvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 10usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -140,7 +140,7 @@ fn cvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCvi::new(0).expect("CudaCvi::new");

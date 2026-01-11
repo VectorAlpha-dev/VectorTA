@@ -186,7 +186,7 @@ pub enum TrimaError {
     #[error("trima: Period too small: {period}")]
     PeriodTooSmall { period: usize },
 
-    // Kept for backward compatibility in other call sites
+    
     #[error("trima: No data provided.")]
     NoData,
 
@@ -211,7 +211,7 @@ fn trima_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // period
         usize,
@@ -982,13 +982,13 @@ impl TrimaStream {
     ///   division denominator stays fixed (m1/m2), matching batch output on finite inputs.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // ---- Pass 1: SMA over x with window m1 ----
+        
         let old1 = self.buf1[self.head1];
         self.buf1[self.head1] = x;
         self.head1 += 1;
         if self.head1 == self.m1 {
             self.head1 = 0;
-            self.filled1 = true; // first wrap completes warmup of pass 1
+            self.filled1 = true; 
         }
 
         if !old1.is_nan() {
@@ -999,24 +999,24 @@ impl TrimaStream {
         }
 
         if !self.filled1 {
-            return None; // not enough for the first SMA yet
+            return None; 
         }
 
         let s1 = self.sum1 * self.inv_m1;
 
-        // ---- Pass 2: SMA over s1 with window m2 ----
+        
         let old2 = self.buf2[self.head2];
         self.buf2[self.head2] = s1;
         self.head2 += 1;
         if self.head2 == self.m2 {
             self.head2 = 0;
-            self.filled2 = true; // first wrap completes warmup of pass 2
+            self.filled2 = true; 
         }
 
         if !old2.is_nan() {
             self.sum2 -= old2;
         }
-        // s1 is finite once pass1 is filled; add unconditionally for speed
+        
         self.sum2 += s1;
 
         if self.filled2 {
@@ -1097,7 +1097,7 @@ pub fn trima_batch_with_kernel(
         other => return Err(TrimaError::InvalidKernelForBatch(other)),
     };
 
-    // Map batch selector to per-row compute kernel (ALMA pattern)
+    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1219,7 +1219,7 @@ fn trima_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // ---------- 2. allocate rows×cols buffer and stamp NaN prefixes ----------
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(TrimaError::InvalidRange {
@@ -1230,11 +1230,11 @@ fn trima_batch_inner(
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // ---------- 3. closure that writes one row in-place ----------
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // cast *just this row* to &mut [f64]
+        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1252,7 +1252,7 @@ fn trima_batch_inner(
         }
     };
 
-    // ---------- 4. run every row (parallel or serial) ----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1273,7 +1273,7 @@ fn trima_batch_inner(
         }
     }
 
-    // ---------- 5. convert Vec<MaybeUninit<f64>> → Vec<f64> ----------
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(raw);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1336,7 +1336,7 @@ pub fn trima_batch_inner_into(
         });
     }
 
-    // Stamp warm prefixes via helper on the destination buffer
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1346,7 +1346,7 @@ pub fn trima_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Per-row writer (cast to f64 slice only for the row)
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let out_row =
@@ -1388,7 +1388,7 @@ pub fn trima_batch_inner_into(
     Ok(combos)
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1505,16 +1505,16 @@ pub fn trima_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Checked arithmetic for rows * cols
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("size overflow: rows*cols exceeds usize"))?;
 
-    // Pre-allocate NumPy output and write into it directly
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Resolve kernel like ALMA
+    
     let kern = validate_kernel(kernel, true)?;
     let kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1607,7 +1607,7 @@ pub fn trima_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32TrimaPy { inner: Some(inner) })
 }
 
-// ---------------- TRIMA Python device handle (CAI v3 + DLPack) ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Trima", unsendable)]
 pub struct DeviceArrayF32TrimaPy {
@@ -2333,7 +2333,7 @@ mod tests {
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2341,7 +2341,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2349,7 +2349,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2363,7 +2363,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_trima_no_poison(
         _test_name: &str,
@@ -2382,7 +2382,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Test strategy: generate period first (4 is minimum valid), then data of appropriate length
+        
         let strat = (4usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2399,14 +2399,14 @@ mod tests {
             };
             let input = TrimaInput::from_slice(&data, params);
 
-            // Compute TRIMA with the specified kernel and scalar reference
+            
             let result = trima_with_kernel(&input, kernel)?;
             let scalar_result = trima_with_kernel(&input, Kernel::Scalar)?;
 
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first + period - 1;
 
-            // Property 1: Warmup period - values before warmup_end should be NaN
+            
             for i in 0..warmup_end.min(data.len()) {
                 prop_assert!(
                     result.values[i].is_nan(),
@@ -2416,7 +2416,7 @@ mod tests {
                 );
             }
 
-            // Property 2: Valid values after warmup
+            
             for i in warmup_end..data.len() {
                 prop_assert!(
                     result.values[i].is_finite() || data[i].is_nan(),
@@ -2426,7 +2426,7 @@ mod tests {
                 );
             }
 
-            // Property 3: Constant input produces constant output
+            
             if data[first..]
                 .windows(2)
                 .all(|w| (w[0] - w[1]).abs() < 1e-10)
@@ -2444,7 +2444,7 @@ mod tests {
                 }
             }
 
-            // Property 4: Cross-kernel consistency
+            
             for i in 0..data.len() {
                 let val = result.values[i];
                 let ref_val = scalar_result.values[i];
@@ -2475,7 +2475,7 @@ mod tests {
                 }
             }
 
-            // Property 5: Numerical stability - no infinite values
+            
             for (i, &val) in result.values.iter().enumerate() {
                 prop_assert!(
                     val.is_nan() || val.is_finite(),
@@ -2485,8 +2485,8 @@ mod tests {
                 );
             }
 
-            // Property 6: Bounds check - output within window bounds (with tolerance for double smoothing)
-            // TRIMA is double-smoothed, so it should be well within bounds
+            
+            
             for i in warmup_end..data.len() {
                 if i >= period - 1 {
                     let start = if i >= period - 1 { i + 1 - period } else { 0 };
@@ -2502,7 +2502,7 @@ mod tests {
 
                     if min_val.is_finite() && max_val.is_finite() {
                         let val = result.values[i];
-                        // Allow small tolerance for numerical errors
+                        
                         prop_assert!(
                             val >= min_val - 1e-6 && val <= max_val + 1e-6,
                             "TRIMA value {} at index {} outside window bounds [{}, {}]",
@@ -2515,14 +2515,14 @@ mod tests {
                 }
             }
 
-            // Property 7: Period=4 edge case with actual calculation verification
+            
             if period == 4 {
-                // m1 = (4+1)/2 = 2, m2 = 4-2+1 = 3
-                // Verify the actual two-pass calculation for minimum period
+                
+                
                 let m1 = 2;
                 let m2 = 3;
 
-                // Compute the expected two-pass SMA
+                
                 let sma1_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams { period: Some(m1) },
@@ -2535,7 +2535,7 @@ mod tests {
                 };
                 let expected = sma(&sma2_input)?;
 
-                // Verify TRIMA matches the two-pass calculation
+                
                 for i in warmup_end..data.len().min(warmup_end + 5) {
                     prop_assert!(
                         (result.values[i] - expected.values[i]).abs() < 1e-9,
@@ -2547,13 +2547,13 @@ mod tests {
                 }
             }
 
-            // Property 8: Two-pass SMA formula verification
-            // TRIMA must equal SMA(SMA(data, m1), m2) where m1=(period+1)/2, m2=period-m1+1
+            
+            
             {
                 let m1 = (period + 1) / 2;
                 let m2 = period - m1 + 1;
 
-                // Compute the expected two-pass SMA
+                
                 let sma1_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams { period: Some(m1) },
@@ -2566,7 +2566,7 @@ mod tests {
                 };
                 let expected = sma(&sma2_input)?;
 
-                // Spot check several points to verify formula
+                
                 let check_points = vec![
                     warmup_end,
                     warmup_end + period / 2,
@@ -2592,9 +2592,9 @@ mod tests {
                 }
             }
 
-            // Property 9: Smoothness verification - TRIMA should be smoother than single SMA
+            
             if data.len() >= warmup_end + 20 {
-                // Compute single SMA for comparison
+                
                 let sma_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams {
@@ -2603,7 +2603,7 @@ mod tests {
                 };
                 let single_sma = sma(&sma_input)?;
 
-                // Calculate roughness (sum of absolute differences between consecutive values)
+                
                 let trima_roughness: f64 = result.values[warmup_end..warmup_end + 20]
                     .windows(2)
                     .map(|w| (w[1] - w[0]).abs())
@@ -2614,12 +2614,12 @@ mod tests {
                     .map(|w| (w[1] - w[0]).abs())
                     .sum();
 
-                // TRIMA should generally be smoother (lower roughness) than single SMA
-                // Allow for some tolerance as this depends on data pattern
+                
+                
                 if sma_roughness > 1e-10 {
-                    // Only check if there's actual variation in the data
+                    
                     prop_assert!(
-							trima_roughness <= sma_roughness * 1.1, // Allow 10% tolerance
+							trima_roughness <= sma_roughness * 1.1, 
 							"TRIMA should be smoother than single SMA: TRIMA roughness={}, SMA roughness={}",
 							trima_roughness,
 							sma_roughness
@@ -2627,15 +2627,15 @@ mod tests {
                 }
             }
 
-            // Property 10: Edge case - exact period length data
+            
             if data.len() == period {
-                // Should have exactly one valid output value at the last index
+                
                 prop_assert!(
                     result.values[period - 1].is_finite(),
                     "With data.len()==period, last value should be finite, got {}",
                     result.values[period - 1]
                 );
-                // All other values should be NaN
+                
                 for i in 0..period - 1 {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -2646,8 +2646,8 @@ mod tests {
                 }
             }
 
-            // Property 11: Monotonicity preservation
-            // For strictly monotonic data, TRIMA should preserve the trend
+            
+            
             let is_monotonic_increasing = data[first..].windows(2).all(|w| w[1] >= w[0] - 1e-10);
             let is_monotonic_decreasing = data[first..].windows(2).all(|w| w[1] <= w[0] + 1e-10);
 
@@ -2676,7 +2676,7 @@ mod tests {
                 }
             }
 
-            // Property 12: Poison detection (debug mode only)
+            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in result.values.iter().enumerate() {
@@ -2736,7 +2736,7 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // You can use expected values as appropriate for TRIMA.
+        
         let expected = [
             59957.916666666664,
             59846.770833333336,
@@ -2775,7 +2775,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2783,12 +2783,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter range combinations
+        
         let period_ranges = vec![
-            (4, 20, 4),    // Small periods
-            (20, 50, 10),  // Medium periods
-            (50, 100, 25), // Large periods
-            (5, 15, 1),    // Dense small range
+            (4, 20, 4),    
+            (20, 50, 10),  
+            (50, 100, 25), 
+            (5, 15, 1),    
         ];
 
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
@@ -2800,9 +2800,9 @@ mod tests {
                     .period_range(start, end, step)
                     .apply_candles(&c, source)?;
 
-                // Check every value in the entire batch matrix for poison patterns
+                
                 for (idx, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in warmup periods
+                    
                     if val.is_nan() {
                         continue;
                     }
@@ -2811,7 +2811,7 @@ mod tests {
                     let row = idx / output.cols;
                     let col = idx % output.cols;
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2819,7 +2819,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2827,7 +2827,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2841,7 +2841,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2855,7 +2855,7 @@ mod tests {
 
     #[test]
     fn test_trima_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..252 {
@@ -2865,10 +2865,10 @@ mod tests {
 
         let input = TrimaInput::from_slice(&data, TrimaParams::default());
 
-        // Baseline via the Vec-returning API
+        
         let baseline = trima(&input)?;
 
-        // Preallocate output buffer and compute via the new into API
+        
         let mut out = vec![0.0; data.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -2876,12 +2876,12 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native trima_into is not available; fall back to slice variant
+            
             trima_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.values.len(), out.len());
-        // NaN-aware equality check (prefer exact equality for finite values)
+        
         for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
             let both_nan = a.is_nan() && b.is_nan();
             assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");

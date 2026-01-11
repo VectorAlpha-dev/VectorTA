@@ -326,7 +326,7 @@ impl CudaMacz {
         Ok(out)
     }
 
-    // ---------- Prefix helpers (single series) ----------
+    
     fn build_prefixes_single(
         prices: &[f32],
         volume: Option<&[f32]>,
@@ -381,7 +381,7 @@ impl CudaMacz {
         }
     }
 
-    // ---------- Prefix helpers (time-major) ----------
+    
     fn build_prefixes_time_major(
         close_tm: &[f32],
         volume_tm: Option<&[f32]>,
@@ -455,7 +455,7 @@ impl CudaMacz {
             .ok_or_else(|| CudaMaczError::InvalidInput("all values are NaN".into()))
     }
 
-    // ---------- Batch: one series × many params ----------
+    
     pub fn macz_batch_dev(
         &self,
         prices: &[f32],
@@ -475,7 +475,7 @@ impl CudaMacz {
             }
         }
         let first_valid = Self::validate_first_valid(prices)?;
-        // Validate warmups
+        
         let mut max_need = 0usize;
         for p in &combos {
             let slow = p.slow_length.unwrap_or(25);
@@ -491,7 +491,7 @@ impl CudaMacz {
             return Err(CudaMaczError::InvalidInput("not enough valid data".into()));
         }
 
-        // VRAM estimate: inputs + prefixes + params + outputs (two arrays), all checked.
+        
         let rows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_f64 = std::mem::size_of::<f64>();
@@ -526,7 +526,7 @@ impl CudaMacz {
             .ok_or_else(|| CudaMaczError::InvalidInput("rows*cols overflow".into()))?;
         let out_b = out_elems
             .checked_mul(sz_f32)
-            .and_then(|v| v.checked_mul(2)) // macz_tmp + hist
+            .and_then(|v| v.checked_mul(2)) 
             .ok_or_else(|| CudaMaczError::InvalidInput("byte size overflow".into()))?;
         let req = prices_b
             .checked_add(prefix_base)
@@ -537,7 +537,7 @@ impl CudaMacz {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(req, headroom)?;
 
-        // Upload inputs/prefixes
+        
         let d_close = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }?;
         let (pcs, pcsq, pcn, vol_tuple) = Self::build_prefixes_single(prices, volume);
         let d_pcs = DeviceBuffer::from_slice(&pcs)?;
@@ -553,7 +553,7 @@ impl CudaMacz {
             (None, None, None)
         };
 
-        // Pack params
+        
         let fasts: Vec<i32> = combos
             .iter()
             .map(|p| p.fast_length.unwrap_or(12) as i32)
@@ -585,7 +585,7 @@ impl CudaMacz {
         let d_as = DeviceBuffer::from_slice(&a_s)?;
         let d_bs = DeviceBuffer::from_slice(&b_s)?;
 
-        // Outputs
+        
         let elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaMaczError::InvalidInput("rows*cols overflow".into()))?;
@@ -598,7 +598,7 @@ impl CudaMacz {
             None
         };
 
-        // Launch
+        
         let func_macz = self
             .module
             .get_function("macz_batch_macz_tmp_f32")
@@ -664,7 +664,7 @@ impl CudaMacz {
             let mut use_sma = if volume.is_some() { 0i32 } else { 1i32 };
             let mut macz_p = d_macz.as_device_ptr().as_raw();
             let mut hist_p = d_hist.as_device_ptr().as_raw();
-            // exact arg list for macz_batch_macz_tmp_f32 (19 params)
+            
             let mut args_macz: [*mut c_void; 19] = [
                 &mut close_p as *mut _ as *mut c_void,
                 &mut vol_p as *mut _ as *mut c_void,
@@ -689,7 +689,7 @@ impl CudaMacz {
             self.stream
                 .launch(&func_macz, grid, block, 0, &mut args_macz)?;
 
-            // exact arg list for macz_batch_hist_from_macz_f32 (9 params)
+            
             let mut args_hist: [*mut c_void; 9] = [
                 &mut macz_p as *mut _ as *mut c_void,
                 &mut s_p as *mut _ as *mut c_void,
@@ -740,7 +740,7 @@ impl CudaMacz {
         d_macz_tmp: &mut DeviceBuffer<f32>,
         d_out_hist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMaczError> {
-        // Validate that the current CUDA context is on the expected device.
+        
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
@@ -833,7 +833,7 @@ impl CudaMacz {
             let mut macz_p = d_macz_tmp.as_device_ptr().as_raw();
             let mut hist_p = d_out_hist.as_device_ptr().as_raw();
 
-            // exact arg list for macz_batch_macz_tmp_f32 (19 params)
+            
             let mut args_macz: [*mut c_void; 19] = [
                 &mut close_p as *mut _ as *mut c_void,
                 &mut vol_p as *mut _ as *mut c_void,
@@ -858,7 +858,7 @@ impl CudaMacz {
             self.stream
                 .launch(&func_macz, grid, block, 0, &mut args_macz)?;
 
-            // exact arg list for macz_batch_hist_from_macz_f32 (9 params)
+            
             let mut args_hist: [*mut c_void; 9] = [
                 &mut macz_p as *mut _ as *mut c_void,
                 &mut s_p as *mut _ as *mut c_void,
@@ -877,7 +877,7 @@ impl CudaMacz {
         Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn macz_many_series_one_param_time_major_dev(
         &self,
         close_tm: &[f32],
@@ -898,7 +898,7 @@ impl CudaMacz {
             }
         }
 
-        // Per-series first_valid (based on close only, per scalar semantics)
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -909,7 +909,7 @@ impl CudaMacz {
                 }
             }
         }
-        // Warmup validation
+        
         let f = params.fast_length.unwrap_or(12);
         let sl = params.slow_length.unwrap_or(25);
         let sg = params.signal_length.unwrap_or(9);
@@ -923,7 +923,7 @@ impl CudaMacz {
             }
         }
 
-        // VRAM estimate
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_f64 = std::mem::size_of::<f64>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -965,7 +965,7 @@ impl CudaMacz {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(req, headroom)?;
 
-        // Upload inputs and prefixes
+        
         let d_close_tm = DeviceBuffer::from_slice(close_tm)?;
         let d_volume_tm = if let Some(v) = volume_tm {
             Some(DeviceBuffer::from_slice(v)?)
@@ -993,7 +993,7 @@ impl CudaMacz {
         let mut d_macz_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
         let mut d_hist_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
-        // Launch
+        
         let func = self
             .module
             .get_function("macz_many_series_one_param_time_major_f32")
@@ -1020,7 +1020,7 @@ impl CudaMacz {
                 }
             }
         }
-        // Allocate first_valids on device outside the launch scope to keep it alive
+        
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         unsafe {
             let grid: GridSize = (((cols as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
@@ -1065,7 +1065,7 @@ impl CudaMacz {
             let mut use_sma = if volume_tm.is_some() { 0i32 } else { 1i32 };
             let mut macz_p = d_macz_tm.as_device_ptr().as_raw();
             let mut hist_p = d_hist_tm.as_device_ptr().as_raw();
-            // exact arg list for macz_many_series_one_param_time_major_f32 (23 params)
+            
             let mut args: [*mut c_void; 23] = [
                 &mut c_p as *mut _ as *mut c_void,
                 &mut v_p as *mut _ as *mut c_void,
@@ -1102,7 +1102,7 @@ impl CudaMacz {
     }
 }
 
-// ---------- Benches ----------
+
 #[cfg(any(test, feature = "cuda"))]
 pub mod benches {
     use super::*;

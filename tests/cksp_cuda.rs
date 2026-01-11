@@ -1,14 +1,14 @@
-// Integration tests for CUDA CKSP kernels
 
-use my_project::indicators::cksp::{CkspBatchBuilder, CkspBatchRange, CkspParams};
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::indicators::cksp::{CkspBatchBuilder, CkspBatchRange, CkspParams};
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cksp_wrapper::CudaCksp;
+use vector_ta::cuda::cksp_wrapper::CudaCksp;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -76,7 +76,7 @@ fn cksp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_pair.long.buf.copy_to(&mut long_host).unwrap();
     dev_pair.short.buf.copy_to(&mut short_host).unwrap();
 
-    let tol = 5e-4; // FP32 device vs f64 scalar
+    let tol = 5e-4; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let cpu_l = cpu.long_values[idx];
         let cpu_s = cpu.short_values[idx];
@@ -120,8 +120,8 @@ fn cksp_cuda_large_p_sweep_smoke() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = base;
     }
 
-    // Wider p sweep than the accuracy test; this is a smoke test to catch
-    // large-sweep launch/indexing issues without changing reference outputs.
+    
+    
     let sweep = CkspBatchRange {
         p: (10, 137, 1),
         x: (1.0, 1.0, 0.0),
@@ -204,7 +204,7 @@ fn cksp_cuda_single_combo_smoke() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = base;
     }
 
-    // Single combo: exercises non-preTR path.
+    
     let sweep = CkspBatchRange {
         p: (10, 10, 0),
         x: (1.0, 1.0, 0.0),

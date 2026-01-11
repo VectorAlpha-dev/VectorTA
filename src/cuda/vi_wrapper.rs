@@ -44,7 +44,7 @@ pub enum CudaViError {
     NotImplemented,
 }
 
-// Pair of VRAM-resident arrays (for VI+ and VI-)
+
 pub struct DeviceArrayF32Pair {
     pub a: DeviceArrayF32,
     pub b: DeviceArrayF32,
@@ -187,7 +187,7 @@ impl CudaVi {
             grid_x = grid_x.max(min_grid_suggest);
         }
         let gx = grid_x.max(1);
-        // Validate against device limits when possible
+        
         if let Ok(device) = Device::get_device(self.device_id) {
             if let Ok(max_grid_x) =
                 device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
@@ -221,7 +221,7 @@ impl CudaVi {
         Ok(((gx, 1, 1).into(), (block_x, 1, 1).into()))
     }
 
-    // ---------------- Host prefix sums (single series) ----------------
+    
     fn build_prefix_single(
         &self,
         high: &[f32],
@@ -239,11 +239,11 @@ impl CudaVi {
             .find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
             .ok_or_else(|| CudaViError::InvalidInput("all values NaN".into()))?;
 
-        // Accumulate in f64 for numerical parity with scalar path; cast to f32 for device
+        
         let mut pfx_tr64 = vec![0.0f64; n];
         let mut pfx_vp64 = vec![0.0f64; n];
         let mut pfx_vm64 = vec![0.0f64; n];
-        // Seed at `first`
+        
         pfx_tr64[first] = (high[first] - low[first]) as f64;
         pfx_vp64[first] = 0.0;
         pfx_vm64[first] = 0.0;
@@ -272,7 +272,7 @@ impl CudaVi {
         Ok((first, pfx_tr, pfx_vp, pfx_vm))
     }
 
-    // ---------------- Host prefix sums (time-major, many series) ----------------
+    
     fn build_prefix_time_major(
         &self,
         high_tm: &[f32],
@@ -299,7 +299,7 @@ impl CudaVi {
         let mut pfx_vm64 = vec![0.0f64; cols * rows];
 
         for s in 0..cols {
-            // Find first valid row for this series
+            
             let mut first = None;
             for r in 0..rows {
                 let idx = r * cols + s;
@@ -313,7 +313,7 @@ impl CudaVi {
             }
             if let Some(fv) = first {
                 first_valids[s] = fv as i32;
-                // Seed at first
+                
                 let base = fv * cols + s;
                 pfx_tr64[base] = (high_tm[base] - low_tm[base]) as f64;
                 pfx_vp64[base] = 0.0;
@@ -339,7 +339,7 @@ impl CudaVi {
                     prev_c = close_tm[idx];
                 }
             } else {
-                // all NaN → mark invalid, leave prefixes at 0
+                
                 first_valids[s] = -1;
             }
         }
@@ -361,7 +361,7 @@ impl CudaVi {
         d_plus: &mut DeviceBuffer<f32>,
         d_minus: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaViError> {
-        // Launch kernel
+        
         let mut func: Function = self
             .module
             .get_function("vi_batch_f32")
@@ -375,14 +375,14 @@ impl CudaVi {
             _ => block_suggest.clamp(64, 1024),
         };
 
-        // Prefer a 2D launch: X=time tiles, Y=row index.
+        
         let mut gx = ((len as u32) + bx - 1) / bx;
         if min_grid_suggest > 0 {
             gx = gx.max(min_grid_suggest);
         }
         let mut gy = rows as u32;
 
-        // Validate against device limits when possible; fall back to 1D when grid.y is too large.
+        
         if let Ok(device) = Device::get_device(self.device_id) {
             if let Ok(max_block_x) =
                 device.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
@@ -402,7 +402,7 @@ impl CudaVi {
                 device.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
             {
                 if gy > max_grid_y as u32 {
-                    // 1D fallback: total elements = rows * len
+                    
                     let total = rows
                         .checked_mul(len)
                         .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
@@ -472,7 +472,7 @@ impl CudaVi {
         d_plus: &mut DeviceBuffer<f32>,
         d_minus: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaViError> {
-        // Launch kernel
+        
         let mut func: Function = self
             .module
             .get_function("vi_many_series_one_param_f32")
@@ -527,7 +527,7 @@ impl CudaVi {
         Ok(())
     }
 
-    // ---------------- Batch entry ----------------
+    
     pub fn vi_batch_dev(
         &self,
         high_f32: &[f32],
@@ -587,7 +587,7 @@ impl CudaVi {
             ));
         }
 
-        // VRAM estimate (inputs already host-only; device: 3*pfx + periods + 2*out)
+        
         let rows = combos.len();
         let bytes = 3usize
             .checked_mul(len)
@@ -620,7 +620,7 @@ impl CudaVi {
             }
         }
 
-        // Upload inputs (safe pinned-or-pageable synchronous path)
+        
         let d_tr = self.h2d_upload(&pfx_tr)?;
         let d_vp = self.h2d_upload(&pfx_vp)?;
         let d_vm = self.h2d_upload(&pfx_vm)?;
@@ -628,7 +628,7 @@ impl CudaVi {
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = self.h2d_upload(&periods_host)?;
 
-        // Allocate outputs
+        
         let total = rows
             .checked_mul(len)
             .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
@@ -647,7 +647,7 @@ impl CudaVi {
             &mut d_minus,
         )?;
 
-        // Ensure kernels have completed before exposing VRAM handles to higher layers.
+        
         self.stream.synchronize()?;
 
         Ok((
@@ -667,7 +667,7 @@ impl CudaVi {
         ))
     }
 
-    // ---------------- Many-series (time-major) entry ----------------
+    
     pub fn vi_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -693,9 +693,9 @@ impl CudaVi {
 
         let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
             self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
-        // Validate sufficient tail per series; if any series lacks enough tail, we still run and kernel will NaN-fill
+        
 
-        // VRAM estimate (3 * rows*cols + first_valids + 2*out)
+        
         let n = rows
             .checked_mul(cols)
             .ok_or_else(|| CudaViError::InvalidInput("rows*cols overflow".into()))?;
@@ -729,13 +729,13 @@ impl CudaVi {
             }
         }
 
-        // Upload inputs (safe pinned-or-pageable synchronous path)
+        
         let d_tr = self.h2d_upload(&pfx_tr)?;
         let d_vp = self.h2d_upload(&pfx_vp)?;
         let d_vm = self.h2d_upload(&pfx_vm)?;
         let d_first = self.h2d_upload(&first_valids)?;
 
-        // Allocate outputs
+        
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
         let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
 
@@ -751,7 +751,7 @@ impl CudaVi {
             &mut d_minus,
         )?;
 
-        // Ensure kernels have completed before exposing VRAM handles to higher layers.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Pair {
@@ -761,7 +761,7 @@ impl CudaVi {
     }
 }
 
-// ---------------- Benches registration ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -825,7 +825,7 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        // Keep sizes reasonable to avoid OOM across varied GPUs
+        
         let mut v = Vec::new();
         v.push(CudaBenchScenario::new(
             "vi",

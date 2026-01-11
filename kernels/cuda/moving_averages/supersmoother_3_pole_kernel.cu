@@ -1,9 +1,9 @@
-// CUDA kernels for the 3-pole SuperSmoother filter.
-// Optimized for Ada+ (e.g., RTX 4090), CUDA 13.
-// - One thread processes one series/period (no thread-0-only blocks)
-// - Coalesced reads in the time-major kernel
-// - FMA in the recurrence (FP64) for better accuracy
-// - Pointer-increment inner loops for strided variant
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -28,7 +28,7 @@ __device__ __forceinline__ SupersmootherCoefs make_coefs(int period) {
     const double b = 2.0 * a * cos(1.738 * CUDART_PI * inv_period);
     const double c = a * a;
     SupersmootherCoefs coefs;
-    // Same algebra as the original implementation
+    
     coefs.coef_source = 1.0 - c * c - b + b * c;
     coefs.coef_prev1 = b + c;
     coefs.coef_prev2 = -c - b * c;
@@ -36,7 +36,7 @@ __device__ __forceinline__ SupersmootherCoefs make_coefs(int period) {
     return coefs;
 }
 
-// --- Core row kernels --------------------------------------------------------
+
 
 __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
     const float* __restrict__ prices,
@@ -49,13 +49,13 @@ __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
 
     const int start = (first_valid < 0) ? 0 : first_valid;
 
-    // Pre-fill NaN up to first valid (bounded by series_len)
+    
     for (int t = 0; t < start && t < series_len; ++t) {
         out[t] = CUDART_NAN_F;
     }
     if (start >= series_len) return;
 
-    // Seed first 3 samples with the input stream as in original code
+    
     int t = start;
 
     double y0 = static_cast<double>(prices[t]);
@@ -70,11 +70,11 @@ __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
     out[t] = static_cast<float>(y2);
     ++t;
 
-    // Main recurrence with fused multiply-add in FP64
+    
     #pragma unroll 4
     for (; t < series_len; ++t) {
         const double x = static_cast<double>(prices[t]);
-        // y_next = cS*x + c1*y2 + c2*y1 + c3*y0  (FMA chained)
+        
         const double y_next =
             fma(coefs.coef_prev3, y0,
             fma(coefs.coef_prev2, y1,
@@ -109,7 +109,7 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
 
     const int start = (first_valid < 0) ? 0 : first_valid;
 
-    // Write NaN prefix
+    
     float* o = out;
     for (int t = 0; t < start && t < series_len; ++t) {
         *o = CUDART_NAN_F;
@@ -117,12 +117,12 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
     }
     if (start >= series_len) return;
 
-    // Position pointers at first valid
+    
     const float* p = prices + static_cast<size_t>(start) * static_cast<size_t>(stride);
     o = out + static_cast<size_t>(start) * static_cast<size_t>(stride);
     int t = start;
 
-    // 3 seeds
+    
     double y0 = static_cast<double>(*p); *o = static_cast<float>(y0);
     p += stride; o += stride; ++t; if (t >= series_len) return;
 
@@ -132,7 +132,7 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
     double y2 = static_cast<double>(*p); *o = static_cast<float>(y2);
     p += stride; o += stride; ++t;
 
-    // Main loop
+    
     #pragma unroll 4
     for (; t < series_len; ++t) {
         const double x = static_cast<double>(*p);
@@ -161,21 +161,21 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided(
     supersmoother_3_pole_row_strided_with_coefs(prices, series_len, stride, first_valid, coefs, out);
 }
 
-}  // namespace
+}  
 
-// --- Public kernels ----------------------------------------------------------
-// Notes:
-//  * __launch_bounds__(256) is a hint; use 128–256 threads per block at launch.
-//  * Each thread processes exactly 1 combo/series. No thread-0-only blocks.
+
+
+
+
 
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32(
-    const float* __restrict__ prices,   // single price series
-    const int*   __restrict__ periods,  // [n_combos]
+    const float* __restrict__ prices,   
+    const int*   __restrict__ periods,  
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out)            // [n_combos, series_len] row-major
+    float* __restrict__ out)            
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -186,12 +186,12 @@ void supersmoother_3_pole_batch_f32(
     supersmoother_3_pole_row(prices, series_len, first_valid, period, out_row);
 }
 
-// Same as above, but read precomputed coefficients per combo.
-// (Use this variant when you can precompute coefs on the host.)
+
+
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32_precomp(
-    const float* __restrict__ prices,                 // single price series
-    const SupersmootherCoefs* __restrict__ coefs_arr, // [n_combos]
+    const float* __restrict__ prices,                 
+    const SupersmootherCoefs* __restrict__ coefs_arr, 
     int series_len,
     int n_combos,
     int first_valid,
@@ -205,19 +205,19 @@ void supersmoother_3_pole_batch_f32_precomp(
     supersmoother_3_pole_row_with_coefs(prices, series_len, first_valid, coefs, out_row);
 }
 
-// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
-// per iteration via an inclusive scan over the 3x3 affine state update:
-//
-//   y[t] = coef_source*x[t] + coef_prev1*y[t-1] + coef_prev2*y[t-2] + coef_prev3*y[t-3]
-//
-// State is s[t] = [y[t], y[t-1], y[t-2]] and:
-//   s[t] = M*s[t-1] + [coef_source*x[t], 0, 0]
-//   M = [[coef_prev1, coef_prev2, coef_prev3],
-//        [    1     ,     0     ,     0     ],
-//        [    0     ,     1     ,     0     ]]
-//
-// - blockDim.x must be exactly 32
-// - warmup: [0, first_valid) = NaN; then 3 seeds = raw input stream at first_valid..first_valid+2
+
+
+
+
+
+
+
+
+
+
+
+
+
 extern "C" __global__
 void supersmoother_3_pole_batch_warp_scan_f32(
     const float* __restrict__ prices,
@@ -248,10 +248,10 @@ void supersmoother_3_pole_batch_warp_scan_f32(
         return;
     }
 
-    // Prefix NaNs only where needed
+    
     for (int t = lane; t < first_valid; t += 32) out_row[t] = CUDART_NAN_F;
 
-    // Seeds: first 3 samples are raw inputs (matches scalar)
+    
     if (lane == 0) {
         out_row[first_valid] = prices[first_valid];
         if (first_valid + 1 < series_len) out_row[first_valid + 1] = prices[first_valid + 1];
@@ -261,20 +261,20 @@ void supersmoother_3_pole_batch_warp_scan_f32(
 
     const SupersmootherCoefs coefs = make_coefs(period);
 
-    // Previous state at t0-1 = first_valid+2
+    
     double s0_prev = 0.0;
     double s1_prev = 0.0;
     double s2_prev = 0.0;
     if (lane == 0) {
-        s2_prev = static_cast<double>(prices[first_valid]);     // y[t0-3]
-        s1_prev = static_cast<double>(prices[first_valid + 1]); // y[t0-2]
-        s0_prev = static_cast<double>(prices[first_valid + 2]); // y[t0-1]
+        s2_prev = static_cast<double>(prices[first_valid]);     
+        s1_prev = static_cast<double>(prices[first_valid + 1]); 
+        s0_prev = static_cast<double>(prices[first_valid + 2]); 
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
     s2_prev = __shfl_sync(mask, s2_prev, 0);
 
-    // Constant state-transition matrix M
+    
     const double m00 = coefs.coef_prev1;
     const double m01 = coefs.coef_prev2;
     const double m02 = coefs.coef_prev3;
@@ -326,15 +326,15 @@ void supersmoother_3_pole_batch_warp_scan_f32(
 
         Mat3 P = valid ? M : I;
 
-        // Per-step u term: v = [coef_source * x[t], 0, 0]
+        
         double v0 = valid ? (coefs.coef_source * static_cast<double>(prices[t])) : 0.0;
         double v1 = 0.0;
         double v2 = 0.0;
 
-        // Inclusive scan over composed transforms: (P_cur, v_cur) ∘ (P_prev, v_prev)
-        // where s' = P*s + v and composition is:
-        //   P = P_cur * P_prev
-        //   v = P_cur * v_prev + v_cur
+        
+        
+        
+        
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const double p00_prev = __shfl_up_sync(mask, P.m00, offset);
@@ -362,7 +362,7 @@ void supersmoother_3_pole_batch_warp_scan_f32(
             }
         }
 
-        // Apply prefix transform to previous state s_prev
+        
         double h0, h1, h2;
         mat_apply(P, s0_prev, s1_prev, s2_prev, h0, h1, h2);
 
@@ -382,21 +382,21 @@ void supersmoother_3_pole_batch_warp_scan_f32(
     }
 }
 
-// Time-major: many series share the same period.
-// Use threads across series for coalesced loads at each timestep.
+
+
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm,  // [series_len, num_series], time-major
+    const float* __restrict__ prices_tm,  
     int period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, // [num_series]
-    float* __restrict__ out_tm)           // [series_len, num_series], time-major
+    const int* __restrict__ first_valids, 
+    float* __restrict__ out_tm)           
 {
     const int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (series_idx >= num_series) return;
 
-    const int stride = num_series; // time-major stride
+    const int stride = num_series; 
     const int first_valid = first_valids[series_idx];
 
     const float* series_prices = prices_tm + series_idx;

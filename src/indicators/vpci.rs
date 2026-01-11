@@ -210,28 +210,28 @@ pub struct VpciStream {
     short_range: usize,
     long_range: usize,
 
-    // Ring buffers for last `long_range` samples
+    
     close_buf: Vec<f64>,
     volume_buf: Vec<f64>,
-    head: usize,  // next index to write in long ring
-    count: usize, // total samples seen
+    head: usize,  
+    count: usize, 
 
-    // Rolling sums for long window
+    
     sum_c_long: f64,
     sum_v_long: f64,
     sum_cv_long: f64,
 
-    // Rolling sums for short window
+    
     sum_c_short: f64,
     sum_v_short: f64,
     sum_cv_short: f64,
 
-    // VPCIS numerator: rolling sum of (VPCI * Volume) over short window
+    
     vpci_vol_buf: Vec<f64>,
     vpci_vol_head: usize,
     sum_vpci_vol_short: f64,
 
-    // Precomputed reciprocals
+    
     inv_long: f64,
     inv_short: f64,
 }
@@ -291,34 +291,34 @@ impl VpciStream {
     /// Push one (close, volume). Returns (VPCI, VPCIS) once long window is filled.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64)> {
-        // Coerce non-finite inputs to zero for contributions (prefix-sum semantics)
+        
         let c_new = Self::zf(close);
         let v_new = Self::zf(volume);
         let cv_new = c_new * v_new;
 
-        // Indices
-        let i = self.head; // leaving long window
-        let j = (self.head + self.long_range - self.short_range) % self.long_range; // leaving short
+        
+        let i = self.head; 
+        let j = (self.head + self.long_range - self.short_range) % self.long_range; 
 
-        // Values leaving long window
+        
         let c_old_L = Self::zf(self.close_buf[i]);
         let v_old_L = Self::zf(self.volume_buf[i]);
         let cv_old_L = c_old_L * v_old_L;
 
-        // Values leaving short window
+        
         let c_old_S = Self::zf(self.close_buf[j]);
         let v_old_S = Self::zf(self.volume_buf[j]);
         let cv_old_S = c_old_S * v_old_S;
 
-        // Write new sample into rings (store raw; zf applied for contributions)
+        
         self.close_buf[i] = close;
         self.volume_buf[i] = volume;
 
-        // Advance ring and count
+        
         self.head = (self.head + 1) % self.long_range;
         self.count = self.count.saturating_add(1);
 
-        // Update rolling sums
+        
         self.sum_c_long += c_new - c_old_L;
         self.sum_v_long += v_new - v_old_L;
         self.sum_cv_long += cv_new - cv_old_L;
@@ -327,12 +327,12 @@ impl VpciStream {
         self.sum_v_short += v_new - v_old_S;
         self.sum_cv_short += cv_new - cv_old_S;
 
-        // Need at least long_range values to compute
+        
         if self.count < self.long_range {
             return None;
         }
 
-        // Long window components
+        
         let sv_l = self.sum_v_long;
         let sc_l = self.sum_c_long;
         let scv_l = self.sum_cv_long;
@@ -340,19 +340,19 @@ impl VpciStream {
         let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
         let vpc = vwma_l - sma_l;
 
-        // Short window components
+        
         let sv_s = self.sum_v_short;
         let sc_s = self.sum_c_short;
         let scv_s = self.sum_cv_short;
 
-        // vpr = (VWMA_S / SMA_S) = (scv_s * short) / (sv_s * sc_s)
+        
         let vpr = if sv_s != 0.0 && sc_s != 0.0 {
             (scv_s * (self.short_range as f64)) / (sv_s * sc_s)
         } else {
             f64::NAN
         };
 
-        // vm = (SMA_V_S / SMA_V_L) = (sv_s * long) / (sv_l * short)
+        
         let vm = if sv_l != 0.0 {
             (sv_s * (self.long_range as f64)) / (sv_l * (self.short_range as f64))
         } else {
@@ -361,14 +361,14 @@ impl VpciStream {
 
         let vpci = vpc * vpr * vm;
 
-        // VPCIS: maintain rolling sum of (VPCI * Volume) over short window
+        
         let vpci_vol_new = if vpci.is_finite() { vpci * v_new } else { 0.0 };
         let vpci_vol_old = self.vpci_vol_buf[self.vpci_vol_head];
         self.sum_vpci_vol_short += vpci_vol_new - vpci_vol_old;
         self.vpci_vol_buf[self.vpci_vol_head] = vpci_vol_new;
         self.vpci_vol_head = (self.vpci_vol_head + 1) % self.short_range;
 
-        let denom = sv_s * self.inv_short; // SMA(Volume, short)
+        let denom = sv_s * self.inv_short; 
         let vpcis = if denom != 0.0 && denom.is_finite() {
             (self.sum_vpci_vol_short * self.inv_short) / denom
         } else {
@@ -411,7 +411,7 @@ pub enum VpciError {
     #[error("vpci: mismatched input lengths: close = {close_len}, volume = {volume_len}")]
     MismatchedInputLengths { close_len: usize, volume_len: usize },
 
-    // Legacy variant kept for backwards compatibility where callers may have matched on it.
+    
     #[error("vpci: Mismatched output lengths: vpci_len = {vpci_len}, vpcis_len = {vpcis_len}, expected = {data_len}")]
     MismatchedOutputLengths {
         vpci_len: usize,
@@ -423,9 +423,9 @@ pub enum VpciError {
     KernelNotAvailable,
 }
 
-// ================================
-// Core Helper Functions
-// ================================
+
+
+
 
 #[inline(always)]
 fn first_valid_both(close: &[f64], volume: &[f64]) -> Option<usize> {
@@ -456,8 +456,8 @@ fn build_prefix_sums(close: &[f64], volume: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
     for i in 0..n {
         let c = close[i];
         let v = volume[i];
-        // Only add finite values to prefix sums, treating NaN as 0
-        // This prevents NaN propagation while allowing windows to work
+        
+        
         let c_val = if c.is_finite() { c } else { 0.0 };
         let v_val = if v.is_finite() { v } else { 0.0 };
         ps_close[i + 1] = ps_close[i] + c_val;
@@ -469,7 +469,7 @@ fn build_prefix_sums(close: &[f64], volume: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 
 #[inline(always)]
 fn window_sum(ps: &[f64], start: usize, end_inclusive: usize) -> f64 {
-    // end_inclusive is inclusive index in original array
+    
     let a = start;
     let b = end_inclusive + 1;
     ps[b] - ps[a]
@@ -529,9 +529,9 @@ fn vpci_prepare<'a>(
     Ok((close, volume, first, short, long, chosen))
 }
 
-// ================================
-// Core Computation Functions
-// ================================
+
+
+
 
 #[inline(always)]
 fn vpci_scalar_into_from_psums(
@@ -562,15 +562,15 @@ fn vpci_scalar_into_from_psums(
         }
     }
 
-    // Hoisted invariants
+    
     let inv_long = 1.0 / (long as f64);
     let inv_short = 1.0 / (short as f64);
 
-    // Rolling numerator for VPCIS = SMA(VPCI*Volume, short)
+    
     let mut sum_vpci_vol_short = 0.0;
 
     unsafe {
-        // Raw pointers to avoid bounds checks in the hot loop
+        
         let pc = ps_close.as_ptr();
         let pv = ps_vol.as_ptr();
         let pcv = ps_cv.as_ptr();
@@ -580,12 +580,12 @@ fn vpci_scalar_into_from_psums(
 
         let mut i = warmup;
         while i < n {
-            // Prefix sums are 1-based
+            
             let end = i + 1;
             let long_start = end.saturating_sub(long);
             let short_start = end.saturating_sub(short);
 
-            // Prefix-sum window diffs (contiguous loads)
+            
             let sc_l = *pc.add(end) - *pc.add(long_start);
             let sv_l = *pv.add(end) - *pv.add(long_start);
             let scv_l = *pcv.add(end) - *pcv.add(long_start);
@@ -594,17 +594,17 @@ fn vpci_scalar_into_from_psums(
             let sv_s = *pv.add(end) - *pv.add(short_start);
             let scv_s = *pcv.add(end) - *pcv.add(short_start);
 
-            // SMAs
+            
             let sma_l = sc_l * inv_long;
             let sma_s = sc_s * inv_short;
             let sma_v_l = sv_l * inv_long;
             let sma_v_s = sv_s * inv_short;
 
-            // VWMAs with zero-denominator guards
+            
             let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
             let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
 
-            // Components
+            
             let vpc = vwma_l - sma_l;
             let vpr = if sma_s != 0.0 {
                 vwma_s / sma_s
@@ -617,11 +617,11 @@ fn vpci_scalar_into_from_psums(
                 f64::NAN
             };
 
-            // VPCI
+            
             let vpci = vpc * vpr * vm;
             *vpci_ptr.add(i) = vpci;
 
-            // Update rolling numerator for VPCIS: sum of (VPCI * Volume) over last `short`
+            
             let v_i = *vptr.add(i);
             sum_vpci_vol_short += zf(vpci) * zf(v_i);
             if i >= warmup + short {
@@ -631,7 +631,7 @@ fn vpci_scalar_into_from_psums(
                 sum_vpci_vol_short -= zf(vpci_rm) * zf(v_rm);
             }
 
-            // VPCIS = SMA(VPCI*Volume, short) / SMA(Volume, short)
+            
             let denom = sma_v_s;
             *vpcis_ptr.add(i) = if denom != 0.0 && denom.is_finite() {
                 (sum_vpci_vol_short * inv_short) / denom
@@ -738,7 +738,7 @@ pub fn vpci_into(
     vpci_into_slice(out_vpci, out_vpcis, input, Kernel::Auto)
 }
 
-// Simple stub functions that use the unified compute path
+
 #[inline]
 pub unsafe fn vpci_scalar(
     close: &[f64],
@@ -861,12 +861,12 @@ unsafe fn vpci_avx2_into_from_psums(
     let yptr = vpci_out.as_mut_ptr();
 
     let mut i = warmup;
-    let step = 4usize; // 4 x f64 per AVX2 vector
-    let vec_end = n.saturating_sub(step) + 1; // last base i where i..i+3 valid
+    let step = 4usize; 
+    let vec_end = n.saturating_sub(step) + 1; 
 
     while i < vec_end {
         let end = i + 1;
-        // Load contiguous prefix segments (end, end-{long,short})
+        
         let c_end = _mm256_loadu_pd(pc.add(end));
         let c_l = _mm256_loadu_pd(pc.add(end - long));
         let v_end = _mm256_loadu_pd(pv.add(end));
@@ -878,7 +878,7 @@ unsafe fn vpci_avx2_into_from_psums(
         let v_s = _mm256_loadu_pd(pv.add(end - short));
         let cv_s = _mm256_loadu_pd(pcv.add(end - short));
 
-        // Window sums
+        
         let sc_l = _mm256_sub_pd(c_end, c_l);
         let sv_l = _mm256_sub_pd(v_end, v_l);
         let scv_l = _mm256_sub_pd(cv_end, cv_l);
@@ -887,20 +887,20 @@ unsafe fn vpci_avx2_into_from_psums(
         let sv_s = _mm256_sub_pd(v_end, v_s);
         let scv_s = _mm256_sub_pd(cv_end, cv_s);
 
-        // SMAs
+        
         let sma_l = _mm256_mul_pd(sc_l, inv_long);
         let sma_s = _mm256_mul_pd(sc_s, inv_short);
         let sma_v_l = _mm256_mul_pd(sv_l, inv_long);
         let sma_v_s = _mm256_mul_pd(sv_s, inv_short);
 
-        // VWMA with denom!=0 mask (blend with NaN)
+        
         let mask_l = _mm256_cmp_pd(sv_l, zero, _CMP_NEQ_OQ);
         let vwma_l = _mm256_blendv_pd(nan, _mm256_div_pd(scv_l, sv_l), mask_l);
 
         let mask_s = _mm256_cmp_pd(sv_s, zero, _CMP_NEQ_OQ);
         let vwma_s = _mm256_blendv_pd(nan, _mm256_div_pd(scv_s, sv_s), mask_s);
 
-        // Components
+        
         let vpc = _mm256_sub_pd(vwma_l, sma_l);
         let mask_vpr = _mm256_cmp_pd(sma_s, zero, _CMP_NEQ_OQ);
         let vpr = _mm256_blendv_pd(nan, _mm256_div_pd(vwma_s, sma_s), mask_vpr);
@@ -912,7 +912,7 @@ unsafe fn vpci_avx2_into_from_psums(
         i += step;
     }
 
-    // Scalar tail for VPCI
+    
     while i < n {
         let end = i + 1;
         let long_start = end - long;
@@ -948,7 +948,7 @@ unsafe fn vpci_avx2_into_from_psums(
         i += 1;
     }
 
-    // Fast scalar pass for VPCIS (rolling)
+    
     #[inline(always)]
     fn zf(x: f64) -> f64 {
         if x.is_finite() {
@@ -1018,7 +1018,7 @@ unsafe fn vpci_avx512_into_from_psums(
     let yptr = vpci_out.as_mut_ptr();
 
     let mut i = warmup;
-    let step = 8usize; // 8 x f64 per AVX-512 vector
+    let step = 8usize; 
     let vec_end = n.saturating_sub(step) + 1;
 
     while i < vec_end {
@@ -1065,7 +1065,7 @@ unsafe fn vpci_avx512_into_from_psums(
         i += step;
     }
 
-    // Scalar tail for VPCI
+    
     while i < n {
         let end = i + 1;
         let long_start = end - long;
@@ -1101,7 +1101,7 @@ unsafe fn vpci_avx512_into_from_psums(
         i += 1;
     }
 
-    // Scalar pass for VPCIS (rolling)
+    
     #[inline(always)]
     fn zf(x: f64) -> f64 {
         if x.is_finite() {
@@ -1169,7 +1169,7 @@ pub fn vpci_batch_with_kernel(
 ) -> Result<VpciBatchOutput, VpciError> {
     let k = match kernel {
         Kernel::Auto => {
-            // Prefer AVX2 for batch by default: AVX-512 often downclocks and underperforms here.
+            
             match detect_best_batch_kernel() {
                 Kernel::Avx512Batch => Kernel::Avx2Batch,
                 other => other,
@@ -1347,7 +1347,7 @@ fn vpci_batch_inner(
         return Err(VpciError::InvalidRange { start, end, step });
     }
 
-    // Find first valid data and calculate warmup periods
+    
     let first = first_valid_both(close, volume).ok_or(VpciError::AllValuesNaN)?;
     let warmups: Vec<usize> = combos
         .iter()
@@ -1357,7 +1357,7 @@ fn vpci_batch_inner(
     let mut vpci_mu = make_uninit_matrix(rows, cols);
     let mut vpcis_mu = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes using the helper function
+    
     init_matrix_prefixes(&mut vpci_mu, cols, &warmups);
     init_matrix_prefixes(&mut vpcis_mu, cols, &warmups);
 
@@ -1366,7 +1366,7 @@ fn vpci_batch_inner(
     let cap_v = vpci_mu.capacity();
     let cap_s = vpcis_mu.capacity();
 
-    // writable slices
+    
     let total_len = rows
         .checked_mul(cols)
         .ok_or_else(|| VpciError::InvalidInput("rows*cols overflow in vpci_batch_inner".into()))?;
@@ -1384,7 +1384,7 @@ fn vpci_batch_inner(
         _ => kernel,
     };
 
-    // compute (propagates Err without leaking)
+    
     let combos = vpci_batch_inner_into(
         close,
         volume,
@@ -1395,7 +1395,7 @@ fn vpci_batch_inner(
         vpcis_slice,
     )?;
 
-    // take ownership only now
+    
     core::mem::forget(vpci_mu);
     core::mem::forget(vpcis_mu);
     let vpci_vec = unsafe { Vec::from_raw_parts(ptr_v, total_len, cap_v) };
@@ -1439,12 +1439,12 @@ fn vpci_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    // Precompute prefix sums once
+    
     let (ps_c, ps_v, ps_cv) = build_prefix_sums(close, volume);
 
-    // Initialize NaN prefixes per row (needed for direct calls from Python/WASM)
-    // Note: When called from vpci_batch_inner, this duplicates work already done
-    // by init_matrix_prefixes, but it's harmless and ensures correctness for all paths
+    
+    
+    
     for (row, prm) in combos.iter().enumerate() {
         let warmup = first + prm.long_range.unwrap() - 1;
         let s = row * cols;
@@ -1454,7 +1454,7 @@ fn vpci_batch_inner_into(
         }
     }
 
-    // Process rows
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1737,60 +1737,60 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            VpciParams::default(), // short: 5, long: 25
+            VpciParams::default(), 
             VpciParams {
                 short_range: Some(2),
                 long_range: Some(3),
-            }, // minimum viable
+            }, 
             VpciParams {
                 short_range: Some(2),
                 long_range: Some(10),
-            }, // small short, medium long
+            }, 
             VpciParams {
                 short_range: Some(5),
                 long_range: Some(20),
-            }, // medium both
+            }, 
             VpciParams {
                 short_range: Some(10),
                 long_range: Some(30),
-            }, // medium-large both
+            }, 
             VpciParams {
                 short_range: Some(20),
                 long_range: Some(50),
-            }, // large both
+            }, 
             VpciParams {
                 short_range: Some(3),
                 long_range: Some(100),
-            }, // small short, very large long
+            }, 
             VpciParams {
                 short_range: Some(50),
                 long_range: Some(100),
-            }, // very large both
+            }, 
             VpciParams {
                 short_range: Some(7),
                 long_range: Some(21),
-            }, // common Fibonacci values
+            }, 
             VpciParams {
                 short_range: Some(14),
                 long_range: Some(28),
-            }, // double common values
+            }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = VpciInput::from_candles(&candles, "close", "volume", params.clone());
             let output = vpci_with_kernel(&input, kernel)?;
 
-            // Check VPCI values
+            
             for (i, &val) in output.vpci.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1834,15 +1834,15 @@ mod tests {
                 }
             }
 
-            // Check VPCIS values
+            
             for (i, &val) in output.vpcis.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1895,7 +1895,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1927,15 +1927,15 @@ mod tests {
 
         let strat = (2usize..=20).prop_flat_map(|short_range| {
             ((short_range + 1)..=50).prop_flat_map(move |long_range| {
-                let min_len = long_range + 10; // Ensure we have enough data after warmup
+                let min_len = long_range + 10; 
                 (min_len..400).prop_flat_map(move |data_len| {
                     (
-                        // Close prices: realistic price range
+                        
                         prop::collection::vec(
                             (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        // Volume: realistic volume range
+                        
                         prop::collection::vec(
                             (1000f64..1000000f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
@@ -1964,17 +1964,17 @@ mod tests {
                     vpcis: ref_out_smooth,
                 } = vpci_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first valid index (non-NaN in both close and volume)
+                
                 let first_valid = close
                     .iter()
                     .zip(volume.iter())
                     .position(|(c, v)| !c.is_nan() && !v.is_nan())
                     .unwrap_or(0);
 
-                // Expected warmup period
+                
                 let expected_warmup = first_valid + long_range - 1;
 
-                // Check warmup period - values before warmup should be NaN
+                
                 for i in 0..expected_warmup.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1990,14 +1990,14 @@ mod tests {
                     );
                 }
 
-                // Check values after warmup period
+                
                 for i in expected_warmup..close.len() {
                     let y = out[i];
                     let ys = out_smooth[i];
                     let r = ref_out[i];
                     let rs = ref_out_smooth[i];
 
-                    // Values should be finite after warmup (unless input had NaN)
+                    
                     if !close[i].is_nan() && !volume[i].is_nan() {
                         prop_assert!(
                             y.is_finite() || r.is_nan(),
@@ -2007,7 +2007,7 @@ mod tests {
                         );
                     }
 
-                    // Check kernel consistency for VPCI
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2031,7 +2031,7 @@ mod tests {
                         );
                     }
 
-                    // Check kernel consistency for VPCIS
+                    
                     if !ys.is_finite() || !rs.is_finite() {
                         prop_assert!(
                             ys.to_bits() == rs.to_bits(),
@@ -2056,10 +2056,10 @@ mod tests {
                     }
                 }
 
-                // Additional mathematical properties specific to VPCI
+                
 
-                // Property 1: When prices are constant, VPC component should be near zero
-                // VPC = VWMA_long - SMA_long, both should be equal for constant prices
+                
+                
                 let prices_constant = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
                 if prices_constant && expected_warmup < close.len() {
@@ -2075,15 +2075,15 @@ mod tests {
                     }
                 }
 
-                // Property 2: When volumes are constant, test volume ratio behavior
+                
                 let volumes_constant = volume.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
                 if volumes_constant && expected_warmup < close.len() {
-                    // VM = SMA_volume_short / SMA_volume_long = 1.0 when volumes are constant
-                    // This simplifies the VPCI calculation
+                    
+                    
                     for i in expected_warmup..close.len() {
                         if out[i].is_finite() && ref_out[i].is_finite() {
-                            // Just verify consistency since the math still involves price components
+                            
                             prop_assert!(
                                 (out[i] - ref_out[i]).abs() <= 1e-9,
                                 "VPCI kernels should match exactly with constant volume"
@@ -2092,15 +2092,15 @@ mod tests {
                     }
                 }
 
-                // Property 3: VPCIS relationship to VPCI - both should be finite in same locations
-                // VPCIS is a volume-weighted average of VPCI, so when VPCI is finite, VPCIS should be too
+                
+                
                 if expected_warmup + short_range < close.len() {
                     for i in (expected_warmup + short_range)..close.len() {
                         if out[i].is_finite() && volume[i].is_finite() && volume[i] > 0.0 {
-                            // If VPCI is finite and volume is valid, VPCIS should also be finite
-                            // (unless there's a division by zero in the calculation)
+                            
+                            
                             if !out_smooth[i].is_finite() {
-                                // Check if it's due to division by zero (SMA of volume being 0)
+                                
                                 let vol_window = &volume[i.saturating_sub(short_range - 1)..=i];
                                 let vol_sum: f64 = vol_window.iter().sum();
                                 prop_assert!(
@@ -2113,13 +2113,13 @@ mod tests {
                     }
                 }
 
-                // Property 4: Special edge case when short_range == long_range
+                
                 if short_range == long_range && expected_warmup < close.len() {
-                    // When periods are equal, certain components interact in specific ways
-                    // VPC uses same period for VWMA and SMA, but different calculations
+                    
+                    
                     for i in expected_warmup..close.len().min(expected_warmup + 10) {
                         if out[i].is_finite() {
-                            // The output should still be valid and finite
+                            
                             prop_assert!(
                                 !out[i].is_nan(),
                                 "VPCI should be valid even when short_range == long_range"
@@ -2128,7 +2128,7 @@ mod tests {
                     }
                 }
 
-                // Property 5: Extreme parameter ratios should still produce valid results
+                
                 let extreme_ratio = long_range as f64 / short_range as f64 > 10.0;
                 if extreme_ratio && expected_warmup < close.len() {
                     for i in expected_warmup..close.len().min(expected_warmup + 5) {
@@ -2140,7 +2140,7 @@ mod tests {
                     }
                 }
 
-                // Property 6: Verify valid count consistency between kernels
+                
                 let valid_count = out
                     .iter()
                     .skip(expected_warmup)
@@ -2236,17 +2236,17 @@ mod tests {
         let close = &c.close;
         let volume = &c.volume;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step)
-            (2, 10, 2, 5, 25, 5),     // Small to medium ranges
-            (5, 15, 5, 20, 40, 10),   // Medium ranges
-            (10, 20, 5, 30, 60, 15),  // Medium to large ranges
-            (2, 5, 1, 10, 15, 1),     // Dense small ranges
-            (20, 30, 2, 40, 60, 5),   // Large ranges
-            (3, 7, 2, 21, 35, 7),     // Fibonacci-inspired ranges
-            (8, 12, 1, 25, 30, 1),    // Narrow dense ranges
-            (2, 50, 10, 10, 100, 20), // Wide sparse ranges
+            
+            (2, 10, 2, 5, 25, 5),     
+            (5, 15, 5, 20, 40, 10),   
+            (10, 20, 5, 30, 60, 15),  
+            (2, 5, 1, 10, 15, 1),     
+            (20, 30, 2, 40, 60, 5),   
+            (3, 7, 2, 21, 35, 7),     
+            (8, 12, 1, 25, 30, 1),    
+            (2, 50, 10, 10, 100, 20), 
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -2258,7 +2258,7 @@ mod tests {
                 .long_range(long_start, long_end, long_step)
                 .apply_slices(close, volume)?;
 
-            // Check VPCI values
+            
             for (idx, &val) in output.vpci.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2269,7 +2269,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2319,7 +2319,7 @@ mod tests {
                 }
             }
 
-            // Check VPCIS values
+            
             for (idx, &val) in output.vpcis.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2330,7 +2330,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2389,7 +2389,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2416,7 +2416,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Parity test for the native `vpci_into` API using the repository CSV data
+
 #[cfg(test)]
 #[cfg(not(feature = "wasm"))]
 mod tests_into {
@@ -2425,17 +2425,17 @@ mod tests_into {
 
     #[test]
     fn test_vpci_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the same CSV used by other VPCI tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let params = VpciParams::default();
         let input = VpciInput::from_candles(&candles, "close", "volume", params);
 
-        // Baseline via Vec-returning API
+        
         let base = vpci(&input)?;
 
-        // Into-API outputs
+        
         let n = candles.close.len();
         let mut y = vec![0.0f64; n];
         let mut ys = vec![0.0f64; n];

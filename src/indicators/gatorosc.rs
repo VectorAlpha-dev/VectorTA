@@ -3859,7 +3859,7 @@ pub fn gatorosc_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output arrays for batch operations
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("gatorosc_batch_py: rows*cols overflow"))?;
@@ -3886,7 +3886,7 @@ pub fn gatorosc_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            // Use zero-allocation batch function
+            
             gatorosc_batch_inner_into(
                 slice_in,
                 &sweep,
@@ -3957,7 +3957,7 @@ pub fn gatorosc_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3971,7 +3971,7 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-// GATOR-specific Python device handle with CAI v3 and DLPack v1.x negotiation
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "GatorDeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32GatorPy {

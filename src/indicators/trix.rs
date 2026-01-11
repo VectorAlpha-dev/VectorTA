@@ -496,7 +496,7 @@ pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
 
 // Delete the old trix_scalar - it's no longer needed with the new compute_into approach
 
-// AVX stubs removed - they're now handled in trix_with_kernel
+
 
 #[derive(Debug, Clone)]
 pub struct TrixStream {
@@ -508,25 +508,25 @@ pub struct TrixStream {
 
 #[derive(Debug, Clone)]
 enum StreamState {
-    // Accumulate logs for first SMA → EMA1 seed
+    
     Seed1 {
         need: usize,
         sum1: f64,
     },
-    // Build EMA1 for (period-1) more samples while accumulating SMA → EMA2 seed
+    
     Seed2 {
         remain: usize,
         ema1: f64,
         sum_ema1: f64,
     },
-    // Build EMA1 & EMA2 for (period-1) samples while accumulating SMA → EMA3 seed
+    
     Seed3 {
         remain: usize,
         ema1: f64,
         ema2: f64,
         sum_ema2: f64,
     },
-    // Fully primed: advance EMA1→EMA2→EMA3 each tick and emit ΔEMA3*10000
+    
     Running {
         ema1: f64,
         ema2: f64,
@@ -568,7 +568,7 @@ impl TrixStream {
     /// Emits the same quantity as the offline/scalar path: (EMA3_t - EMA3_{t-1}) * 10000.0
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // TRIX uses ln(price). Reset on invalid or non-positive inputs.
+        
         if !value.is_finite() || value <= 0.0 {
             self.reset();
             return None;
@@ -712,8 +712,8 @@ pub fn trix_batch_with_kernel(
     k: Kernel,
 ) -> Result<TrixBatchOutput, TrixError> {
     let kernel = match k {
-        // Batch kernels are currently scalar (row-parallel) and ignore SIMD selections.
-        // Short-circuit Auto to scalarbatch to avoid runtime detection overhead.
+        
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -825,7 +825,7 @@ fn trix_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = trix_needed_len(max_p)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let needed = trix_needed_len(max_p)?; 
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -838,10 +838,10 @@ fn trix_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| TrixError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Use make_uninit_matrix and init_matrix_prefixes like ALMA
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| trix_warmup_end(first, c.period.unwrap()))
@@ -849,16 +849,16 @@ fn trix_batch_inner(
 
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
-    // Shared log precompute across rows to avoid redundant ln() work
+    
     let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
     unsafe { logs.set_len(cols) };
     for i in 0..first {
-        logs[i] = 0.0; // unused
+        logs[i] = 0.0; 
     }
     for i in first..cols {
         logs[i] = data[i].ln();
@@ -889,7 +889,7 @@ fn trix_batch_inner(
         }
     }
 
-    // Convert the uninitialized memory buffer to a Vec for the output
+    
     let values = unsafe {
         let ptr = buf_guard.as_mut_ptr() as *mut f64;
         let len = buf_guard.len();
@@ -922,9 +922,9 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
 
     let p = data.as_ptr();
 
-    // ---------------------------
-    // Stage 1 seed: EMA1 via SMA
-    // ---------------------------
+    
+    
+    
     let mut sum1 = 0.0;
     let end1 = first + period;
     let mut i = first;
@@ -934,7 +934,7 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     }
     let mut ema1 = sum1 * inv_n;
 
-    // Build remaining EMA1 values (period-1) and accumulate for EMA2 SMA
+    
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
@@ -945,12 +945,12 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         i += 1;
     }
 
-    // ---------------------------
-    // Stage 2 seed: EMA2 via SMA
-    // ---------------------------
+    
+    
+    
     let mut ema2 = sum_ema1 * inv_n;
 
-    // Build remaining EMA2 values (period-1) and accumulate for EMA3 SMA
+    
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
@@ -962,12 +962,12 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         i += 1;
     }
 
-    // ---------------------------
-    // Stage 3 seed: EMA3 via SMA
-    // ---------------------------
+    
+    
+    
     let mut ema3_prev = sum_ema2 * inv_n;
 
-    // First TRIX sample at warmup_end
+    
     let mut src = warmup_end;
     let mut lv = (*p.add(src)).ln();
     ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -977,9 +977,9 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     ema3_prev = ema3;
     src += 1;
 
-    // Main loop, unrolled by 2
+    
     while src + 1 < len {
-        // step 1
+        
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -988,7 +988,7 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         ema3_prev = ema3;
         src += 1;
 
-        // step 2
+        
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -998,7 +998,7 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         src += 1;
     }
 
-    // Tail
+    
     if src < len {
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1023,7 +1023,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
 
     let p = logs.as_ptr();
 
-    // Seed EMA1 via SMA of logs
+    
     let mut sum1 = 0.0;
     let end1 = first + period;
     let mut i = first;
@@ -1033,11 +1033,11 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     }
     let mut ema1 = sum1 * inv_n;
 
-    // Build remaining EMA1 values and accumulate for EMA2 seed
+    
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
-    // Unroll by 4
+    
     while i + 3 < end2 {
         let mut lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1063,14 +1063,14 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         i += 1;
     }
 
-    // Seed EMA2 via SMA of EMA1
+    
     let mut ema2 = sum_ema1 * inv_n;
 
-    // Build remaining EMA2 values and accumulate for EMA3 seed
+    
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
-    // Unroll by 4
+    
     while i + 3 < end3 {
         let mut lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1101,10 +1101,10 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         i += 1;
     }
 
-    // Seed EMA3 via SMA of EMA2
+    
     let mut ema3_prev = sum_ema2 * inv_n;
 
-    // Emit TRIX and proceed
+    
     let mut src = warmup_end;
     let mut lv = *p.add(src);
     ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1114,9 +1114,9 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     ema3_prev = ema3;
     src += 1;
 
-    // Unroll main loop by 4
+    
     while src + 3 < len {
-        // step 1
+        
         lv = *p.add(src);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1124,7 +1124,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 2
+        
         let lv1 = *p.add(src + 1);
         ema1 = (lv1 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1132,7 +1132,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src + 1) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 3
+        
         let lv2 = *p.add(src + 2);
         ema1 = (lv2 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1140,7 +1140,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src + 2) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 4
+        
         let lv3 = *p.add(src + 3);
         ema1 = (lv3 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1161,7 +1161,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     }
 }
 
-// AVX row stubs removed - trix_row_scalar handles all kernels
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "trix")]
@@ -1213,7 +1213,7 @@ impl TrixStreamPy {
     }
 }
 
-// ---------------- Python CUDA bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "trix_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1326,7 +1326,7 @@ pub fn trix_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Warmup prefill to guarantee NaNs in prefixes (mirrors init_matrix_prefixes behavior)
+    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1383,7 +1383,7 @@ fn trix_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = trix_needed_len(max_p)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let needed = trix_needed_len(max_p)?; 
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -1393,7 +1393,7 @@ fn trix_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Shared log precompute across rows
+    
     let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
     unsafe { logs.set_len(cols) };
     for i in 0..first {
@@ -1439,7 +1439,7 @@ pub fn trix_into_slice(dst: &mut [f64], input: &TrixInput, kern: Kernel) -> Resu
             got: dst.len(),
         });
     }
-    // Fill warmup NaNs and compute
+    
     let warmup_len = warmup_end.min(dst.len());
     for v in &mut dst[..warmup_len] {
         *v = f64::NAN;
@@ -1460,9 +1460,9 @@ pub fn trix_into_slice(dst: &mut [f64], input: &TrixInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1589,7 +1589,7 @@ pub fn trix_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Calculate output size
+        
         let combos = expand_grid(&sweep)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let num_combos = combos.len();
@@ -1599,7 +1599,7 @@ pub fn trix_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Use the existing batch function that writes directly to output
+        
         trix_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1607,7 +1607,7 @@ pub fn trix_batch_into(
     }
 }
 
-// ================== PYTHON MODULE REGISTRATION ==================
+
 #[cfg(feature = "python")]
 pub fn register_trix_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trix_py, m)?)?;
@@ -2193,7 +2193,7 @@ mod tests {
                     }
                 }
 
-                // Property 7: No infinite values for finite input
+                
                 for (i, &val) in out.iter().enumerate() {
                     prop_assert!(
                         val.is_nan() || val.is_finite(),
@@ -2203,14 +2203,14 @@ mod tests {
                     );
                 }
 
-                // Property 8: Smoothness property - TRIX should be smoother than log returns
-                // Calculate standard deviation of log returns vs TRIX values
+                
+                
                 if data.len() > warmup_period + 20 {
-                    // Calculate log returns
+                    
                     let log_returns: Vec<f64> = data
                         .windows(2)
                         .skip(warmup_period)
-                        .map(|w| (w[1] / w[0]).ln() * 10000.0) // Scale similarly to TRIX
+                        .map(|w| (w[1] / w[0]).ln() * 10000.0) 
                         .collect();
 
                     let trix_values: Vec<f64> = out
@@ -2224,8 +2224,8 @@ mod tests {
                         let log_std = calculate_std(&log_returns);
                         let trix_std = calculate_std(&trix_values);
 
-                        // TRIX should be smoother (lower std) due to triple smoothing
-                        // Allow some tolerance for edge cases
+                        
+                        
                         prop_assert!(
 							trix_std <= log_std * 1.2 || trix_std < 1.0,
 							"TRIX should be smoother than log returns: TRIX std={}, log return std={}",
@@ -2235,12 +2235,12 @@ mod tests {
                     }
                 }
 
-                // Property 9: Kernel consistency - compare with scalar reference
+                
                 for i in warmup_period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Both should be NaN or both should be finite
+                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2252,7 +2252,7 @@ mod tests {
                         continue;
                     }
 
-                    // Check ULP difference for finite values
+                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -2267,7 +2267,7 @@ mod tests {
                     );
                 }
 
-                // Property 10: Determinism - running twice should give same result
+                
                 let TrixOutput { values: out2 } = trix_with_kernel(&input, kernel).unwrap();
                 prop_assert_eq!(
                     out.len(),
@@ -2288,8 +2288,8 @@ mod tests {
             })
             .unwrap();
 
-        // Additional test: Handle edge cases with very small positive values
-        // These should work since log is defined for all positive values
+        
+        
         let edge_data = vec![0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0];
         let params = TrixParams { period: Some(2) };
         let input = TrixInput::from_slice(&edge_data, params);
@@ -2302,7 +2302,7 @@ mod tests {
         Ok(())
     }
 
-    // Helper function to calculate standard deviation
+    
     fn calculate_std(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance =

@@ -76,7 +76,7 @@ impl CudaBop {
         &self,
         src: &[f32],
     ) -> Result<(DeviceBuffer<f32>, Option<LockedBuffer<f32>>), CudaBopError> {
-        const ASYNC_PIN_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        const ASYNC_PIN_THRESHOLD_BYTES: usize = 1 << 20; 
         let bytes = src
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -102,12 +102,12 @@ impl CudaBop {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // SM count for light grid clamping
+        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/bop_kernel.ptx"));
-        // Target from current context, moderate JIT opt for stability
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -158,7 +158,7 @@ impl CudaBop {
         self.policy = p;
     }
 
-    // ---------- Batch (one series × many params [degenerate: 1]) ----------
+    
     pub fn bop_batch_dev(
         &self,
         open: &[f32],
@@ -167,10 +167,10 @@ impl CudaBop {
         close: &[f32],
     ) -> Result<DeviceArrayF32, CudaBopError> {
         let (first_valid, len) = Self::validate_ohlc_slices(open, high, low, close)?;
-        // VRAM estimate and check (best-effort)
+        
         let elems = 5usize
             .checked_mul(len)
-            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?; // 4 inputs + 1 output
+            .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?; 
         let bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaBopError::InvalidInput("size overflow".into()))?;
@@ -232,10 +232,10 @@ impl CudaBop {
             .map_err(|_| CudaBopError::MissingKernelSymbol { name: "bop_batch_f32" })?;
 
         let block_x = self.policy.batch_block_x.unwrap_or(256);
-        // Match kernel ILP (4 items per thread) to size grid tightly.
+        
         const ILP: u32 = 4;
         let work = ((len as u32) + block_x * ILP - 1) / (block_x * ILP);
-        // Clamp grid to a conservative multiple of SMs to avoid oversubscription on huge inputs
+        
         let max_grid = (self.sm_count.max(1)) * 32;
         let grid_x = work.min(max_grid).max(1);
         let max_threads_per_block = Device::get_device(self.device_id)?.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
@@ -274,7 +274,7 @@ impl CudaBop {
         self.stream.synchronize().map_err(CudaBopError::Cuda)
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    
     pub fn bop_many_series_one_param_time_major_dev(
         &self,
         open_tm: &[f32],
@@ -300,7 +300,7 @@ impl CudaBop {
             ));
         }
 
-        // Per-series first_valids (allow all-NaN series; kernel fills NaNs)
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -318,7 +318,7 @@ impl CudaBop {
             first_valids[s] = fv;
         }
 
-        // VRAM estimate and check (best-effort)
+        
         let n = expected;
         let in_elems = 4usize
             .checked_mul(n)
@@ -485,7 +485,7 @@ impl CudaBop {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -496,7 +496,7 @@ pub mod benches {
     const MANY_ROWS: usize = 8192;
 
     fn bytes_one_series() -> usize {
-        // 4 inputs + 1 output + headroom
+        
         let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024

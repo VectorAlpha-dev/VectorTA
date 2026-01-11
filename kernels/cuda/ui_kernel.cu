@@ -1,9 +1,9 @@
-// CUDA kernels for Ulcer Index (UI)
-//
-// UI[i] = sqrt( avg_{k=0..period-1}( ((price[j] - max_{window})/max_{window})^2 ) ) * |scalar|
-// Warmup: write NaN for indices < first + (2*period - 2)
-// Division-by-zero guard: if rolling max is ~0 or non-finite, mark drawdown invalid.
-// Validity policy: emit value only when the last `period` drawdowns are all valid; else NaN.
+
+
+
+
+
+
 
 #include <cuda_runtime.h>
 #include <math.h>
@@ -14,18 +14,18 @@
 #define WARP_SIZE 32
 #endif
 
-// -----------------------------
-// Helpers
-// -----------------------------
 
-// FP32 compensated summation (Neumaier)
+
+
+
+
 static __forceinline__ __device__ void neumaier_add(float y, float &sum, float &c) {
     float t = sum + y;
     if (fabsf(sum) >= fabsf(y)) c += (sum - t) + y; else c += (y - t) + sum;
     sum = t;
 }
 
-// FP32 compensated summation (classic Kahan)
+
 static __forceinline__ __device__ void kahan_add(float y, float &sum, float &c) {
     float y2 = y - c;
     float t  = sum + y2;
@@ -33,10 +33,10 @@ static __forceinline__ __device__ void kahan_add(float y, float &sum, float &c) 
     sum      = t;
 }
 
-// Shared-memory helpers for a small circular deque and ring buffers.
-// We implement a monotonic deque of indices of length `period` to track the rolling max.
 
-// Single-series kernel computing base UI with scalar=1.0.
+
+
+
 extern "C" __global__ void ui_single_series_f32(
     const float* __restrict__ prices,
     int series_len,
@@ -45,43 +45,43 @@ extern "C" __global__ void ui_single_series_f32(
     float* __restrict__ out)
 {
     if (series_len <= 0 || period <= 0) return;
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; // single worker
+    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
 
-    // dynamic shared memory layout (must match Rust wrapper sizing):
-    // [deq_idx:int p][D region: p*sizeof(double) bytes][valid:uint8 p]
-    // For the single-series base we use the D region as a double ring (sq_ring[p]).
+    
+    
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
     const int p = period;
-    // deq indices
+    
     int* deq_idx = reinterpret_cast<int*>(base);
-    // align to 8 bytes as in wrapper
+    
     size_t off = static_cast<size_t>(p) * sizeof(int);
     const size_t a = sizeof(double) - 1;
     off = (off + a) & ~a;
-    // use the double-sized region for double sq_ring
+    
     double* sq_ring = reinterpret_cast<double*>(base + off);
-    // valid ring comes after the double region
+    
     unsigned char* valid_ring = reinterpret_cast<unsigned char*>(base + off + static_cast<size_t>(p) * sizeof(double));
 
     const int fv = first_valid < 0 ? 0 : first_valid;
     const int warm_end = fv + (2 * p - 2);
 
-    // init rings
+    
     for (int i = 0; i < p; ++i) { sq_ring[i] = 0.0; valid_ring[i] = 0u; }
-    // warmup NaNs
+    
     const int warm_write = (warm_end < series_len) ? warm_end : series_len;
     for (int i = 0; i < warm_write; ++i) out[i] = CUDART_NAN_F;
 
     int head = 0, tail = 0, dsize = 0;
     int ring_idx = 0;
-    double sum = 0.0; // FP64 accumulator for higher accuracy
+    double sum = 0.0; 
     int count = 0;
 
     for (int i = fv; i < series_len; ++i) {
         const int start = (i + 1 >= p) ? (i + 1 - p) : 0;
 
-        // expire stale from front
+        
         while (dsize != 0 && deq_idx[head] < start) {
             head = (head + 1); if (head == p) head = 0; dsize--;
         }
@@ -89,7 +89,7 @@ extern "C" __global__ void ui_single_series_f32(
         const float xi = prices[i];
         const bool xi_finite = isfinite(xi);
         if (xi_finite) {
-            // pop from back while <= xi (reload values from global)
+            
             while (dsize != 0) {
                 int back = (tail == 0) ? (p - 1) : (tail - 1);
                 const int j = deq_idx[back];
@@ -97,12 +97,12 @@ extern "C" __global__ void ui_single_series_f32(
                 if (xj <= xi) { tail = back; dsize--; }
                 else break;
             }
-            // push xi
+            
             deq_idx[tail] = i;
             tail += 1; if (tail == p) tail = 0; dsize++;
         }
 
-        // compute new squared drawdown
+        
         unsigned char new_valid = 0u;
         float new_sq = 0.0f;
         if (i + 1 >= fv + p && dsize != 0) {
@@ -114,13 +114,13 @@ extern "C" __global__ void ui_single_series_f32(
             }
         }
 
-        // slide ring (compensated sum)
+        
         if (new_valid)             { sum += (double)new_sq; count++; }
         if (valid_ring[ring_idx])  { sum -= sq_ring[ring_idx]; count--; }
         sq_ring[ring_idx] = (double)new_sq; valid_ring[ring_idx] = new_valid;
         ring_idx += 1; if (ring_idx == p) ring_idx = 0;
 
-        // output
+        
         if (i >= warm_end) {
             if (count == p) {
                 double avg_d = sum / (double)p;
@@ -133,7 +133,7 @@ extern "C" __global__ void ui_single_series_f32(
     }
 }
 
-// Expand base -> rows by scaling with |scalar|.
+
 extern "C" __global__ void ui_scale_rows_from_base_f32(
     const float* __restrict__ base,
     const float* __restrict__ scalars,
@@ -153,8 +153,8 @@ extern "C" __global__ void ui_scale_rows_from_base_f32(
     }
 }
 
-// Many-series × one-param (time-major): params are (period, scalar).
-// prices_tm: [rows][cols] laid out as t*cols + s
+
+
 extern "C" __global__ void ui_many_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
@@ -164,11 +164,11 @@ extern "C" __global__ void ui_many_series_one_param_time_major_f32(
     float scalar,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x;               // one series per block
+    const int s = blockIdx.x;               
     if (s >= cols || rows <= 0 || period <= 0) return;
-    if (threadIdx.x != 0) return;            // single worker per block
+    if (threadIdx.x != 0) return;            
 
-    // dynamic shared memory layout compatible with wrapper
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
     const int p = period;
@@ -236,17 +236,17 @@ extern "C" __global__ void ui_many_series_one_param_time_major_f32(
     }
 }
 
-// NEW: one price series × many (period, scalar) parameters.
-// Not used by the current Rust wrapper yet, but compiled and available.
+
+
 extern "C" __global__ void ui_one_series_many_params_f32(
     const float* __restrict__ prices,
     int series_len,
-    const int*  __restrict__ periods,   // [n_params]
-    const float* __restrict__ scalars,  // [n_params]
+    const int*  __restrict__ periods,   
+    const float* __restrict__ scalars,  
     int n_params,
     int first_valid,
-    int max_period,                     // host-provided max(periods)
-    float* __restrict__ out)            // [n_params][series_len]
+    int max_period,                     
+    float* __restrict__ out)            
 {
     const int lane = threadIdx.x & (WARP_SIZE - 1);
     const int warp = threadIdx.x / WARP_SIZE;
@@ -254,9 +254,9 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     int param_id = blockIdx.x * warps_per_block + warp;
     if (param_id >= n_params) return;
 
-    // Shared memory layout per block (compat with 8B alignment from host isn't required here):
-    // [deq_idx:int warps*maxP][D region: warps*maxP*sizeof(double) bytes][valid:uchar warps*maxP]
-    // We split each warp's D region into two FP32 arrays: deq_val[p] and sq_ring[p].
+    
+    
+    
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
 
@@ -269,7 +269,7 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     float* sq_ring_base = reinterpret_cast<float*>(base + off + stride_i * sizeof(float));
     unsigned char* valid_base = reinterpret_cast<unsigned char*>(base + off + stride_i * sizeof(double));
 
-    // Pointers for this warp (parameter)
+    
     int*   deq_idx = deq_idx_base + warp * max_period;
     float* deq_val = deq_val_base + warp * max_period;
     float* sq_ring = sq_ring_base + warp * max_period;
@@ -280,14 +280,14 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     const int fv = first_valid < 0 ? 0 : first_valid;
     const int warm_end = fv + (2 * p - 2);
 
-    // Parallel init within warp
+    
     for (int k = lane; k < p; k += WARP_SIZE) { sq_ring[k] = 0.0f; valid_ring[k] = 0u; }
-    // Warmup NaNs for this param
+    
     float* out_row = out + (size_t)param_id * (size_t)series_len;
     for (int i = lane; i < series_len && i < warm_end; i += WARP_SIZE) { out_row[i] = CUDART_NAN_F; }
     __syncwarp();
 
-    // Lane 0 runs the sequential scan for this parameter
+    
     if (lane == 0) {
         int head = 0, tail = 0, dsize = 0;
         int ring_idx = 0;

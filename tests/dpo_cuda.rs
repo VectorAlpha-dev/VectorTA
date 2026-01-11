@@ -1,16 +1,16 @@
-// Integration tests for CUDA DPO kernels
 
-use my_project::indicators::dpo::{
+
+use vector_ta::indicators::dpo::{
     dpo_batch_with_kernel, dpo_with_kernel, DpoBatchRange, DpoBuilder, DpoInput, DpoParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::dpo_wrapper::CudaDpo;
+use vector_ta::cuda::oscillators::dpo_wrapper::CudaDpo;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -67,7 +67,7 @@ fn dpo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // FP32 kernel vs FP64 CPU
+    let tol = 7e-4; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -97,8 +97,8 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 12usize; // series count
-    let rows = 8192usize; // series length
+    let cols = 12usize; 
+    let rows = 8192usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 7)..rows {
@@ -109,7 +109,7 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 14usize;
 
-    // CPU baseline per series (row-major flatten)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -153,9 +153,9 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    // Slightly relaxed tolerance: device path now performs FP32-only math
-    // to avoid slow FP64 ops on consumer GPUs. This can increase error a bit
-    // on rolling-difference of large prefixes in time-major layout.
+    
+    
+    
     let tol = 1.1e-3;
     for idx in 0..host.len() {
         let c = cpu_tm[idx];

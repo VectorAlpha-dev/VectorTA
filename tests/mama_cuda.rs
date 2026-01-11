@@ -1,16 +1,16 @@
-// Integration tests for CUDA MAMA kernels
 
-use my_project::indicators::moving_averages::mama::{
+
+use vector_ta::indicators::moving_averages::mama::{
     mama_batch_with_kernel, MamaBatchRange, MamaBuilder,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::{CudaMama, DeviceMamaPair};
+use vector_ta::cuda::moving_averages::{CudaMama, DeviceMamaPair};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -76,8 +76,8 @@ fn mama_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         .copy_to(&mut gpu_f_host)
         .expect("copy fama results to host");
 
-    // Slightly looser tolerance for many-series path to account for cumulative
-    // GPU vs CPU rounding at the warm boundary while keeping strict accuracy.
+    
+    
     let tol = 4e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let cpu_m = cpu.mama_values[idx];

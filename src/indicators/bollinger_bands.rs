@@ -255,7 +255,7 @@ pub enum BollingerBandsError {
     InvalidRange { start: usize, end: usize, step: usize },
     #[error("bollinger_bands: invalid range (f64): start={start}, end={end}, step={step}")]
     InvalidRangeF64 { start: f64, end: f64, step: f64 },
-    // Legacy variant retained for compatibility; not used going forward.
+    
     #[error(
         "bollinger_bands: Kernel must be a batch variant for batch operations. Got: {kernel:?}"
     )]
@@ -281,10 +281,10 @@ fn bb_prepare<'a>(
         usize,     // period
         f64,       // devup
         f64,       // devdn
-        &'a str,   // matype
-        usize,     // devtype
-        usize,     // first valid index
-        Kernel,    // final kernel
+        &'a str,   
+        usize,     
+        usize,     
+        Kernel,    
     ),
     BollingerBandsError,
 > {
@@ -296,7 +296,7 @@ fn bb_prepare<'a>(
     let period = input.get_period();
     let devup = input.get_devup();
     let devdn = input.get_devdn();
-    // Hot-path: borrow MA type instead of cloning/allocating a new `String` per call.
+    
     let matype = input.params.matype.as_deref().unwrap_or("sma");
     let devtype = input.get_devtype();
 
@@ -364,7 +364,7 @@ pub fn bollinger_bands_compute_into(
     out_m: &mut [f64],
     out_l: &mut [f64],
 ) -> Result<(), BollingerBandsError> {
-    // Use classic kernel for SMA
+    
     if matype == "sma" || matype == "SMA" {
         unsafe {
             bb_row_scalar_classic_sma(
@@ -374,7 +374,7 @@ pub fn bollinger_bands_compute_into(
         return Ok(());
     }
 
-    // Use SIMD row kernels when requested and available; otherwise, fall back to scalar.
+    
     match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => unsafe {
@@ -391,7 +391,7 @@ pub fn bollinger_bands_compute_into(
             Ok(())
         },
         _ => {
-            // Precompute middle and deviation once; jam the blend in a tight scalar loop.
+            
             let middle = ma(matype, MaData::Slice(data), period)
                 .map_err(|e| BollingerBandsError::UnderlyingFunctionFailed(e.to_string()))?;
             let dev_values = deviation(&DevInput::from_slice(
@@ -478,7 +478,7 @@ pub fn bollinger_bands_into(
         });
     }
 
-    // Prefill warmup prefixes with the crate's quiet-NaN pattern
+    
     let warm = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let w = warm.min(data.len());
@@ -492,7 +492,7 @@ pub fn bollinger_bands_into(
         *v = qnan;
     }
 
-    // Compute remaining values into provided buffers
+    
     bollinger_bands_compute_into(
         data,
         period,
@@ -569,8 +569,8 @@ pub unsafe fn bollinger_bands_scalar(
     })
 }
 
-// NOTE: AVX512 implementation currently delegates to scalar as a safe fallback.
-// Future optimization: implement actual AVX512 SIMD operations.
+
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn bollinger_bands_avx512(
     data: &[f64],
@@ -593,7 +593,7 @@ pub unsafe fn bollinger_bands_avx512(
     }
 }
 
-// Stub implementation - delegates to scalar
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn bollinger_bands_avx512_short(
     data: &[f64],
@@ -610,7 +610,7 @@ pub unsafe fn bollinger_bands_avx512_short(
     )
 }
 
-// Stub implementation - delegates to scalar
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn bollinger_bands_avx512_long(
     data: &[f64],
@@ -627,8 +627,8 @@ pub unsafe fn bollinger_bands_avx512_long(
     )
 }
 
-// NOTE: AVX2 implementation currently delegates to scalar as a safe fallback.
-// Future optimization: implement actual AVX2 SIMD operations.
+
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub unsafe fn bollinger_bands_avx2(
     data: &[f64],
@@ -668,8 +668,8 @@ unsafe fn bb_row_scalar_classic_sma(
         return;
     }
 
-    // If deviation is not standard deviation (devtype != 0), use the generic path
-    // to preserve correctness for mean_ad / median_ad.
+    
+    
     if devtype != 0 {
         let ma_data = MaData::Slice(data);
         let dev_input = DevInput::from_slice(
@@ -697,11 +697,11 @@ unsafe fn bb_row_scalar_classic_sma(
         return;
     }
 
-    // ----------- Fast rolling SMA + stddev (devtype == 0) -----------
+    
     let inv_n = 1.0 / (period as f64);
-    let use_sample = false; // population variance per repo convention
+    let use_sample = false; 
 
-    // Compute initial window sums using raw pointers to avoid bounds checks.
+    
     let mut sum = 0.0f64;
     let mut sum_sq = 0.0f64;
 
@@ -713,9 +713,9 @@ unsafe fn bb_row_scalar_classic_sma(
         p = unsafe { p.add(1) };
     }
 
-    // Emit first valid point at index `warm`.
+    
     let mean = sum * inv_n;
-    // Population variance: Var = E[x^2] - (E[x])^2
+    
     let var0 = if !use_sample {
         (sum_sq * inv_n) - (mean * mean)
     } else if period > 1 {
@@ -731,7 +731,7 @@ unsafe fn bb_row_scalar_classic_sma(
         *out_l.get_unchecked_mut(warm) = mean - devdn * std0;
     }
 
-    // Rolling update with two moving pointers for old/new elements.
+    
     let mut i = warm + 1;
     let mut p_new = unsafe { data.as_ptr().add(i) };
     let mut p_old = unsafe { data.as_ptr().add(i - period) };
@@ -739,7 +739,7 @@ unsafe fn bb_row_scalar_classic_sma(
         let new = unsafe { *p_new };
         let old = unsafe { *p_old };
 
-        // Update sum and sum of squares
+        
         sum += new - old;
         sum_sq = (sum_sq - old * old) + new * new;
 
@@ -838,7 +838,7 @@ unsafe fn bb_row_avx2(
         return;
     }
 
-    // For the SMA+stddev case, the scalar rolling kernel is optimal.
+    
     if matype.eq_ignore_ascii_case("sma") && devtype == 0 {
         bb_row_scalar_classic_sma(
             data, period, devtype, devup, devdn, first, out_u, out_m, out_l,
@@ -846,7 +846,7 @@ unsafe fn bb_row_avx2(
         return;
     }
 
-    // Precompute middle & deviation with flexible engines.
+    
     let ma_data = MaData::Slice(data);
     let dev_input = DevInput::from_slice(
         data,
@@ -864,20 +864,20 @@ unsafe fn bb_row_avx2(
     let mut i = warm;
     let step = 4usize;
 
-    // Vectorized loop
+    
     while i + step <= n {
         let m = unsafe { _mm256_loadu_pd(middle.as_ptr().add(i)) };
         let dv = unsafe { _mm256_loadu_pd(dev_values.values.as_ptr().add(i)) };
 
-        // upper = m + devup * dv
-        // lower = m - devdn * dv
+        
+        
         #[cfg(target_feature = "fma")]
         let up = unsafe { _mm256_fmadd_pd(du, dv, m) };
         #[cfg(not(target_feature = "fma"))]
         let up = unsafe { _mm256_add_pd(m, _mm256_mul_pd(du, dv)) };
 
         #[cfg(target_feature = "fma")]
-        let lo = unsafe { _mm256_fnmadd_pd(dd, dv, m) }; // m - dd*dv
+        let lo = unsafe { _mm256_fnmadd_pd(dd, dv, m) }; 
         #[cfg(not(target_feature = "fma"))]
         let lo = unsafe { _mm256_sub_pd(m, _mm256_mul_pd(dd, dv)) };
 
@@ -890,7 +890,7 @@ unsafe fn bb_row_avx2(
         i += step;
     }
 
-    // Scalar tail
+    
     while i < n {
         let m = unsafe { *middle.get_unchecked(i) };
         let d = unsafe { *dev_values.values.get_unchecked(i) };
@@ -924,7 +924,7 @@ unsafe fn bb_row_avx512(
         return;
     }
 
-    // For the SMA+stddev case, the scalar rolling kernel is optimal.
+    
     if matype.eq_ignore_ascii_case("sma") && devtype == 0 {
         bb_row_scalar_classic_sma(
             data, period, devtype, devup, devdn, first, out_u, out_m, out_l,
@@ -932,7 +932,7 @@ unsafe fn bb_row_avx512(
         return;
     }
 
-    // Precompute middle & deviation with flexible engines.
+    
     let ma_data = MaData::Slice(data);
     let dev_input = DevInput::from_slice(
         data,
@@ -954,15 +954,15 @@ unsafe fn bb_row_avx512(
         let m = unsafe { _mm512_loadu_pd(middle.as_ptr().add(i)) };
         let dv = unsafe { _mm512_loadu_pd(dev_values.values.as_ptr().add(i)) };
 
-        // upper = m + devup * dv
-        // lower = m - devdn * dv
+        
+        
         #[cfg(target_feature = "fma")]
         let up = unsafe { _mm512_fmadd_pd(du, dv, m) };
         #[cfg(not(target_feature = "fma"))]
         let up = unsafe { _mm512_add_pd(m, _mm512_mul_pd(du, dv)) };
 
         #[cfg(target_feature = "fma")]
-        let lo = unsafe { _mm512_fnmadd_pd(dd, dv, m) }; // m - dd*dv
+        let lo = unsafe { _mm512_fnmadd_pd(dd, dv, m) }; 
         #[cfg(not(target_feature = "fma"))]
         let lo = unsafe { _mm512_sub_pd(m, _mm512_mul_pd(dd, dv)) };
 
@@ -975,7 +975,7 @@ unsafe fn bb_row_avx512(
         i += step;
     }
 
-    // Scalar tail
+    
     while i < n {
         let m = unsafe { *middle.get_unchecked(i) };
         let d = unsafe { *dev_values.values.get_unchecked(i) };
@@ -990,30 +990,30 @@ unsafe fn bb_row_avx512(
 
 #[derive(Debug, Clone)]
 pub struct BollingerBandsStream {
-    // public configuration (unchanged API)
+    
     pub period: usize,
     pub devup: f64,
     pub devdn: f64,
     pub matype: String,
     pub devtype: usize,
 
-    // --- internal state for O(1) fast paths ---
-    buf: Vec<f64>, // ring buffer capacity == period
-    idx: usize,    // write index (oldest element position)
-    len: usize,    // number of valid samples in buf (<= period)
-    sum: f64,      // Σ x
-    sum_sq: f64,   // Σ x^2
-    inv_n: f64,    // 1.0 / period (cached)
+    
+    buf: Vec<f64>, 
+    idx: usize,    
+    len: usize,    
+    sum: f64,      
+    sum_sq: f64,   
+    inv_n: f64,    
 
-    // EMA state (only used when matype == "ema")
-    alpha: f64, // 2.0 / (period + 1.0)
+    
+    alpha: f64, 
     ema: f64,
     ema_seeded: bool,
 
-    // scratch for generic fallback path (re-used, no allocs per tick)
+    
     scratch: Vec<f64>,
 
-    // dispatch
+    
     fast_path: FastPath,
 }
 
@@ -1048,7 +1048,7 @@ impl BollingerBandsStream {
         };
 
         let inv_n = 1.0 / (period as f64);
-        let alpha = 2.0 / ((period as f64) + 1.0); // standard EMA smoothing
+        let alpha = 2.0 / ((period as f64) + 1.0); 
         Ok(Self {
             period,
             devup,
@@ -1077,7 +1077,7 @@ impl BollingerBandsStream {
         self.sum_sq = 0.0;
         self.ema = 0.0;
         self.ema_seeded = false;
-        // buffer values may remain; len=0 ensures they are ignored until refilled
+        
     }
 
     /// Build a contiguous (oldest..newest) view of the current window into `self.scratch`.
@@ -1105,7 +1105,7 @@ impl BollingerBandsStream {
         // Var = E[x^2] - (E[x])^2, with E[.] over the window, population variance (no Bessel's)
         let mean = self.sum * self.inv_n;
         let var = (self.sum_sq * self.inv_n) - mean * mean;
-        // Numerically safe clamp against tiny negative due to FP error:
+        
         let v = if var > 0.0 { var } else { 0.0 };
         v.sqrt()
     }
@@ -1122,10 +1122,10 @@ impl BollingerBandsStream {
             }
             self.len += 1;
             self.sum += x;
-            self.sum_sq = x.mul_add(x, self.sum_sq); // sum_sq += x*x
+            self.sum_sq = x.mul_add(x, self.sum_sq); 
             (0.0, false)
         } else {
-            // overwrite oldest (at idx)
+            
             let old = self.buf[self.idx];
             self.buf[self.idx] = x;
             self.idx += 1;
@@ -1133,9 +1133,9 @@ impl BollingerBandsStream {
                 self.idx = 0;
             }
 
-            // O(1) rolling updates
+            
             self.sum += x - old;
-            // sum_sq = sum_sq - old^2 + x^2  (use FMA where possible)
+            
             let tmp = self.sum_sq - old * old;
             self.sum_sq = x.mul_add(x, tmp);
             (old, true)
@@ -1145,24 +1145,24 @@ impl BollingerBandsStream {
     /// O(1) stream update. Returns (upper, middle, lower) once the window is full.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
-        // Treat non-finite as a break in the series; this mirrors batch behavior
-        // where computation starts at the first finite element.
+        
+        
         if !value.is_finite() {
             self.reset();
             return None;
         }
 
-        // Insert and update ring/sums
+        
         let _ = self.push(value);
 
-        // Warm‑up: wait until we have a full window
+        
         if self.len < self.period {
             return None;
         }
 
         match self.fast_path {
             FastPath::SmaStddev => {
-                // middle = SMA, deviation = window stddev (population)
+                
                 let mean = self.sum * self.inv_n;
                 let sd = self.stddev_current();
                 let up = self.devup.mul_add(sd, mean);
@@ -1170,13 +1170,13 @@ impl BollingerBandsStream {
                 Some((up, mean, lo))
             }
             FastPath::EmaStddev => {
-                // deviation = window stddev (same as batch); middle = EMA seeded with first SMA
+                
                 if !self.ema_seeded {
-                    self.ema = self.sum * self.inv_n; // seed EMA with SMA of first window
+                    self.ema = self.sum * self.inv_n; 
                     self.ema_seeded = true;
                 } else {
-                    // ema = α*new + (1-α)*ema
-                    // (value is the newest sample that just entered the window)
+                    
+                    
                     self.ema = self.alpha.mul_add(value, (1.0 - self.alpha) * self.ema);
                 }
                 let sd = self.stddev_current();
@@ -1185,8 +1185,8 @@ impl BollingerBandsStream {
                 Some((up, self.ema, lo))
             }
             FastPath::Generic => {
-                // Fall back to generic engines for non-stddev deviations or non-SMA/EMA MAs.
-                // Still avoids O(period) shifting thanks to the ring; only one copy into scratch.
+                
+                
                 let matype = self.matype.clone();
                 let period = self.period;
                 let devtype = self.devtype;
@@ -1194,13 +1194,13 @@ impl BollingerBandsStream {
                 let devdn = self.devdn;
                 let win = self.window_contiguous();
 
-                // middle
+                
                 let mid = ma(&matype, MaData::Slice(win), period)
                     .ok()
                     .and_then(|v| v.last().copied())
                     .unwrap_or(f64::NAN);
 
-                // deviation (devtype may be mean_ad or median_ad)
+                
                 let dev = deviation(&DevInput::from_slice(
                     win,
                     DevParams {
@@ -1517,27 +1517,27 @@ fn bollinger_bands_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Checked arithmetic for rows * cols; then allocate uninitialized matrices
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| {
         BollingerBandsError::InvalidInput("rows*cols overflow".into())
     })?;
-    // Allocate uninitialized matrices
+    
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row using single first
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut upper_mu, cols, &warm);
     init_matrix_prefixes(&mut middle_mu, cols, &warm);
     init_matrix_prefixes(&mut lower_mu, cols, &warm);
 
-    // Convert to mutable slices for computation
+    
     let mut upper_guard = ManuallyDrop::new(upper_mu);
     let mut middle_guard = ManuallyDrop::new(middle_mu);
     let mut lower_guard = ManuallyDrop::new(lower_mu);
@@ -1559,7 +1559,7 @@ fn bollinger_bands_batch_inner(
         let mt = combos[row].matype.as_deref().unwrap_or("sma");
         let dt = combos[row].devtype.unwrap();
 
-        // Fast path: for SMA + stddev, the scalar rolling kernel is consistently best.
+        
         if mt.eq_ignore_ascii_case("sma") && dt == 0 {
             bb_row_scalar_classic_sma(data, p, dt, du, dd, first, out_u, out_m, out_l);
             return;
@@ -1608,7 +1608,7 @@ fn bollinger_bands_batch_inner(
         }
     }
 
-    // Reclaim as Vec<f64>
+    
     let upper_vec = unsafe {
         Vec::from_raw_parts(
             upper_guard.as_mut_ptr() as *mut f64,
@@ -1702,7 +1702,7 @@ pub fn bollinger_bands_batch_inner_into(
         let mt = combos[row].matype.as_deref().unwrap_or("sma");
         let dt = combos[row].devtype.unwrap();
 
-        // Fill NaN prefix
+        
         if first + p > 0 {
             let nan_end = (first + p - 1).min(data.len());
             out_u[..nan_end].fill(f64::NAN);
@@ -1710,7 +1710,7 @@ pub fn bollinger_bands_batch_inner_into(
             out_l[..nan_end].fill(f64::NAN);
         }
 
-        // Compute into buffers
+        
         bollinger_bands_compute_into(data, p, du, dd, mt, dt, first, kern, out_u, out_m, out_l)
     };
 
@@ -1781,31 +1781,31 @@ mod tests {
 
     #[test]
     fn test_bollinger_bands_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Prepare deterministic input series (length 256)
+        
         let mut data = Vec::with_capacity(256);
         for i in 0..256u32 {
             let x = i as f64;
-            // Mildly varying pattern; no NaNs
+            
             data.push((x * 0.25).sin() * 1000.0 + ((i % 7) as f64));
         }
         let input = BollingerBandsInput::from_slice(&data, BollingerBandsParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let base = bollinger_bands(&input)?;
 
-        // Preallocate output buffers
+        
         let n = data.len();
         let mut up = vec![0.0; n];
         let mut mid = vec![0.0; n];
         let mut low = vec![0.0; n];
 
-        // New into API
+        
         #[cfg(not(feature = "wasm"))]
         {
             bollinger_bands_into(&input, &mut up, &mut mid, &mut low)?;
         }
 
-        // Helper: treat NaN == NaN; prefer exact equality for finite
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2113,7 +2113,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_bb_no_poison(
         test_name: &str,
@@ -2124,7 +2124,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
+        
         let params_list = vec![
             BollingerBandsParams::default(),
             BollingerBandsParams {
@@ -2147,21 +2147,21 @@ mod tests {
             let input = BollingerBandsInput::from_candles(&candles, "close", params.clone());
             let output = bollinger_bands_with_kernel(&input, kernel)?;
 
-            // Check all three bands for poison patterns
+            
             for (band_name, band_data) in [
                 ("upper", &output.upper_band),
                 ("middle", &output.middle_band),
                 ("lower", &output.lower_band),
             ] {
                 for (i, &val) in band_data.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
+                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
@@ -2174,7 +2174,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
@@ -2187,7 +2187,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in {} band with params: period={}, devup={}, devdn={}, matype={}, devtype={}",
@@ -2206,7 +2206,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_bb_no_poison(
         _test_name: &str,
@@ -2224,11 +2224,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Note: This test currently only validates with SMA and standard deviation (devtype=0).
-        // Future enhancement could test other MA types (EMA, WMA, etc.) and deviation types
-        // (mean_ad, median_ad), each with their own specific invariants.
+        
+        
+        
 
-        // Generate test strategy: period, data, devup, devdn
+        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2236,53 +2236,53 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                0.0f64..5.0f64, // devup multiplier
-                0.0f64..5.0f64, // devdn multiplier
+                0.0f64..5.0f64, 
+                0.0f64..5.0f64, 
             )
         });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, devup, devdn)| {
-                // Create input with SMA as default (most common)
+                
                 let params = BollingerBandsParams {
                     period: Some(period),
                     devup: Some(devup),
                     devdn: Some(devdn),
                     matype: Some("sma".to_string()),
-                    devtype: Some(0), // Standard deviation
+                    devtype: Some(0), 
                 };
                 let input = BollingerBandsInput::from_slice(&data, params);
 
-                // Compute with specified kernel
+                
                 let result = bollinger_bands_with_kernel(&input, kernel).unwrap();
                 let upper = &result.upper_band;
                 let middle = &result.middle_band;
                 let lower = &result.lower_band;
 
-                // Also compute with scalar kernel for reference
+                
                 let ref_result = bollinger_bands_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_upper = &ref_result.upper_band;
                 let ref_middle = &ref_result.middle_band;
                 let ref_lower = &ref_result.lower_band;
 
-                // Find first valid index
+                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first_valid + period - 1;
 
-                // Property 1: Warmup period should be NaN
+                
                 for i in 0..warmup_end.min(data.len()) {
                     prop_assert!(upper[i].is_nan(), "Upper band should be NaN at idx {}", i);
                     prop_assert!(middle[i].is_nan(), "Middle band should be NaN at idx {}", i);
                     prop_assert!(lower[i].is_nan(), "Lower band should be NaN at idx {}", i);
                 }
 
-                // Test properties for valid output range
+                
                 for i in warmup_end..data.len() {
                     let u = upper[i];
                     let m = middle[i];
                     let l = lower[i];
 
-                    // Property 2: Band ordering (when bands are finite and devup/devdn >= 0)
+                    
                     if u.is_finite()
                         && m.is_finite()
                         && l.is_finite()
@@ -2305,7 +2305,7 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Middle band should be within window range
+                    
                     if m.is_finite() {
                         let window_start = i.saturating_sub(period - 1);
                         let window = &data[window_start..=i];
@@ -2319,10 +2319,10 @@ mod tests {
                                 .iter()
                                 .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-                            // For period=1, use larger tolerance due to floating-point precision
+                            
                             let tolerance = if period == 1 { 1e-6 } else { 1e-9 };
 
-                            // Middle band (moving average) should be within data range
+                            
                             prop_assert!(
                                 m >= window_min - tolerance && m <= window_max + tolerance,
                                 "Middle band {} not in window range [{}, {}] at idx {}",
@@ -2334,12 +2334,12 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Cross-kernel consistency
+                    
                     let ru = ref_upper[i];
                     let rm = ref_middle[i];
                     let rl = ref_lower[i];
 
-                    // Check upper band consistency
+                    
                     if u.is_finite() && ru.is_finite() {
                         let ulp_diff = u.to_bits().abs_diff(ru.to_bits());
                         prop_assert!(
@@ -2354,7 +2354,7 @@ mod tests {
                         prop_assert_eq!(u.is_nan(), ru.is_nan(), "Upper NaN mismatch at idx {}", i);
                     }
 
-                    // Check middle band consistency
+                    
                     if m.is_finite() && rm.is_finite() {
                         let ulp_diff = m.to_bits().abs_diff(rm.to_bits());
                         prop_assert!(
@@ -2374,7 +2374,7 @@ mod tests {
                         );
                     }
 
-                    // Check lower band consistency
+                    
                     if l.is_finite() && rl.is_finite() {
                         let ulp_diff = l.to_bits().abs_diff(rl.to_bits());
                         prop_assert!(
@@ -2390,12 +2390,12 @@ mod tests {
                     }
                 }
 
-                // Property 5: Period=2 edge case (smallest valid period for stddev)
+                
                 if period == 2 && warmup_end < data.len() {
-                    // With period=2, we can validate basic properties
+                    
                     for i in warmup_end..data.len() {
                         if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
-                            // Bands should still follow ordering
+                            
                             prop_assert!(
                                 upper[i] >= middle[i] - 1e-9,
                                 "Period=2: upper band should be >= middle at idx {}",
@@ -2410,13 +2410,13 @@ mod tests {
                     }
                 }
 
-                // Property 6: Constant data property
+                
                 let all_same = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 if all_same && data.len() > 0 && data[0].is_finite() {
                     let const_val = data[0];
                     for i in warmup_end..data.len() {
                         if upper[i].is_finite() {
-                            // With constant data, std dev = 0, so all bands equal the constant
+                            
                             prop_assert!(
                                 (upper[i] - const_val).abs() <= 1e-9,
                                 "Constant data: upper band should be {} at idx {}",
@@ -2439,14 +2439,14 @@ mod tests {
                     }
                 }
 
-                // Property 7: Band width relationship
+                
                 if devup > 0.0 && devdn > 0.0 && warmup_end < data.len() {
                     for i in warmup_end..data.len() {
                         if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
                             let upper_width = upper[i] - middle[i];
                             let lower_width = middle[i] - lower[i];
 
-                            // Band widths should be proportional to deviation multipliers
+                            
                             if upper_width > 1e-12 && lower_width > 1e-12 {
                                 let ratio = (upper_width / lower_width) / (devup / devdn);
                                 prop_assert!(
@@ -2461,7 +2461,7 @@ mod tests {
                     }
                 }
 
-                // Property 8: Symmetry with equal multipliers
+                
                 if (devup - devdn).abs() < 1e-12 && devup > 0.0 {
                     for i in warmup_end..data.len() {
                         if upper[i].is_finite() && middle[i].is_finite() && lower[i].is_finite() {
@@ -2478,7 +2478,7 @@ mod tests {
                     }
                 }
 
-                // Property 9: Finite output for finite input
+                
                 let all_finite = data.iter().all(|x| x.is_finite());
                 if all_finite {
                     for i in warmup_end..data.len() {
@@ -2544,7 +2544,7 @@ mod tests {
         check_bb_no_poison
     );
 
-    // Generate property tests only when proptest feature is enabled
+    
     #[cfg(feature = "proptest")]
     generate_all_bb_tests!(check_bollinger_bands_property);
 
@@ -2553,7 +2553,7 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let sweep = BollingerBandsBatchRange::default();
 
-        // Test that a non-batch kernel returns the correct error
+        
         let result = bollinger_bands_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(
             result,
@@ -2590,7 +2590,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2598,24 +2598,24 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = BollingerBandsBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 30, 10) // Tests periods: 10, 20, 30
-            .devup_range(1.0, 3.0, 1.0) // Tests devup: 1.0, 2.0, 3.0
-            .devdn_range(1.0, 2.0, 0.5) // Tests devdn: 1.0, 1.5, 2.0
+            .period_range(10, 30, 10) 
+            .devup_range(1.0, 3.0, 1.0) 
+            .devdn_range(1.0, 2.0, 0.5) 
             .matype_static("sma")
             .devtype_static(0)
             .apply_candles(&c, "close")?;
 
-        // Check every value in all three batch matrices for poison patterns
+        
         for (band_name, band_data) in [
             ("upper", &output.upper),
             ("middle", &output.middle),
             ("lower", &output.lower),
         ] {
             for (idx, &val) in band_data.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2625,7 +2625,7 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
@@ -2636,7 +2636,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
@@ -2647,7 +2647,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} band. Params: period={}, devup={}, devdn={}",
@@ -2663,7 +2663,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2715,9 +2715,9 @@ use wasm_bindgen::prelude::*;
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub struct BollingerJsResult {
-    values: Vec<f64>, // [upper..., middle..., lower...]
-    rows: usize,      // 3
-    cols: usize,      // data length
+    values: Vec<f64>, 
+    rows: usize,      
+    cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2853,14 +2853,14 @@ pub fn bollinger_bands_batch_py<'py>(
         devtype: devtype_range,
     };
 
-    // 1. Expand grid once to know rows*cols
+    
     let combos = expand_grid(&sweep)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
+    
+    
     let upper_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let middle_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let lower_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
@@ -2869,14 +2869,14 @@ pub fn bollinger_bands_batch_py<'py>(
     let slice_middle = unsafe { middle_arr.as_slice_mut()? };
     let slice_lower = unsafe { lower_arr.as_slice_mut()? };
 
-    // Use kernel validation for safety
+    
     let kern = validate_kernel(kernel, true)?;
 
-    // 3. Heavy work without the GIL
+    
     let combos_clone = py
         .allow_threads(
             || -> Result<Vec<BollingerBandsParams>, BollingerBandsError> {
-                // Resolve Kernel::Auto to a specific kernel
+                
                 let kernel = match kern {
                     Kernel::Auto => detect_best_batch_kernel(),
                     k => k,
@@ -2888,12 +2888,12 @@ pub fn bollinger_bands_batch_py<'py>(
                     _ => unreachable!(),
                 };
 
-                // Use the new function that writes directly to output buffers
+                
                 bollinger_bands_batch_inner_into(
                     slice_in,
                     &sweep,
                     simd,
-                    true, // parallel
+                    true, 
                     slice_upper,
                     slice_middle,
                     slice_lower,
@@ -2902,7 +2902,7 @@ pub fn bollinger_bands_batch_py<'py>(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 4. Build dict with the GIL
+    
     let dict = PyDict::new(py);
     dict.set_item("upper", upper_arr.reshape((rows, cols))?)?;
     dict.set_item("middle", middle_arr.reshape((rows, cols))?)?;
@@ -3011,32 +3011,32 @@ pub fn bollinger_bands_batch_js(
         devtype: (devtype, devtype, 0),
     };
 
-    // Expand grid and allocate output vectors
+    
     let combos = expand_grid(&sweep)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
 
-    // Find first valid index
+    
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-    // Allocate uninitialized matrices
+    
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut upper_mu, cols, &warm);
     init_matrix_prefixes(&mut middle_mu, cols, &warm);
     init_matrix_prefixes(&mut lower_mu, cols, &warm);
 
-    // Convert to mutable slices
+    
     let mut upper_guard = ManuallyDrop::new(upper_mu);
     let mut middle_guard = ManuallyDrop::new(middle_mu);
     let mut lower_guard = ManuallyDrop::new(lower_mu);
@@ -3051,7 +3051,7 @@ pub fn bollinger_bands_batch_js(
         core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len())
     };
 
-    // Process each row
+    
     for (i, combo) in combos.iter().enumerate() {
         let row_start = i * cols;
         let out_u = &mut upper_vec[row_start..row_start + cols];
@@ -3064,7 +3064,7 @@ pub fn bollinger_bands_batch_js(
         let mt = combo.matype.as_ref().unwrap();
         let dt = combo.devtype.unwrap();
 
-        // Fill NaN prefix if needed
+        
         if first + p > 0 {
             let nan_end = (first + p - 1).min(cols);
             out_u[..nan_end].fill(f64::NAN);
@@ -3072,7 +3072,7 @@ pub fn bollinger_bands_batch_js(
             out_l[..nan_end].fill(f64::NAN);
         }
 
-        // Compute into buffers
+        
         bollinger_bands_compute_into(
             data,
             p,
@@ -3089,7 +3089,7 @@ pub fn bollinger_bands_batch_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
 
-    // Reclaim as Vec<f64>
+    
     let upper_vec = unsafe {
         Vec::from_raw_parts(
             upper_guard.as_mut_ptr() as *mut f64,
@@ -3112,7 +3112,7 @@ pub fn bollinger_bands_batch_js(
         )
     };
 
-    // Flatten into single output vector
+    
     let mut result = upper_vec;
     result.extend(middle_vec);
     result.extend(lower_vec);
@@ -3156,7 +3156,7 @@ pub fn bollinger_bands_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct BollingerBandsBatchConfig {
@@ -3181,7 +3181,7 @@ pub struct BollingerBandsBatchJsOutput {
 #[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = bollinger_bands_batch)]
 pub fn bollinger_bands_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    // 1. Deserialize the configuration object from JavaScript
+    
     let config: BollingerBandsBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -3193,11 +3193,11 @@ pub fn bollinger_bands_batch_unified_js(data: &[f64], config: JsValue) -> Result
         devtype: (config.devtype, config.devtype, 0),
     };
 
-    // 2. Run the existing core logic
+    
     let output = bollinger_bands_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
+    
     let js_output = BollingerBandsBatchJsOutput {
         upper: output.upper,
         middle: output.middle,
@@ -3207,7 +3207,7 @@ pub fn bollinger_bands_batch_unified_js(data: &[f64], config: JsValue) -> Result
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
+    
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
@@ -3263,7 +3263,7 @@ pub fn bollinger_bands_into(
             },
         );
 
-        // Protect against aliasing input/output
+        
         if in_ptr == out_u as *const f64
             || in_ptr == out_m as *const f64
             || in_ptr == out_l as *const f64
@@ -3379,7 +3379,7 @@ pub fn bb_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaBollingerBands};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3391,9 +3391,9 @@ use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::{pyfunction, PyResult, Python};
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyValueError already imported above under `#[cfg(feature = "python")]`.
 
-// Bollinger-specific CUDA device array wrapper with CAI v3 + DLPack v1.x
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct BollingerDeviceArrayF32Py {

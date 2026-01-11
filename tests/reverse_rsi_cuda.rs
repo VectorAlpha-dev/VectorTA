@@ -1,17 +1,17 @@
-// Integration tests for CUDA Reverse RSI kernels
 
-use my_project::indicators::reverse_rsi::{
+
+use vector_ta::indicators::reverse_rsi::{
     reverse_rsi_batch_with_kernel, reverse_rsi_with_kernel, ReverseRsiBatchRange, ReverseRsiInput,
     ReverseRsiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaReverseRsi;
+use vector_ta::cuda::oscillators::CudaReverseRsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -47,7 +47,7 @@ fn reverse_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
         rsi_level_range: (30.0, 70.0, 20.0),
     };
 
-    // Align CPU baseline to FP32 input used on GPU
+    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_cpu_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = reverse_rsi_batch_with_kernel(&price_cpu_f64, &sweep, Kernel::ScalarBatch)?;
@@ -63,7 +63,7 @@ fn reverse_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; // conservative due to FP32 accumulation
+    let tol = 7e-4; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -99,14 +99,14 @@ fn reverse_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let rsi_length = 14usize;
     let rsi_level = 55.0f64;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
         for t in 0..rows {
             p[t] = price_tm[t * cols + s];
         }
-        // Align CPU baseline to FP32 input used on GPU
+        
         let p_f32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
         let p_cpu_f64: Vec<f64> = p_f32.iter().map(|&v| v as f64).collect();
         let params = ReverseRsiParams {

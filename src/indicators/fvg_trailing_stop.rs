@@ -28,8 +28,8 @@
 //! - [ ] Row-specific batch: precompute FVG candidates and close prefix sums if/when needed.
 //! - [ ] Revisit SIMD only if structure changes make it beneficial.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -39,13 +39,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -55,13 +55,13 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// Standard library imports
-// std containers used throughout; streaming uses BinaryHeap/Reverse locally below
+
+
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-// ==================== DATA STRUCTURES ====================
+
 /// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct FvgTrailingStopOutput {
@@ -644,7 +644,7 @@ fn fvg_ts_prepare<'a>(
     let lookback = input.get_lookback();
     let smoothing_len = input.get_smoothing();
 
-    // Validate parameters with specific errors
+    
     if lookback == 0 {
         return Err(FvgTrailingStopError::InvalidLookback { lookback });
     }
@@ -654,7 +654,7 @@ fn fvg_ts_prepare<'a>(
         });
     }
 
-    // need at least 2 (FVG) + (smoothing_len - 1)
+    
     let need = 2 + smoothing_len.saturating_sub(1);
     if len - first < need {
         return Err(FvgTrailingStopError::NotEnoughValidData {
@@ -759,7 +759,7 @@ fn fvg_ts_compute_into(
     }
 }
 
-// ==================== MAIN ALGORITHM ====================
+
 #[inline]
 pub fn fvg_trailing_stop(
     input: &FvgTrailingStopInput,
@@ -859,7 +859,7 @@ pub fn fvg_trailing_stop_into_slices(
         chosen,
     );
 
-    // enforce warm NaNs like alma_into_slice
+    
     let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
     for dst in [upper, lower, upper_ts, lower_ts] {
         for v in &mut dst[..warm] {
@@ -869,7 +869,7 @@ pub fn fvg_trailing_stop_into_slices(
     Ok(())
 }
 
-// ==================== BATCH OPERATIONS ====================
+
 #[derive(Clone, Debug)]
 pub struct FvgTsBatchRange {
     pub lookback: (usize, usize, usize),
@@ -941,7 +941,7 @@ fn expand_axis_usize(
             }
         }
     } else {
-        // reversed bounds supported
+        
         let mut v = start;
         loop {
             if v < end {
@@ -1002,7 +1002,7 @@ pub fn fvg_ts_batch_inner_into(
     sweep: &FvgTsBatchRange,
     kern: Kernel,
     parallel: bool,
-    out: &mut [f64], // layout: for each combo, 4 consecutive rows: upper,lower,upper_ts,lower_ts
+    out: &mut [f64], 
 ) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
     if !matches!(
         kern,
@@ -1038,7 +1038,7 @@ pub fn fvg_ts_batch_inner_into(
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
 
-    // Validate parameter grid (no zero lookback/smoothing) and ensure enough data for max smoothing.
+    
     let mut max_sm = 0usize;
     for prm in &combos {
         let look = prm.unmitigated_fvg_lookback.unwrap_or(5);
@@ -1066,8 +1066,8 @@ pub fn fvg_ts_batch_inner_into(
         k => k,
     };
 
-    // --------- Row-shared precompute (independent of parameters) ---------
-    // 1) Precompute FVG candidates per bar (bull: high[i-2], bear: low[i-2])
+    
+    
     let mut bull_cand = vec![f64::NAN; len];
     let mut bear_cand = vec![f64::NAN; len];
     if len >= 3 {
@@ -1088,8 +1088,8 @@ pub fn fvg_ts_batch_inner_into(
         }
     }
 
-    // 2) Precompute prefix sums for close with NaNs treated as 0 and a NaN counter
-    //    This enables O(1) progressive SMA fallback while preserving NaN semantics.
+    
+    
     let mut pref_sum_close = vec![0.0f64; len + 1];
     let mut pref_nan_count = vec![0usize; len + 1];
     for i in 0..len {
@@ -1107,7 +1107,7 @@ pub fn fvg_ts_batch_inner_into(
         let (l_block, rest) = rest.split_at_mut(cols);
         let (uts_block, lts_block) = rest.split_at_mut(cols);
 
-        // Fast per-row compute using shared precomputes
+        
         let mut bull_buf = vec![0.0f64; look];
         let mut bear_buf = vec![0.0f64; look];
         let mut bull_len = 0usize;
@@ -1133,7 +1133,7 @@ pub fn fvg_ts_batch_inner_into(
         let mut ts_prev: Option<f64> = None;
 
         for i in 0..cols {
-            // Push candidates from shared streams
+            
             let bc = bull_cand[i];
             if !bc.is_nan() {
                 if bull_len < look {
@@ -1159,7 +1159,7 @@ pub fn fvg_ts_batch_inner_into(
                 }
             }
 
-            // Mitigation
+            
             let price = c[i];
             let mut new_bull_len = 0usize;
             let mut bull_acc = 0.0f64;
@@ -1202,7 +1202,7 @@ pub fn fvg_ts_batch_inner_into(
                 last_bear_non_na = Some(i);
             }
 
-            // Progressive SMA fallback via prefix sums (preserve NaN semantics)
+            
             let bull_bs = if bull_avg.is_nan() {
                 match last_bull_non_na {
                     Some(last) => ((i - last).max(1)).min(sm),
@@ -1254,7 +1254,7 @@ pub fn fvg_ts_batch_inner_into(
                 bear_sma
             };
 
-            // Ring update for smoothing
+            
             if bull_ring_count < sm {
                 let is_nan = x_bull.is_nan();
                 bull_ring_nan[bull_ring_count] = is_nan;
@@ -1324,7 +1324,7 @@ pub fn fvg_ts_batch_inner_into(
                 f64::NAN
             };
 
-            // OS/TS
+            
             let prev_os = os;
             let next_os = if !bear_disp.is_nan() && price > bear_disp {
                 Some(1)
@@ -1382,7 +1382,7 @@ pub fn fvg_ts_batch_inner_into(
                 }
             }
 
-            // Output
+            
             let show = ts.is_some() || ts_prev.is_some();
             let ts_nz = if ts.is_some() { ts } else { ts_prev };
             if os == Some(1) && show {
@@ -1404,7 +1404,7 @@ pub fn fvg_ts_batch_inner_into(
             ts_prev = ts;
         }
 
-        // Enforce warmup prefix to NaN for all 4 outputs
+        
         for buf in [u_block, l_block, uts_block, lts_block] {
             for v in &mut buf[..warm] {
                 *v = f64::NAN;
@@ -1412,7 +1412,7 @@ pub fn fvg_ts_batch_inner_into(
         }
     };
 
-    // rows × (4*cols) chunking
+    
     #[cfg(not(target_arch = "wasm32"))]
     if parallel {
         use rayon::prelude::*;
@@ -1458,7 +1458,7 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     let rows = combos.len();
     let cols = len;
 
-    // warm per output row (upper/lower/uts/lts share same warm per combo)
+    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(FvgTrailingStopError::AllValuesNaN);
@@ -1492,7 +1492,7 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     let mut buf_mu = make_uninit_matrix(rows4, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // one pass fill
+    
     let flat: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
     };
@@ -1515,7 +1515,7 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     })
 }
 
-// ==================== BATCH BUILDER ====================
+
 #[derive(Clone, Debug, Default)]
 pub struct FvgTsBatchBuilder {
     range: FvgTsBatchRange,
@@ -1577,16 +1577,16 @@ impl FvgTsBatchBuilder {
     }
 }
 
-// ==================== STREAMING SUPPORT (drop-in replacement) ====================
-// Decision: Streaming uses heaps + rings for O(1)–O(log L) updates,
-// matches scalar behavior and fixes i-2 detection + fallback SMA.
+
+
+
 use core::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 #[inline]
 fn f64_to_bits_pos(v: f64) -> u64 {
-    // We only push positive prices; no NaNs; safe to order by bits.
+    
     debug_assert!(v.is_finite() && v >= 0.0);
     v.to_bits()
 }
@@ -1600,15 +1600,15 @@ struct Slot {
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct HeapItem {
-    bits: u64,  // order by numeric value (prices are non-negative)
-    slot: u32,  // slot index in the ring
-    stamp: u32, // generation to avoid aliasing after overwrite
-    seq: u32,   // tie-breaker to stabilize Ord
+    bits: u64,  
+    slot: u32,  
+    stamp: u32, 
+    seq: u32,   
 }
 impl Ord for HeapItem {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        // Max-heap by bits; break ties by seq then slot
+        
         self.bits
             .cmp(&other.bits)
             .then(self.seq.cmp(&other.seq))
@@ -1627,16 +1627,16 @@ pub struct FvgTrailingStopStream {
     smoothing_len: usize,
     reset_on_cross: bool,
 
-    // -------- Bull (max-heap drops values > close) --------
-    bull_slots: Vec<Slot>,           // fixed-size ring of size lookback
-    bull_head: usize,                // next write position
-    bull_occ: usize,                 // how many slots currently in use (<= lookback)
-    bull_sum: f64,                   // sum of alive (unmitigated) levels
-    bull_cnt: u32,                   // count of alive levels
-    bull_heap: BinaryHeap<HeapItem>, // max-heap by value
-    bull_seq: u32,                   // generation/tie
+    
+    bull_slots: Vec<Slot>,           
+    bull_head: usize,                
+    bull_occ: usize,                 
+    bull_sum: f64,                   
+    bull_cnt: u32,                   
+    bull_heap: BinaryHeap<HeapItem>, 
+    bull_seq: u32,                   
 
-    // -------- Bear (min-heap drops values < close) --------
+    
     bear_slots: Vec<Slot>,
     bear_head: usize,
     bear_occ: usize,
@@ -1645,12 +1645,12 @@ pub struct FvgTrailingStopStream {
     bear_heap: BinaryHeap<Reverse<HeapItem>>,
     bear_seq: u32,
 
-    // Last bar index where avg wasn’t NaN (for progressive fallback)
+    
     last_bull_non_na: Option<usize>,
     last_bear_non_na: Option<usize>,
 
-    // -------- Output smoothing (fixed-window SMA on x-series) --------
-    xbull_vals: Vec<f64>, // size = smoothing_len
+    
+    xbull_vals: Vec<f64>, 
     xbull_idx: usize,
     xbull_filled: usize,
     xbull_sum: f64,
@@ -1662,29 +1662,29 @@ pub struct FvgTrailingStopStream {
     xbear_sum: f64,
     xbear_nan: u32,
 
-    // -------- Progressive fallback over close: prefix-sum ring (O(1)) --------
-    // We only need the last W+1 prefix totals to compute any "last bs" sum with bs<=W.
-    pref_sum_ring: Vec<f64>, // size = W + 1
-    pref_nan_ring: Vec<u32>, // size = W + 1
-    pref_idx: usize,         // current write index in rings
-    pref_sum_total: f64,     // running total of closes (NaN->0)
-    pref_nan_total: u32,     // running count of NaNs
+    
+    
+    pref_sum_ring: Vec<f64>, 
+    pref_nan_ring: Vec<u32>, 
+    pref_idx: usize,         
+    pref_sum_total: f64,     
+    pref_nan_total: u32,     
 
-    // -------- OS/TS state --------
+    
     os: Option<i8>,
     ts: Option<f64>,
     ts_prev: Option<f64>,
     bar_count: usize,
 
-    // -------- FVG detection memory (correct i-2 & i-1 wiring) --------
-    // We keep the last two highs/lows explicitly: hi_m2, hi_m1 and lo_m2, lo_m1.
+    
+    
     hi_m2: f64,
     hi_m1: f64,
     lo_m2: f64,
     lo_m1: f64,
     cl_m1: f64,
 
-    inv_w: f64, // 1.0 / smoothing_len (fast constant reciprocal)
+    inv_w: f64, 
 }
 
 impl FvgTrailingStopStream {
@@ -1700,7 +1700,7 @@ impl FvgTrailingStopStream {
             });
         }
 
-        // Pre-size small, cache-friendly buffers
+        
         let mut bull_slots = Vec::with_capacity(lookback);
         bull_slots.resize(
             lookback,
@@ -1725,7 +1725,7 @@ impl FvgTrailingStopStream {
         let mut xbear_vals = Vec::with_capacity(smoothing_len);
         xbear_vals.resize(smoothing_len, f64::NAN);
 
-        // prefix-sum rings keep W+1 cumulative totals
+        
         let mut pref_sum_ring = Vec::with_capacity(smoothing_len + 1);
         pref_sum_ring.resize(smoothing_len + 1, 0.0);
         let mut pref_nan_ring = Vec::with_capacity(smoothing_len + 1);
@@ -1769,7 +1769,7 @@ impl FvgTrailingStopStream {
 
             pref_sum_ring,
             pref_nan_ring,
-            pref_idx: 0, // rings start at prefix (0)
+            pref_idx: 0, 
             pref_sum_total: 0.0,
             pref_nan_total: 0,
 
@@ -1795,7 +1795,7 @@ impl FvgTrailingStopStream {
         }
         let idx = self.bull_head;
         if self.bull_occ == self.lookback {
-            // evict oldest slot
+            
             let s = &mut self.bull_slots[idx];
             if s.alive {
                 self.bull_sum -= s.val;
@@ -1833,7 +1833,7 @@ impl FvgTrailingStopStream {
         }
         let idx = self.bear_head;
         if self.bear_occ == self.lookback {
-            // evict oldest slot
+            
             let s = &mut self.bear_slots[idx];
             if s.alive {
                 self.bear_sum -= s.val;
@@ -1867,7 +1867,7 @@ impl FvgTrailingStopStream {
 
     #[inline(always)]
     fn bull_sweep(&mut self, close: f64) {
-        // Pop all v > close from the max-heap (lazy deletion for stale nodes)
+        
         while let Some(top) = self.bull_heap.peek().copied() {
             let v = f64::from_bits(top.bits);
             if !(v > close) {
@@ -1888,7 +1888,7 @@ impl FvgTrailingStopStream {
 
     #[inline(always)]
     fn bear_sweep(&mut self, close: f64) {
-        // Pop all v < close from the min-heap
+        
         while let Some(Reverse(top)) = self.bear_heap.peek().copied() {
             let v = f64::from_bits(top.bits);
             if !(v < close) {
@@ -1921,7 +1921,7 @@ impl FvgTrailingStopStream {
         let pos = *idx;
 
         if *filled == w {
-            // evict oldest
+            
             let old = vals[pos];
             if old.is_nan() {
                 *nan -= 1;
@@ -1958,13 +1958,13 @@ impl FvgTrailingStopStream {
         w: usize,
         close: f64,
     ) {
-        // Include this bar's close in running totals (NaN treated as 0 and counted separately)
+        
         let add = if close.is_nan() { 0.0 } else { close };
         let add_nan = if close.is_nan() { 1 } else { 0 };
         *pref_sum_total += add;
         *pref_nan_total += add_nan;
 
-        // bump index and write current cumulative totals
+        
         let ring_len = w + 1;
         let next = if *pref_idx + 1 == ring_len {
             0
@@ -1984,7 +1984,7 @@ impl FvgTrailingStopStream {
         w: usize,
         bs: usize,
     ) -> (f64, u32) {
-        // Sum & NaN count for the last `bs` closes (including current)
+        
         debug_assert!(bs >= 1 && bs <= w);
         let ring_len = w + 1;
         let prev = (pref_idx + ring_len - bs) % ring_len;
@@ -1994,7 +1994,7 @@ impl FvgTrailingStopStream {
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64, f64)> {
-        // 1) Prefix-sum ring update for close (enables O(1) progressive SMA fallback)
+        
         Self::prefix_add_close(
             &mut self.pref_sum_ring,
             &mut self.pref_nan_ring,
@@ -2005,9 +2005,9 @@ impl FvgTrailingStopStream {
             close,
         );
 
-        // 2) FVG detection using (i-2, i-1, i)
-        //    Bull FVG: low[i]   > high[i-2] && close[i-1] > high[i-2]  -> track v = high[i-2]
-        //    Bear FVG: high[i]  <  low[i-2] && close[i-1] <  low[i-2]  -> track v =  low[i-2]
+        
+        
+        
         if self.bar_count >= 2
             && self.hi_m2.is_finite()
             && self.lo_m2.is_finite()
@@ -2021,11 +2021,11 @@ impl FvgTrailingStopStream {
             }
         }
 
-        // 3) Mitigation by threshold (amortized O(1), O(log L) per pop via heap)
-        self.bull_sweep(close); // drop all bull levels > close
-        self.bear_sweep(close); // drop all bear levels < close
+        
+        self.bull_sweep(close); 
+        self.bear_sweep(close); 
 
-        // 4) Fast averages of unmitigated FVG levels
+        
         let bull_avg = if self.bull_cnt > 0 {
             self.bull_sum / (self.bull_cnt as f64)
         } else {
@@ -2043,7 +2043,7 @@ impl FvgTrailingStopStream {
             self.last_bear_non_na = Some(self.bar_count);
         }
 
-        // 5) Progressive SMA fallback over close (now exact, O(1) via prefix ring)
+        
         let bull_bs = if bull_avg.is_nan() {
             match self.last_bull_non_na {
                 Some(last) => ((self.bar_count - last).max(1)).min(self.smoothing_len),
@@ -2105,7 +2105,7 @@ impl FvgTrailingStopStream {
             bear_sma
         };
 
-        // 6) Fixed-window smoothing (true O(1) ring update, NaN-aware)
+        
         let bull_disp = Self::push_x_and_smooth(
             &mut self.xbull_vals,
             &mut self.xbull_idx,
@@ -2127,7 +2127,7 @@ impl FvgTrailingStopStream {
             x_bear,
         );
 
-        // 7) OS/TS updates
+        
         let prev_os = self.os;
         let next_os = if !bear_disp.is_nan() && close > bear_disp {
             Some(1)
@@ -2185,7 +2185,7 @@ impl FvgTrailingStopStream {
             }
         }
 
-        // 8) Outputs
+        
         let show = self.ts.is_some() || self.ts_prev.is_some();
         let ts_nz = self.ts.or(self.ts_prev);
 
@@ -2202,8 +2202,8 @@ impl FvgTrailingStopStream {
 
         self.ts_prev = self.ts;
 
-        // 9) Rotate detection memory for next call (correct i-2 maintenance)
-        //     Before update: hi_m2, hi_m1 were (i-2, i-1). Now shift and store current as i.
+        
+        
         self.hi_m2 = self.hi_m1;
         self.hi_m1 = high;
         self.lo_m2 = self.lo_m1;
@@ -2220,7 +2220,7 @@ impl FvgTrailingStopStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "fvg_trailing_stop")]
 #[pyo3(signature = (high, low, close, unmitigated_fvg_lookback, smoothing_length, reset_on_cross, kernel=None))]

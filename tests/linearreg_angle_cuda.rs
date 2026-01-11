@@ -1,17 +1,17 @@
-// Integration tests for CUDA Linear Regression Angle (LRA) kernels
 
-use my_project::indicators::linearreg_angle::{
+
+use vector_ta::indicators::linearreg_angle::{
     linearreg_angle_batch_with_kernel, Linearreg_angleBatchRange, Linearreg_angleBuilder,
     Linearreg_angleParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaLinearregAngle;
+use vector_ta::cuda::CudaLinearregAngle;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -82,19 +82,19 @@ fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         return Ok(());
     }
 
-    let cols = 8usize; // series count
-    let rows = 2048usize; // series length
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            // staggered start
+            
             let x = (r as f64) + (s as f64) * 0.25;
             data_tm[r * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 21usize;
 
-    // CPU baseline per series (time-major)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

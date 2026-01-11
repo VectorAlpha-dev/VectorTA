@@ -54,11 +54,11 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// ========== CONSTANTS ==========
 
-const N_LEVELS: usize = 9; // r4, r3, r2, r1, pp, s1, s2, s3, s4 in this order
 
-// ========== HELPER FUNCTIONS ==========
+const N_LEVELS: usize = 9; 
+
+
 
 #[inline(always)]
 fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> Option<usize> {
@@ -71,7 +71,7 @@ fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> Option<usize> {
     None
 }
 
-// Unified kernel dispatch like ALMA
+
 #[inline(always)]
 fn pivot_compute_into(
     high: &[f64],
@@ -109,7 +109,7 @@ fn pivot_compute_into(
     }
 }
 
-// ========== DATA/INPUT/OUTPUT STRUCTS ==========
+
 
 #[derive(Debug, Clone)]
 pub enum PivotData<'a> {
@@ -211,7 +211,7 @@ pub enum PivotError {
     InvalidKernelForBatch(Kernel),
 }
 
-// ========== BUILDER ==========
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct PivotBuilder {
@@ -261,7 +261,7 @@ impl PivotBuilder {
     }
 }
 
-// ========== MAIN INTERFACE FUNCTIONS ==========
+
 
 #[inline]
 pub fn pivot(input: &PivotInput) -> Result<PivotOutput, PivotError> {
@@ -311,7 +311,7 @@ pub fn pivot_with_kernel(input: &PivotInput, kernel: Kernel) -> Result<PivotOutp
         return Err(PivotError::NotEnoughValidData);
     }
 
-    // Allocate output vectors with NaN prefix
+    
     let mut r4 = alloc_with_nan_prefix(len, first_valid_idx);
     let mut r3 = alloc_with_nan_prefix(len, first_valid_idx);
     let mut r2 = alloc_with_nan_prefix(len, first_valid_idx);
@@ -413,13 +413,13 @@ pub fn pivot_into(
 
     let mode = input.get_mode();
 
-    // Compute warmup exactly as the Vec-returning API
+    
     let first_valid_idx = first_valid_ohlc(high, low, close).ok_or(PivotError::AllValuesNaN)?;
     if first_valid_idx >= len {
         return Err(PivotError::NotEnoughValidData);
     }
 
-    // Prefill quiet-NaN warmups to match alloc_with_nan_prefix
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for i in 0..first_valid_idx {
         r4[i] = qnan;
@@ -433,7 +433,7 @@ pub fn pivot_into(
         s4[i] = qnan;
     }
 
-    // Compute into the provided buffers using the existing kernel dispatcher
+    
     let chosen = detect_best_kernel();
     pivot_compute_into(
         high,
@@ -532,7 +532,7 @@ pub fn pivot_into_slices(
         return Err(PivotError::NotEnoughValidData);
     }
 
-    // Match ALMA pattern: compute first, then set warmup NaNs
+    
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -557,7 +557,7 @@ pub fn pivot_into_slices(
         s4,
     );
 
-    // Now set warmup NaNs after computation
+    
     for i in 0..first_valid_idx {
         r4[i] = f64::NAN;
         r3[i] = f64::NAN;
@@ -599,7 +599,7 @@ pub unsafe fn pivot_scalar(
     let nan = f64::NAN;
 
     match mode {
-        // ========================== STANDARD ==========================
+        
         0 => {
             for i in first..len {
                 let h = high[i];
@@ -632,7 +632,7 @@ pub unsafe fn pivot_scalar(
             }
         }
 
-        // ========================== FIBONACCI ==========================
+        
         1 => {
             for i in first..len {
                 let h = high[i];
@@ -666,7 +666,7 @@ pub unsafe fn pivot_scalar(
             }
         }
 
-        // ========================== DEMARK ==========================
+        
         2 => {
             for i in first..len {
                 let h = high[i];
@@ -711,7 +711,7 @@ pub unsafe fn pivot_scalar(
             }
         }
 
-        // ========================== CAMARILLA (default) ==========================
+        
         3 => {
             const C1: f64 = 0.0916_f64;
             const C2: f64 = 0.183_f64;
@@ -751,7 +751,7 @@ pub unsafe fn pivot_scalar(
             }
         }
 
-        // ========================== WOODIE ==========================
+        
         4 => {
             for i in first..len {
                 let h = high[i];
@@ -771,7 +771,7 @@ pub unsafe fn pivot_scalar(
                     continue;
                 }
                 let d = h - l;
-                let p = (h + l + (o + o)) * 0.25; // (H+L+2*O)/4
+                let p = (h + l + (o + o)) * 0.25; 
                 pp[i] = p;
                 let t2p = p + p;
                 let t2l = l + l;
@@ -1402,7 +1402,7 @@ pub unsafe fn pivot_avx512_long(
     }
 }
 
-// ========== ROW "BATCH" VECTORIZED API ==========
+
 
 #[inline(always)]
 pub unsafe fn pivot_row_scalar(
@@ -1519,9 +1519,9 @@ pub unsafe fn pivot_row_avx512_long(
     )
 }
 
-// ========== NEW BATCH HELPERS ==========
 
-// Compute one row-block (9 rows) for a given mode into pre-sliced outputs
+
+
 #[inline(always)]
 unsafe fn pivot_rows_scalar_into(
     high: &[f64],
@@ -1545,7 +1545,7 @@ unsafe fn pivot_rows_scalar_into(
     )
 }
 
-// New: flat batch "inner_into" mirroring alma_batch_inner_into
+
 #[inline(always)]
 fn pivot_batch_inner_into(
     high: &[f64],
@@ -1594,10 +1594,10 @@ fn pivot_batch_inner_into(
         });
     }
 
-    // Warm prefixes for each of the 9 rows of each combo
+    
     let warm: Vec<usize> = vec![first; rows];
 
-    // Poison + warm NaNs using your helper
+    
     let out_mu = unsafe {
         let mu = std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1607,7 +1607,7 @@ fn pivot_batch_inner_into(
         mu
     };
 
-    // Resolve kernel (scalar path is fine; stubs keep parity)
+    
     let chosen = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1619,14 +1619,14 @@ fn pivot_batch_inner_into(
             use rayon::prelude::*;
             use std::sync::atomic::{AtomicPtr, Ordering};
 
-            // Wrap pointer in AtomicPtr for thread safety
+            
             let out_ptr = AtomicPtr::new(out.as_mut_ptr());
             let out_len = out.len();
 
-            // Drive indices; compute offsets and re-slice
+            
             (0..combos.len()).into_par_iter().for_each(|ci| {
                 let mode = combos[ci].mode.unwrap_or(3);
-                // Compute 9 rows window for this combo
+                
                 let base = ci * N_LEVELS * cols;
                 unsafe {
                     let ptr = out_ptr.load(Ordering::Relaxed);
@@ -1677,7 +1677,7 @@ fn pivot_batch_inner_into(
         }
         #[cfg(target_arch = "wasm32")]
         {
-            // Sequential execution for WASM
+            
             let mut row_chunks = out_mu.chunks_mut(cols);
             for p in &combos {
                 let mode = p.mode.unwrap_or(3);
@@ -1692,7 +1692,7 @@ fn pivot_batch_inner_into(
                     let s3_mu = row_chunks.next().unwrap();
                     let s4_mu = row_chunks.next().unwrap();
 
-                    // Cast MU -> f64 slices without extra alloc/copy
+                    
                     let mut cast = |mu: &mut [std::mem::MaybeUninit<f64>]| {
                         std::slice::from_raw_parts_mut(mu.as_mut_ptr() as *mut f64, mu.len())
                     };
@@ -1715,7 +1715,7 @@ fn pivot_batch_inner_into(
             }
         }
     } else {
-        // Sequential execution
+        
         let mut row_chunks = out_mu.chunks_mut(cols);
         for p in &combos {
             let mode = p.mode.unwrap_or(3);
@@ -1730,7 +1730,7 @@ fn pivot_batch_inner_into(
                 let s3_mu = row_chunks.next().unwrap();
                 let s4_mu = row_chunks.next().unwrap();
 
-                // Cast MU -> f64 slices without extra alloc/copy
+                
                 let mut cast = |mu: &mut [std::mem::MaybeUninit<f64>]| {
                     std::slice::from_raw_parts_mut(mu.as_mut_ptr() as *mut f64, mu.len())
                 };
@@ -1755,7 +1755,7 @@ fn pivot_batch_inner_into(
     Ok(combos)
 }
 
-// ========== BATCH (RANGE) API ==========
+
 
 #[derive(Clone, Debug)]
 pub struct PivotBatchRange {
@@ -1836,13 +1836,13 @@ pub struct PivotBatchOutput {
     pub cols: usize,
 }
 
-// New: flat batch container like ALMA
+
 #[derive(Clone, Debug)]
 pub struct PivotBatchFlatOutput {
-    pub values: Vec<f64>,         // row-major, rows = combos*9, cols = len
-    pub combos: Vec<PivotParams>, // one per combo
-    pub rows: usize,              // combos*9
-    pub cols: usize,              // len
+    pub values: Vec<f64>,         
+    pub combos: Vec<PivotParams>, 
+    pub rows: usize,              
+    pub cols: usize,              
 }
 
 pub fn pivot_batch_flat_with_kernel(
@@ -1880,7 +1880,7 @@ pub fn pivot_batch_flat_with_kernel(
             step: 0,
         })?;
 
-    // Single allocation, MU -> f64 without copies
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> =
         vec![first_valid_ohlc(high, low, close).ok_or(PivotError::AllValuesNaN)?; rows];
@@ -1982,7 +1982,7 @@ fn pivot_batch_inner(
         }
         let first = first.unwrap_or(len);
 
-        // Allocate output vectors with NaN prefix
+        
         let mut r4 = alloc_with_nan_prefix(len, first);
         let mut r3 = alloc_with_nan_prefix(len, first);
         let mut r2 = alloc_with_nan_prefix(len, first);
@@ -2023,7 +2023,7 @@ fn pivot_batch_inner(
     })
 }
 
-// ========== STREAMING INTERFACE ==========
+
 
 /// Streaming pivot calculation
 /// Note: Pivot is not truly a streaming indicator as it requires complete period data.
@@ -2040,7 +2040,7 @@ impl PivotStream {
     pub fn try_new(params: PivotParams) -> Result<Self, PivotError> {
         let mode = params.mode.unwrap_or(3);
         if mode > 4 {
-            return Err(PivotError::EmptyData); // Using existing error for invalid mode
+            return Err(PivotError::EmptyData); 
         }
         Ok(Self { mode })
     }
@@ -2056,21 +2056,21 @@ impl PivotStream {
         close: f64,
         open: f64,
     ) -> Option<(f64, f64, f64, f64, f64, f64, f64, f64, f64)> {
-        // Camarilla multipliers (keep identical to batch path for bitwise parity)
+        
         const C1: f64 = 0.0916;
         const C2: f64 = 0.183;
         const C3: f64 = 0.275;
         const C4: f64 = 0.55;
 
-        // Exact binary constants for fast divides
-        const INV3: f64 = 1.0 / 3.0; // compile-time constant
+        
+        const INV3: f64 = 1.0 / 3.0; 
         const INV4: f64 = 0.25;
         const INV2: f64 = 0.5;
 
         match self.mode {
-            // ======================= STANDARD =======================
+            
             0 => {
-                // Only H,L,C are required in this mode
+                
                 if high.is_nan() || low.is_nan() || close.is_nan() {
                     return None;
                 }
@@ -2079,14 +2079,14 @@ impl PivotStream {
                 let t2 = p + p;
 
                 let r1 = t2 - low;
-                let r2 = d.mul_add(1.0, p); // p + d
+                let r2 = d.mul_add(1.0, p); 
                 let s1 = t2 - high;
-                let s2 = (-d).mul_add(1.0, p); // p - d
+                let s2 = (-d).mul_add(1.0, p); 
 
                 Some((f64::NAN, f64::NAN, r2, r1, p, s1, s2, f64::NAN, f64::NAN))
             }
 
-            // ======================= FIBONACCI =======================
+            
             1 => {
                 if high.is_nan() || low.is_nan() || close.is_nan() {
                     return None;
@@ -2104,24 +2104,24 @@ impl PivotStream {
                 Some((f64::NAN, r3, r2, r1, p, s1, s2, s3, f64::NAN))
             }
 
-            // ======================= DEMARK =======================
+            
             2 => {
-                // DeMark needs O as well
+                
                 if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
                     return None;
                 }
-                // Branchless selection of X depending on close vs open
-                // X_lt = H + 2L + C, X_gt = 2H + L + C, X_eq = H + L + 2C
+                
+                
                 let x_lt = high + low + low + close;
                 let x_gt = high + high + low + close;
                 let x_eq = high + low + close + close;
 
-                // Convert the comparisons to {0.0, 1.0} masks.
+                
                 let lt: f64 = if close < open { 1.0 } else { 0.0 };
                 let gt: f64 = if close > open { 1.0 } else { 0.0 };
                 let eq: f64 = 1.0 - lt - gt;
 
-                // Fuse the weighted selection: x = lt*x_lt + gt*x_gt + eq*x_eq
+                
                 let x = lt.mul_add(x_lt, gt.mul_add(x_gt, eq * x_eq));
                 let pp = x * INV4;
                 let half = x * INV2;
@@ -2142,7 +2142,7 @@ impl PivotStream {
                 ))
             }
 
-            // ======================= CAMARILLA =======================
+            
             3 => {
                 if high.is_nan() || low.is_nan() || close.is_nan() {
                     return None;
@@ -2150,7 +2150,7 @@ impl PivotStream {
                 let d = high - low;
                 let p = (high + low + close) * INV3;
 
-                // Use FMA to reduce latency and rounding
+                
                 let r1 = d.mul_add(C1, close);
                 let r2 = d.mul_add(C2, close);
                 let r3 = d.mul_add(C3, close);
@@ -2163,9 +2163,9 @@ impl PivotStream {
                 Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
             }
 
-            // ======================= WOODIE =======================
+            
             4 => {
-                // Woodie uses O in PP
+                
                 if high.is_nan() || low.is_nan() || close.is_nan() || open.is_nan() {
                     return None;
                 }
@@ -2176,12 +2176,12 @@ impl PivotStream {
                 let r1 = t2 - low;
                 let r2 = d.mul_add(1.0, p);
                 let r3 = high + (p - low) * 2.0;
-                let r4 = (high - low).mul_add(1.0, r3); // r3 + d
+                let r4 = (high - low).mul_add(1.0, r3); 
 
                 let s1 = t2 - high;
                 let s2 = (-d).mul_add(1.0, p);
                 let s3 = low - (high - p) * 2.0;
-                let s4 = (-(high - low)).mul_add(1.0, s3); // s3 - d
+                let s4 = (-(high - low)).mul_add(1.0, s3); 
 
                 Some((r4, r3, r2, r1, p, s1, s2, s3, s4))
             }
@@ -2191,7 +2191,7 @@ impl PivotStream {
     }
 }
 
-// ========== PYTHON BINDINGS ==========
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pivot")]
@@ -2370,34 +2370,34 @@ pub fn pivot_batch_py<'py>(
     let sweep = PivotBatchRange { mode: mode_range };
     let kern = validate_kernel(kernel, true)?;
 
-    // Compute flat once using zero-copy path
+    
     let flat = py
         .allow_threads(|| pivot_batch_flat_with_kernel(h, l, c, o, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Split flat values into 9 views of shape (combos, cols) flattened (row-major)
+    
     let combos = flat.combos.len();
     let cols = flat.cols;
-    let vals = flat.values; // take ownership; move into NumPy without copy
+    let vals = flat.values; 
 
-    // One NumPy buffer, then create 9 arrays as views without extra copies
+    
     let arr = unsafe { PyArray1::<f64>::new(py, [vals.len()], false) };
     unsafe {
         arr.as_slice_mut()?.copy_from_slice(&vals);
-    } // single copy from our owned Vec into NumPy storage
+    } 
 
-    // Produce 9 arrays as separate 2D arrays
+    
     let dict = PyDict::new(py);
     let names = ["r4", "r3", "r2", "r1", "pp", "s1", "s2", "s3", "s4"];
 
     for (li, name) in names.iter().enumerate() {
-        // Create a new array for this level
+        
         let level_arr = unsafe { PyArray1::<f64>::new(py, [combos * cols], false) };
         let level_slice = unsafe { level_arr.as_slice_mut()? };
 
-        // Copy data for this level from the flat array
-        // The data is organized as [combo0_r4...combo0_s4, combo1_r4...combo1_s4, ...]
-        // We need to extract every 9th element starting from li
+        
+        
+        
         for combo_idx in 0..combos {
             let base_idx = combo_idx * N_LEVELS * cols;
             let level_base = li * cols;
@@ -2417,12 +2417,12 @@ pub fn pivot_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    dict.set_item("rows_per_level", combos)?; // for each level
+    dict.set_item("rows_per_level", combos)?; 
     dict.set_item("cols", cols)?;
     Ok(dict)
 }
 
-// ========== WASM BINDINGS ==========
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2433,7 +2433,7 @@ pub fn pivot_js(
     open: &[f64],
     mode: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    // Check for mismatched lengths explicitly
+    
     let len = high.len();
     if low.len() != len || close.len() != len || open.len() != len {
         return Err(JsValue::from_str(
@@ -2504,7 +2504,7 @@ pub fn pivot_into(
         let params = PivotParams { mode: Some(mode) };
         let input = PivotInput::from_slices(high, low, close, open, params);
 
-        // Check for any aliasing between inputs and outputs
+        
         let input_ptrs = [
             high_ptr as *const u8,
             low_ptr as *const u8,
@@ -2528,10 +2528,10 @@ pub fn pivot_into(
             .any(|&inp| output_ptrs.iter().any(|&out| inp == out));
 
         if has_aliasing {
-            // Use single temporary buffer if there's aliasing
+            
             let mut temp = vec![0.0; len * 9];
 
-            // Split into slices
+            
             let (r4_temp, rest) = temp.split_at_mut(len);
             let (r3_temp, rest) = rest.split_at_mut(len);
             let (r2_temp, rest) = rest.split_at_mut(len);
@@ -2556,7 +2556,7 @@ pub fn pivot_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results to output pointers
+            
             let r4_out = std::slice::from_raw_parts_mut(r4_ptr, len);
             let r3_out = std::slice::from_raw_parts_mut(r3_ptr, len);
             let r2_out = std::slice::from_raw_parts_mut(r2_ptr, len);
@@ -2577,7 +2577,7 @@ pub fn pivot_into(
             s3_out.copy_from_slice(s3_temp);
             s4_out.copy_from_slice(s4_temp);
         } else {
-            // Direct computation into output slices
+            
             let r4_out = std::slice::from_raw_parts_mut(r4_ptr, len);
             let r3_out = std::slice::from_raw_parts_mut(r3_ptr, len);
             let r2_out = std::slice::from_raw_parts_mut(r2_ptr, len);
@@ -2630,13 +2630,13 @@ pub fn pivot_free(ptr: *mut f64, len: usize) {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct PivotBatchConfig {
-    pub mode_range: (usize, usize, usize), // (start, end, step)
+    pub mode_range: (usize, usize, usize), 
 }
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct PivotBatchFlatJsOutput {
-    pub values: Vec<f64>, // row-major, rows = combos*9, cols = len
+    pub values: Vec<f64>, 
     pub modes: Vec<usize>,
     pub rows: usize,
     pub cols: usize,
@@ -2698,7 +2698,7 @@ mod tests {
         assert_eq!(result.s3.len(), candles.close.len());
         assert_eq!(result.s4.len(), candles.close.len());
 
-        // Spot-check Camarilla outputs for a few points
+        
         let last_five_r4 = &result.r4[result.r4.len().saturating_sub(5)..];
         let expected_r4 = [59466.5, 59357.55, 59243.6, 59334.85, 59170.35];
         for (i, &val) in last_five_r4.iter().enumerate() {
@@ -2842,11 +2842,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate diverse OHLC data including edge cases
+        
         let strat = (10usize..=200).prop_flat_map(|len| {
-            // Mix of normal and edge case data generation
+            
             prop_oneof![
-                // Normal case: realistic price movements
+                
                 prop::collection::vec(
                     (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                     len,
@@ -2866,8 +2866,8 @@ mod tests {
                         for (i, base) in base_prices.iter().enumerate() {
                             let (high_factor, low_factor, close_factor, open_factor) = factors[i];
 
-                            // Generate realistic OHLC where high >= low
-                            let range = base * 0.1; // 10% range
+                            
+                            let range = base * 0.1; 
                             let low = base - range * low_factor;
                             let high = base + range * high_factor;
                             let open = low + (high - low) * open_factor;
@@ -2882,12 +2882,12 @@ mod tests {
                         (high_data, low_data, close_data, open_data, mode)
                     })
                 }),
-                // Edge case: flat market (all prices equal)
+                
                 (100f64..1000f64, 0usize..=4).prop_map(move |(price, mode)| {
                     let data = vec![price; len];
                     (data.clone(), data.clone(), data.clone(), data, mode)
                 }),
-                // Edge case: very small price differences
+                
                 (100f64..1000f64, 0usize..=4).prop_map(move |(base, mode)| {
                     let mut high_data = Vec::with_capacity(len);
                     let mut low_data = Vec::with_capacity(len);
@@ -2921,7 +2921,7 @@ mod tests {
                 let output = pivot_with_kernel(&input, kernel)?;
                 let ref_output = pivot_with_kernel(&input, Kernel::Scalar)?;
 
-                // Verify output lengths
+                
                 prop_assert_eq!(output.pp.len(), high.len());
                 prop_assert_eq!(output.r1.len(), high.len());
                 prop_assert_eq!(output.s1.len(), high.len());
@@ -2932,7 +2932,7 @@ mod tests {
                     let c = close[i];
                     let o = open[i];
 
-                    // Skip if any input is NaN
+                    
                     if h.is_nan() || l.is_nan() || c.is_nan() || o.is_nan() {
                         continue;
                     }
@@ -2950,10 +2950,10 @@ mod tests {
                     let tolerance = 1e-9;
                     let range = h - l;
 
-                    // Comprehensive formula verification for each mode
+                    
                     match mode {
                         0 => {
-                            // Standard Mode
+                            
                             let expected_pp = (h + l + c) / 3.0;
                             prop_assert!(
                                 (pp - expected_pp).abs() < tolerance,
@@ -2963,7 +2963,7 @@ mod tests {
                                 expected_pp
                             );
 
-                            // R1 = 2*PP - L
+                            
                             let expected_r1 = 2.0 * pp - l;
                             prop_assert!(
                                 (r1 - expected_r1).abs() < tolerance,
@@ -2973,7 +2973,7 @@ mod tests {
                                 expected_r1
                             );
 
-                            // R2 = PP + (H - L)
+                            
                             let expected_r2 = pp + range;
                             prop_assert!(
                                 (r2 - expected_r2).abs() < tolerance,
@@ -2983,7 +2983,7 @@ mod tests {
                                 expected_r2
                             );
 
-                            // S1 = 2*PP - H
+                            
                             let expected_s1 = 2.0 * pp - h;
                             prop_assert!(
                                 (s1 - expected_s1).abs() < tolerance,
@@ -2993,7 +2993,7 @@ mod tests {
                                 expected_s1
                             );
 
-                            // S2 = PP - (H - L)
+                            
                             let expected_s2 = pp - range;
                             prop_assert!(
                                 (s2 - expected_s2).abs() < tolerance,
@@ -3003,20 +3003,20 @@ mod tests {
                                 expected_s2
                             );
 
-                            // R3, R4, S3, S4 should be NaN for Standard mode
+                            
                             prop_assert!(r3.is_nan(), "Standard R3 should be NaN at {}", i);
                             prop_assert!(r4.is_nan(), "Standard R4 should be NaN at {}", i);
                             prop_assert!(s3.is_nan(), "Standard S3 should be NaN at {}", i);
                             prop_assert!(s4.is_nan(), "Standard S4 should be NaN at {}", i);
 
-                            // Verify ordering: S2 < S1 < PP < R1 < R2
+                            
                             prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
                             prop_assert!(s1 <= pp + tolerance, "S1 > PP at {}", i);
                             prop_assert!(pp <= r1 + tolerance, "PP > R1 at {}", i);
                             prop_assert!(r1 <= r2 + tolerance, "R1 > R2 at {}", i);
                         }
                         1 => {
-                            // Fibonacci Mode
+                            
                             let expected_pp = (h + l + c) / 3.0;
                             prop_assert!(
                                 (pp - expected_pp).abs() < tolerance,
@@ -3026,7 +3026,7 @@ mod tests {
                                 expected_pp
                             );
 
-                            // Fibonacci ratios
+                            
                             let expected_r1 = pp + 0.382 * range;
                             let expected_r2 = pp + 0.618 * range;
                             let expected_r3 = pp + 1.0 * range;
@@ -3077,11 +3077,11 @@ mod tests {
                                 expected_s3
                             );
 
-                            // R4, S4 should be NaN for Fibonacci
+                            
                             prop_assert!(r4.is_nan(), "Fibonacci R4 should be NaN at {}", i);
                             prop_assert!(s4.is_nan(), "Fibonacci S4 should be NaN at {}", i);
 
-                            // Verify ordering
+                            
                             prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
                             prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
                             prop_assert!(s1 <= pp + tolerance, "S1 > PP at {}", i);
@@ -3090,7 +3090,7 @@ mod tests {
                             prop_assert!(r2 <= r3 + tolerance, "R2 > R3 at {}", i);
                         }
                         2 => {
-                            // Demark Mode
+                            
                             let expected_pp = if c < o {
                                 (h + 2.0 * l + c) / 4.0
                             } else if c > o {
@@ -3106,7 +3106,7 @@ mod tests {
                                 expected_pp
                             );
 
-                            // Demark has special R1/S1 calculations
+                            
                             let expected_r1 = if c < o {
                                 (h + 2.0 * l + c) / 2.0 - l
                             } else if c > o {
@@ -3137,7 +3137,7 @@ mod tests {
                                 expected_s1
                             );
 
-                            // Other levels should be NaN for Demark
+                            
                             prop_assert!(r2.is_nan(), "Demark R2 should be NaN at {}", i);
                             prop_assert!(r3.is_nan(), "Demark R3 should be NaN at {}", i);
                             prop_assert!(r4.is_nan(), "Demark R4 should be NaN at {}", i);
@@ -3146,7 +3146,7 @@ mod tests {
                             prop_assert!(s4.is_nan(), "Demark S4 should be NaN at {}", i);
                         }
                         3 => {
-                            // Camarilla Mode
+                            
                             let expected_pp = (h + l + c) / 3.0;
                             prop_assert!(
                                 (pp - expected_pp).abs() < tolerance,
@@ -3156,7 +3156,7 @@ mod tests {
                                 expected_pp
                             );
 
-                            // Camarilla specific multipliers
+                            
                             let expected_r4 = 0.55 * range + c;
                             let expected_r3 = 0.275 * range + c;
                             let expected_r2 = 0.183 * range + c;
@@ -3223,7 +3223,7 @@ mod tests {
                                 expected_s4
                             );
 
-                            // Verify ordering
+                            
                             prop_assert!(s4 <= s3 + tolerance, "S4 > S3 at {}", i);
                             prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
                             prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
@@ -3232,7 +3232,7 @@ mod tests {
                             prop_assert!(r3 <= r4 + tolerance, "R3 > R4 at {}", i);
                         }
                         4 => {
-                            // Woodie Mode
+                            
                             let expected_pp = (h + l + 2.0 * o) / 4.0;
                             prop_assert!(
                                 (pp - expected_pp).abs() < tolerance,
@@ -3242,7 +3242,7 @@ mod tests {
                                 expected_pp
                             );
 
-                            // Woodie calculations
+                            
                             let expected_r1 = 2.0 * pp - l;
                             let expected_r2 = pp + range;
                             let expected_r3 = h + 2.0 * (pp - l);
@@ -3309,7 +3309,7 @@ mod tests {
                                 expected_s4
                             );
 
-                            // Verify ordering
+                            
                             prop_assert!(s4 <= s3 + tolerance, "S4 > S3 at {}", i);
                             prop_assert!(s3 <= s2 + tolerance, "S3 > S2 at {}", i);
                             prop_assert!(s2 <= s1 + tolerance, "S2 > S1 at {}", i);
@@ -3320,7 +3320,7 @@ mod tests {
                         _ => {}
                     }
 
-                    // Verify kernel consistency
+                    
                     prop_assert!(
                         (pp - ref_output.pp[i]).abs() < tolerance,
                         "PP kernel mismatch at {}",
@@ -3339,7 +3339,7 @@ mod tests {
                         i
                     );
 
-                    // Check for poison values in debug builds
+                    
                     #[cfg(debug_assertions)]
                     {
                         let check_poison = |val: f64, name: &str| {
@@ -3399,21 +3399,21 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations covering all modes
+        
         let test_params = vec![
-            PivotParams::default(),        // mode: 3 (Camarilla)
-            PivotParams { mode: Some(0) }, // Standard
-            PivotParams { mode: Some(1) }, // Fibonacci
-            PivotParams { mode: Some(2) }, // Demark
-            PivotParams { mode: Some(3) }, // Camarilla (explicit)
-            PivotParams { mode: Some(4) }, // Woodie
+            PivotParams::default(),        
+            PivotParams { mode: Some(0) }, 
+            PivotParams { mode: Some(1) }, 
+            PivotParams { mode: Some(2) }, 
+            PivotParams { mode: Some(3) }, 
+            PivotParams { mode: Some(4) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = PivotInput::from_candles(&candles, params.clone());
             let output = pivot_with_kernel(&input, kernel)?;
 
-            // Check all 9 output arrays
+            
             let arrays = vec![
                 ("r4", &output.r4),
                 ("r3", &output.r3),
@@ -3429,12 +3429,12 @@ mod tests {
             for (array_name, values) in arrays {
                 for (i, &val) in values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; // NaN values are expected during warmup
+                        continue; 
                     }
 
                     let bits = val.to_bits();
 
-                    // Check all three poison patterns
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -3470,7 +3470,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     fn check_pivot_batch_default_row(
@@ -3495,7 +3495,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for all kernel variants
+    
     macro_rules! generate_all_pivot_tests {
         ($($test_fn:ident),*) => {
             paste! {
@@ -3555,12 +3555,12 @@ mod tests {
             .expect("default row missing");
         let levels = &output.levels[row];
 
-        // Spot check: each level should be the right length
+        
         for arr in levels.iter() {
             assert_eq!(arr.len(), candles.close.len());
         }
 
-        // Optionally, spot-check some values (e.g. Camarilla r4)
+        
         let expected_r4 = [59466.5, 59357.55, 59243.6, 59334.85, 59170.35];
         let r4 = &levels[0];
         let last_five_r4 = &r4[r4.len().saturating_sub(5)..];
@@ -3581,15 +3581,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for mode
+        
         let test_configs = vec![
-            (0, 2, 1), // Small range: Standard, Fibonacci, Demark
-            (0, 4, 1), // Full range: all modes
-            (0, 4, 2), // Skip modes: Standard, Demark, Woodie
-            (1, 3, 1), // Middle modes: Fibonacci, Demark, Camarilla
-            (3, 4, 1), // Last two: Camarilla, Woodie
-            (2, 2, 1), // Single mode: Demark only
-            (0, 0, 1), // Single mode: Standard only
+            (0, 2, 1), 
+            (0, 4, 1), 
+            (0, 4, 2), 
+            (1, 3, 1), 
+            (3, 4, 1), 
+            (2, 2, 1), 
+            (0, 0, 1), 
         ];
 
         for (cfg_idx, &(mode_start, mode_end, mode_step)) in test_configs.iter().enumerate() {
@@ -3598,11 +3598,11 @@ mod tests {
                 .mode_range(mode_start, mode_end, mode_step)
                 .apply_candles(&c)?;
 
-            // Check all 9 arrays for each parameter combination
+            
             for (row_idx, levels) in output.levels.iter().enumerate() {
                 let combo = &output.combos[row_idx];
 
-                // Check each of the 9 arrays
+                
                 for (level_idx, level_array) in levels.iter().enumerate() {
                     let level_name = match level_idx {
                         0 => "r4",
@@ -3624,7 +3624,7 @@ mod tests {
 
                         let bits = val.to_bits();
 
-                        // Check all three poison patterns with detailed context
+                        
                         if bits == 0x11111111_11111111 {
                             panic!(
 								"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3661,10 +3661,10 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
-    // Kernel variant macro expansion (as in alma.rs)
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste! {
@@ -3689,20 +3689,20 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    // ========== INTO PARITY TEST ==========
+    
     #[test]
     fn test_pivot_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the existing CSV input for parity, consistent with other tests
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
         let params = PivotParams::default();
         let input = PivotInput::from_candles(&candles, params);
 
-        // Baseline via existing Vec-returning API
+        
         let base = pivot(&input)?;
 
         let len = candles.close.len();
-        // Preallocate output buffers
+        
         let mut r4 = vec![0.0; len];
         let mut r3 = vec![0.0; len];
         let mut r2 = vec![0.0; len];
@@ -3713,7 +3713,7 @@ mod tests {
         let mut s3 = vec![0.0; len];
         let mut s4 = vec![0.0; len];
 
-        // Call the new into API
+        
         #[cfg(not(feature = "wasm"))]
         {
             pivot_into(

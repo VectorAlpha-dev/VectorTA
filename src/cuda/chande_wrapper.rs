@@ -77,7 +77,7 @@ pub struct CudaChande {
     device_id: u32,
     policy: CudaChandePolicy,
 
-    // Persistent monotone-deque workspaces for one-series × many-params path
+    
     dq_idx: Option<DeviceBuffer<i32>>,
     dq_val: Option<DeviceBuffer<f32>>,
     dq_combo_cap: usize,
@@ -289,7 +289,7 @@ impl CudaChande {
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
-        // Inputs: 3×len f32; params: periods/mults/dirs/alphas/warm per combo; outputs: combos×len f32.
+        
         let in_bytes = 3usize
             .checked_mul(len)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
@@ -328,7 +328,7 @@ impl CudaChande {
         }
         let len = high.len();
         let first_valid = Self::first_valid_hlc(high, low, close)?;
-        // Expand params on host (robust range rules: zero step => static, reversed bounds supported)
+        
         let (ps, pe, pst) = sweep.period;
         let (ms, me, mst) = sweep.mult;
         if !(direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("short")) {
@@ -366,7 +366,7 @@ impl CudaChande {
         }
         let n_combos = h_periods.len();
 
-        // Device buffers (inputs & params)
+        
         let d_high  = DeviceBuffer::from_slice(high)?;
         let d_low   = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
@@ -375,12 +375,12 @@ impl CudaChande {
         let d_dirs    = DeviceBuffer::from_slice(&h_dirs)?;
         let d_alphas  = DeviceBuffer::from_slice(&h_alphas)?;
 
-        // Check for new kernels and compute queue_cap for deque buffers
+        
         let have_oneseries = self.module.get_function("chande_one_series_many_params_f32").is_ok();
         let have_oneseries_tr = self.module.get_function("chande_one_series_many_params_from_tr_f32").is_ok();
         let queue_cap = Self::next_pow2_usize(max_p + 1);
 
-        // VRAM checks and workspace ensure
+        
         if have_oneseries || have_oneseries_tr {
             self.will_fit_full_output_one_series(n_combos, len, queue_cap)?;
             self.ensure_workspace(n_combos, queue_cap)?;
@@ -409,7 +409,7 @@ impl CudaChande {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         if have_oneseries {
-            // Fast path: on-the-fly TR, no extra copy
+            
             let func = self
                 .module
                 .get_function("chande_one_series_many_params_f32")
@@ -463,7 +463,7 @@ impl CudaChande {
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
-            // Fallback to legacy batch implementation
+            
             let use_tr = self.module.get_function("chande_batch_from_tr_f32").is_ok();
             let func = if use_tr {
                 self.module.get_function("chande_batch_from_tr_f32").unwrap()
@@ -494,11 +494,11 @@ impl CudaChande {
                 Some(DeviceBuffer::from_slice(&tr)?)
             } else { None };
 
-            // No VRAM-driven chunking anymore; we validated full output.
+            
             let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, BatchKernelPolicy::Auto => 256 };
             let chunk = n_combos.max(1);
             let mut launched = 0usize;
-            // Upload warms per chunk to simplify pointer arithmetic
+            
             while launched < n_combos {
                 let cur = (n_combos - launched).min(chunk);
                 let grid: GridSize = (cur as u32, 1, 1).into();
@@ -726,14 +726,14 @@ impl CudaChande {
     }
 }
 
-// ---------------- Bench profiles ----------------
+
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 512_000; // moderate, naive window scan is O(period)
+    const ONE_SERIES_LEN: usize = 512_000; 
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -835,7 +835,7 @@ pub mod benches {
         let mut cuda = CudaChande::new(0).expect("cuda chande");
 
         let first_valid = CudaChande::first_valid_hlc(&high, &low, &close).expect("first_valid");
-        let dir_flag = 1i32; // long
+        let dir_flag = 1i32; 
 
         let periods = CudaChande::axis_usize_range(sweep.period).expect("period axis");
         let mults_host = CudaChande::axis_f64_range(sweep.mult).expect("mult axis");
@@ -858,7 +858,7 @@ pub mod benches {
         let queue_cap = CudaChande::next_pow2_usize(max_p + 1);
         cuda.ensure_workspace(n_combos, queue_cap).expect("workspace");
 
-        // Upload once
+        
         let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
         let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
         let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
@@ -869,7 +869,7 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
 
-        // Launch config (same as chande_batch_dev oneseries path)
+        
         let warps_needed = ((n_combos + 31) / 32) as u32;
         let warps_per_block = match cuda.policy.batch {
             BatchKernelPolicy::Plain { block_x } => (block_x.max(32) / 32),

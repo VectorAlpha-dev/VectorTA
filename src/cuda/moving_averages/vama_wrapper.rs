@@ -29,7 +29,7 @@ use std::fmt;
 use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-// -------- Kernel selection policy (kept simple; no tiled variants for VAMA) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -232,7 +232,7 @@ impl CudaVama {
         }
     }
 
-    // ---------- VRAM utilities ----------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -256,7 +256,7 @@ impl CudaVama {
         }
     }
 
-    // ----- Dynamic shared memory helpers -----
+    
     #[inline]
     fn optin_smem_limit_bytes(&self) -> Result<i32, CudaVamaError> {
         unsafe {
@@ -328,12 +328,12 @@ impl CudaVama {
             .unwrap_or(0)
             .max(1) as usize;
 
-        // VRAM estimation: inputs + params + outputs (+ small scratch)
-        let headroom = 64usize * 1024 * 1024; // ~64MB
+        
+        let headroom = 64usize * 1024 * 1024; 
         let price_bytes = prepared.series_len * std::mem::size_of::<f32>();
         let params_bytes =
             n_combos * (std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>() * 2);
-        let work_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>(); // out
+        let work_bytes = n_combos * prepared.series_len * std::mem::size_of::<f32>(); 
         let total_est = price_bytes + params_bytes + work_bytes;
         if !Self::will_fit(total_est, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
@@ -352,8 +352,8 @@ impl CudaVama {
             .series_len
             .checked_mul(n_combos)
             .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?;
-        // The batch kernel no longer materializes EMA to device memory (output is the only public
-        // result). Keep a 1-element placeholder to preserve the PTX signature.
+        
+        
         let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(1)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
 
@@ -371,7 +371,7 @@ impl CudaVama {
             max_vol_period,
         )?;
 
-        // Ensure completion before returning VRAM handle for consistency
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Vama {
@@ -435,7 +435,7 @@ impl CudaVama {
             ));
         }
 
-        // Dynamic shared memory for the batch deque implementation needs the maximum vol window.
+        
         let mut host_vols = vec![0i32; n_combos];
         d_vol_periods.copy_to(&mut host_vols).map_err(CudaVamaError::Cuda)?;
         let max_vol_period = host_vols.iter().copied().max().unwrap_or(0).max(1) as usize;
@@ -465,8 +465,8 @@ impl CudaVama {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM headroom check similar to batch path
-        let headroom = 64usize * 1024 * 1024; // ~64MB
+        
+        let headroom = 64usize * 1024 * 1024; 
         let elem_bytes = std::mem::size_of::<f32>();
         let prices_bytes = data_tm_f32.len().saturating_mul(elem_bytes);
         let first_valids_bytes = prepared.first_valids.len().saturating_mul(std::mem::size_of::<i32>());
@@ -474,7 +474,7 @@ impl CudaVama {
             .checked_mul(series_len)
             .and_then(|n| n.checked_mul(elem_bytes))
             .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?
-            .saturating_mul(2); // ema + out
+            .saturating_mul(2); 
         let total_est = prices_bytes
             .saturating_add(first_valids_bytes)
             .saturating_add(work_bytes);
@@ -491,7 +491,7 @@ impl CudaVama {
         let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
-        // Shared memory for many-series kernel: 2 deques × (float+int) × vol_period
+        
         let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
 
         self.launch_many_series_kernel(
@@ -508,7 +508,7 @@ impl CudaVama {
             shmem_bytes,
         )?;
 
-        // Synchronize producing stream so __cuda_array_interface__ can omit 'stream'.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Vama {
@@ -539,8 +539,8 @@ impl CudaVama {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM headroom check similar to dev-returning path
-        let headroom = 64usize * 1024 * 1024; // ~64MB
+        
+        let headroom = 64usize * 1024 * 1024; 
         let elem_bytes = std::mem::size_of::<f32>();
         let prices_bytes = data_tm_f32.len().saturating_mul(elem_bytes);
         let first_valids_bytes = prepared.first_valids.len().saturating_mul(std::mem::size_of::<i32>());
@@ -548,7 +548,7 @@ impl CudaVama {
             .checked_mul(series_len)
             .and_then(|n| n.checked_mul(elem_bytes))
             .ok_or_else(|| CudaVamaError::InvalidInput("size overflow".into()))?
-            .saturating_mul(2); // ema + out
+            .saturating_mul(2); 
         let total_est = prices_bytes
             .saturating_add(first_valids_bytes)
             .saturating_add(work_bytes);
@@ -565,7 +565,7 @@ impl CudaVama {
         let mut d_ema: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
-        // Shared memory requirement for many-series kernel
+        
         let shmem_bytes = (24 * prepared.vol_period + 16) as u32;
 
         self.launch_many_series_kernel(
@@ -623,7 +623,7 @@ impl CudaVama {
             ));
         }
 
-        // Shared memory requirement for many-series kernel
+        
         let shmem_bytes = (24 * (vol_period as usize) + 16) as u32;
 
         self.launch_many_series_kernel(
@@ -739,7 +739,7 @@ impl CudaVama {
         }
         self.maybe_log_batch_debug();
 
-        // One block per combo; sequential work is done by thread 0 per block
+        
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let requested_smem = 24usize
@@ -889,10 +889,10 @@ impl CudaVama {
         }
         self.maybe_log_many_debug();
 
-        // One block per series; sequential work is done by thread 0 per block
+        
         let grid: GridSize = (1u32, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Compute and opt-in dynamic SMEM for this single-vol window
+        
         let requested_smem = 16usize * vol_period;
         let smem_bytes2: u32 = if requested_smem > 48 * 1024 {
             self.set_kernel_dynamic_smem(&mut func, requested_smem)? as u32
@@ -932,7 +932,7 @@ impl CudaVama {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1141,7 +1141,7 @@ fn expand_vama_grid(range: &VamaBatchRange) -> Vec<VamaParams> {
         if start <= end {
             return (start..=end).step_by(step).collect();
         }
-        // reversed
+        
         let mut v = Vec::new();
         let mut x = start;
         while x >= end {

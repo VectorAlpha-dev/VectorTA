@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
-// Must match the kernel's MSW_CHUNK_PER_THREAD macro (default 8)
+
 const MSW_CHUNK_PER_THREAD: u32 = 8;
 
 #[derive(Debug, Error)]
@@ -112,7 +112,7 @@ impl CudaMsw {
         })
     }
 
-    // ----- Policy control & introspection -----
+    
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.policy_batch = p;
     }
@@ -178,7 +178,7 @@ impl CudaMsw {
         }
     }
 
-    // ----- Helpers -----
+    
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
@@ -202,8 +202,8 @@ impl CudaMsw {
             }
             Ok(())
         } else {
-            // If mem_get_info failed earlier, conservatively succeed here but callers
-            // still see any underlying CUDA errors from allocations.
+            
+            
             Ok(())
         }
     }
@@ -246,7 +246,7 @@ impl CudaMsw {
                 }
                 return Ok(out);
             }
-            // Reversed bounds: walk downwards, including both ends.
+            
             let mut out = Vec::new();
             let mut v = start;
             loop {
@@ -287,8 +287,8 @@ impl CudaMsw {
             .collect())
     }
 
-    // Dynamic shared memory for optimized kernel (use_lut = true):
-    // floats = cos(P) + sin(P) + tile(T + P - 1), with T = block_x * MSW_CHUNK_PER_THREAD.
+    
+    
     #[inline]
     fn dyn_smem_floats(period: usize, block_x: u32) -> usize {
         let t = (block_x as usize) * (MSW_CHUNK_PER_THREAD as usize);
@@ -333,7 +333,7 @@ impl CudaMsw {
                 return Ok((bx, need_bytes));
             }
         }
-        // Fallback: try a small bx if nothing fit
+        
         let bx = 64u32.min(max_threads);
         let need_bytes = Self::dyn_smem_floats(period, bx) * std::mem::size_of::<f32>();
         let avail = func
@@ -348,7 +348,7 @@ impl CudaMsw {
         Ok((bx, need_bytes))
     }
 
-    // ----- Batch: one series × many params -----
+    
     fn launch_batch_chunk(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -362,12 +362,12 @@ impl CudaMsw {
         shared_bytes: usize,
         func: &Function,
     ) -> Result<(), CudaMswError> {
-        // Batch kernel advances one output per thread (tile = block_x)
+        
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Basic launch config validation against device limits
+        
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev
             .get_attribute(DeviceAttribute::MaxBlockDimX)
@@ -390,7 +390,7 @@ impl CudaMsw {
             let mut len_i = series_len as i32;
             let mut combos_i = chunk_rows as i32;
             let mut first_valid_i = first_valid as i32;
-            // offset out by base_row (2 rows per combo)
+            
             let mut out_ptr = d_out.as_device_ptr().as_raw()
                 + ((2 * base_row * series_len) * std::mem::size_of::<f32>()) as u64;
             let args: &mut [*mut c_void] = &mut [
@@ -447,7 +447,7 @@ impl CudaMsw {
             periods_i32.push(p as i32);
         }
 
-        // VRAM estimate: input + periods + output(2*rows*len)
+        
         let rows = combos.len();
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
@@ -470,14 +470,14 @@ impl CudaMsw {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(req, headroom)?;
 
-        // Device buffers
+        
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Select block_x based on max_p for shared memory sizing once using the function handle
-        // (we still pass it to launch method via try_pick inside, so warm up function cache here)
+        
+        
         let func = self
             .module
             .get_function("msw_batch_f32")
@@ -491,7 +491,7 @@ impl CudaMsw {
             },
         )?;
 
-        // Chunk grid.y if needed
+        
         let mut base = 0usize;
         const MAX_Y: usize = 65_535;
         while base < combos.len() {
@@ -511,7 +511,7 @@ impl CudaMsw {
         ))
     }
 
-    // ----- Many-series: time‑major, one param -----
+    
     pub fn msw_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -535,7 +535,7 @@ impl CudaMsw {
             return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
         }
 
-        // Per-series first_valid and validation
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -559,7 +559,7 @@ impl CudaMsw {
             first_valids[s] = found;
         }
 
-        // VRAM: input + first_valids + output (rows * 2*cols)
+        
         let prices_bytes = expected_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMswError::InvalidInput("input size overflow".into()))?;
@@ -591,7 +591,7 @@ impl CudaMsw {
                 name: "msw_many_series_one_param_time_major_f32",
             })?;
         let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })?;
-        // grid.x in tiles of T = block_x * MSW_CHUNK_PER_THREAD
+        
         let t_per_block = block_x * MSW_CHUNK_PER_THREAD;
         let grid_x = ((rows as u32) + t_per_block - 1) / t_per_block;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
@@ -644,7 +644,7 @@ impl CudaMsw {
     }
 }
 
-// -------- Benches --------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};

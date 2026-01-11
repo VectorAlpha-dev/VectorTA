@@ -14,7 +14,7 @@ fn main() {
     let data = &candles.close;
     println!("Loaded {} data points\n", data.len());
 
-    // Warmup
+    
     for _ in 0..10 {
         let _ = sma_with_kernel(
             &SmaInput::from_slice(data, SmaParams { period: Some(14) }),
@@ -33,7 +33,7 @@ fn main() {
         );
     }
 
-    // Benchmark SMA
+    
     println!("Benchmarking Rust-only performance...");
     println!("{:=<60}", "=");
 
@@ -53,7 +53,7 @@ fn main() {
         sma_avg.as_secs_f64() * 1000.0
     );
 
-    // Benchmark ALMA with Auto kernel
+    
     let mut alma_times = Vec::new();
     for _ in 0..50 {
         let start = Instant::now();
@@ -77,11 +77,11 @@ fn main() {
         alma_avg.as_secs_f64() * 1000.0
     );
 
-    // Now test with explicit kernels
+    
     println!("\nTesting ALMA with explicit kernels:");
     println!("{}", "-".repeat(40));
 
-    // Test ALMA with AVX512
+    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     {
         if std::arch::is_x86_feature_detected!("avx512f") {
@@ -127,7 +127,7 @@ fn main() {
         }
     }
 
-    // Scalar
+    
     let mut times = Vec::new();
     for _ in 0..50 {
         let start = Instant::now();

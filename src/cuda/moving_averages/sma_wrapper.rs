@@ -59,7 +59,7 @@ impl CudaSma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sma_kernel.ptx"));
-        // Align with ALMA/CWMA: JIT target from context + OptLevel (default O2 here).
+        
         let opt = match env::var("SMA_JIT_OPT").ok().as_deref() {
             Some("O0") => OptLevel::O0,
             Some("O1") => OptLevel::O1,
@@ -106,7 +106,7 @@ impl CudaSma {
 
     #[inline]
     fn use_async_transfers() -> bool {
-        // Default ON; set SMA_ASYNC=0 to disable.
+        
         match env::var("SMA_ASYNC") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
@@ -118,7 +118,7 @@ impl CudaSma {
         match env::var("SMA_CACHE").ok().as_deref() {
             Some("prefer_l1") => Some(CacheConfig::PreferL1),
             Some("prefer_shared") => Some(CacheConfig::PreferShared),
-            _ => Some(CacheConfig::PreferL1), // default to PreferL1 for read-mostly kernels
+            _ => Some(CacheConfig::PreferL1), 
         }
     }
 
@@ -210,11 +210,11 @@ impl CudaSma {
             let _ = func.set_cache_config(cfg);
         }
 
-        // Single-thread prefix kernel.
+        
         let grid: GridSize = (1u32, 1u32, 1u32).into();
         let block: BlockSize = (1u32, 1u32, 1u32).into();
 
-        // Optional validation against device limits (defensive)
+        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if 1u32 > max_threads {
@@ -258,7 +258,7 @@ impl CudaSma {
             let _ = func.set_cache_config(cfg);
         }
 
-        // Time-tiled 2D launch: grid.y = combos, grid.x covers time.
+        
         let block_x: u32 = match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
             Some(s) if s.eq_ignore_ascii_case("auto") => {
                 let (_min_grid, suggested) = func
@@ -318,9 +318,9 @@ impl CudaSma {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
-        // Optional VRAM check (rough estimate) like ALMA/CWMA wrappers
+        
         let rows = combos.len();
-        // Checked arithmetic: rows * cols and byte sizes
+        
         let elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaSmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -350,7 +350,7 @@ impl CudaSma {
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
 
         if Self::use_async_transfers() {
-            // Async path: pinned host buffers + stream-ordered alloc + async copies
+            
             let h_prices = LockedBuffer::from_slice(data_f32)?;
             let h_periods = LockedBuffer::from_slice(&periods)?;
 
@@ -379,7 +379,7 @@ impl CudaSma {
                 &mut d_out,
             )?;
 
-            // Ensure DMA + kernel completed before returning device buffers
+            
             self.stream.synchronize()?;
 
             Ok(DeviceArrayF32 {
@@ -388,7 +388,7 @@ impl CudaSma {
                 cols: len,
             })
         } else {
-            // Fallback synchronous path
+            
             let d_prices = DeviceBuffer::from_slice(data_f32)?;
             let d_periods = DeviceBuffer::from_slice(&periods)?;
 
@@ -411,7 +411,7 @@ impl CudaSma {
                 &mut d_out,
             )?;
 
-            // Ensure kernels finished before input buffers drop.
+            
             self.stream.synchronize()?;
 
             Ok(DeviceArrayF32 {
@@ -532,7 +532,7 @@ impl CudaSma {
             let _ = func.set_cache_config(cfg);
         }
 
-        // Default to CUDA-suggested block size; allow numeric override via SMA_MS_BLOCK_X
+        
         let block_x: u32 = match env::var("SMA_MS_BLOCK_X").ok().as_deref() {
             Some(s) if s.eq_ignore_ascii_case("auto") => {
                 let (_min_grid, suggested) = func
@@ -582,7 +582,7 @@ impl CudaSma {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
         if Self::use_async_transfers() {
-            // Async path: pinned I/O and stream-ordered allocs
+            
             let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
             let h_first = LockedBuffer::from_slice(first_valids)?;
 
@@ -606,7 +606,7 @@ impl CudaSma {
                 cols,
             })
         } else {
-            // Synchronous fallback
+            
             let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
             let d_first = DeviceBuffer::from_slice(first_valids)?;
             let elems = cols * rows;
@@ -657,7 +657,7 @@ impl CudaSma {
             .map_err(CudaSmaError::Cuda)
     }
 
-    // -------- Optional pinned output helpers (no extra host memcpy) --------
+    
     /// Copy SMA batch output directly into a page-locked host buffer using async D2H.
     pub fn sma_batch_into_host_pinned_f32(
         &self,
@@ -703,7 +703,7 @@ impl CudaSma {
         Ok(self.stream.synchronize()?)
     }
 
-    // -------- Device-resident input variants to avoid re-uploading --------
+    
     pub fn sma_batch_dev_from_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -764,7 +764,7 @@ impl CudaSma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

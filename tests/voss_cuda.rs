@@ -1,13 +1,13 @@
-// CUDA integration tests for VOSS
 
-use my_project::utilities::enums::Kernel;
+
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaVoss;
+use vector_ta::cuda::CudaVoss;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -32,7 +32,7 @@ fn voss_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    use my_project::indicators::voss::{voss_batch_with_kernel, VossBatchRange};
+    use vector_ta::indicators::voss::{voss_batch_with_kernel, VossBatchRange};
 
     let len = 8192usize;
     let mut data = vec![f64::NAN; len];
@@ -65,7 +65,7 @@ fn voss_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_voss.buf.copy_to(&mut voss_g)?;
     dev_filt.buf.copy_to(&mut filt_g)?;
 
-    let tol = 1e-2; // IIR + predictive feedback accumulates FP32 drift vs FP64 CPU
+    let tol = 1e-2; 
     for idx in 0..(cpu.rows * cpu.cols) {
         let cv = cpu.voss[idx];
         let gv = voss_g[idx] as f64;
@@ -97,14 +97,14 @@ fn voss_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    use my_project::indicators::voss::{voss_with_kernel, VossData, VossInput, VossParams};
+    use vector_ta::indicators::voss::{voss_with_kernel, VossData, VossInput, VossParams};
 
-    let cols = 8usize; // series
-    let rows = 2048usize; // time
+    let cols = 8usize; 
+    let rows = 2048usize; 
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (2 + s)..rows {
-            // stagger valid starts
+            
             let x = t as f64 + (s as f64) * 0.1;
             tm[t * cols + s] = (x * 0.0021).sin() + 0.00021 * x;
         }
@@ -115,7 +115,7 @@ fn voss_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         bandwidth: Some(0.25),
     };
 
-    // CPU baseline per series
+    
     let mut voss_cpu_tm = vec![f64::NAN; cols * rows];
     let mut filt_cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

@@ -1,11 +1,11 @@
-// CUDA kernels for ADXR (Average Directional Index Rating)
-//
-// Semantics mirror the scalar Rust implementation in src/indicators/adxr.rs:
-// - Warmup: values before (first_valid + 2*period) are NaN
-// - Wilder smoothing with alpha = 1/period for smoothed +DM/-DM
-// - DX = 100 * |+DM_s - -DM_s| / (+DM_s + -DM_s), denominator 0 -> 0
-// - ADX builds as mean of first `period` DX values, then Wilder recursion
-// - ADXR[t] = 0.5 * (ADX[t] + ADX[t - period]) once the ring is full
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -19,7 +19,7 @@ static __forceinline__ __device__ float fmax3(float a, float b, float c) {
     return fmaxf(a, fmaxf(b, c));
 }
 
-// Tiny helper: Kahan-compensated sum in FP32
+
 struct KahanF32 {
     float sum, c;
     __device__ inline void init(float s0=0.f){ sum=s0; c=0.f; }
@@ -50,19 +50,19 @@ void adxr_batch_f32(const float* __restrict__ high,
 
     const int base = combo * series_len;
 
-    // Fill entire row with NaNs cooperatively
+    
     for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
         out[base + i] = NAN;
     }
     __syncthreads();
 
-    // Only one thread per row runs the sequential recurrence
+    
     if (threadIdx.x != 0) return;
 
-    // Bootstrap sums over first window: i in [first+1 .. first+period]
+    
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
-    // Accumulate in FP32 (ATR/TR removed; not needed for DX)
+    
     float pdm_sum = 0.f;
     float mdm_sum = 0.f;
     while (i <= stop) {
@@ -77,7 +77,7 @@ void adxr_batch_f32(const float* __restrict__ high,
         ++i;
     }
 
-    // Initial DX from bootstrap sums (ATR cancels)
+    
     const float denom0 = pdm_sum + mdm_sum;
     const float initial_dx = (denom0 > 0.f) ? (100.f * fabsf(pdm_sum - mdm_sum) / denom0) : 0.f;
 
@@ -87,7 +87,7 @@ void adxr_batch_f32(const float* __restrict__ high,
     const float pm1 = p - 1.0f;
     const int warmup_start = first_valid + 2 * period;
 
-    // Wilder running state (FP32)
+    
     float pdm_s = pdm_sum;
     float mdm_s = mdm_sum;
 
@@ -96,7 +96,7 @@ void adxr_batch_f32(const float* __restrict__ high,
     float adx_last = NAN;
     bool have_adx = false;
 
-    // Use a local ring buffer for ADX history. Periods are small in practice.
+    
     float ring_local[256];
     const bool use_local = (period <= 256);
     if (use_local) {
@@ -115,7 +115,7 @@ void adxr_batch_f32(const float* __restrict__ high,
         const float plus_dm = (up > down && up > 0.0f) ? up : 0.0f;
         const float minus_dm = (down > up && down > 0.0f) ? down : 0.0f;
 
-        // Wilder smoothing (FP32)
+        
         pdm_s = fmaf(pdm_s, one_minus, plus_dm);
         mdm_s = fmaf(mdm_s, one_minus, minus_dm);
 
@@ -128,7 +128,7 @@ void adxr_batch_f32(const float* __restrict__ high,
             if (dx_count == period) {
                 adx_last = dx_sum.sum * inv_p;
                 have_adx = true;
-                // push into ring
+                
                 float prev = use_local ? ring_local[head] : NAN;
                 if (use_local) ring_local[head] = adx_last;
                 head += 1; if (head == period) head = 0;
@@ -151,7 +151,7 @@ void adxr_batch_f32(const float* __restrict__ high,
     }
 }
 
-// Many-series × one-param (time-major). Each block handles one series with a single thread.
+
 extern "C" __global__
 void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
                                     const float* __restrict__ low_tm,
@@ -169,7 +169,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     const int stride = num_series;
 
-    // Fill with NaNs
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = NAN;
     }
@@ -177,7 +177,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     if (threadIdx.x != 0) return;
 
-    // Bootstrap over [first+1 .. first+period]
+    
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
     float pdm_sum = 0.f;
@@ -212,7 +212,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
     bool have_adx = false;
 
     int head = 0;
-    // Use small local ring for typical periods; fall back to noop if too large
+    
     const bool use_local = (period <= 256);
     float ring_local[256];
     if (use_local) {
@@ -264,10 +264,10 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Optimized one series × many params kernel (throughput-oriented, tiled)
-// Adds global ring workspace (adx_ring, ring_pitch) to support any period.
-// -----------------------------------------------------------------------------
+
+
+
+
 extern "C" __global__
 void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
                                          const float* __restrict__ low,
@@ -276,10 +276,10 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
                                          int series_len,
                                          int first_valid,
                                          int n_periods,
-                                         // ADX ring workspace (size: n_periods * ring_pitch)
+                                         
                                          float* __restrict__ adx_ring,
                                          int ring_pitch,
-                                         // Output (row-major): out[row * series_len + t]
+                                         
                                          float* __restrict__ out)
 {
     if (first_valid < 0 || first_valid >= series_len || n_periods <= 0) return;
@@ -293,7 +293,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     }
     const bool valid = active && (period > 0);
 
-    // Per-thread row base and ring base (only for valid combos)
+    
     const int row_base  = valid ? (tid * series_len) : 0;
     const int ring_base = valid ? (tid * ring_pitch) : 0;
 
@@ -309,7 +309,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         warmup_start = first_valid + 2 * period;
     }
 
-    // Fill only the warmup prefix with NaNs (the main loop writes all i >= warmup_start).
+    
     if (valid) {
         const int warm_end = min(warmup_start, series_len);
         for (int t = 0; t < warm_end; ++t) {
@@ -317,7 +317,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         }
     }
 
-    // Bootstrap sums (period-dependent) over [first_valid+1 .. first_valid+period]
+    
     const int init_i0 = first_valid + 1;
     const int init_i1 = min(first_valid + period, series_len - 1);
     float pdm_s = 0.f;
@@ -344,10 +344,10 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     float adx_last = NAN;
     bool  have_adx = false;
 
-    int head = 0; // ring head for this period
+    int head = 0; 
     int ring_filled = 0;
 
-    // Tiled pass over time using dynamic shared memory
+    
     extern __shared__ float smem[];
     const int TILE = 256;
     float* pdm_tile = smem;
@@ -359,7 +359,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         const int tile_end   = min(tile_start + TILE, series_len);
         const int count      = tile_end - tile_start;
 
-        // Tile loader: compute +DM/-DM once per tile per block
+        
         for (int j = threadIdx.x; j < count; j += blockDim.x) {
             const int i = tile_start + j;
             const float ch = high[i];
@@ -377,9 +377,9 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
             const int i = tile_start + j;
 
             if (!valid || i <= first_valid + period) {
-                // still within bootstrap window; skip
+                
             } else {
-                // Wilder updates
+                
                 pdm_s = fmaf(pdm_s, one_minus, pdm_tile[j]);
                 mdm_s = fmaf(mdm_s, one_minus, mdm_tile[j]);
 
@@ -419,10 +419,10 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     }
 }
 
-// -----------------------------------------------------------------------------
-// Optional: Many-series × one-param variant with global-ring fallback
-// Keeps time-major layout and preserves original signature via a new function.
-// -----------------------------------------------------------------------------
+
+
+
+
 extern "C" __global__
 void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ high_tm,
                                                    const float* __restrict__ low_tm,
@@ -431,7 +431,7 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
                                                    int period,
                                                    int num_series,
                                                    int series_len,
-                                                   // Global ring workspace (size: num_series * ring_pitch)
+                                                   
                                                    float* __restrict__ adx_ring,
                                                    int ring_pitch,
                                                    float* __restrict__ out_tm) {
@@ -443,14 +443,14 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
 
     const int stride = num_series;
 
-    // Fill with NaNs
+    
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = NAN;
     }
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    // Bootstrap
+    
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
     float pdm_sum = 0.f;
@@ -489,7 +489,7 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
     if (use_local) {
         for (int k = 0; k < period; ++k) ring_local[k] = NAN;
     } else {
-        // initialize global ring for this series
+        
         const int ring_base = series * ring_pitch;
         for (int k = 0; k < period; ++k) adx_ring[ring_base + k] = NAN;
     }

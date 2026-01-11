@@ -1,13 +1,13 @@
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaAvsl};
-use my_project::indicators::avsl::{
+use vector_ta::cuda::{cuda_available, CudaAvsl};
+use vector_ta::indicators::avsl::{
     avsl_batch_with_kernel, avsl_with_kernel, AvslBatchRange, AvslData, AvslInput, AvslParams,
 };
-use my_project::utilities::data_loader::Candles;
+use vector_ta::utilities::data_loader::Candles;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -61,7 +61,7 @@ fn avsl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_vals = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_vals)?;
 
-    let tol = 1.5e-2; // FP32 allowance for complex recurrence
+    let tol = 1.5e-2; 
     for idx in 0..gpu_vals.len() {
         assert!(
             approx_eq(cpu.values[idx], gpu_vals[idx] as f64, tol),
@@ -100,7 +100,7 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let slow = 26usize;
     let mult = 2.0;
 
-    // CPU baseline (per column)
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

@@ -66,7 +66,7 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-// Note: AVec and CACHELINE_ALIGN not needed for stddev as we don't use cache-aligned buffers
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -237,7 +237,7 @@ pub enum StdDevError {
     InvalidRange { start: String, end: String, step: String },
     #[error("stddev: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
-    // Kept for backward compatibility; new code should use `OutputLengthMismatch`.
+    
     #[error("stddev: Output length mismatch: dst = {dst_len}, expected = {expected_len}")]
     MismatchedOutputLen { dst_len: usize, expected_len: usize },
     #[error("stddev: Invalid kernel type: {msg}")]
@@ -303,7 +303,7 @@ pub fn stddev_with_kernel(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 stddev_avx512(data, period, first, nbdev, &mut out)
             }
-            // fallback parity with alma.rs
+            
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 stddev_scalar(data, period, first, nbdev, &mut out)
@@ -357,7 +357,7 @@ pub fn stddev_into_slice(
         });
     }
 
-    // warmup fill
+    
     let warmup = first + period - 1;
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
@@ -393,18 +393,18 @@ pub fn stddev_into_slice(
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn stddev_into(input: &StdDevInput, out: &mut [f64]) -> Result<(), StdDevError> {
-    // Delegate to the existing no-allocation entry which validates lengths,
-    // computes identical warmup, and dispatches to the selected kernel.
+    
+    
     stddev_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
 pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
-    // Rolling O(1) update of sum and sum of squares.
-    // Compute variance with the same operation order as the stream path
-    // to preserve bitwise-equivalent results in tests:
-    //   mean = sum / den; var = (sum_sqr / den) - (mean * mean)
-    // Using division by a constant `den` matches the streaming update logic.
+    
+    
+    
+    
+    
     let den = period as f64;
     let inv_den = 1.0 / den;
 
@@ -413,8 +413,8 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
 
-    // Pointer-based loops to reduce bounds checks and iterator overhead (Tulip-style),
-    // while preserving the same operation order for numerical parity.
+    
+    
     unsafe {
         let mut ptr = data.as_ptr().add(first);
         let end = ptr.add(period);
@@ -426,13 +426,13 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
         }
     }
 
-    // First output at warmup index
+    
     let idx0 = first + period - 1;
     let mean0 = sum * inv_den;
     let var0 = (sum_sqr * inv_den) - (mean0 * mean0);
     out[idx0] = if var0 <= 0.0 { 0.0 } else { var0.sqrt() * nbdev };
 
-    // Subsequent outputs
+    
     unsafe {
         let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
         let mut in_new = data.as_ptr().add(first + period);
@@ -506,7 +506,7 @@ pub struct StdDevStream {
     filled: bool,
     sum: f64,
     sum_sqr: f64,
-    nan_count: usize, // Track NaNs currently inside the window
+    nan_count: usize, 
 }
 
 impl StdDevStream {
@@ -544,7 +544,7 @@ impl StdDevStream {
     ///   mean = sum/den; var = sum2/den - mean*mean.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Warmup phase: fill buffer, build sums, first emit at window-full.
+        
         if !self.filled {
             if value.is_nan() {
                 self.nan_count += 1;
@@ -556,7 +556,7 @@ impl StdDevStream {
 
             let next = self.head + 1;
             if next == self.period {
-                // Window becomes full on this tick; emit first value
+                
                 self.head = 0;
                 self.filled = true;
 
@@ -576,26 +576,26 @@ impl StdDevStream {
             }
         }
 
-        // Steady state: drop oldest, add newest.
+        
         let old = self.buffer[self.head];
         let new_is_nan = value.is_nan();
         let old_is_nan = old.is_nan();
 
-        // Update sums with operation order parity when both are finite.
+        
         match (old_is_nan, new_is_nan) {
             (false, false) => {
-                // Match original rounding: single add of (new - old)
+                
                 self.sum += value - old;
                 self.sum_sqr += (value * value) - (old * old);
             }
             (false, true) => {
-                // Remove only the finite old; add no contribution for NaN new
+                
                 self.sum -= old;
                 self.sum_sqr -= old * old;
                 self.nan_count += 1;
             }
             (true, false) => {
-                // Old was NaN; just add the finite new
+                
                 if self.nan_count > 0 {
                     self.nan_count -= 1;
                 }
@@ -603,27 +603,27 @@ impl StdDevStream {
                 self.sum_sqr += value * value;
             }
             (true, true) => {
-                // NaN slid out and NaN slid in: nan_count unchanged; sums unchanged
-                // Maintain nan_count explicitly
-                // old NaN out
+                
+                
+                
                 if self.nan_count > 0 {
                     self.nan_count -= 1;
                 }
-                // new NaN in
+                
                 self.nan_count += 1;
             }
         }
 
-        // Write new value into ring
+        
         self.buffer[self.head] = value;
 
-        // Advance ring head without modulo
+        
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
 
-        // Emit NaN if any NaN in the window
+        
         if self.nan_count > 0 {
             return Some(f64::NAN);
         }
@@ -918,22 +918,22 @@ fn stddev_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    // Guard rows*cols overflow before allocating the output matrix.
+    
     let _ = rows.checked_mul(cols).ok_or_else(|| StdDevError::InvalidInput {
         msg: "stddev: rows*cols overflow in batch".to_string(),
     })?;
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Allocate uninitialized matrix and set NaN prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to initialized slice
+    
     let mut values = unsafe {
         Vec::from_raw_parts(
             buf_mu.as_mut_ptr() as *mut f64,
@@ -943,7 +943,7 @@ fn stddev_batch_inner(
     };
     std::mem::forget(buf_mu);
 
-    // Build prefix sums once (n+1 to simplify window differences); track NaNs like zscore
+    
     #[derive(Clone)]
     struct StdPrefixes {
         ps: Vec<f64>,
@@ -984,24 +984,24 @@ fn stddev_batch_inner(
             return;
         }
 
-        // Precompute reciprocals to avoid per-element divisions
+        
         let inv_den = 1.0 / (period as f64);
         let inv_den2 = inv_den * inv_den;
 
-        // Fast path: no NaNs anywhere in the slice ⇒ skip per-element NaN checks
+        
         let no_nans = pre.pnan[n] == 0;
         if no_nans {
             for i in warmup_end..n {
                 let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
                 let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
-                // var = sum2 * inv_den - (sum * sum) * inv_den2
+                
                 let var = sum2.mul_add(inv_den, -(sum * sum) * inv_den2);
                 out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
             }
             return;
         }
 
-        // General path: handle NaNs per-window
+        
         for i in warmup_end..n {
             if pre.pnan[i + 1] - pre.pnan[i + 1 - period] > 0 {
                 out_row[i] = f64::NAN;
@@ -1030,7 +1030,7 @@ fn stddev_batch_inner(
         }
         let no_nans = pre.pnan[n] == 0;
         if !no_nans {
-            // Fallback to scalar with NaN handling
+            
             stddev_from_prefix_scalar(warmup_end, period, nbdev, pre, out_row);
             return;
         }
@@ -1044,7 +1044,7 @@ fn stddev_batch_inner(
 
         let mut i = warmup_end;
         while i + 4 <= n {
-            // Sums
+            
             let s_hi = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1));
             let s_lo = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
             let sum = _mm256_sub_pd(s_hi, s_lo);
@@ -1053,7 +1053,7 @@ fn stddev_batch_inner(
             let q_lo = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
             let sum2 = _mm256_sub_pd(q_hi, q_lo);
 
-            // var = sum2*inv_den - (sum*sum)*inv_den2
+            
             let sum_sq = _mm256_mul_pd(sum, sum);
             let term = _mm256_mul_pd(sum_sq, v_inv_den2);
             let var = _mm256_sub_pd(_mm256_mul_pd(sum2, v_inv_den), term);
@@ -1063,7 +1063,7 @@ fn stddev_batch_inner(
             _mm256_storeu_pd(out_row.as_mut_ptr().add(i), outv);
             i += 4;
         }
-        // Tail
+        
         if i < n {
             stddev_from_prefix_scalar(i, period, nbdev, pre, out_row);
         }
@@ -1273,7 +1273,7 @@ pub fn stddev_batch_inner_into(
         });
     }
 
-    // warmup vector and helper init
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1448,9 +1448,9 @@ pub fn stddev_batch_py<'py>(
     Ok(dict)
 }
 
-// ============================
-// Python CUDA bindings
-// ============================
+
+
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "stddev_cuda_batch_dev")]
@@ -1511,9 +1511,9 @@ pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
     Ok(handle)
 }
 
-// ============================
-// WASM Bindings
-// ============================
+
+
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -1524,7 +1524,7 @@ pub fn stddev_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, Js
     };
     let input = StdDevInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()]; 
     stddev_into_slice(&mut output, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1553,7 +1553,7 @@ pub fn stddev_into(
         let input = StdDevInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
+            
             let mut temp = vec![0.0; len];
             stddev_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1599,7 +1599,7 @@ pub struct StdDevBatchConfig {
 pub struct StdDevBatchJsOutput {
     pub values: Vec<f64>,
     pub combos: Vec<StdDevParams>,
-    // Legacy fields for backward compatibility
+    
     pub periods: Vec<usize>,
     pub nbdevs: Vec<f64>,
     pub rows: usize,
@@ -1633,7 +1633,7 @@ pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// add ALMA-parity batch_into
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn stddev_batch_into(
@@ -1675,7 +1675,7 @@ pub fn stddev_batch_into(
     }
 }
 
-// keep your existing config-based entrypoint but rename
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn stddev_batch_into_cfg(
@@ -1716,7 +1716,7 @@ pub fn stddev_batch_into_cfg(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let result = StdDevBatchJsOutput {
-            values: vec![], // Empty, data is already in out_ptr
+            values: vec![], 
             periods: params.iter().map(|p| p.period.unwrap()).collect(),
             nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
             combos: params,
@@ -1747,15 +1747,15 @@ mod tests {
         test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        // Test that non-batch kernels are rejected in batch functions
+        
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let sweep = StdDevBatchRange::default();
 
-        // Try using a non-batch kernel
+        
         let res = stddev_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(res, Err(StdDevError::InvalidKernelForBatch(_))));
 
-        // Also test with other non-batch kernels
+        
         let res2 = stddev_batch_with_kernel(&data, &sweep, Kernel::Avx2);
         assert!(matches!(res2, Err(StdDevError::InvalidKernelForBatch(_))));
         Ok(())
@@ -1770,13 +1770,13 @@ mod tests {
         let params = StdDevParams::default();
         let input = StdDevInput::from_slice(&data, params);
 
-        // Create a mismatched output buffer
-        let mut wrong_size_output = vec![0.0; 10]; // Wrong size: data is 5, output is 10
+        
+        let mut wrong_size_output = vec![0.0; 10]; 
         let res = stddev_into_slice(&mut wrong_size_output, &input, kernel);
         assert!(matches!(res, Err(StdDevError::OutputLengthMismatch { .. })));
 
-        // Also test with smaller buffer
-        let mut small_output = vec![0.0; 3]; // Too small
+        
+        let mut small_output = vec![0.0; 3]; 
         let res2 = stddev_into_slice(&mut small_output, &input, kernel);
         assert!(matches!(res2, Err(StdDevError::OutputLengthMismatch { .. })));
         Ok(())
@@ -1787,17 +1787,17 @@ mod tests {
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let params = StdDevParams {
             period: Some(3),
-            nbdev: Some(-1.0), // Negative nbdev should be rejected
+            nbdev: Some(-1.0), 
         };
         let input = StdDevInput::from_slice(&data, params.clone());
         let res = stddev_with_kernel(&input, kernel);
         assert!(matches!(res, Err(StdDevError::InvalidNbdev { .. })));
 
-        // Also test with stream
+        
         let stream_res = StdDevStream::try_new(params);
         assert!(matches!(stream_res, Err(StdDevError::InvalidNbdev { .. })));
 
-        // Test infinite nbdev
+        
         let inf_params = StdDevParams {
             period: Some(3),
             nbdev: Some(f64::INFINITY),
@@ -1806,7 +1806,7 @@ mod tests {
         let inf_res = stddev_with_kernel(&inf_input, kernel);
         assert!(matches!(inf_res, Err(StdDevError::InvalidNbdev { .. })));
 
-        // Test NaN nbdev
+        
         let nan_params = StdDevParams {
             period: Some(3),
             nbdev: Some(f64::NAN),
@@ -1966,16 +1966,16 @@ mod tests {
 
     #[test]
     fn test_stddev_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use existing CSV data to match other tests and exercise realistic paths.
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = StdDevInput::from_candles(&candles, "close", StdDevParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = stddev(&input)?.values;
 
-        // Preallocate output buffer and run the into variant
+        
         let mut out = vec![0.0; baseline.len()];
         #[cfg(not(feature = "wasm"))]
         {
@@ -1983,13 +1983,13 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, the native symbol is not present; use the slice variant.
+            
             stddev_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper to treat NaN == NaN, otherwise require exact equality (or tight epsilon)
+        
         let eq_or_both_nan = |a: f64, b: f64| -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         };
@@ -2202,8 +2202,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate random parameter combinations and corresponding data vectors
-        // Use positive values to simulate realistic financial data (prices >= 0)
+        
+        
         let strat = (2usize..=30, 0.5f64..=3.0f64).prop_flat_map(|(period, nbdev)| {
             (
                 prop::collection::vec(
@@ -2226,10 +2226,10 @@ mod tests {
             let StdDevOutput { values: ref_out } =
                 stddev_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Calculate expected warmup period
+            
             let warmup_period = period - 1;
 
-            // Verify warmup period values are NaN
+            
             for i in 0..warmup_period {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2239,12 +2239,12 @@ mod tests {
                 );
             }
 
-            // Test properties for valid output values
+            
             for i in warmup_period..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                // Property 1: Standard deviation is always non-negative
+                
                 prop_assert!(
                     y.is_nan() || y >= 0.0,
                     "StdDev at index {} is negative: {}",
@@ -2252,7 +2252,7 @@ mod tests {
                     y
                 );
 
-                // Property 2: Check kernel consistency (all kernels should produce same result)
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = if y_bits > r_bits {
@@ -2269,7 +2269,7 @@ mod tests {
                     ulp_diff
                 );
 
-                // Property 3: For constant window, stddev should be 0
+                
                 let window = &data[i + 1 - period..=i];
                 let is_constant = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 if is_constant {
@@ -2281,15 +2281,15 @@ mod tests {
                     );
                 }
 
-                // Property 4: Bounded by theoretical maximum (for nbdev=1)
-                // Maximum stddev occurs with bimodal distribution at extremes
-                // Max stddev ≈ range/2 * sqrt(n/(n-1)) for n points
+                
+                
+                
                 if (nbdev - 1.0).abs() < 1e-9 {
                     let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let range = window_max - window_min;
 
-                    // Theoretical maximum with correction factor for finite samples
+                    
                     let max_stddev =
                         (range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
 
@@ -2302,8 +2302,8 @@ mod tests {
                     );
                 }
 
-                // Property 5: Scaling with nbdev
-                // Run another calculation with nbdev=1.0 to verify scaling
+                
+                
                 if (nbdev - 1.0).abs() > 1e-9 {
                     let params_unit = StdDevParams {
                         period: Some(period),
@@ -2314,7 +2314,7 @@ mod tests {
                         stddev_with_kernel(&input_unit, kernel).unwrap();
                     let y_unit = out_unit[i];
 
-                    // Verify that output scales linearly with nbdev
+                    
                     let expected = y_unit * nbdev;
                     let diff = (y - expected).abs();
                     prop_assert!(
@@ -2329,7 +2329,7 @@ mod tests {
                 }
             }
 
-            // Special case: period=2 with two identical values should give 0
+            
             if period == 2 && data.len() >= 2 {
                 let identical_data = vec![42.0; 10];
                 let params2 = StdDevParams {
@@ -2349,8 +2349,8 @@ mod tests {
                 }
             }
 
-            // Test monotonic increasing pattern
-            // For a linear sequence, stddev = range * sqrt((n²-1)/12) / n
+            
+            
             if data.len() >= period * 2 {
                 let monotonic_data: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 10.0).collect();
                 let mono_params = StdDevParams {
@@ -2361,14 +2361,14 @@ mod tests {
                 let StdDevOutput { values: mono_out } =
                     stddev_with_kernel(&mono_input, kernel).unwrap();
 
-                // For linear sequence with step size d, theoretical stddev = d * sqrt((n²-1)/12)
+                
                 let step_size = 10.0;
                 let expected_stddev = step_size * ((period * period - 1) as f64 / 12.0).sqrt();
 
                 for i in (period - 1)..mono_out.len().min(period * 3) {
                     let deviation = (mono_out[i] - expected_stddev).abs();
                     prop_assert!(
-                        deviation < 1.0, // Allow some tolerance for numerical precision
+                        deviation < 1.0, 
                         "Monotonic pattern stddev mismatch at index {}: got {}, expected ~{}",
                         i,
                         mono_out[i],
@@ -2377,8 +2377,8 @@ mod tests {
                 }
             }
 
-            // Test alternating pattern (high-low-high-low)
-            // This should produce high variance
+            
+            
             if data.len() >= period * 2 && period >= 4 {
                 let alternating_data: Vec<f64> = (0..100)
                     .map(|i| if i % 2 == 0 { 1000.0 } else { 100.0 })
@@ -2391,19 +2391,19 @@ mod tests {
                 let StdDevOutput { values: alt_out } =
                     stddev_with_kernel(&alt_input, kernel).unwrap();
 
-                // For alternating pattern, stddev should be close to range/2
-                let alt_range = 900.0; // 1000 - 100
-                let expected_alt_stddev = alt_range / 2.0; // Approximately 450
+                
+                let alt_range = 900.0; 
+                let expected_alt_stddev = alt_range / 2.0; 
 
                 for i in (period - 1)..alt_out.len().min(period * 3) {
-                    // Should be substantial (at least 40% of range)
+                    
                     prop_assert!(
                         alt_out[i] > alt_range * 0.4,
                         "Alternating pattern should produce high stddev at index {}: got {}",
                         i,
                         alt_out[i]
                     );
-                    // But not exceed theoretical maximum
+                    
                     let max_possible =
                         (alt_range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
                     prop_assert!(
@@ -2505,14 +2505,14 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            // (period_start, period_end, period_step, nbdev_start, nbdev_end, nbdev_step)
-            (2, 10, 2, 1.0, 1.0, 0.0),    // Small periods, static nbdev
-            (5, 25, 5, 0.5, 2.5, 0.5),    // Medium periods, varying nbdev
-            (30, 60, 15, 1.0, 1.0, 0.0),  // Large periods, static nbdev
-            (2, 5, 1, 1.0, 3.0, 1.0),     // Dense small range, varying nbdev
-            (10, 10, 0, 0.5, 3.0, 0.5),   // Static period, varying nbdev
-            (20, 50, 10, 2.0, 2.0, 0.0),  // Medium to large periods, static nbdev=2
-            (100, 100, 0, 1.0, 3.0, 1.0), // Large static period, varying nbdev
+            
+            (2, 10, 2, 1.0, 1.0, 0.0),    
+            (5, 25, 5, 0.5, 2.5, 0.5),    
+            (30, 60, 15, 1.0, 1.0, 0.0),  
+            (2, 5, 1, 1.0, 3.0, 1.0),     
+            (10, 10, 0, 0.5, 3.0, 0.5),   
+            (20, 50, 10, 2.0, 2.0, 0.0),  
+            (100, 100, 0, 1.0, 3.0, 1.0), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, n_start, n_end, n_step)) in

@@ -119,7 +119,7 @@ impl<'a> MamaInput<'a> {
     }
 }
 
-// Builder struct
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct MamaBuilder {
@@ -186,7 +186,7 @@ impl MamaBuilder {
     }
 }
 
-// Error type (richer coverage for CPU/batch callers)
+
 
 #[derive(Debug, Error)]
 pub enum MamaError {
@@ -210,7 +210,7 @@ pub enum MamaError {
     InvalidSlowLimit { slow_limit: f64 },
 }
 
-// Indicator API
+
 
 #[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, MamaError> {
@@ -223,7 +223,7 @@ fn mama_prepare<'a>(
     kernel: Kernel,
 ) -> Result<
     (
-        // data
+        
         &'a [f64],
         // fast_limit
         f64,
@@ -452,7 +452,7 @@ pub fn mama_into(
         });
     }
 
-    // Compute full series in-place, then overwrite warmup with NaN to match Vec API.
+    
     mama_compute_into(input, Kernel::Auto, out_mama, out_fama)?;
 
     const WARM: usize = 10;
@@ -525,20 +525,20 @@ pub unsafe fn mama_avx2(
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 #[inline]
 unsafe fn hilbert4_avx512(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-    // X = [x6, x4, x2, x0, 0,0,0,0]  (upper 4 lanes zeroed so they don't
-    // influence the horizontal reduction)
+    
+    
     let v_x = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, x6, x4, x2, x0);
 
-    // H = [-0.0962, -0.5769, 0.5769, 0.0962, 0,0,0,0]
+    
     const H3: f64 = -0.096_2;
     const H2: f64 = -0.576_9;
     const H1: f64 = 0.576_9;
     const H0: f64 = 0.096_2;
     let v_h = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, H3, H2, H1, H0);
 
-    // 1) component‑wise multiply, 2) horizontal add of all 8 lanes
-    let v_mul = _mm512_mul_pd(v_x, v_h); // 1 µ‑op
-    _mm512_reduce_add_pd(v_mul) // 1 µ‑op (ICE: latency → 4 cy)
+    
+    let v_mul = _mm512_mul_pd(v_x, v_h); 
+    _mm512_reduce_add_pd(v_mul) 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -554,11 +554,11 @@ pub unsafe fn mama_avx512_inplace(
     debug_assert_eq!(data.len(), out_mama.len());
     debug_assert_eq!(data.len(), out_fama.len());
 
-    // ---- identical constants & ring‑buffer setup to your AVX2 version ----
-    const LEN: usize = 8; // power of two
+    
+    const LEN: usize = 8; 
     const MASK: usize = LEN - 1;
 
-    // align on 64 B so every load hits one line
+    
     #[repr(align(64))]
     struct A([f64; LEN]);
     let first = data[0];
@@ -569,7 +569,7 @@ pub unsafe fn mama_avx512_inplace(
 
     const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-    // ---- state ----
+    
     let (mut idx, mut prev_mesa, mut prev_phase) = (0usize, 0.0, 0.0);
     let (mut prev_mama, mut prev_fama) = (first, first);
     let (mut prev_i2, mut prev_q2) = (0.0, 0.0);
@@ -580,9 +580,9 @@ pub unsafe fn mama_avx512_inplace(
         unsafe { *buf.get_unchecked((p.wrapping_sub(k)) & MASK) }
     }
 
-    // ---- main loop ----
+    
     for (i, &price) in data.iter().enumerate() {
-        // 1. 4‑3‑2‑1 smoother (scalar FMA)
+        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
@@ -590,7 +590,7 @@ pub unsafe fn mama_avx512_inplace(
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         smooth[idx] = smooth_val;
 
-        // 2. Hilbert detrender (AVX‑512) with amplitude correction
+        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
         let dt_val = amp
             * hilbert4_avx512(
@@ -601,7 +601,7 @@ pub unsafe fn mama_avx512_inplace(
             );
         detrender[idx] = dt_val;
 
-        // 3. In‑phase / quadrature
+        
         let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
 
@@ -614,7 +614,7 @@ pub unsafe fn mama_avx512_inplace(
             );
         q1_buf[idx] = q1;
 
-        // 4. 90° leads
+        
         let j_i = amp
             * hilbert4_avx512(
                 i1_buf[idx],
@@ -630,7 +630,7 @@ pub unsafe fn mama_avx512_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        // 5. Homodyne discriminator (unchanged)
+        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let old_i2 = prev_i2;
@@ -645,7 +645,7 @@ pub unsafe fn mama_avx512_inplace(
         prev_re = re;
         prev_im = im;
 
-        // 6. Dominant cycle period
+        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -659,7 +659,7 @@ pub unsafe fn mama_avx512_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        // 7. Adaptive alpha
+        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -674,7 +674,7 @@ pub unsafe fn mama_avx512_inplace(
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
-        // 8. MAMA / FAMA
+        
         let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = cur_mama;
@@ -691,22 +691,22 @@ pub unsafe fn mama_avx512_inplace(
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 unsafe fn hilbert4_avx2(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-    // X = [x6,x4,x2,x0]  – order chosen so that vhadd folds without shuffle
+    
     let v_x = _mm256_set_pd(x6, x4, x2, x0);
-    // H = [‑.0962,‑.5769,.5769,.0962]
+    
     const H3: f64 = -0.096_2;
     const H2: f64 = -0.576_9;
     const H1: f64 = 0.576_9;
     const H0: f64 = 0.096_2;
     let v_h = _mm256_set_pd(H3, H2, H1, H0);
 
-    // multiply & first stage add
-    let v_mul = _mm256_mul_pd(v_x, v_h); // 1 µ‑op
-    let v_sum = _mm256_hadd_pd(v_mul, v_mul); // horizontal add
-                                              // fold lanes 0‑1 with 2‑3
+    
+    let v_mul = _mm256_mul_pd(v_x, v_h); 
+    let v_sum = _mm256_hadd_pd(v_mul, v_mul); 
+                                              
     let v_fold = _mm256_permute2f128_pd(v_sum, v_sum, 0x1);
-    let v_res = _mm256_add_pd(v_sum, v_fold); // 1 µ‑op
-    _mm256_cvtsd_f64(v_res) // lane 0 → scalar
+    let v_res = _mm256_add_pd(v_sum, v_fold); 
+    _mm256_cvtsd_f64(v_res) 
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -721,19 +721,19 @@ pub unsafe fn mama_avx2_inplace(
     debug_assert_eq!(data.len(), out_mama.len());
     debug_assert_eq!(data.len(), out_fama.len());
 
-    // ----------------------------------------------------------
-    // 1. Constants – weights & helpers
-    // --------------------------------------------------------
-    const RING_LEN: usize = 8; // power‑of‑two → & (LEN‑1) instead of %
+    
+    
+    
+    const RING_LEN: usize = 8; 
     const MASK: usize = RING_LEN - 1;
 
-    // 4‑3‑2‑1 smoother coefficients (sum = 10).
+    
     const W0: f64 = 4.0;
     const W1: f64 = 3.0;
     const W2: f64 = 2.0;
     const W3: f64 = 1.0;
 
-    // Hilbert transform taps (John Ehlers)
+    
     const H0: f64 = 0.096_2;
     const H1: f64 = 0.576_9;
     const H2: f64 = -0.576_9;
@@ -741,18 +741,18 @@ pub unsafe fn mama_avx2_inplace(
 
     const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-    // ----------------------------------------------------------
-    // 3. Local ring buffers (filled with first sample)
-    // --------------------------------------------------------
+    
+    
+    
     let first = data[0];
     let mut smooth = [first; RING_LEN];
     let mut detrender = [first; RING_LEN];
     let mut i1_buf = [first; RING_LEN];
     let mut q1_buf = [first; RING_LEN];
 
-    // ----------------------------------------------------------
-    // 4. Rolling state variables
-    // --------------------------------------------------------
+    
+    
+    
     let mut idx = 0usize;
     let mut prev_mesa = 0.0;
     let mut prev_phase = 0.0;
@@ -763,29 +763,29 @@ pub unsafe fn mama_avx2_inplace(
     let mut prev_re = 0.0;
     let mut prev_im = 0.0;
 
-    // lag helper – branch‑free via masking
+    
     #[inline(always)]
     fn lag(buf: &[f64; RING_LEN], p: usize, k: usize) -> f64 {
         buf[(p.wrapping_sub(k)) & MASK]
     }
 
-    // ----------------------------------------------------------
-    // 5. Main processing loop
-    // --------------------------------------------------------
+    
+    
+    
     for (i, &price) in data.iter().enumerate() {
-        // ---------- 5.1 4‑3‑2‑1 smoother -------------------
+        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
 
-        // fused  (4p + 3s1 + 2s2 + s3) / 10
+        
         let smooth_val = W0.mul_add(price, W1.mul_add(s1, W2.mul_add(s2, s3))) * 0.1;
         smooth[idx] = smooth_val;
 
-        // amplitude correction per Ehlers
+        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
-        // ---------- 5.2 Hilbert detrender ------------------
+        
         let dt_val = amp
             * hilbert4_avx2(
                 smooth[idx],
@@ -795,8 +795,8 @@ pub unsafe fn mama_avx2_inplace(
             );
         detrender[idx] = dt_val;
 
-        // ---------- 5.3 In‑phase & quadrature --------------
-        let i1 = lag(&detrender, idx, 3); // 3‑bar lag
+        
+        let i1 = lag(&detrender, idx, 3); 
         i1_buf[idx] = i1;
 
         let q1 = amp
@@ -808,7 +808,7 @@ pub unsafe fn mama_avx2_inplace(
             );
         q1_buf[idx] = q1;
 
-        // ---------- 5.4 90° leads --------------------------
+        
         let j_i = amp
             * hilbert4_avx2(
                 i1_buf[idx],
@@ -824,7 +824,7 @@ pub unsafe fn mama_avx2_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        // ---------- 5.5 Homodyne discriminator -------------
+        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let old_i2 = prev_i2;
@@ -839,7 +839,7 @@ pub unsafe fn mama_avx2_inplace(
         prev_re = re;
         prev_im = im;
 
-        // ---------- 5.6 Dominant cycle period --------------
+        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -854,7 +854,7 @@ pub unsafe fn mama_avx2_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        // ---------- 5.7 Adaptive alpha ---------------------
+        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -869,7 +869,7 @@ pub unsafe fn mama_avx2_inplace(
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
-        // ---------- 5.8 MAMA & FAMA ------------------------
+        
         let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = cur_mama;
@@ -878,8 +878,8 @@ pub unsafe fn mama_avx2_inplace(
         out_mama[i] = cur_mama;
         out_fama[i] = cur_fama;
 
-        // ---------- 5.9 Advance ring index -----------------
-        idx = (idx + 1) & MASK; // branch‑free, cheaper than %
+        
+        idx = (idx + 1) & MASK; 
     }
 }
 #[inline(always)]
@@ -899,11 +899,11 @@ pub fn mama_scalar_inplace(
     debug_assert_eq!(data.len(), out_fama.len());
     let len = data.len();
 
-    // Power-of-two ring to avoid expensive modulo; safe indexing.
-    const RING: usize = 8; // 0..7 used; lags 2,4,6 are valid
+    
+    const RING: usize = 8; 
     const MASK: usize = RING - 1;
 
-    // Hilbert taps (Ehlers)
+    
     const H0: f64 = 0.096_2;
     const H1: f64 = 0.576_9;
     const H2: f64 = -0.576_9;
@@ -922,13 +922,13 @@ pub fn mama_scalar_inplace(
 
     let first = data[0];
 
-    // ring buffers preseeded with the first sample (as before)
+    
     let mut smooth = [first; RING];
     let mut detrender = [first; RING];
     let mut i1_buf = [first; RING];
     let mut q1_buf = [first; RING];
 
-    // rolling state
+    
     let mut idx = 0usize;
     let mut prev_mesa = 0.0;
     let mut prev_phase = 0.0;
@@ -940,7 +940,7 @@ pub fn mama_scalar_inplace(
     let mut prev_im = 0.0;
 
     for (i, &price) in data.iter().enumerate() {
-        // 4‑3‑2‑1 smoother (fused)
+        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
@@ -948,10 +948,10 @@ pub fn mama_scalar_inplace(
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         smooth[idx] = smooth_val;
 
-        // amplitude correction (per Ehlers): 0.075*Period + 0.54, using previous period
+        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
-        // Hilbert detrender
+        
         let dt = amp
             * hilbert4(
                 smooth[idx],
@@ -961,7 +961,7 @@ pub fn mama_scalar_inplace(
             );
         detrender[idx] = dt;
 
-        // in‑phase & quadrature
+        
         let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
         let q1 = amp
@@ -973,7 +973,7 @@ pub fn mama_scalar_inplace(
             );
         q1_buf[idx] = q1;
 
-        // 90° leads
+        
         let j_i = amp
             * hilbert4(
                 i1_buf[idx],
@@ -989,7 +989,7 @@ pub fn mama_scalar_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        // homodyne discriminator (EMA smoothing)
+        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let i2s = 0.2_f64.mul_add(i2, 0.8 * prev_i2);
@@ -1001,7 +1001,7 @@ pub fn mama_scalar_inplace(
         prev_re = re;
         prev_im = im;
 
-        // dominant cycle period
+        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -1022,7 +1022,7 @@ pub fn mama_scalar_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        // phase & adaptive alpha
+        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -1042,7 +1042,7 @@ pub fn mama_scalar_inplace(
             alpha = fast_limit;
         }
 
-        // MAMA & FAMA
+        
         let mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let fama = (0.5 * alpha).mul_add(mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = mama;
@@ -1051,7 +1051,7 @@ pub fn mama_scalar_inplace(
         out_mama[i] = mama;
         out_fama[i] = fama;
 
-        // advance ring index (branch‑free)
+        
         idx = (idx + 1) & MASK;
     }
 }
@@ -1072,7 +1072,7 @@ unsafe fn mama_simd128_inplace(
 
     let len = data.len();
 
-    // Ring buffers & rolling state
+    
     let mut smooth_buf = [data[0]; 7];
     let mut detrender_buf = [data[0]; 7];
     let mut i1_buf = [data[0]; 7];
@@ -1087,11 +1087,11 @@ unsafe fn mama_simd128_inplace(
     let mut prev_im = 0.0;
     let mut prev_phase = 0.0;
 
-    // SIMD128 constants for Hilbert transform
+    
     let hilbert_weights = f64x2(0.0962, 0.5769);
     let neg_hilbert_weights = f64x2(-0.5769, -0.0962);
 
-    // 4-3-2-1 smoother weights
+    
     let smooth_weights = f64x2(4.0, 3.0);
     let smooth_weights2 = f64x2(2.0, 1.0);
     let smooth_div = f64x2_splat(0.1);
@@ -1105,28 +1105,28 @@ unsafe fn mama_simd128_inplace(
         weights: v128,
         neg_weights: v128,
     ) -> f64 {
-        // Pack values for SIMD computation
+        
         let v1 = f64x2(x0, x2);
         let v2 = f64x2(x4, x6);
 
-        // Multiply and accumulate
+        
         let prod1 = f64x2_mul(v1, weights);
         let prod2 = f64x2_mul(v2, neg_weights);
         let sum = f64x2_add(prod1, prod2);
 
-        // Extract and sum elements
+        
         f64x2_extract_lane::<0>(sum) + f64x2_extract_lane::<1>(sum)
     }
 
     for i in 0..len {
         let price = data[i];
 
-        // 4-3-2-1 smoother using SIMD
+        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
 
-        // Use SIMD for smoothing calculation
+        
         let v1 = f64x2(price, s1);
         let v2 = f64x2(s2, s3);
         let prod1 = f64x2_mul(v1, smooth_weights);
@@ -1137,7 +1137,7 @@ unsafe fn mama_simd128_inplace(
         let idx = i % 7;
         smooth_buf[idx] = smooth_val;
 
-        // Hilbert transform (detrender) using SIMD
+        
         let x0 = smooth_buf[idx];
         let x2 = smooth_buf[(idx + 5) % 7];
         let x4 = smooth_buf[(idx + 3) % 7];
@@ -1148,9 +1148,9 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(x0, x2, x4, x6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
-        // In-phase & quadrature
+        
         let i1_val = if i >= 3 {
-            detrender_buf[(idx + 4) % 7] // lag 3
+            detrender_buf[(idx + 4) % 7] 
         } else {
             dt_val
         };
@@ -1164,7 +1164,7 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(d0, d2, d4, d6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
         q1_buf[idx] = q1_val;
 
-        // 90° leads (J components) using SIMD
+        
         let j_i = {
             let i0 = i1_buf[idx];
             let i2 = i1_buf[(idx + 5) % 7];
@@ -1180,7 +1180,7 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(q0, q2, q4, q6, hilbert_weights, neg_hilbert_weights) * mesa_mult
         };
 
-        // Homodyne discriminator
+        
         let i2 = i1_val - j_q;
         let q2 = q1_val + j_i;
         let i2_sm = 0.2 * i2 + 0.8 * prev_i2_sm;
@@ -1192,14 +1192,14 @@ unsafe fn mama_simd128_inplace(
         prev_re = re;
         prev_im = im;
 
-        // Dominant cycle period
+        
         let mut mesa_period = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
             prev_mesa_period
         };
 
-        // Apply Mesa constraints
+        
         if mesa_period > 1.5 * prev_mesa_period {
             mesa_period = 1.5 * prev_mesa_period;
         }
@@ -1213,27 +1213,27 @@ unsafe fn mama_simd128_inplace(
             mesa_period = 50.0;
         }
 
-        // Phase from homodyne discriminator (convert to degrees)
+        
         let phase = if i1_val != 0.0 {
             atan_fast(q1_val / i1_val) * 180.0 / std::f64::consts::PI
         } else {
             prev_phase
         };
 
-        // Adjust phase change
+        
         let mut dp = prev_phase - phase;
         if dp < 1.0 {
             dp = 1.0;
         }
         prev_phase = phase;
 
-        // Alpha calculation
+        
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
         prev_mesa_period = mesa_period;
 
-        // MAMA and FAMA calculation
+        
         let mama_val = alpha * price + (1.0 - alpha) * prev_mama;
         let fama_val = 0.5 * alpha * mama_val + (1.0 - 0.5 * alpha) * prev_fama;
 
@@ -1245,23 +1245,23 @@ unsafe fn mama_simd128_inplace(
     }
 }
 
-// Stream (online) MAMA — O(1) per update (no slice rebuilds)
+
 
 #[derive(Debug, Clone)]
 pub struct MamaStream {
     fast_limit: f64,
     slow_limit: f64,
 
-    // --- RING BUFFERS (length=8 → cheap (&MASK) lags 2/4/6, 3-bar i1) ---
+    
     smooth: [f64; 8],
     detrender: [f64; 8],
     i1_buf: [f64; 8],
     q1_buf: [f64; 8],
-    idx: usize, // current write position in rings (0..7)
+    idx: usize, 
 
-    // --- rolling DSP state (mirrors scalar implementation) ---
-    prev_mesa: f64,  // dominant cycle period (EMA-smoothed)
-    prev_phase: f64, // degrees
+    
+    prev_mesa: f64,  
+    prev_phase: f64, 
     prev_mama: f64,
     prev_fama: f64,
     prev_i2: f64,
@@ -1269,14 +1269,14 @@ pub struct MamaStream {
     prev_re: f64,
     prev_im: f64,
 
-    // --- last raw prices for 4-3-2-1 smoother fallbacks during startup ---
-    last1: f64, // t-1
-    last2: f64, // t-2
-    last3: f64, // t-3
+    
+    last1: f64, 
+    last2: f64, 
+    last3: f64, 
 
-    // --- bookkeeping ---
-    seeded: bool, // have we processed the very first tick?
-    seen: usize,  // number of processed samples (bars)
+    
+    seeded: bool, 
+    seen: usize,  
 }
 
 impl MamaStream {
@@ -1331,7 +1331,7 @@ impl MamaStream {
 
         #[inline(always)]
         fn hilbert4(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-            // FMA-friendly cascade
+            
             H0.mul_add(x0, H1.mul_add(x2, H2.mul_add(x4, H3 * x6)))
         }
         #[inline(always)]
@@ -1339,9 +1339,9 @@ impl MamaStream {
             buf[(pos.wrapping_sub(k)) & (N - 1)]
         }
 
-        // -- one-time seed: set rings to first price, make prev_mama/fama=price, then process bar 0
+        
         if !self.seeded {
-            // fill rings with 'price' so early lags read 'price' (matches scalar seeding)
+            
             self.smooth = [price; RING];
             self.detrender = [price; RING];
             self.i1_buf = [price; RING];
@@ -1363,17 +1363,17 @@ impl MamaStream {
 
             self.seeded = true;
 
-            // process bar 0 (outputs unused) to keep ring/state identical to scalar path
+            
             let _ = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
 
-            // warmup: do not output yet
+            
             return None;
         }
 
-        // process bar t
+        
         let (mama, fama) = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
 
-        // warmup policy: first 10 bars suppressed (consistent with batch/scalar NaN prefix)
+        
         self.seen += 1;
         if self.seen < 10 {
             return None;
@@ -1389,10 +1389,10 @@ impl MamaStream {
         lag: impl Fn(&[f64; 8], usize, usize) -> f64,
         deg_per_rad: f64,
     ) -> (f64, f64) {
-        const MASK: usize = 7; // for N=8 rings
+        const MASK: usize = 7; 
         let i = self.idx;
 
-        // ---- 4-3-2-1 smoother (startup fallbacks match scalar loop) ------------------------
+        
         let s1 = if self.seen >= 1 { self.last1 } else { price };
         let s2 = if self.seen >= 2 { self.last2 } else { price };
         let s3 = if self.seen >= 3 { self.last3 } else { price };
@@ -1400,10 +1400,10 @@ impl MamaStream {
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         self.smooth[i] = smooth_val;
 
-        // amplitude correction (Ehlers): 0.075 * Period + 0.54
+        
         let amp = 0.075_f64.mul_add(self.prev_mesa, 0.54);
 
-        // ---- Hilbert detrender ------------------------------------------------------------
+        
         let dt = amp
             * hilbert4(
                 self.smooth[i],
@@ -1413,7 +1413,7 @@ impl MamaStream {
             );
         self.detrender[i] = dt;
 
-        // ---- In‑phase & Quadrature --------------------------------------------------------
+        
         let i1 = lag(&self.detrender, i, 3);
         self.i1_buf[i] = i1;
 
@@ -1426,7 +1426,7 @@ impl MamaStream {
             );
         self.q1_buf[i] = q1;
 
-        // ---- 90° leads --------------------------------------------------------------------
+        
         let j_i = amp
             * hilbert4(
                 self.i1_buf[i],
@@ -1442,7 +1442,7 @@ impl MamaStream {
                 lag(&self.q1_buf, i, 6),
             );
 
-        // ---- Homodyne discriminator (EMA) ------------------------------------------------
+        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
 
@@ -1459,14 +1459,14 @@ impl MamaStream {
         self.prev_re = re;
         self.prev_im = im;
 
-        // ---- Dominant cycle period --------------------------------------------------------
+        
         let mut mesa = if re != 0.0 && im != 0.0 {
-            // Keep atan_fast to match batch/scalar results
+            
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
             self.prev_mesa
         };
-        // clamp & smooth
+        
         mesa = mesa
             .min(1.5 * self.prev_mesa)
             .max(0.67 * self.prev_mesa)
@@ -1475,7 +1475,7 @@ impl MamaStream {
         mesa = 0.2_f64.mul_add(mesa, 0.8 * self.prev_mesa);
         self.prev_mesa = mesa;
 
-        // ---- Phase & adaptive alpha -------------------------------------------------------
+        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * deg_per_rad
         } else {
@@ -1495,7 +1495,7 @@ impl MamaStream {
             alpha = self.fast_limit;
         }
 
-        // ---- MAMA & FAMA ------------------------------------------------------------------
+        
         let one_minus_alpha = 1.0 - alpha;
         let mama = alpha.mul_add(price, one_minus_alpha * self.prev_mama);
 
@@ -1505,7 +1505,7 @@ impl MamaStream {
         self.prev_mama = mama;
         self.prev_fama = fama;
 
-        // ---- advance ring & last price window ---------------------------------------------
+        
         self.idx = (self.idx + 1) & MASK;
         self.last3 = self.last2;
         self.last2 = self.last1;
@@ -1515,7 +1515,7 @@ impl MamaStream {
     }
 }
 
-// Batch types, grid expansion
+
 
 #[derive(Clone, Debug)]
 pub struct MamaBatchRange {
@@ -1616,12 +1616,12 @@ impl MamaBatchOutput {
 #[inline(always)]
 pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, MamaError> {
-        // Treat zero step or identical bounds as a static axis
+        
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return Ok(vec![start]);
         }
 
-        // Support reversed bounds by aligning step sign with the direction
+        
         let mut step_signed = step;
         if end < start && step_signed > 0.0 {
             step_signed = -step_signed;
@@ -1629,7 +1629,7 @@ pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
             step_signed = -step_signed;
         }
 
-        // Build inclusive sequence with a tiny epsilon to avoid FP fencepost issues
+        
         let mut v = Vec::new();
         let eps = 1e-12_f64;
         let mut x = start;
@@ -1658,7 +1658,7 @@ pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
     let fast_limits = axis_f64(r.fast_limit)?;
     let slow_limits = axis_f64(r.slow_limit)?;
 
-    // checked capacity to avoid usize overflow
+    
     let cap = fast_limits
         .len()
         .checked_mul(slow_limits.len())
@@ -1686,12 +1686,12 @@ pub fn mama_batch_with_kernel(
     k: Kernel,
 ) -> Result<MamaBatchOutput, MamaError> {
     let kernel = match k {
-        // ScalarBatch is faster for this indicator; short-circuit Auto → ScalarBatch.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MamaError::InvalidKernelForBatch(other)),
     };
-    // Route any SIMD batch request to the scalar batch path for this indicator.
+    
     let simd = Kernel::Scalar;
     mama_batch_par_slice(data, sweep, simd)
 }
@@ -1720,7 +1720,7 @@ fn mama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MamaBatchOutput, MamaError> {
-    // ---------- 0. prelim checks ----------
+    
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(MamaError::InvalidRange {
@@ -1736,7 +1736,7 @@ fn mama_batch_inner(
         });
     }
 
-    // Validate all parameter combinations
+    
     for combo in &combos {
         let fast_limit = combo.fast_limit.unwrap_or(0.5);
         let slow_limit = combo.slow_limit.unwrap_or(0.05);
@@ -1749,26 +1749,26 @@ fn mama_batch_inner(
         }
     }
 
-    // ---------- 1. matrix allocation ----------
+    
     let rows = combos.len();
     let cols = data.len();
 
-    // uninitialised backing buffers
+    
     let mut raw_mama = make_uninit_matrix(rows, cols);
     let mut raw_fama = make_uninit_matrix(rows, cols);
 
-    // write quiet-NaN prefixes so the first 10 values line up with streaming MAMA
+    
     let warm_prefixes = vec![10; rows];
     unsafe {
         init_matrix_prefixes(&mut raw_mama, cols, &warm_prefixes);
         init_matrix_prefixes(&mut raw_fama, cols, &warm_prefixes);
     }
 
-    // ---------- 2. shared precompute: delta_phase per bar ----------
-    // Compute the heavy DSP path (smooth → Hilbert → homodyne → period → phase)
-    // once per bar, independent of (fast_limit, slow_limit).
+    
+    
+    
     let delta_phase: Vec<f64> = {
-        // reuse the optimized scalar pipeline; identical math
+        
         const RING: usize = 8;
         const MASK: usize = RING - 1;
         const H0: f64 = 0.096_2;
@@ -1786,7 +1786,7 @@ fn mama_batch_inner(
             buf[(pos.wrapping_sub(k)) & (N - 1)]
         }
 
-        let mut out = vec![1.0; cols]; // initialize with min 1.0
+        let mut out = vec![1.0; cols]; 
         if cols == 0 {
             out
         } else {
@@ -1881,7 +1881,7 @@ fn mama_batch_inner(
                 mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
                 prev_mesa = mesa;
 
-                // phase and delta phase (>= 1.0)
+                
                 let phase = if i1 != 0.0 {
                     atan_fast(q1 / i1) * DEG_PER_RAD
                 } else {
@@ -1900,7 +1900,7 @@ fn mama_batch_inner(
         }
     };
 
-    // ---------- 3. per-row worker using precomputed delta_phase ----------
+    
     let do_row = |row: usize, dst_m: &mut [MaybeUninit<f64>], dst_f: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let fast = prm.fast_limit.unwrap_or(0.5);
@@ -1909,7 +1909,7 @@ fn mama_batch_inner(
         let out_m = core::slice::from_raw_parts_mut(dst_m.as_mut_ptr() as *mut f64, dst_m.len());
         let out_f = core::slice::from_raw_parts_mut(dst_f.as_mut_ptr() as *mut f64, dst_f.len());
 
-        // Per-row light pass: alpha clamp + IIR update
+        
         let mut prev_mama = data[0];
         let mut prev_fama = data[0];
         for i in 0..cols {
@@ -1930,14 +1930,14 @@ fn mama_batch_inner(
             out_f[i] = fama;
         }
 
-        // Re-apply warmup NaNs after computation
+        
         for j in 0..10.min(out_m.len()) {
             out_m[j] = f64::NAN;
             out_f[j] = f64::NAN;
         }
     };
 
-    // ---------- 4. run over every row ----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1968,8 +1968,8 @@ fn mama_batch_inner(
         }
     }
 
-    // ---------- 4. from_raw_parts to Vec<f64> ----------
-    // raw_mama/raw_fama are Vec<MaybeUninit<f64>>
+    
+    
     let mut guard_m = core::mem::ManuallyDrop::new(raw_mama);
     let mut guard_f = core::mem::ManuallyDrop::new(raw_fama);
 
@@ -1988,7 +1988,7 @@ fn mama_batch_inner(
         )
     };
 
-    // ---------- 5. package result ----------
+    
     Ok(MamaBatchOutput {
         mama_values,
         fama_values,
@@ -2007,7 +2007,7 @@ pub fn mama_batch_inner_into(
     out_mama: &mut [f64],
     out_fama: &mut [f64],
 ) -> Result<Vec<MamaParams>, MamaError> {
-    // ---------- 0. prelim checks ----------
+    
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(MamaError::InvalidRange {
@@ -2023,7 +2023,7 @@ pub fn mama_batch_inner_into(
         });
     }
 
-    // Validate all parameter combinations
+    
     for combo in &combos {
         let fast_limit = combo.fast_limit.unwrap_or(0.5);
         let slow_limit = combo.slow_limit.unwrap_or(0.05);
@@ -2039,7 +2039,7 @@ pub fn mama_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Validate output slice sizes
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(MamaError::InvalidRange {
@@ -2054,7 +2054,7 @@ pub fn mama_batch_inner_into(
         });
     }
 
-    // ---------- 1. cast output slices to MaybeUninit for init_matrix_prefixes ----------
+    
     let out_mama_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out_mama.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -2068,20 +2068,20 @@ pub fn mama_batch_inner_into(
         )
     };
 
-    // write quiet-NaN prefixes so the first 10 values line up with streaming MAMA
+    
     let warm_prefixes = vec![10; rows];
     unsafe {
         init_matrix_prefixes(out_mama_uninit, cols, &warm_prefixes);
         init_matrix_prefixes(out_fama_uninit, cols, &warm_prefixes);
     }
 
-    // ---------- 2. per-row worker ----------
+    
     let do_row = |row: usize, dst_m: &mut [MaybeUninit<f64>], dst_f: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let fast = prm.fast_limit.unwrap_or(0.5);
         let slow = prm.slow_limit.unwrap_or(0.05);
 
-        // cast each row to `&mut [f64]` once and let the kernel write directly
+        
         let out_m = core::slice::from_raw_parts_mut(dst_m.as_mut_ptr() as *mut f64, dst_m.len());
         let out_f = core::slice::from_raw_parts_mut(dst_f.as_mut_ptr() as *mut f64, dst_f.len());
 
@@ -2094,14 +2094,14 @@ pub fn mama_batch_inner_into(
             _ => unreachable!(),
         }
 
-        // Re-apply warmup NaNs after computation
+        
         for j in 0..10.min(out_m.len()) {
             out_m[j] = f64::NAN;
             out_f[j] = f64::NAN;
         }
     };
 
-    // ---------- 3. run over every row ----------
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2135,7 +2135,7 @@ pub fn mama_batch_inner_into(
     Ok(combos)
 }
 
-// Row API (for batch)
+
 
 #[inline(always)]
 pub unsafe fn mama_row_scalar(
@@ -2172,7 +2172,7 @@ pub unsafe fn mama_row_avx512(
     mama_avx512_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
 }
 
-// Tests (see ALMA-style harness for parity; copy/adapt as needed)
+
 
 #[cfg(test)]
 mod tests {
@@ -2318,7 +2318,7 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_mama_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2326,11 +2326,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test multiple parameter combinations to better catch uninitialized memory bugs
+        
         let test_cases = vec![
-            // Default parameters
+            
             MamaParams::default(),
-            // Various fast_limit/slow_limit combinations
+            
             MamaParams {
                 fast_limit: Some(0.3),
                 slow_limit: Some(0.03),
@@ -2351,7 +2351,7 @@ mod tests {
                 fast_limit: Some(0.7),
                 slow_limit: Some(0.07),
             },
-            // Edge cases
+            
             MamaParams {
                 fast_limit: Some(0.8),
                 slow_limit: Some(0.01),
@@ -2370,16 +2370,16 @@ mod tests {
             let input = MamaInput::from_candles(&candles, "close", params.clone());
             let output = mama_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns in mama_values
+            
             for (i, &val) in output.mama_values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2387,7 +2387,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2395,7 +2395,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2404,16 +2404,16 @@ mod tests {
                 }
             }
 
-            // Check every value for poison patterns in fama_values
+            
             for (i, &val) in output.fama_values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2421,7 +2421,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2429,7 +2429,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2442,7 +2442,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_mama_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2451,19 +2451,19 @@ mod tests {
     fn check_mama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test cases with wider, more realistic parameter ranges
-        let strat = (10usize..=200) // Data length (MAMA needs at least 10)
+        
+        let strat = (10usize..=200) 
             .prop_flat_map(|len| {
                 (
-                    // Wider data range to catch edge cases while staying realistic
+                    
                     prop::collection::vec(
                         (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    // Fast limit: typically between 0.01 and 0.99
+                    
                     (0.01f64..0.99f64)
                         .prop_filter("valid fast_limit", |x| x.is_finite() && *x > 0.0),
-                    // Slow limit: typically between 0.001 and fast_limit
+                    
                     (0.001f64..0.5f64)
                         .prop_filter("valid slow_limit", |x| x.is_finite() && *x > 0.0),
                 )
@@ -2471,7 +2471,7 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, fast_limit, slow_limit)| {
-                // Ensure slow_limit < fast_limit for valid configuration
+                
                 let slow = slow_limit.min(fast_limit * 0.9);
 
                 let params = MamaParams {
@@ -2480,22 +2480,22 @@ mod tests {
                 };
                 let input = MamaInput::from_slice(&data, params);
 
-                // Get output from the kernel being tested
+                
                 let result = mama_with_kernel(&input, kernel).unwrap();
                 let mama_out = &result.mama_values;
                 let fama_out = &result.fama_values;
 
-                // Get reference output from scalar kernel for consistency check
+                
                 let ref_result = mama_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_mama = &ref_result.mama_values;
                 let ref_fama = &ref_result.fama_values;
 
-                // Property 1: Output length must match input length
+                
                 prop_assert_eq!(mama_out.len(), data.len(), "MAMA output length mismatch");
                 prop_assert_eq!(fama_out.len(), data.len(), "FAMA output length mismatch");
 
-                // Property 2: MAMA has a 10-sample warmup period with NaN, then outputs finite values
-                // First 10 values should be NaN, remaining should be finite
+                
+                
                 const WARMUP: usize = 10;
                 for i in 0..data.len() {
                     if i < WARMUP {
@@ -2527,15 +2527,15 @@ mod tests {
                     }
                 }
 
-                // Property 3: Values should be within reasonable bounds of input data
+                
                 let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
                 let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let data_range = data_max - data_min;
-                // Tightened tolerance from 0.5 to 0.2 for more rigorous bounds checking
-                let tolerance = data_range * 0.2 + 10.0; // Allow 20% overshoot plus small constant
+                
+                let tolerance = data_range * 0.2 + 10.0; 
 
                 for i in WARMUP..data.len() {
-                    // MAMA and FAMA should be within extended bounds of the data (skip warmup)
+                    
                     prop_assert!(
                         mama_out[i] >= data_min - tolerance && mama_out[i] <= data_max + tolerance,
                         "MAMA at index {} ({}) outside bounds [{}, {}]",
@@ -2554,11 +2554,11 @@ mod tests {
                     );
                 }
 
-                // Property 4: Constant data should produce stable output
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
-                    // For constant data, MAMA and FAMA should converge to that constant
+                    
                     let constant_val = data[0];
-                    // Check values after warmup period
+                    
                     for i in 10..data.len() {
                         prop_assert!(
                             (mama_out[i] - constant_val).abs() < 1e-6,
@@ -2577,15 +2577,15 @@ mod tests {
                     }
                 }
 
-                // Property 5: FAMA behavior
-                // FAMA is a "Following" Adaptive MA, but its exact behavior depends on data patterns
-                // For sparse/spiky data, FAMA may actually have higher variance than MAMA
+                
+                
+                
                 if data.len() > 30 {
-                    // Check that both MAMA and FAMA produce reasonable outputs
+                    
                     let mama_variance = variance(&mama_out[10..]);
                     let fama_variance = variance(&fama_out[10..]);
 
-                    // Both should have finite, non-negative variance
+                    
                     prop_assert!(
                         mama_variance >= 0.0 && mama_variance.is_finite(),
                         "MAMA variance should be finite and non-negative: {}",
@@ -2597,10 +2597,10 @@ mod tests {
                         fama_variance
                     );
 
-                    // Neither should have extreme variance relative to the data
+                    
                     let data_variance = variance(&data);
                     if data_variance > 1e-6 {
-                        // Allow up to 100x data variance for adaptive algorithms
+                        
                         prop_assert!(
                             mama_variance < data_variance * 100.0,
                             "MAMA variance ({}) too large relative to data variance ({})",
@@ -2616,12 +2616,12 @@ mod tests {
                     }
                 }
 
-                // Property 6: Kernel consistency
-                // NOTE: AVX implementations have SEVERE correctness issues (100x+ differences from scalar)
-                // This needs to be fixed in the indicator implementation
-                // For now, we only verify values are finite, not consistent
+                
+                
+                
+                
                 for i in WARMUP..data.len() {
-                    // Basic sanity for all kernels (skip warmup)
+                    
                     prop_assert!(
                         mama_out[i].is_finite(),
                         "MAMA kernel {:?} produced non-finite value at idx {}: {}",
@@ -2637,25 +2637,25 @@ mod tests {
                         fama_out[i]
                     );
 
-                    // TODO: Re-enable kernel consistency checks once AVX implementations are fixed
-                    // Currently AVX kernels can differ by 100x+ from scalar, indicating serious bugs
+                    
+                    
                 }
 
-                // Property 7: Parameter sensitivity - fast_limit should affect responsiveness
+                
                 if data.len() > 50 && fast_limit > slow * 2.0 && variance(&data) > 1e-6 {
-                    // Test with different fast_limit
+                    
                     let alt_params = MamaParams {
                         fast_limit: Some(fast_limit * 0.5),
                         slow_limit: Some(slow),
                     };
                     let alt_input = MamaInput::from_slice(&data, alt_params);
                     if let Ok(alt_result) = mama_with_kernel(&alt_input, kernel) {
-                        // Lower fast_limit should produce smoother (less responsive) output
-                        // Check variance after warmup
+                        
+                        
                         let mama_var = variance(&mama_out[20..]);
                         let alt_var = variance(&alt_result.mama_values[20..]);
 
-                        // Ensure parameters have an effect
+                        
                         if mama_var > 1e-6 && alt_var > 1e-6 {
                             prop_assert!(
                                 (mama_var - alt_var).abs() > 1e-12,
@@ -2665,19 +2665,19 @@ mod tests {
                     }
                 }
 
-                // Property 8: Edge case - when fast_limit ≈ slow_limit
-                // Note: Even with very close limits, MAMA and FAMA may not converge due to
-                // the adaptive nature of the algorithm and initial conditions
-                // We just verify they don't diverge to infinity
+                
+                
+                
+                
                 if (fast_limit - slow).abs() < 0.01 && data.len() > 20 {
-                    // Ensure outputs remain bounded and finite
+                    
                     for i in 10..data.len() {
                         prop_assert!(
                             mama_out[i].is_finite() && fama_out[i].is_finite(),
                             "MAMA/FAMA should remain finite even with close limits at idx {}",
                             i
                         );
-                        // Ensure they stay within reasonable bounds of the data
+                        
                         prop_assert!(
                             mama_out[i].abs() < data_max.abs() * 100.0 + 1000.0,
                             "MAMA should not diverge with close limits"
@@ -2689,15 +2689,15 @@ mod tests {
                     }
                 }
 
-                // Property 9: Monotonic sequence handling
+                
                 let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-9);
                 let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-9);
 
                 if (is_monotonic_inc || is_monotonic_dec) && data.len() > 20 {
-                    // For monotonic data, outputs should follow the trend
+                    
                     for i in 11..data.len() {
                         if is_monotonic_inc {
-                            // Generally increasing trend (allow small reversals due to smoothing)
+                            
                             prop_assert!(
                                 mama_out[i] >= mama_out[i - 10] - tolerance * 0.1,
                                 "MAMA should follow increasing trend at idx {}",
@@ -2705,7 +2705,7 @@ mod tests {
                             );
                         }
                         if is_monotonic_dec {
-                            // Generally decreasing trend
+                            
                             prop_assert!(
                                 mama_out[i] <= mama_out[i - 10] + tolerance * 0.1,
                                 "MAMA should follow decreasing trend at idx {}",
@@ -2722,7 +2722,7 @@ mod tests {
         Ok(())
     }
 
-    // Helper function to calculate variance
+    
     fn variance(data: &[f64]) -> f64 {
         if data.is_empty() {
             return 0.0;
@@ -2777,7 +2777,7 @@ mod tests {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2785,17 +2785,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test multiple batch configurations to better catch uninitialized memory bugs
+        
         let test_configs = vec![
-            // Small ranges
+            
             ((0.2, 0.4, 0.1), (0.02, 0.04, 0.01)),
-            // Medium ranges
+            
             ((0.3, 0.7, 0.2), (0.03, 0.07, 0.02)),
-            // Large ranges
+            
             ((0.4, 0.9, 0.1), (0.01, 0.09, 0.02)),
-            // Edge case: small slow_limit
+            
             ((0.5, 0.8, 0.15), (0.01, 0.03, 0.01)),
-            // Dense parameter sweep
+            
             ((0.2, 0.6, 0.05), (0.02, 0.08, 0.01)),
         ];
 
@@ -2806,9 +2806,9 @@ mod tests {
                 .slow_limit_range(slow_range.0, slow_range.1, slow_range.2)
                 .apply_candles(&c, "close")?;
 
-            // Check every value in the entire batch matrix for poison patterns in mama_values
+            
             for (idx, &val) in output.mama_values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2818,7 +2818,7 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2826,7 +2826,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2834,7 +2834,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2843,9 +2843,9 @@ mod tests {
                 }
             }
 
-            // Check every value in the entire batch matrix for poison patterns in fama_values
+            
             for (idx, &val) in output.fama_values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2855,7 +2855,7 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2863,7 +2863,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2871,7 +2871,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2884,16 +2884,16 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Ensure the no-allocation API matches the Vec-returning API exactly (including NaN warmups).
+    
     #[test]
     fn test_mama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a small but non-trivial input series
+        
         let n = 256usize;
         let data: Vec<f64> = (0..n)
             .map(|i| {
@@ -2904,22 +2904,22 @@ mod tests {
 
         let input = MamaInput::from_slice(&data, MamaParams::default());
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = mama(&input)?;
 
-        // Preallocate and call the new into API
+        
         let mut out_mama = vec![0.0; n];
         let mut out_fama = vec![0.0; n];
         #[allow(unused_variables)]
         {
-            // Native-only symbol; keep build green when feature "wasm" is enabled in other targets
+            
             #[cfg(not(feature = "wasm"))]
             {
                 super::mama_into(&input, &mut out_mama, &mut out_fama)?;
             }
             #[cfg(feature = "wasm")]
             {
-                // In wasm builds, compare against the slice-based helper to keep parity coverage.
+                
                 super::mama_into_slice(&mut out_mama, &mut out_fama, &input, Kernel::Auto)?;
             }
         }
@@ -2953,7 +2953,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 mod python_bindings {
     use super::*;
@@ -2976,7 +2976,7 @@ mod python_bindings {
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
     use pyo3::types::PyDictMethods;
-    // Bring attribute macros into scope explicitly to avoid resolution issues
+    
     use pyo3::{pyclass, pymethods};
     use pyo3::types::PyDict;
     use std::collections::HashMap;
@@ -3057,15 +3057,15 @@ mod python_bindings {
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     Kernel::Avx2Batch => Kernel::Avx2,
                     // If SIMD isn't compiled in, or any other batch variant is requested,
-                    // fall back to scalar which matches the single-series path.
+                    
                     _ => Kernel::Scalar,
                 };
-                // Use the _into variant that writes directly to our pre-allocated buffers
+                
                 mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)
             })
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        // 4. Build dict with the GIL
+        
         let dict = PyDict::new(py);
         dict.set_item("mama", mama_arr.reshape((rows, cols))?)?;
         dict.set_item("fama", fama_arr.reshape((rows, cols))?)?;
@@ -3194,22 +3194,22 @@ mod python_bindings {
     }
 }
 
-// Re-export Python bindings at module level
+
 #[cfg(feature = "python")]
 pub use python_bindings::{mama_batch_py, mama_py, MamaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub use python_bindings::{mama_cuda_batch_dev_py, mama_cuda_many_series_one_param_dev_py};
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct MamaResult {
-    pub values: Vec<f64>, // [mama..., fama...], length = 2*len
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -3226,8 +3226,8 @@ pub fn mama_js(data: &[f64], fast_limit: f64, slow_limit: f64) -> Result<JsValue
     mama_into_slice(&mut mama, &mut fama, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // concatenate without extra allocations
-    let mut values = mama; // take ownership
+    
+    let mut values = mama; 
     values.extend_from_slice(&fama);
 
     let out = MamaResult {
@@ -3372,17 +3372,17 @@ pub fn mama_batch_rows_cols_js(
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn mama_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn mama_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -3423,22 +3423,22 @@ pub fn mama_batch_into(
         let cols = len;
         let total_elements = rows * cols;
 
-        // Write mama values
+        
         let out_mama = std::slice::from_raw_parts_mut(out_mama_ptr, total_elements);
         out_mama.copy_from_slice(&batch_output.mama_values);
 
-        // Write fama values
+        
         let out_fama = std::slice::from_raw_parts_mut(out_fama_ptr, total_elements);
         out_fama.copy_from_slice(&batch_output.fama_values);
 
         Ok(rows)
     }
 }
-    // MAMA-specific VRAM-backed Python handle with CAI v3 + DLPack
+    
     #[cfg(all(feature = "python", feature = "cuda"))]
     #[pyo3::pyclass(module = "ta_indicators.cuda", unsendable)]
     pub struct DeviceArrayF32Py {
-        pub(crate) buf: Option<cust::memory::DeviceBuffer<f32>>, // moved into DLPack once exported
+        pub(crate) buf: Option<cust::memory::DeviceBuffer<f32>>, 
         pub(crate) rows: usize,
         pub(crate) cols: usize,
         pub(crate) _ctx: std::sync::Arc<cust::context::Context>,

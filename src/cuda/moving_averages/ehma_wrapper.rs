@@ -116,7 +116,7 @@ impl CudaEhma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehma_kernel.ptx"));
-        // Prefer O2 and target-from-context for stability across drivers
+        
         let jit_opts = &[
             cust::module::ModuleJitOption::DetermineTargetFromContext,
             cust::module::ModuleJitOption::OptLevel(cust::module::OptLevel::O2),
@@ -124,7 +124,7 @@ impl CudaEhma {
         let module = Module::from_ptx(ptx, jit_opts).or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Best-effort: reserve a portion of L2 for persisting cache if supported
+        
         Self::reserve_l2_persisting_quota_once(device_id as u32);
 
         Ok(Self {
@@ -417,7 +417,7 @@ impl CudaEhma {
                 }
             }
         }
-        // Default: 256 unless very short series
+        
         if series_len < 8192 {
             if self
                 .module
@@ -485,18 +485,18 @@ impl CudaEhma {
     }
 
     fn compute_normalized_weights(period: usize) -> Vec<f32> {
-        // Use exact Hann normalization: sum_{i=1..P} (1 - cos(2*pi*i/(P+1))) = P+1
-        // Generate weights via 2*sin^2(pi*x) with f64 trig, then normalize by 1/(P+1) exactly.
+        
+        
         let mut weights = vec![0.0f32; period];
         if period == 0 {
             return weights;
         }
         let inv = 1.0f32 / (period as f32 + 1.0f32);
         for idx in 0..period {
-            let i = (period - idx) as f64; // map oldest..newest to i=P..1
+            let i = (period - idx) as f64; 
             let x = i / ((period as f64) + 1.0);
             let s = (std::f64::consts::PI * x).sin();
-            let wt = 2.0 * s * s; // 1 - cos = 2*sin^2
+            let wt = 2.0 * s * s; 
             weights[idx] = (wt as f32) * inv;
         }
         weights
@@ -594,12 +594,12 @@ impl CudaEhma {
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
         self.set_kernel_launch_prefs(&mut func, shared_bytes as usize);
 
-        // Launch in chunks along grid.y to respect the 65,535 limit
+        
         for (start, len) in Self::grid_y_chunks(n_combos) {
             let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                // Offset periods/warm/out by the chunk start
+                
                 let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
                 let mut warms_ptr = d_warms.as_device_ptr().add(start).as_raw();
                 let out_offset = d_out.as_device_ptr().add(start * series_len);
@@ -620,7 +620,7 @@ impl CudaEhma {
             }
         }
 
-        // Introspection/log
+        
         unsafe {
             (*(self as *const _ as *mut CudaEhma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x: BLOCK_X });
@@ -688,7 +688,7 @@ impl CudaEhma {
             self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
 
-        // Introspection/log
+        
         unsafe {
             (*(self as *const _ as *mut CudaEhma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x: BLOCK_X });
@@ -718,7 +718,7 @@ impl CudaEhma {
         let grid_y = ((num_series as u32) + ty - 1) / ty;
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
         let block: BlockSize = (tx, ty, 1).into();
-        // Shared layout: align16(period*4) + (TX+period-1)*TY*4
+        
         let period_aligned = Self::align_up_16(period * std::mem::size_of::<f32>());
         let tile_elems = (tx as usize + period - 1) * (ty as usize);
         let shared_bytes = (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
@@ -728,7 +728,7 @@ impl CudaEhma {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut weights_ptr = d_weights.as_device_ptr().as_raw();
             let mut period_i = period as i32;
-            let mut inv_norm = 1.0f32; // ignored in kernels
+            let mut inv_norm = 1.0f32; 
             let mut num_series_i = num_series as i32;
             let mut series_len_i = series_len as i32;
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -777,7 +777,7 @@ impl CudaEhma {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM preflight (prices + weights_flat + out) with checked arithmetic
+        
         let prices_bytes = Self::bytes_for::<f32>(series_len)?;
         let weights_elems = n_combos
             .checked_mul(max_period)
@@ -793,10 +793,10 @@ impl CudaEhma {
             .ok_or_else(|| CudaEhmaError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        // Upload prices once
+        
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
 
-        // Build per-combo weights (pre-normalized) and periods; warms for plain fallback
+        
         let mut periods_i32 = vec![0i32; n_combos];
         let mut warms_i32 = vec![0i32; n_combos];
         let mut weights_flat = vec![0f32; n_combos * max_period];
@@ -812,17 +812,17 @@ impl CudaEhma {
         let d_warms = unsafe { DeviceBuffer::from_slice_async(&warms_i32, &self.stream) }?;
         let d_weights = unsafe { DeviceBuffer::from_slice_async(&weights_flat, &self.stream) }?;
 
-        // Output
+        
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Hint L2 persistence for the prices region (best-effort)
+        
         self.hint_stream_access_policy_window(
             d_prices.as_device_ptr().as_raw(),
             series_len * std::mem::size_of::<f32>(),
         );
 
-        // Choose kernel per policy
+        
         let mut use_tiled = series_len > 8192;
         let mut force_tile: Option<u32> = None;
         match self.policy.batch {
@@ -839,12 +839,12 @@ impl CudaEhma {
             let fname = self.batch_tiled_symbol(tile);
             if let Ok(mut func) = self.module.get_function(fname) {
                 let grid_x = ((series_len as u32) + tile - 1) / tile;
-                let block_x = (tile / 2) as u32; // 2 outputs per thread
+                let block_x = (tile / 2) as u32; 
                 let block: BlockSize = (block_x, 1, 1).into();
-                // Chunk over combos in grid.y
+                
                 for (start, len) in Self::grid_y_chunks(n_combos) {
                     let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
-                    // Exact dynamic shared memory layout
+                    
                     let period_aligned = Self::align_up_16(max_period * std::mem::size_of::<f32>());
                     let tile_elems = (tile as usize) + max_period - 1;
                     let shared_bytes =
@@ -877,14 +877,14 @@ impl CudaEhma {
                             .map_err(|e| CudaEhmaError::Cuda(e))?;
                     }
                 }
-                // Introspection
+                
                 unsafe {
                     (*(self as *const _ as *mut CudaEhma)).last_batch =
                         Some(BatchKernelSelected::Tiled2x { tile });
                 }
                 self.maybe_log_batch_debug();
             } else {
-                // Fallback to plain
+                
                 self.launch_batch_kernel_plain(
                     &d_prices, &d_periods, &d_warms, series_len, n_combos, max_period, &mut d_out,
                 )?;
@@ -917,7 +917,7 @@ impl CudaEhma {
         let mut periods_i32 = vec![0i32; n_combos];
         let mut warms_i32 = vec![0i32; n_combos];
         let mut weights_flat = vec![0f32; n_combos * max_period];
-        // inv_norms unused by tiled path
+        
         for (i, prm) in combos.iter().enumerate() {
             let p = prm.period.unwrap();
             periods_i32[i] = p as i32;
@@ -935,13 +935,13 @@ impl CudaEhma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
                 .map_err(|e| CudaEhmaError::Cuda(e))?;
-        // Hint L2 persistence for the prices region (best-effort)
+        
         self.hint_stream_access_policy_window(
             d_prices.as_device_ptr().as_raw(),
             series_len * std::mem::size_of::<f32>(),
         );
 
-        // Prefer tiled if available
+        
         let tile = self.pick_tiled_block(series_len);
         let fname = self.batch_tiled_symbol(tile);
         if let Ok(mut func) = self.module.get_function(fname) {
@@ -1015,7 +1015,7 @@ impl CudaEhma {
             )));
         }
 
-        // VRAM preflight (prices + periods + warms + out) with checked arithmetic
+        
         let prices_bytes = Self::bytes_for::<f32>(series_len)?;
         let period_elems = n_combos;
         let warms_elems = n_combos;
@@ -1108,7 +1108,7 @@ impl CudaEhma {
         let (first_valids, period, weights) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM preflight with checked arithmetic
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaEhmaError::InvalidInput("tm elems overflow".into()))?;
@@ -1122,7 +1122,7 @@ impl CudaEhma {
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
-        // Hint L2 persistence for time-major prices if supported
+        
         self.hint_stream_access_policy_window(
             d_prices_tm.as_device_ptr().as_raw(),
             cols * rows * std::mem::size_of::<f32>(),
@@ -1131,10 +1131,10 @@ impl CudaEhma {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        // Select kernel
+        
         match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
-                // Prefer 2D tiled for larger problems
+                
                 if cols >= 16
                     && rows >= 8192
                     && self
@@ -1317,7 +1317,7 @@ impl CudaEhma {
         }
         self.stream.synchronize()?;
 
-        // Pinned D2H for determinism and throughput
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len()) }?;
         unsafe {
             d_out_tm.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
@@ -1329,7 +1329,7 @@ impl CudaEhma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

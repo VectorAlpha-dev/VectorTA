@@ -274,7 +274,7 @@ pub enum EmdError {
     #[error("emd: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
 
-    // Batch/domain errors
+    
     #[error("emd: Invalid range (usize): start={start}, end={end}, step={step}")]
     InvalidRangeU { start: usize, end: usize, step: usize },
 
@@ -2400,17 +2400,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             EmdParams::default(),
-            // Minimum viable parameters
+            
             EmdParams {
                 period: Some(2),
                 delta: Some(0.1),
                 fraction: Some(0.05),
             },
-            // Small period variations
+            
             EmdParams {
                 period: Some(5),
                 delta: Some(0.3),
@@ -2421,7 +2421,7 @@ mod tests {
                 delta: Some(0.5),
                 fraction: Some(0.15),
             },
-            // Medium periods
+            
             EmdParams {
                 period: Some(20),
                 delta: Some(0.4),
@@ -2432,7 +2432,7 @@ mod tests {
                 delta: Some(0.6),
                 fraction: Some(0.2),
             },
-            // Large periods
+            
             EmdParams {
                 period: Some(50),
                 delta: Some(0.7),
@@ -2443,7 +2443,7 @@ mod tests {
                 delta: Some(0.8),
                 fraction: Some(0.3),
             },
-            // Edge cases with extreme delta
+            
             EmdParams {
                 period: Some(15),
                 delta: Some(0.1),
@@ -2454,7 +2454,7 @@ mod tests {
                 delta: Some(0.9),
                 fraction: Some(0.1),
             },
-            // Edge cases with extreme fraction
+            
             EmdParams {
                 period: Some(25),
                 delta: Some(0.5),
@@ -2465,7 +2465,7 @@ mod tests {
                 delta: Some(0.5),
                 fraction: Some(0.5),
             },
-            // Additional combinations
+            
             EmdParams {
                 period: Some(40),
                 delta: Some(0.65),
@@ -2482,15 +2482,15 @@ mod tests {
             let input = EmdInput::from_candles(&candles, params.clone());
             let output = emd_with_kernel(&input, kernel)?;
 
-            // Check upperband array
+            
             for (i, &val) in output.upperband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in upperband \
@@ -2528,15 +2528,15 @@ mod tests {
                 }
             }
 
-            // Check middleband array
+            
             for (i, &val) in output.middleband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in middleband \
@@ -2574,15 +2574,15 @@ mod tests {
                 }
             }
 
-            // Check lowerband array
+            
             for (i, &val) in output.lowerband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in lowerband \
@@ -2626,7 +2626,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_emd_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     generate_all_emd_tests!(
@@ -2663,7 +2663,7 @@ mod tests {
             assert_eq!(mb.len(), c.close.len(), "Middleband length mismatch");
             assert_eq!(lb.len(), c.close.len(), "Lowerband length mismatch");
 
-            // Spot check last values vs. single-batch computation (if desired, could hardcode here)
+            
             let expected_last_five_upper = [
                 50.33760237677157,
                 50.28850695686447,
@@ -2716,7 +2716,7 @@ mod tests {
             let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
             let c = read_candles_from_csv(file)?;
 
-            // Sweep period over 20 and 22, delta over 0.5 and 0.6, fraction over 0.1 and 0.2
+            
             let output = EmdBatchBuilder::new()
                 .kernel(kernel)
                 .period_range(20, 22, 2)
@@ -2731,7 +2731,7 @@ mod tests {
             );
             assert_eq!(output.cols, c.close.len());
 
-            // Verify that bands_for returns correct shapes for all combos
+            
             for params in &output.combos {
                 let (ub, mb, lb) = output
                     .bands_for(params)
@@ -2772,22 +2772,22 @@ mod tests {
             let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
             let c = read_candles_from_csv(file)?;
 
-            // Test various parameter sweep configurations
+            
             let test_configs = vec![
-                // (period range, delta range, fraction range)
-                // Small periods with varying delta and fraction
+                
+                
                 (5, 15, 5, 0.1, 0.5, 0.2, 0.05, 0.15, 0.05),
-                // Medium periods
+                
                 (10, 30, 10, 0.3, 0.7, 0.2, 0.1, 0.2, 0.05),
-                // Large periods
+                
                 (20, 50, 15, 0.5, 0.8, 0.15, 0.15, 0.3, 0.075),
-                // Dense small range
+                
                 (8, 12, 1, 0.4, 0.6, 0.1, 0.08, 0.12, 0.02),
-                // Single values (no sweep)
+                
                 (20, 20, 0, 0.5, 0.5, 0.0, 0.1, 0.1, 0.0),
-                // Wide period range with fine delta/fraction
+                
                 (5, 40, 5, 0.2, 0.8, 0.1, 0.05, 0.25, 0.05),
-                // Edge case: minimum periods with varying other params
+                
                 (2, 6, 2, 0.1, 0.9, 0.4, 0.01, 0.5, 0.245),
             ];
 
@@ -2803,7 +2803,7 @@ mod tests {
                     .fraction_range(f_start, f_end, f_step)
                     .apply_candles(&c)?;
 
-                // Check upperband matrix
+                
                 for (idx, &val) in output.upperband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2814,7 +2814,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in upperband \
@@ -2849,7 +2849,7 @@ mod tests {
                     }
                 }
 
-                // Check middleband matrix
+                
                 for (idx, &val) in output.middleband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2860,7 +2860,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in middleband \
@@ -2895,7 +2895,7 @@ mod tests {
                     }
                 }
 
-                // Check lowerband matrix
+                
                 for (idx, &val) in output.lowerband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2906,7 +2906,7 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    // Check all three poison patterns with detailed context
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in lowerband \
@@ -2947,7 +2947,7 @@ mod tests {
 
         #[cfg(not(debug_assertions))]
         fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-            Ok(()) // No-op in release builds
+            Ok(()) 
         }
 
         gen_batch_tests!(check_batch_default_row);
@@ -2956,7 +2956,7 @@ mod tests {
     }
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "emd")]
 #[pyo3(signature = (high, low, period, delta, fraction, kernel=None))]
@@ -3116,7 +3116,7 @@ pub fn emd_batch_py<'py>(
     Ok(d)
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "emd_cuda_batch_dev")]
 #[pyo3(signature = (high, low, period_range, delta_range, fraction_range, device_id=0))]

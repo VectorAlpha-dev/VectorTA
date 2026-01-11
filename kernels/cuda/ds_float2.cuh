@@ -1,7 +1,7 @@
-// ds_float2.cuh — minimal double-single (float2) helpers with FMA.
-// Based on TwoSum / TwoProd (Veltkamp/Dekker; Ogita-Rump-Oishi) and CUDA fmaf.
-// Returns a ≈ hi+lo with non-overlapping parts.
-// References: Thall 2006; Ogita-Rump-Oishi 2005.
+
+
+
+
 
 #pragma once
 #include <cuda_runtime.h>
@@ -13,13 +13,13 @@ __device__ __forceinline__ dsf ds_set(float x)        { return {x, 0.0f}; }
 __device__ __forceinline__ dsf ds_make(float hi, float lo){ return {hi, lo}; }
 
 __device__ __forceinline__ dsf ds_norm(float s, float e) {
-    // FastTwoSum normalization assuming |s| >= |e|
+    
     float t  = s + e;
     float lo = e - (t - s);
     return {t, lo};
 }
 
-// Error-free transform of sum (Knuth TwoSum)
+
 __device__ __forceinline__ dsf ds_add(dsf a, dsf b) {
     float s  = a.hi + b.hi;
     float z  = s - a.hi;
@@ -31,7 +31,7 @@ __device__ __forceinline__ dsf ds_add(dsf a, dsf b) {
 __device__ __forceinline__ dsf ds_neg(dsf a)          { return {-a.hi, -a.lo}; }
 __device__ __forceinline__ dsf ds_sub(dsf a, dsf b)   { return ds_add(a, ds_neg(b)); }
 
-// Error-free product using FMA (TwoProdFMA)
+
 __device__ __forceinline__ dsf ds_mul(dsf a, dsf b) {
     float p  = a.hi * b.hi;
     float e  = fmaf(a.hi, b.hi, -p);
@@ -40,14 +40,14 @@ __device__ __forceinline__ dsf ds_mul(dsf a, dsf b) {
     return ds_norm(p, e);
 }
 
-// Scale by float (exactly as ds_mul with {s,0})
+
 __device__ __forceinline__ dsf ds_scale(dsf a, float s) {
     float p  = a.hi * s;
     float e  = fmaf(a.hi, s, -p) + a.lo * s;
     return ds_norm(p, e);
 }
 
-// a*b + c
+
 __device__ __forceinline__ dsf ds_fma(dsf a, dsf b, dsf c) {
     return ds_add(ds_mul(a, b), c);
 }

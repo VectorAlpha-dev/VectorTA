@@ -1,17 +1,17 @@
-// Integration tests for CUDA Donchian kernels (upper, middle, lower)
 
-use my_project::indicators::donchian::{
+
+use vector_ta::indicators::donchian::{
     donchian_batch_with_kernel, donchian_with_kernel, DonchianBatchRange, DonchianData,
     DonchianInput, DonchianParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaDonchian;
+use vector_ta::cuda::CudaDonchian;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -46,7 +46,7 @@ fn donchian_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = DonchianBatchRange { period: (5, 48, 1) };
 
-    // Downcast to f32 for fairness, then compute CPU baseline on quantized data
+    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let high_q: Vec<f64> = high_f32.iter().map(|&v| v as f64).collect();
@@ -110,7 +110,7 @@ fn donchian_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     }
     let period = 21usize;
 
-    // CPU baseline per series
+    
     let mut up_tm = vec![f64::NAN; rows * cols];
     let mut mid_tm = vec![f64::NAN; rows * cols];
     let mut lo_tm = vec![f64::NAN; rows * cols];
@@ -136,7 +136,7 @@ fn donchian_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    // GPU
+    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaDonchian::new(0).expect("CudaDonchian::new");

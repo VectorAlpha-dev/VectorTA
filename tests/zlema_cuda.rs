@@ -1,13 +1,13 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaZlema;
-use my_project::indicators::moving_averages::zlema::{
+use vector_ta::cuda::moving_averages::CudaZlema;
+use vector_ta::indicators::moving_averages::zlema::{
     zlema_batch_inner_into, zlema_with_kernel, ZlemaBatchRange, ZlemaInput, ZlemaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];
@@ -159,7 +159,7 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    // Build time-major input (rows = time, cols = series)
+    
     let cols = 8usize;
     let rows = 1024usize;
     let mut tm = vec![f64::NAN; cols * rows];
@@ -172,7 +172,7 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let period = 13usize;
 
-    // CPU baseline per-series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -202,10 +202,10 @@ fn zlema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let mut gpu_tm = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_tm)?;
 
-    // Compare with tolerance, honoring warmup per series
+    
     let tol = 1e-4;
     for s in 0..cols {
-        // compute first_valid for series
+        
         let first_valid = (0..rows)
             .find(|&t| !tm[t * cols + s].is_nan())
             .unwrap_or(rows);

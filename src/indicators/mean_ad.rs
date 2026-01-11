@@ -236,7 +236,7 @@ pub fn mean_ad_with_kernel(
     }
 
     let chosen = match kernel {
-        // SIMD kernels currently delegate to scalar, so Auto skips runtime detection.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -267,7 +267,7 @@ pub fn mean_ad_scalar(
     period: usize,
     first: usize,
 ) -> Result<MeanAdOutput, MeanAdError> {
-    // Guard against invalid parameters
+    
     if period == 0 {
         return Err(MeanAdError::InvalidPeriod {
             period: 0,
@@ -283,32 +283,32 @@ pub fn mean_ad_scalar(
 
     let n = data.len();
 
-    // Early out if the initial SMA window doesn't fit
+    
     if first + period > n {
         let out = alloc_with_nan_prefix(n, n);
         return Ok(MeanAdOutput { values: out });
     }
 
-    // Hoist reciprocal to avoid repeated divisions
+    
     let inv_p = 1.0f64 / (period as f64);
 
-    // Warmup prefix length (NaNs) = first + 2*period - 2
+    
     let warmup_end = first + (period << 1) - 2;
     let mut out = alloc_with_nan_prefix(n, warmup_end.min(n));
 
-    // === Initial SMA over [first .. first+period) ===
+    
     let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
     let mut sma = sum * inv_p;
 
-    // === Residual ring buffer ===
+    
     let mut residual_buffer = vec![0.0f64; period];
     let mut buffer_index = 0usize;
     let mut residual_sum = 0.0f64;
 
-    // === Fill residual buffer for first `period` SMAs ===
+    
     let start_t = first + period - 1;
     let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
     for t in start_t..=fill_t_end {
@@ -325,17 +325,17 @@ pub fn mean_ad_scalar(
         }
     }
 
-    // === First valid output ===
+    
     if warmup_end < n {
         out[warmup_end] = residual_sum * inv_p;
     }
 
-    // === Main streaming loop ===
-    let mut t = start_t + period; // warmup_end + 1
+    
+    let mut t = start_t + period; 
     while t < n {
         let residual = (data[t] - sma).abs();
 
-        // Update residual ring and sum
+        
         let old = residual_buffer[buffer_index];
         residual_sum += residual - old;
         residual_buffer[buffer_index] = residual;
@@ -344,10 +344,10 @@ pub fn mean_ad_scalar(
             buffer_index = 0;
         }
 
-        // Write output (rolling mean of residuals)
+        
         out[t] = residual_sum * inv_p;
 
-        // Advance SMA for next t
+        
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
             sma = sum * inv_p;
@@ -405,7 +405,7 @@ pub fn mean_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MeanAdBatchOutput, MeanAdError> {
     let kernel = match k {
-        // Batch SIMD kernels delegate to scalar, so Auto skips runtime detection.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MeanAdError::InvalidKernelForBatch(other)),
@@ -512,7 +512,7 @@ fn expand_grid(r: &MeanAdBatchRange) -> Result<Vec<MeanAdParams>, MeanAdError> {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -616,7 +616,7 @@ fn mean_ad_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Detect best kernel if Auto is specified
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -694,23 +694,23 @@ fn mean_ad_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Calculate warmup periods for each parameter combination
+    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + 2 * c.period.unwrap() - 2)
         .collect();
 
-    // Allocate uninitialized matrix and initialize NaN prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
     let values_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(values_ptr, buf_guard.len()) };
 
-    // Detect best kernel if Auto is specified
+    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -718,7 +718,7 @@ fn mean_ad_batch_inner(
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        // Initialize warmup period with NaN
+        
         let warmup_end = first + 2 * period - 2;
         for i in 0..warmup_end.min(out_row.len()) {
             out_row[i] = f64::NAN;
@@ -753,7 +753,7 @@ fn mean_ad_batch_inner(
         }
     }
 
-    // Convert back to Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -779,19 +779,19 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     let n = data.len();
     let inv_p = 1.0f64 / (period as f64);
 
-    // Compute rolling SMA of prices
+    
     let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
     let mut sma = sum * inv_p;
 
-    // Residual ring buffer
+    
     let mut residual_buffer = vec![0.0f64; period];
     let mut buffer_index = 0usize;
     let mut residual_sum = 0.0f64;
 
-    // Fill residual buffer for first `period` SMAs
+    
     let start_t = first + period - 1;
     let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
     for t in start_t..=fill_t_end {
@@ -808,18 +808,18 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         }
     }
 
-    // First output after warmup period
+    
     let first_output = first + (period << 1) - 2;
     if first_output < n {
         out[first_output] = residual_sum * inv_p;
     }
 
-    // Continue streaming for remaining data
-    let mut t = start_t + period; // first_output + 1
+    
+    let mut t = start_t + period; 
     while t < n {
         let residual = (data[t] - sma).abs();
 
-        // Update residual buffer and sum
+        
         let old = residual_buffer[buffer_index];
         residual_sum += residual - old;
         residual_buffer[buffer_index] = residual;
@@ -828,10 +828,10 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
             buffer_index = 0;
         }
 
-        // Output MA of residuals
+        
         out[t] = residual_sum * inv_p;
 
-        // Advance SMA for next step
+        
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
             sma = sum * inv_p;
@@ -907,63 +907,63 @@ impl MeanAdStream {
         let p = self.period;
         let inv_p = 1.0f64 / (p as f64);
 
-        // 1) Capture outgoing slots (oldest values in the rings)
+        
         let price_idx = self.head;
         let old_x = self.buffer[price_idx];
 
         let resid_idx = self.mean_head;
         let old_r = self.mean_buffer[resid_idx];
 
-        // 2) Write incoming price & advance ring index (modulo-free)
+        
         self.buffer[price_idx] = value;
         let next_price_idx = price_idx + 1;
         let wrapped_prices = next_price_idx == p;
         self.head = if wrapped_prices { 0 } else { next_price_idx };
 
-        // If we just completed the first full price window, flip the flag.
+        
         let just_filled_prices = !self.filled && wrapped_prices;
         if just_filled_prices {
             self.filled = true;
         }
-        // Warm up price window: reuse `self.mean` as a running SUM until first window closes.
+        
         if !self.filled {
             self.mean += value;
             return None;
         }
 
-        // 3) O(1) SMA update for current tick using running SUM in `self.mean`
+        
         let sum_t = if just_filled_prices {
-            // `self.mean` has SUM of the previous (p-1) values here
+            
             self.mean + value
         } else {
-            // steady state: drop oldest, add newest
+            
             self.mean + value - old_x
         };
         let mean_t = sum_t * inv_p;
-        // keep SUM in `self.mean` to match batch numerics
+        
         self.mean = sum_t;
 
-        // 4) Current residual against current SMA
+        
         let resid_t = (value - mean_t).abs();
 
-        // 5) Push residual & advance residual ring (modulo-free)
+        
         self.mean_buffer[resid_idx] = resid_t;
         let next_resid_idx = resid_idx + 1;
         let wrapped_resids = next_resid_idx == p;
         self.mean_head = if wrapped_resids { 0 } else { next_resid_idx };
 
-        // Warm up residual window: reuse `self.mad` as a running SUM of residuals.
+        
         if !self.mean_filled {
             self.mad += resid_t;
             if wrapped_resids {
-                // First MAD becomes available exactly at t = 2*p - 2
+                
                 self.mean_filled = true;
                 return Some(self.mad * inv_p);
             }
             return None;
         }
 
-        // 6) O(1) rolling MAD update once residual window full (keep SUM in `self.mad`)
+        
         self.mad = self.mad + resid_t - old_r;
         Some(self.mad * inv_p)
     }
@@ -1133,7 +1133,7 @@ mod tests {
             period: Some(period),
         })?;
 
-        // Use uninitialized memory for stream values
+        
         let mut stream_uninit: Vec<MaybeUninit<f64>> = Vec::with_capacity(candles.close.len());
         unsafe {
             stream_uninit.set_len(candles.close.len());
@@ -1147,7 +1147,7 @@ mod tests {
             stream_uninit[i] = MaybeUninit::new(val);
         }
 
-        // SAFETY: All elements have been initialized
+        
         let stream_values = unsafe {
             let ptr = stream_uninit.as_mut_ptr() as *mut f64;
             let len = stream_uninit.len();
@@ -1181,20 +1181,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            MeanAdParams::default(),            // period: 5 (default)
-            MeanAdParams { period: Some(2) },   // minimum viable period
-            MeanAdParams { period: Some(3) },   // very small
-            MeanAdParams { period: Some(5) },   // small (same as default)
-            MeanAdParams { period: Some(7) },   // small-medium
-            MeanAdParams { period: Some(10) },  // medium
-            MeanAdParams { period: Some(14) },  // medium
-            MeanAdParams { period: Some(20) },  // medium-large
-            MeanAdParams { period: Some(30) },  // large
-            MeanAdParams { period: Some(50) },  // very large
-            MeanAdParams { period: Some(100) }, // extra large
-            MeanAdParams { period: Some(200) }, // extreme
+            MeanAdParams::default(),            
+            MeanAdParams { period: Some(2) },   
+            MeanAdParams { period: Some(3) },   
+            MeanAdParams { period: Some(5) },   
+            MeanAdParams { period: Some(7) },   
+            MeanAdParams { period: Some(10) },  
+            MeanAdParams { period: Some(14) },  
+            MeanAdParams { period: Some(20) },  
+            MeanAdParams { period: Some(30) },  
+            MeanAdParams { period: Some(50) },  
+            MeanAdParams { period: Some(100) }, 
+            MeanAdParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1203,12 +1203,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1255,7 +1255,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_mean_ad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_mean_ad_tests {
@@ -1287,7 +1287,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic price data with various periods
+        
         let strat = (2usize..=64)
             .prop_flat_map(|period| {
                 (
@@ -1296,13 +1296,13 @@ mod tests {
                         period..400,
                     ),
                     Just(period),
-                    // Add a flag for whether to generate constant data
+                    
                     prop::bool::weighted(0.1),
                 )
             })
             .prop_map(|(mut data, period, make_constant)| {
                 if make_constant && data.len() > 0 {
-                    // Make all values the same for testing constant data property
+                    
                     let constant_val = data[0];
                     data.iter_mut().for_each(|v| *v = constant_val);
                 }
@@ -1318,7 +1318,7 @@ mod tests {
             let MeanAdOutput { values: out } = mean_ad_with_kernel(&input, kernel)?;
             let MeanAdOutput { values: ref_out } = mean_ad_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: Output length should match input length
+            
             prop_assert_eq!(
                 out.len(),
                 data.len(),
@@ -1326,11 +1326,11 @@ mod tests {
                 test_name
             );
 
-            // Calculate the expected warmup period
+            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_period = first_valid + 2 * period - 2;
 
-            // Property 2: Values during warmup should be NaN
+            
             for i in 0..warmup_period.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1341,11 +1341,11 @@ mod tests {
                 );
             }
 
-            // Property 3: After warmup, all values should be non-negative (MAD is always >= 0)
+            
             for i in warmup_period..out.len() {
                 if !out[i].is_nan() {
                     prop_assert!(
-                        out[i] >= -1e-10, // Allow tiny negative due to floating-point errors
+                        out[i] >= -1e-10, 
                         "[{}] MAD should be non-negative at index {}: got {}",
                         test_name,
                         i,
@@ -1354,12 +1354,12 @@ mod tests {
                 }
             }
 
-            // Property 4: Kernel consistency - compare with scalar reference
+            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                // Both should be NaN or both should be finite
+                
                 if y.is_nan() || r.is_nan() {
                     prop_assert!(
                         y.is_nan() && r.is_nan(),
@@ -1372,7 +1372,7 @@ mod tests {
                     continue;
                 }
 
-                // Check ULP difference for finite values
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = y_bits.abs_diff(r_bits);
@@ -1389,7 +1389,7 @@ mod tests {
                 );
             }
 
-            // Property 5: For constant data, MAD should be very close to 0
+            
             let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
             if is_constant && out.len() > warmup_period {
                 for i in warmup_period..out.len() {
@@ -1405,8 +1405,8 @@ mod tests {
                 }
             }
 
-            // Property 6: For perfectly linear monotonic data, MAD should be very stable
-            // Check if data is linearly increasing/decreasing
+            
+            
             let is_linear_monotonic = if data.len() >= 3 {
                 let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
                 let first_diff = diffs[0];
@@ -1416,12 +1416,12 @@ mod tests {
             };
 
             if is_linear_monotonic && out.len() > warmup_period + period {
-                // For perfectly linear data, consecutive MAD values should be nearly identical
+                
                 for i in (warmup_period + 1)..out.len() {
                     if !out[i].is_nan() && !out[i - 1].is_nan() && out[i - 1] > 1e-10 {
                         let change_ratio = (out[i] - out[i - 1]).abs() / out[i - 1];
 
-                        // For linear data, MAD should change by less than 10%
+                        
                         prop_assert!(
 								change_ratio <= 0.1,
 								"[{}] MAD changes too much for linear data at index {}: {} -> {} ({:.2}% change)",
@@ -1435,23 +1435,23 @@ mod tests {
                 }
             }
 
-            // Property 7: MAD should be bounded by half the window range (tighter bound)
+            
             for i in warmup_period..out.len() {
                 if out[i].is_nan() || i < period {
                     continue;
                 }
 
-                // Get the actual window for this MAD value
+                
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
 
-                // Calculate window range
+                
                 let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                 let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let window_range = window_max - window_min;
 
-                // MAD cannot exceed half the window range (maximum possible deviation from mean)
-                // For a window [a, b], mean is (a+b)/2, max deviation is |b - (a+b)/2| = (b-a)/2
+                
+                
                 prop_assert!(
                     out[i] <= window_range / 2.0 + 1e-9,
                     "[{}] MAD exceeds half window range at index {}: MAD={}, window_range/2={}",
@@ -1462,9 +1462,9 @@ mod tests {
                 );
             }
 
-            // Property 8: Edge case - period equals data length
+            
             if period == data.len() && out.len() > warmup_period {
-                // With period = data.len(), only one MAD value should be non-NaN
+                
                 let non_nan_count = out.iter().filter(|&&v| !v.is_nan()).count();
                 prop_assert!(
                     non_nan_count <= 1,
@@ -1475,7 +1475,7 @@ mod tests {
                 );
             }
 
-            // Property 9: For period=2, MAD should equal half the absolute difference
+            
             if period == 2 && out.len() > warmup_period {
                 for i in warmup_period..out.len() {
                     if !out[i].is_nan() && i >= 1 {
@@ -1552,17 +1552,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            (2, 10, 2),     // Small periods with step 2
-            (5, 25, 5),     // Medium periods with step 5
-            (30, 60, 15),   // Large periods with step 15
-            (2, 5, 1),      // Dense small range
-            (10, 50, 10),   // Wide range with step 10
-            (3, 15, 3),     // Small to medium range
-            (20, 30, 2),    // Medium range, dense sampling
-            (7, 21, 7),     // Week-based periods
-            (100, 200, 50), // Very large periods
+            (2, 10, 2),     
+            (5, 25, 5),     
+            (30, 60, 15),   
+            (2, 5, 1),      
+            (10, 50, 10),   
+            (3, 15, 3),     
+            (20, 30, 2),    
+            (7, 21, 7),     
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1581,7 +1581,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1634,12 +1634,12 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[test]
     fn test_mean_ad_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a small but non-trivial synthetic dataset with a NaN prefix
+        
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         data.push(f64::NAN);
@@ -1661,7 +1661,7 @@ mod tests {
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds the native mean_ad_into is not available; fall back to slice API for parity
+            
             mean_ad_into_slice(&mut into_out, &input, Kernel::Auto)?;
         }
 
@@ -1787,7 +1787,7 @@ pub fn mean_ad_batch_py<'py>(
     Ok(dict)
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mean_ad_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1862,7 +1862,7 @@ impl MeanAdStreamPy {
     }
 }
 
-// ============== WASM Bindings ==============
+
 
 /// Zero-copy helper for writing directly to output slice - no allocations
 pub fn mean_ad_into_slice(
@@ -1910,7 +1910,7 @@ pub fn mean_ad_into_slice(
     }
 
     let chosen = match kern {
-        // SIMD kernels currently delegate to scalar, so Auto skips runtime detection.
+        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -1921,7 +1921,7 @@ pub fn mean_ad_into_slice(
         dst[..warmup_end].fill(f64::NAN);
     }
 
-    // Process data using the appropriate kernel
+    
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => mean_ad_row_scalar(data, first, period, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1942,7 +1942,7 @@ pub fn mean_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = MeanAdInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()]; 
     mean_ad_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1969,7 +1969,7 @@ pub fn mean_ad_into(
         let input = MeanAdInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
+            
             let mut temp = vec![0.0; len];
             mean_ad_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2006,7 +2006,7 @@ pub fn mean_ad_free(ptr: *mut f64, len: usize) {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct MeanAdBatchConfig {
-    pub period_range: (usize, usize, usize), // (start, end, step)
+    pub period_range: (usize, usize, usize), 
 }
 
 #[cfg(feature = "wasm")]
@@ -2079,7 +2079,7 @@ pub fn mean_ad_batch_into(
             .ok_or_else(|| JsValue::from_str("mean_ad_batch_into: size overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Detect kernel
+        
         let kernel = detect_best_batch_kernel();
         let simd = match kernel {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -2088,7 +2088,7 @@ pub fn mean_ad_batch_into(
             _ => unreachable!(),
         };
 
-        // Compute batch directly into output
+        
         mean_ad_batch_inner_into(data, &sweep, simd, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

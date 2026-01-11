@@ -20,8 +20,8 @@
 //! - Streaming update: O(1) per tick via ring-buffered masked sums; matches offline warmup and NaN semantics.
 //! - CUDA + Python interop: CAI v3 (byte strides) and DLPack v1.x with versioned capsules and legacy fallback; primary-context lifetime retained; numerics unchanged.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -41,13 +41,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -57,25 +57,25 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// --- Python: VRAM handle with CAI v3 + DLPack ---
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct BuffAveragesDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>, 
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -261,7 +261,7 @@ impl<'a> BuffAveragesInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 /// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct BuffAveragesBuilder {
@@ -338,7 +338,7 @@ impl BuffAveragesBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum BuffAveragesError {
     #[error("buff_averages: Input data slice is empty.")]
@@ -372,7 +372,7 @@ pub enum BuffAveragesError {
     SizeOverflow { rows: usize, cols: usize },
 }
 
-// ==================== CORE COMPUTATION FUNCTIONS ====================
+
 /// Main entry point with automatic kernel detection
 #[inline]
 pub fn buff_averages(input: &BuffAveragesInput) -> Result<BuffAveragesOutput, BuffAveragesError> {
@@ -389,7 +389,7 @@ pub fn buff_averages_with_kernel(
 
     let warm = first + slow_period - 1;
 
-    // CRITICAL: Use zero-copy allocation helper with correct warmup
+    
     let mut fast_buff = alloc_with_nan_prefix(price.len(), warm);
     let mut slow_buff = alloc_with_nan_prefix(price.len(), warm);
 
@@ -1440,13 +1440,13 @@ impl BuffAveragesStream {
         // Arm the warmup threshold the first time we see a non-NaN price
         // (this matches the offline kernel's `first = position(|p| !is_nan)`).
         if self.warm_target_count.is_none() && !price.is_nan() {
-            // first (this tick) is `n`, first valid output is at index `first + slow - 1`,
-            // i.e., after we have processed `first + slow` elements.
+            
+            
             self.warm_target_count = Some(n + self.slow_period);
         }
 
-        // Compute masked new terms (identical NaN semantics as offline kernels):
-        // If either price or volume is NaN, both contributions are 0.
+        
+        
         let valid = !price.is_nan() && !volume.is_nan();
         let pv_new = if valid {
             price.mul_add(volume, 0.0)
@@ -1455,8 +1455,8 @@ impl BuffAveragesStream {
         };
         let vv_new = if valid { volume } else { 0.0 };
 
-        // Remove the elements that fall out of each window after adding this tick.
-        // The element to evict is at logical index (n - period); map it into the ring by % cap.
+        
+        
         if n >= self.slow_period {
             let idx_out_slow = (n + self.cap - self.slow_period) % self.cap;
             let old_pv = unsafe { *self.ring_pv.get_unchecked(idx_out_slow) };
@@ -1472,25 +1472,25 @@ impl BuffAveragesStream {
             self.fast_den -= old_vv;
         }
 
-        // Write new masked values into the ring after evicting.
+        
         unsafe {
             *self.ring_pv.get_unchecked_mut(write_idx) = pv_new;
             *self.ring_vv.get_unchecked_mut(write_idx) = vv_new;
         }
 
-        // Accumulate into running sums (O(1)).
+        
         self.slow_num += pv_new;
         self.slow_den += vv_new;
         self.fast_num += pv_new;
         self.fast_den += vv_new;
 
-        // Advance time.
+        
         self.index = n + 1;
 
-        // Emit only after warm threshold is armed & reached (aligned to offline warmup).
+        
         if let Some(warm) = self.warm_target_count {
             if self.index >= warm {
-                // Division: Σ(p·v) / Σ(v). If Σ(v)==0, match offline behavior: return 0.0
+                
                 let slow = if self.slow_den != 0.0 {
                     self.slow_num / self.slow_den
                 } else {
@@ -1508,11 +1508,11 @@ impl BuffAveragesStream {
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 /// Batch processing range for parameter sweeps
 #[derive(Clone, Debug)]
 pub struct BuffAveragesBatchRange {
-    pub fast_period: (usize, usize, usize), // (start, end, step)
+    pub fast_period: (usize, usize, usize), 
     pub slow_period: (usize, usize, usize),
 }
 
@@ -1528,9 +1528,9 @@ impl Default for BuffAveragesBatchRange {
 /// Batch output structure
 #[derive(Clone, Debug)]
 pub struct BuffAveragesBatchOutput {
-    pub fast: Vec<f64>,              // rows*cols flattened
-    pub slow: Vec<f64>,              // rows*cols flattened
-    pub combos: Vec<(usize, usize)>, // (fast, slow) pairs
+    pub fast: Vec<f64>,              
+    pub slow: Vec<f64>,              
+    pub combos: Vec<(usize, usize)>, 
     pub rows: usize,
     pub cols: usize,
 }
@@ -1623,8 +1623,8 @@ pub fn buff_averages_batch_inner_into(
     volume: &[f64],
     sweep: &BuffAveragesBatchRange,
     kern: Kernel,
-    fast_out: &mut [f64], // len = rows*cols
-    slow_out: &mut [f64], // len = rows*cols
+    fast_out: &mut [f64], 
+    slow_out: &mut [f64], 
 ) -> Result<Vec<(usize, usize)>, BuffAveragesError> {
     buff_averages_batch_inner_into_parallel(price, volume, sweep, kern, fast_out, slow_out, false)
 }
@@ -1683,7 +1683,7 @@ fn buff_averages_batch_inner_into_parallel(
         });
     }
 
-    // SAFETY: re-interpret as MaybeUninit to use init_matrix_prefixes
+    
     let fast_mu = unsafe {
         core::slice::from_raw_parts_mut(
             fast_out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1701,7 +1701,7 @@ fn buff_averages_batch_inner_into_parallel(
     init_matrix_prefixes(fast_mu, cols, &warms);
     init_matrix_prefixes(slow_mu, cols, &warms);
 
-    // Reject non-batch kernels explicitly
+    
     match kern {
         Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {}
         other => return Err(BuffAveragesError::InvalidKernelForBatch(other)),
@@ -1721,9 +1721,9 @@ fn buff_averages_batch_inner_into_parallel(
 
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     let masked_buffers: Option<(Vec<f64>, Vec<f64>)> =
-        // The masked pv/vv precompute is an amortization win when we have multiple rows
-        // reusing the same (price, volume) series. For a single row, the extra O(n) pass
-        // dominates and is slower than computing pv/v on the fly.
+        
+        
+        
         if rows > 1 && matches!(simd, Kernel::Avx2 | Kernel::Avx512) {
             let mut pv = vec![0.0; price.len()];
             let mut vv = vec![0.0; price.len()];
@@ -1739,13 +1739,13 @@ fn buff_averages_batch_inner_into_parallel(
             None
         };
 
-    // Compute each row - either parallel or sequential
+    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
 
-            // Process fast and slow outputs in parallel
+            
             fast_out
                 .par_chunks_mut(cols)
                 .zip(slow_out.par_chunks_mut(cols))
@@ -1791,7 +1791,7 @@ fn buff_averages_batch_inner_into_parallel(
 
         #[cfg(target_arch = "wasm32")]
         {
-            // WASM doesn't support threads, fall back to sequential
+            
             for (row, &(fp, sp)) in combos.iter().enumerate() {
                 let fr = &mut fast_out[row * cols..(row + 1) * cols];
                 let sr = &mut slow_out[row * cols..(row + 1) * cols];
@@ -1832,7 +1832,7 @@ fn buff_averages_batch_inner_into_parallel(
             }
         }
     } else {
-        // Sequential processing
+        
         for (row, &(fp, sp)) in combos.iter().enumerate() {
             let fr = &mut fast_out[row * cols..(row + 1) * cols];
             let sr = &mut slow_out[row * cols..(row + 1) * cols];
@@ -1942,22 +1942,22 @@ fn buff_averages_batch_inner(
         return Err(BuffAveragesError::SizeOverflow { rows, cols });
     }
 
-    // 2 matrices, uninitialized, zero-copy
+    
     let mut fast_mu = make_uninit_matrix(rows, cols);
     let mut slow_mu = make_uninit_matrix(rows, cols);
 
-    // Convert to f64 slices for compute
+    
     let fast_slice =
         unsafe { core::slice::from_raw_parts_mut(fast_mu.as_mut_ptr() as *mut f64, fast_mu.len()) };
     let slow_slice =
         unsafe { core::slice::from_raw_parts_mut(slow_mu.as_mut_ptr() as *mut f64, slow_mu.len()) };
 
-    // Inner helper will set NaN warm prefixes itself
+    
     buff_averages_batch_inner_into_parallel(
         price, volume, sweep, k, fast_slice, slow_slice, parallel,
     )?;
 
-    // Return as Vec<f64> without copy
+    
     let fast = unsafe {
         let ptr = fast_mu.as_mut_ptr() as *mut f64;
         let len = fast_mu.len();
@@ -1982,7 +1982,7 @@ fn buff_averages_batch_inner(
     })
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "buff_averages")]
 #[pyo3(signature = (price, volume, fast_period=5, slow_period=20, kernel=None))]
@@ -2517,7 +2517,7 @@ impl BuffAveragesContext {
                 || volume_ptr == slow_out_ptr;
 
             if needs_temp {
-                // Use temporary buffers
+                
                 let mut temp_fast = vec![0.0; len];
                 let mut temp_slow = vec![0.0; len];
 
@@ -2527,7 +2527,7 @@ impl BuffAveragesContext {
                 fast_out.copy_from_slice(&temp_fast);
                 slow_out.copy_from_slice(&temp_slow);
             } else {
-                // Direct write
+                
                 buff_averages_into_slices(fast_out, slow_out, &input, self.kernel)
                     .map_err(|e| JsValue::from_str(&e.to_string()))?;
             }
@@ -2550,7 +2550,7 @@ impl BuffAveragesContext {
         let result = buff_averages_with_kernel(&input, self.kernel)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Concatenate [fast..., slow...]
+        
         let mut output = Vec::with_capacity(price.len() * 2);
         output.extend_from_slice(&result.fast_buff);
         output.extend_from_slice(&result.slow_buff);
@@ -2558,7 +2558,7 @@ impl BuffAveragesContext {
     }
 }
 
-// ==================== UNIT TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2577,12 +2577,12 @@ mod tests {
             BuffAveragesInput::from_candles(&candles, "close", BuffAveragesParams::default());
         let result = buff_averages_with_kernel(&input, kernel)?;
 
-        // REFERENCE VALUES FROM PINESCRIPT (NEVER MODIFY THESE!)
+        
         let expected_fast = [
             58740.30855637,
             59132.28418702,
             59309.76658172,
-            59266.10492431, // Fixed typo: was 59.266 in original
+            59266.10492431, 
             59194.11908892,
         ];
 
@@ -2594,7 +2594,7 @@ mod tests {
             59196.26139533,
         ];
 
-        // Get last 6 values and use first 5 for comparison
+        
         let start = result.fast_buff.len().saturating_sub(6);
 
         for (i, (&fast_val, &slow_val)) in result.fast_buff[start..]
@@ -2606,7 +2606,7 @@ mod tests {
             let fast_diff = (fast_val - expected_fast[i]).abs();
             let slow_diff = (slow_val - expected_slow[i]).abs();
             assert!(
-                fast_diff < 1e-3, // Increased tolerance for floating point differences
+                fast_diff < 1e-3, 
                 "[{}] Buff Averages {:?} fast mismatch at idx {}: got {}, expected {}",
                 test_name,
                 kernel,
@@ -2615,7 +2615,7 @@ mod tests {
                 expected_fast[i]
             );
             assert!(
-                slow_diff < 1e-3, // Increased tolerance for floating point differences
+                slow_diff < 1e-3, 
                 "[{}] Buff Averages {:?} slow mismatch at idx {}: got {}, expected {}",
                 test_name,
                 kernel,
@@ -2830,14 +2830,14 @@ mod tests {
         Ok(())
     }
 
-    // Test for mismatched data lengths
+    
     fn check_buff_averages_mismatched_lengths(
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let price_data = [10.0, 20.0, 30.0];
-        let volume_data = [100.0, 200.0]; // Different length
+        let volume_data = [100.0, 200.0]; 
         let params = BuffAveragesParams::default();
         let input = BuffAveragesInput::from_slices(&price_data, &volume_data, params);
         let res = buff_averages_with_kernel(&input, kernel);
@@ -2849,7 +2849,7 @@ mod tests {
         Ok(())
     }
 
-    // Test for missing volume data
+    
     fn check_buff_averages_missing_volume(
         test_name: &str,
         kernel: Kernel,
@@ -2861,11 +2861,11 @@ mod tests {
         ];
         let params = BuffAveragesParams::default();
 
-        // Create input with slice data but no volume
+        
         let input = BuffAveragesInput {
             data: BuffAveragesData::Slice(&price_data),
             params,
-            volume: None, // Missing volume
+            volume: None, 
         };
 
         let res = buff_averages_with_kernel(&input, kernel);
@@ -2877,7 +2877,7 @@ mod tests {
         Ok(())
     }
 
-    // ==================== BATCH TESTS ====================
+    
 
     fn check_buff_averages_batch_single(
         test_name: &str,
@@ -2888,8 +2888,8 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let range = BuffAveragesBatchRange {
-            fast_period: (5, 5, 0),   // Single value
-            slow_period: (20, 20, 0), // Single value
+            fast_period: (5, 5, 0),   
+            slow_period: (20, 20, 0), 
         };
 
         let price = source_type(&candles, "close");
@@ -2897,12 +2897,12 @@ mod tests {
 
         let batch_result = buff_averages_batch_with_kernel(price, volume, &range, kernel)?;
 
-        // Compare with single calculation
+        
         let single_input =
             BuffAveragesInput::from_slices(price, volume, BuffAveragesParams::default());
         let single_result = buff_averages_with_kernel(&single_input, kernel)?;
 
-        // Should have 1 combination
+        
         assert_eq!(batch_result.rows, 1, "[{}] Expected 1 row", test_name);
         assert_eq!(
             batch_result.combos.len(),
@@ -2911,7 +2911,7 @@ mod tests {
             test_name
         );
 
-        // Compare outputs
+        
         for i in 0..price.len() {
             let batch_fast = batch_result.fast[i];
             let single_fast = single_result.fast_buff[i];
@@ -2951,8 +2951,8 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let range = BuffAveragesBatchRange {
-            fast_period: (3, 7, 2),   // 3, 5, 7
-            slow_period: (18, 22, 2), // 18, 20, 22
+            fast_period: (3, 7, 2),   
+            slow_period: (18, 22, 2), 
         };
 
         let price = source_type(&candles, "close");
@@ -2960,7 +2960,7 @@ mod tests {
 
         let result = buff_averages_batch_with_kernel(price, volume, &range, kernel)?;
 
-        // Should have 3 fast periods * 3 slow periods = 9 combinations
+        
         assert_eq!(result.rows, 9, "[{}] Expected 9 rows", test_name);
         assert_eq!(
             result.cols,
@@ -2987,7 +2987,7 @@ mod tests {
             test_name
         );
 
-        // Verify combinations
+        
         let expected_combos = vec![
             (3, 18),
             (3, 20),
@@ -3030,7 +3030,7 @@ mod tests {
         Ok(())
     }
 
-    // Test parallel batch processing
+    
     fn check_buff_averages_batch_parallel(
         test_name: &str,
         kernel: Kernel,
@@ -3040,20 +3040,20 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let range = BuffAveragesBatchRange {
-            fast_period: (3, 7, 2),   // 3, 5, 7
-            slow_period: (18, 22, 2), // 18, 20, 22
+            fast_period: (3, 7, 2),   
+            slow_period: (18, 22, 2), 
         };
 
         let price = source_type(&candles, "close");
         let volume = &candles.volume;
 
-        // Run sequential version
+        
         let seq_result = buff_averages_batch_with_kernel(price, volume, &range, kernel)?;
 
-        // Run parallel version
+        
         let par_result = buff_averages_batch_par_slice(price, volume, &range, kernel)?;
 
-        // Compare results - they should be identical
+        
         assert_eq!(
             seq_result.rows, par_result.rows,
             "[{}] Row count mismatch",
@@ -3070,7 +3070,7 @@ mod tests {
             test_name
         );
 
-        // Compare actual values with small tolerance for floating point differences
+        
         for i in 0..seq_result.fast.len() {
             let seq_fast = seq_result.fast[i];
             let par_fast = par_result.fast[i];
@@ -3120,14 +3120,14 @@ mod tests {
         Ok(())
     }
 
-    // ==================== STREAMING TESTS ====================
+    
 
     #[test]
     fn test_buff_averages_stream() -> Result<(), Box<dyn Error>> {
         let params = BuffAveragesParams::default();
         let mut stream = BuffAveragesStream::try_new(params)?;
 
-        // Feed data points
+        
         let test_data = vec![
             (100.0, 1000.0),
             (110.0, 1100.0),
@@ -3159,15 +3159,15 @@ mod tests {
             }
         }
 
-        // Should get result after slow period (20)
+        
         assert!(!results.is_empty(), "Stream should produce results");
 
         Ok(())
     }
 
-    // ==================== MACRO GENERATION ====================
+    
 
-    // Macro for generating single indicator tests
+    
     macro_rules! generate_buff_averages_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3194,7 +3194,7 @@ mod tests {
         };
     }
 
-    // Macro for batch tests
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -3223,7 +3223,7 @@ mod tests {
         };
     }
 
-    // Generate all single kernel tests
+    
     generate_buff_averages_tests!(
         check_buff_averages_accuracy,
         check_buff_averages_partial_params,
@@ -3238,17 +3238,17 @@ mod tests {
         check_buff_nan_prefix
     );
 
-    // Debug-only tests
+    
     #[cfg(debug_assertions)]
     generate_buff_averages_tests!(check_buff_no_poison);
 
-    // Generate batch tests
+    
     gen_batch_tests!(check_buff_averages_batch_single);
     gen_batch_tests!(check_buff_averages_batch_grid);
     gen_batch_tests!(check_buff_averages_batch_empty);
     gen_batch_tests!(check_buff_averages_batch_parallel);
 
-    // ==================== PROPERTY-BASED TESTS ====================
+    
 
     #[cfg(feature = "proptest")]
     proptest! {
@@ -3258,7 +3258,7 @@ mod tests {
             fast_period in 2usize..10,
             slow_period in 11usize..30
         ) {
-            // Generate same-length vectors
+            
             let data: Vec<f64> = (0..len).map(|i| (i as f64 + 1.0) * 10.0).collect();
             let volume: Vec<f64> = (0..len).map(|i| (i as f64 + 1.0) * 100.0).collect();
 
@@ -3280,11 +3280,11 @@ mod tests {
         fn prop_buff_averages_nan_handling(
             len in 50usize..100
         ) {
-            // Generate same-length vectors
+            
             let mut data: Vec<f64> = (0..len).map(|i| (i as f64 + 1.0) * 10.0).collect();
             let mut volume: Vec<f64> = (0..len).map(|i| (i as f64 + 1.0) * 100.0).collect();
 
-            // Insert some NaNs
+            
             for i in (0..5).map(|x| x * 10) {
                 if i < data.len() {
                     data[i] = f64::NAN;
@@ -3295,14 +3295,14 @@ mod tests {
             let params = BuffAveragesParams::default();
             let input = BuffAveragesInput::from_slices(&data, &volume, params);
 
-            // Should either succeed or fail gracefully
+            
             let _ = buff_averages(&input);
         }
     }
 
     #[test]
     fn test_buff_averages_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a moderate-size input with distinct price and volume
+        
         let len = 256usize;
         let price: Vec<f64> = (0..len).map(|i| (i as f64) * 1.5 + 10.0).collect();
         let volume: Vec<f64> = (0..len).map(|i| (i as f64) * 2.0 + 100.0).collect();
@@ -3310,10 +3310,10 @@ mod tests {
         let params = BuffAveragesParams::default();
         let input = BuffAveragesInput::from_slices(&price, &volume, params);
 
-        // Baseline via Vec-returning API
+        
         let base = buff_averages(&input)?;
 
-        // Preallocate outputs and compute via into API
+        
         let mut out_fast = vec![0.0; len];
         let mut out_slow = vec![0.0; len];
         super::buff_averages_into(&input, &mut out_fast, &mut out_slow)?;

@@ -54,14 +54,14 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// =============== Python: reuse shared DeviceArrayF32Py (CAI v3 + DLPack v1.x) ===============
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 
-// NOTE: This module intentionally avoids allocating any full-length scratch buffers. The core
-// kernel maintains a small O(period) working set and streams through the input once.
+
+
 
 #[derive(Debug, Clone)]
 pub enum EdcfData<'a> {
@@ -253,8 +253,8 @@ fn edcf_prepare<'a>(
     }
 
     let warm = first + 2 * period;
-    // EDCF uses a recurrence-bound O(1) rolling kernel; `Scalar` is consistently fastest in
-    // practice once AVX kernels no longer provide a meaningful advantage.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -265,7 +265,7 @@ fn edcf_prepare<'a>(
 
 #[inline(always)]
 fn edcf_compute_into(data: &[f64], period: usize, first: usize, chosen: Kernel, out: &mut [f64]) {
-    // Use optimized WASM version with reusable buffer
+    
     #[cfg(target_arch = "wasm32")]
     {
         if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -304,7 +304,7 @@ pub fn edcf_with_kernel(input: &EdcfInput, kernel: Kernel) -> Result<EdcfOutput,
 pub fn edcf_into(input: &EdcfInput, out: &mut [f64]) -> Result<(), EdcfError> {
     let (data, period, first, warm, chosen) = edcf_prepare(input, Kernel::Auto)?;
 
-    // Validate output buffer size
+    
     if out.len() != data.len() {
         return Err(EdcfError::OutputLenMismatch {
             expected: data.len(),
@@ -312,7 +312,7 @@ pub fn edcf_into(input: &EdcfInput, out: &mut [f64]) -> Result<(), EdcfError> {
         });
     }
 
-    // Guard against aliasing with the input slice (in-place not supported)
+    
     let in_ptr = data.as_ptr();
     let out_ptr = out.as_ptr();
     if core::ptr::eq(in_ptr, out_ptr) {
@@ -322,13 +322,13 @@ pub fn edcf_into(input: &EdcfInput, out: &mut [f64]) -> Result<(), EdcfError> {
         return Ok(());
     }
 
-    // Prefill warmup with the same quiet-NaN pattern used by alloc_with_nan_prefix
+    
     let warm = warm.min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute the remainder directly into the provided buffer
+    
     edcf_compute_into(data, period, first, chosen, out);
 
     Ok(())
@@ -340,7 +340,7 @@ pub fn edcf_into(input: &EdcfInput, out: &mut [f64]) -> Result<(), EdcfError> {
 pub fn edcf_into_slice(dst: &mut [f64], input: &EdcfInput, kern: Kernel) -> Result<(), EdcfError> {
     let (data, period, first, warm, chosen) = edcf_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
+    
     if dst.len() != data.len() {
         return Err(EdcfError::OutputLenMismatch {
             expected: data.len(),
@@ -348,10 +348,10 @@ pub fn edcf_into_slice(dst: &mut [f64], input: &EdcfInput, kern: Kernel) -> Resu
         });
     }
 
-    // Compute directly into the output buffer
+    
     edcf_compute_into(data, period, first, chosen, dst);
 
-    // Fill warmup period with NaN (post-compute write pattern like ALMA)
+    
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -378,7 +378,7 @@ fn edcf_scalar_o1_into(
     debug_assert_eq!(buf.len(), period);
     debug_assert_eq!(wbuf.len(), period);
 
-    // reset working sets (O(period))
+    
     buf.fill(0.0);
     wbuf.fill(0.0);
 
@@ -388,7 +388,7 @@ fn edcf_scalar_o1_into(
     let mut head = 0usize;
     let mut count = 0usize;
 
-    // streaming O(1) rolling-sums state (matches EdcfStream for finite inputs)
+    
     let mut sum_prev = 0.0;
     let mut sum_prev_sq = 0.0;
     let mut den = 0.0;
@@ -398,23 +398,23 @@ fn edcf_scalar_o1_into(
     for idx in first_valid..len {
         let value = data[idx];
 
-        // Values that are about to leave the window (valid only once we've seen >= p samples).
+        
         let old_x = unsafe { *buf.get_unchecked(head) };
         let old_w = unsafe { *wbuf.get_unchecked(head) };
         let had_full_window = count >= period;
 
-        // --- 1) Compute new weight w_t in O(1) ---
-        // Only defined once we have p previous samples; otherwise keep it 0 to mirror the
-        // legacy dist-buffer behavior (weights are unused until output warmup anyway).
+        
+        
+        
         let w_new = if count >= period {
-            // w_t = (p-1)*x^2 - 2*x*sum_prev + sum_prev_sq
+            
             let x2 = value * value;
             p_minus1_f.mul_add(x2, sum_prev_sq) - (2.0 * value * sum_prev)
         } else {
             0.0
         };
 
-        // --- 2) Update rolling aggregates (den,num) for the last p weights ---
+        
         if had_full_window {
             den -= old_w;
             num -= old_w * old_x;
@@ -422,7 +422,7 @@ fn edcf_scalar_o1_into(
         den += w_new;
         num = w_new.mul_add(value, num);
 
-        // --- 3) Commit the new sample & weight to the rings ---
+        
         unsafe {
             *buf.get_unchecked_mut(head) = value;
             *wbuf.get_unchecked_mut(head) = w_new;
@@ -432,13 +432,13 @@ fn edcf_scalar_o1_into(
             head = 0;
         }
 
-        // --- 4) Maintain sums of the *previous p-1* values for next step ---
-        // This keeps `sum_prev` aligned with the legacy definition:
-        // sum of the (p-1) most recent samples before the next value.
+        
+        
+        
         sum_prev += value;
         sum_prev_sq = value.mul_add(value, sum_prev_sq);
         if count >= (period - 1) {
-            // After bumping `head`, it points at the oldest value in the ring.
+            
             let drop_x = unsafe { *buf.get_unchecked(head) };
             sum_prev -= drop_x;
             sum_prev_sq -= drop_x * drop_x;
@@ -446,7 +446,7 @@ fn edcf_scalar_o1_into(
 
         count += 1;
 
-        // Batch warmup: match the Vec-returning API (NaNs through `first_valid + 2*period`).
+        
         if idx >= warm {
             if den != 0.0 {
                 out[idx] = num / den;
@@ -465,7 +465,7 @@ fn edcf_scalar_into_with_scratch(
     out: &mut [f64],
     scratch: &mut Vec<f64>,
 ) {
-    // Scratch layout: [x_ring | w_ring]
+    
     let need = period * 2;
     if scratch.len() < need {
         scratch.resize(need, 0.0);
@@ -477,20 +477,20 @@ fn edcf_scalar_into_with_scratch(
 #[cfg(target_arch = "wasm32")]
 #[inline]
 fn edcf_scalar_wasm(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // Same O(1) rolling kernel; only allocates O(period) working set.
+    
     edcf_scalar(data, period, first_valid, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn edcf_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // O(1) rolling kernel (recurrence-bound); faster than the legacy O(n·period) dist-buffer path.
+    
     edcf_scalar(data, period, first_valid, out);
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // O(1) rolling kernel (recurrence-bound); faster than the legacy O(n·period) dist-buffer path.
+    
     edcf_scalar(data, period, first_valid, out);
 }
 
@@ -498,24 +498,24 @@ pub unsafe fn edcf_avx512(data: &[f64], period: usize, first_valid: usize, out: 
 /// Streaming variant of the EDCF filter with O(1) updates.
 pub struct EdcfStream {
     period: usize,
-    // price ring buffer
+    
     buffer: Vec<f64>,
-    // weight ring buffer (w_k for the price at the same index)
+    
     dist: Vec<f64>,
-    // index to overwrite next (points at the oldest sample)
+    
     head: usize,
-    // number of accepted finite samples since last reset
+    
     count: usize,
 
-    // rolling sums over the *previous p-1* samples (exclude current)
+    
     sum_prev: f64,
     sum_prev_sq: f64,
 
-    // rolling window aggregates over the last *p* (w_k, x_k) pairs
+    
     den: f64,
     num: f64,
 
-    // cached (p-1) as f64
+    
     p_minus1_f: f64,
 }
 
@@ -531,8 +531,8 @@ impl EdcfStream {
             });
         }
 
-        // Keep parity with existing semantics: price buffer starts as NaN,
-        // weight buffer starts as 0.0 (weights are not defined before p-1 prevs).
+        
+        
         let buffer = alloc_with_nan_prefix(period, period);
         let dist = vec![0.0; period];
 
@@ -552,7 +552,7 @@ impl EdcfStream {
 
     #[inline(always)]
     fn bump_head(&mut self) {
-        // branchy increment is faster than % on hot paths
+        
         let n = self.head + 1;
         self.head = if n == self.period { 0 } else { n };
     }
@@ -564,62 +564,62 @@ impl EdcfStream {
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         if !value.is_finite() {
-            // keep state unchanged on non-finite input
+            
             return None;
         }
 
         let p = self.period;
 
-        // Values that are about to leave the window (valid only once we've seen >= p samples).
+        
         let old_x = self.buffer[self.head];
         let old_w = self.dist[self.head];
         let had_full_window = self.count >= p;
 
-        // --- 1) Compute new weight w_t in O(1) ---
-        // Only defined once we have p previous values; otherwise keep it 0
-        // to mirror the batch kernel's early zeros in the distance buffer.
+        
+        
+        
         let w_new = if self.count >= p {
-            // w_t = (p-1)*x^2 - 2*x*sum_prev + sum_prev_sq
+            
             let x2 = value * value;
             self.p_minus1_f.mul_add(x2, self.sum_prev_sq) - (2.0 * value * self.sum_prev)
         } else {
             0.0
         };
 
-        // --- 2) Update rolling aggregates (den,num) for the last p weights ---
+        
         if had_full_window {
-            // drop the contribution that slides out
+            
             self.den -= old_w;
             self.num -= old_w * old_x;
         }
-        // add the new contribution
+        
         self.den += w_new;
         self.num = w_new.mul_add(value, self.num);
 
-        // --- 3) Commit the new sample & weight to the rings ---
+        
         self.buffer[self.head] = value;
         self.dist[self.head] = w_new;
         self.bump_head();
 
-        // --- 4) Maintain sums of the *previous p-1* values for next step ---
-        // After evaluating w_new with the *current* previous set, we now insert x_t into that set
-        // for the next update and remove the new oldest element so the set stays at size (p-1).
+        
+        
+        
         self.sum_prev += value;
         self.sum_prev_sq = value.mul_add(value, self.sum_prev_sq);
         if self.count >= (p - 1) {
-            // After bump_head(), `self.head` points at the oldest value in the ring.
+            
             let drop_x = self.buffer[self.head];
             self.sum_prev -= drop_x;
             self.sum_prev_sq -= drop_x * drop_x;
         }
 
-        // --- 5) Advance sample count and decide output ---
+        
         self.count += 1;
         if self.count < 2 * p {
             return None;
         }
         if self.den != 0.0 {
-            // Division isolated for easy "fast-math" swap (see helper below)
+            
             Some(fast_div(self.num, self.den))
         } else {
             None
@@ -627,11 +627,11 @@ impl EdcfStream {
     }
 }
 
-// ------------ Fast-math division hook (optional) ------------
+
 #[inline(always)]
 fn fast_div(num: f64, den: f64) -> f64 {
-    // Default: rely on the platform's IEEE-754 division.
-    // Swap this for a gated approximation below if you enable the "fast-math" cfg.
+    
+    
     num / den
 }
 
@@ -724,7 +724,7 @@ pub fn edcf_batch_with_kernel(
         return Err(EdcfError::NoData);
     }
     let kernel = match k {
-        // Same rationale as the single-series path: the rolling kernel is scalar-first.
+        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EdcfError::InvalidKernelForBatch(other)),
@@ -769,7 +769,7 @@ impl EdcfBatchOutput {
 fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
     let (mut start, mut end, step) = r.period;
 
-    // Normalize reversed bounds and treat zero step or equal bounds as singleton.
+    
     if start > end {
         core::mem::swap(&mut start, &mut end);
     }
@@ -779,7 +779,7 @@ fn expand_grid(r: &EdcfBatchRange) -> Vec<EdcfParams> {
         (start..=end).step_by(step).collect()
     };
 
-    // Map periods → EdcfParams
+    
     periods
         .into_iter()
         .map(|p| EdcfParams { period: Some(p) })
@@ -827,24 +827,24 @@ fn edcf_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Checked sizing before allocating rows*cols matrix
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(EdcfError::SizeOverflow { op: "rows*cols" })?;
 
-    // Use zero-copy allocation pattern from alma.rs
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| data.iter().position(|x| !x.is_nan()).unwrap_or(0) + 2 * c.period.unwrap_or(15))
         .collect();
 
-    // Initialize NaN prefixes
+    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice for computation
+    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -852,7 +852,7 @@ fn edcf_batch_inner(
 
     let result_combos = edcf_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Reclaim as Vec<f64>
+    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -877,7 +877,7 @@ fn edcf_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<EdcfParams>, EdcfError> {
-    // ─────────────────── guards unchanged ───────────────────
+    
     if data.is_empty() {
         return Err(EdcfError::NoData);
     }
@@ -912,7 +912,7 @@ fn edcf_batch_inner_into(
 
             out.par_chunks_mut(cols).enumerate().for_each(|(row, dst)| {
                 let period = combos[row].period.unwrap();
-                // Each row keeps its own small O(period) scratch (no full-length temps).
+                
                 let mut scratch = Vec::<f64>::new();
                 match kern {
                     Kernel::Scalar
@@ -920,7 +920,7 @@ fn edcf_batch_inner_into(
                     | Kernel::Avx512 => {
                         edcf_scalar_into_with_scratch(data, period, first, dst, &mut scratch);
                     }
-                    _ => unsafe { edcf_row_scalar(data, first, period, dst) }, // wasm path
+                    _ => unsafe { edcf_row_scalar(data, first, period, dst) }, 
                 }
             });
         }
@@ -933,7 +933,7 @@ fn edcf_batch_inner_into(
             }
         }
     } else {
-        // serial: single reusable scratch
+        
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut scratch = Vec::<f64>::new();
@@ -974,7 +974,7 @@ unsafe fn edcf_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
     edcf_avx512(data, period, first, out);
 }
 
-// ==================== PYTHON MODULE REGISTRATION ====================
+
 #[cfg(feature = "python")]
 pub fn register_edcf_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
@@ -1250,7 +1250,7 @@ mod tests {
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1258,7 +1258,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1266,7 +1266,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1280,7 +1280,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_edcf_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1294,8 +1294,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // ─ 1. Strategy ───────────────────────────────────────────────────────────
-        // choose period first (3‥=30), then a ≥-2·period finite vector
+        
+        
         let strat = (3usize..=30).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1303,14 +1303,14 @@ mod tests {
                     2 * period..400,
                 ),
                 Just(period),
-                // affine parameters: non-zero scale, arbitrary shift
+                
                 (-1e3f64..1e3f64).prop_filter("a≠0", |a| a.abs() > 1e-12),
                 -1e3f64..1e3f64,
             )
         });
 
         proptest::test_runner::TestRunner::default().run(&strat, |(data, period, a, b)| {
-            // ─ 2. Run kernels safely (don’t unwrap blindly) ───────────────────
+            
             let params = EdcfParams {
                 period: Some(period),
             };
@@ -1320,28 +1320,28 @@ mod tests {
             let slow = edcf_with_kernel(&input, Kernel::Scalar);
 
             match (fast, slow) {
-                // ➊ Same-kind error ⇒ property holds
+                
                 (Err(e1), Err(e2))
                     if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
                 {
                     return Ok(());
                 }
 
-                // ➊′ Different error kinds → fail
+                
                 (Err(e1), Err(e2)) => {
                     prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2)
                 }
 
-                // ➋ Kernels disagree on success/error
+                
                 (Err(e), Ok(_)) => prop_assert!(false, "fast errored {e:?} but scalar succeeded"),
                 (Ok(_), Err(e)) => prop_assert!(false, "scalar errored {e:?} but fast succeeded"),
 
-                // ➌ Both succeeded – full invariant suite
+                
                 (Ok(fast), Ok(reference)) => {
                     let EdcfOutput { values: out } = fast;
                     let EdcfOutput { values: rref } = reference;
 
-                    // pre-compute streaming and affine-transformed outputs
+                    
                     let mut stream = EdcfStream::try_new(params.clone()).unwrap();
                     let mut s_out = Vec::with_capacity(data.len());
                     for &v in &data {
@@ -1351,7 +1351,7 @@ mod tests {
                     let transformed: Vec<f64> = data.iter().map(|x| a * x + b).collect();
                     let t_out = edcf(&EdcfInput::from_slice(&transformed, params.clone()))?.values;
 
-                    let warm = 2 * period; // first usable index
+                    let warm = 2 * period; 
 
                     for i in warm..data.len() {
                         let win = &data[i + 1 - period..=i];
@@ -1365,18 +1365,18 @@ mod tests {
                         let ys = s_out[i];
                         let yt = t_out[i];
 
-                        // 1️⃣ Window-boundedness
+                        
                         prop_assert!(
                             y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
                             "idx {i}: {y} ∉ [{lo}, {hi}]"
                         );
 
-                        // 2️⃣ Constant-series ⇒ all NaN
+                        
                         if win.iter().all(|v| *v == win[0]) {
                             prop_assert!(y.is_nan(), "idx {i}: expected NaN on constant series");
                         }
 
-                        // 3️⃣ Affine equivariance (scale & translation)
+                        
                         if y.is_finite() && yt.is_finite() {
                             let expect = a * y + b;
                             let diff = (yt - expect).abs();
@@ -1388,21 +1388,21 @@ mod tests {
                             );
                         }
 
-                        // 4️⃣ SIMD ≡ scalar (ULP ≤ 4 or abs ≤ 1e-9)
+                        
                         let ulp = y.to_bits().abs_diff(yr.to_bits());
                         prop_assert!(
                             (y - yr).abs() <= 1e-9 || ulp <= 4,
                             "idx {i}: fast={y} ref={yr} ULP={ulp}"
                         );
 
-                        // 5️⃣ Streaming parity
+                        
                         prop_assert!(
                             (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
                             "idx {i}: stream mismatch"
                         );
                     }
 
-                    // 6️⃣ Warm-up NaNs
+                    
                     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
                     let warm_expected = first + warm;
                     prop_assert!(out[..warm_expected].iter().all(|v| v.is_nan()));
@@ -1412,7 +1412,7 @@ mod tests {
             Ok(())
         })?;
 
-        // 🔟 Error-path smoke tests (uniform across indicators)
+        
         assert!(edcf(&EdcfInput::from_slice(&[], EdcfParams::default())).is_err());
         assert!(edcf(&EdcfInput::from_slice(
             &[f64::NAN; 12],
@@ -1499,7 +1499,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1507,20 +1507,20 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations to better catch uninitialized memory bugs
-        // Test different period ranges and sources
+        
+        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            // Test with various period ranges
+            
             let output = EdcfBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(3, 200, 5) // Wide range: 3 to 200 with step 5
+                .period_range(3, 200, 5) 
                 .apply_candles(&c, source)?;
 
-            // Check every value in the entire batch matrix for poison patterns
+            
             for (idx, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -1529,7 +1529,7 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1537,7 +1537,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1545,7 +1545,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1555,7 +1555,7 @@ mod tests {
             }
         }
 
-        // Also test edge cases with very small and very large periods
+        
         let edge_case_ranges = vec![(3, 5, 1), (190, 200, 2), (50, 100, 10)];
         for (start, end, step) in edge_case_ranges {
             let output = EdcfBatchBuilder::new()
@@ -1587,7 +1587,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1700,7 +1700,7 @@ pub fn edcf_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize warmup NaN prefixes to match Rust batch semantics when data is non-empty.
+    
     if !slice_in.is_empty() && rows > 0 {
         if let Some(first) = slice_in.iter().position(|x| !x.is_nan()) {
             let warm: Vec<usize> = combos
@@ -1832,10 +1832,10 @@ pub fn edcf_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = EdcfInput::from_slice(data, params);
 
-    // Allocate output buffer once
+    
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
+    
     edcf_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1854,7 +1854,7 @@ pub fn edcf_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
+    
     edcf_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -1880,22 +1880,22 @@ pub fn edcf_batch_metadata_js(
     Ok(metadata)
 }
 
-// ================== Zero-Copy WASM Functions ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn edcf_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
+    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec); 
     ptr
 }
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn edcf_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
+    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1911,38 +1911,38 @@ pub fn edcf_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
+    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to edcf_into"));
     }
 
     unsafe {
-        // Create slice from pointer
+        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
+        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Create input structure
+        
         let params = EdcfParams {
             period: Some(period),
         };
         let input = EdcfInput::from_slice(data, params);
 
-        // Check for aliasing (same input and output)
+        
         if in_ptr == out_ptr {
-            // Need temporary buffer for in-place operation
+            
             let mut temp = vec![0.0; len];
             edcf_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy result to output
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct computation into output buffer
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             edcf_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1952,7 +1952,7 @@ pub fn edcf_into(
     }
 }
 
-// ================== Batch Processing with Serde ==================
+
 
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
@@ -1992,7 +1992,7 @@ pub fn edcf_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// ================== Optimized Batch Processing ==================
+
 
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
@@ -2025,7 +2025,7 @@ pub fn edcf_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Initialize warmup NaN prefixes so zero-copy API matches scalar/batch semantics.
+        
         if !data.is_empty() && rows > 0 {
             if let Some(first) = data.iter().position(|x| !x.is_nan()) {
                 let warm: Vec<usize> = combos
@@ -2045,7 +2045,7 @@ pub fn edcf_batch_into(
             }
         }
 
-        // Use optimized batch processing
+        
         edcf_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

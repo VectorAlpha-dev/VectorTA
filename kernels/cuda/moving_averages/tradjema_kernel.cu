@@ -1,5 +1,5 @@
-// CUDA kernels for the Trend Adjusted EMA (TrAdjEMA).
-// FP32 I/O for API compatibility; prefer FP32 arithmetic for throughput.
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -8,7 +8,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// Precise FP64 division even when compiled with --use_fast_math.
+
 __device__ __forceinline__ double div_rn_f64(double num, double den) {
     return __ddiv_rn(num, den);
 }
@@ -25,7 +25,7 @@ __device__ __forceinline__ double compute_true_range_f64(
     return fmax(hl, fmax(hc, lc));
 }
 
-// Force-inline for tiny hot helper
+
 __device__ __forceinline__ float compute_true_range_f32(
     float high, float low, float prev_close, bool first_bar)
 {
@@ -38,7 +38,7 @@ __device__ __forceinline__ float compute_true_range_f32(
     return fmaxf(hl, fmaxf(hc, lc));
 }
 
-// Small helpers for circular indexing without %
+
 __device__ __forceinline__ int inc_wrap(int x, int n) {
     ++x; return (x == n) ? 0 : x;
 }
@@ -50,11 +50,11 @@ __device__ __forceinline__ int add_wrap(int head, int add, int n) {
     return (s >= n) ? s - n : s;
 }
 
-//------------------------------------------------------------------------------
-// Kernel 1: Many (length, mult) combos over a single series (contiguous time)
-// Each block handles one combo; thread 0 runs the sequential EMA loop.
-// Other threads only help with the initial NaN prefix fill.
-//------------------------------------------------------------------------------
+
+
+
+
+
 
 extern "C" __global__
 void tradjema_batch_f32(const float* __restrict__ high,
@@ -76,7 +76,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
     const int base = combo * series_len;
 
-    // Invalid parameter set: write full NaN range and return
+    
     if (length <= 1 || length > series_len || !isfinite(mult_f32) || mult_f32 <= 0.0f) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out[base + t] = NAN;
@@ -87,17 +87,17 @@ void tradjema_batch_f32(const float* __restrict__ high,
     const int warm  = first_valid + length - 1;
     const float alpha = 2.0f / (static_cast<float>(length) + 1.0f);
 
-    // Only write the necessary NaN prefix: [0, warm-1]
+    
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    // Nothing to compute (window never fully warms)
+    
     if (warm >= series_len || threadIdx.x != 0) return;
 
-    // Shared memory layout (mirrors the scalar ring-deque behavior):
-    // [ f32 min_vals[length] ][ f32 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+    
+    
     extern __shared__ __align__(16) unsigned char smem[];
     float* min_vals = reinterpret_cast<float*>(smem);
     float* max_vals = min_vals + length;
@@ -109,7 +109,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
     auto minq_push = [&](float v, int idx) {
         int back = dec_wrap(min_tail, length);
-        // strict ">" to preserve older equal elements (matches scalar path)
+        
         while (min_tail != min_head && min_vals[back] > v) {
             min_tail = back;
             back = dec_wrap(min_tail, length);
@@ -120,7 +120,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
     };
     auto maxq_push = [&](float v, int idx) {
         int back = dec_wrap(max_tail, length);
-        // strict "<" to preserve older equal elements (matches scalar path)
+        
         while (max_tail != max_head && max_vals[back] < v) {
             max_tail = back;
             back = dec_wrap(max_tail, length);
@@ -130,7 +130,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
         max_tail = inc_wrap(max_tail, length);
     };
 
-    // Seed window: [first_valid .. warm]
+    
     float last_tr = high[first_valid] - low[first_valid];
     minq_push(last_tr, first_valid);
     maxq_push(last_tr, first_valid);
@@ -148,13 +148,13 @@ void tradjema_batch_f32(const float* __restrict__ high,
     const float denom0 = tr_high - tr_low;
     const float tr_adj0 = (denom0 != 0.0f) ? ((last_tr - tr_low) / denom0) : 0.0f;
 
-    // Initial EMA output at 'warm'
+    
     const float src0 = close[warm - 1];
     const float a0 = alpha * (1.0f + tr_adj0 * mult);
     float y = src0 * a0;
     out[base + warm] = y;
 
-    // Main sequential loop
+    
     for (int i = warm + 1; i < series_len; ++i) {
         const int lim = i - length;
         while (min_head != min_tail && min_idx[min_head] <= lim) {
@@ -176,16 +176,16 @@ void tradjema_batch_f32(const float* __restrict__ high,
         const float tr_adj = (den != 0.0f) ? ((tr - lo_tr) / den) : 0.0f;
         const float a = alpha * (1.0f + tr_adj * mult);
 
-        const float src = prev_close; // src is close[i-1]
+        const float src = prev_close; 
         y = fmaf(a, (src - y), y);
         out[base + i] = y;
     }
 }
 
-//------------------------------------------------------------------------------
-// Kernel 2: Many series, one (length, mult), time-major storage.
-// Same core improvements as above.
-//------------------------------------------------------------------------------
+
+
+
+
 
 extern "C" __global__
 void tradjema_many_series_one_param_time_major_f32(
@@ -229,8 +229,8 @@ void tradjema_many_series_one_param_time_major_f32(
         return buf[row * num_series + col];
     };
 
-    // Shared memory layout (mirrors the scalar ring-deque behavior):
-    // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+    
+    
     extern __shared__ __align__(16) unsigned char smem[];
     double* min_vals = reinterpret_cast<double*>(smem);
     double* max_vals = min_vals + length;
@@ -261,7 +261,7 @@ void tradjema_many_series_one_param_time_major_f32(
         max_tail = inc_wrap(max_tail, length);
     };
 
-    // Seed window: [first_valid .. warm]
+    
     double last_tr =
         static_cast<double>(at(high_tm, first_valid, series))
         - static_cast<double>(at(low_tm, first_valid, series));

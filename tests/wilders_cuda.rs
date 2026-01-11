@@ -1,16 +1,16 @@
-// Integration tests for CUDA Wilders kernels
 
-use my_project::indicators::moving_averages::wilders::{
+
+use vector_ta::indicators::moving_averages::wilders::{
     wilders_batch_with_kernel, WildersBatchRange,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaWilders;
+use vector_ta::cuda::moving_averages::CudaWilders;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -85,11 +85,11 @@ fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         return Ok(());
     }
 
-    let cols = 8usize; // number of series (columns)
-    let rows = 1024usize; // series length (rows/time)
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        // Stagger start to introduce NaN prefixes
+        
         for t in s..rows {
             let x = (t as f64) + (s as f64) * 0.25;
             data_tm[t * cols + s] = (x * 0.0027).sin() + 0.00019 * x;
@@ -98,20 +98,20 @@ fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
 
     let period = 14usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
         for t in 0..rows {
             series[t] = data_tm[t * cols + s];
         }
-        let params = my_project::indicators::moving_averages::wilders::WildersParams {
+        let params = vector_ta::indicators::moving_averages::wilders::WildersParams {
             period: Some(period),
         };
-        let input = my_project::indicators::moving_averages::wilders::WildersInput::from_slice(
+        let input = vector_ta::indicators::moving_averages::wilders::WildersInput::from_slice(
             &series, params,
         );
-        let out = my_project::indicators::moving_averages::wilders::wilders_with_kernel(
+        let out = vector_ta::indicators::moving_averages::wilders::wilders_with_kernel(
             &input,
             Kernel::Scalar,
         )?;
@@ -122,7 +122,7 @@ fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaWilders::new(0).expect("CudaWilders::new");
-    let params = my_project::indicators::moving_averages::wilders::WildersParams {
+    let params = vector_ta::indicators::moving_averages::wilders::WildersParams {
         period: Some(period),
     };
     let dev = cuda

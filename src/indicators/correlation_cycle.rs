@@ -278,10 +278,10 @@ pub fn correlation_cycle_with_kernel(
         k => k,
     };
 
-    let warm_real_imag_angle = first + period; // first index we write for R/I/Angle
-    let warm_state = first + period + 1; // first index we write for State
+    let warm_real_imag_angle = first + period; 
+    let warm_state = first + period + 1; 
 
-    // Zero-copy friendly allocations with NaN prefixes only
+    
     let mut real = alloc_with_nan_prefix(len, warm_real_imag_angle);
     let mut imag = alloc_with_nan_prefix(len, warm_real_imag_angle);
     let mut angle = alloc_with_nan_prefix(len, warm_real_imag_angle);
@@ -360,7 +360,7 @@ pub fn correlation_cycle_into(
     let threshold = input.get_threshold();
     let chosen = correlation_cycle_auto_kernel();
 
-    // Prefill warmup prefixes with the crate's quiet-NaN pattern used by alloc_with_nan_prefix
+    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm_ria = (first + period).min(len);
     let warm_s = (first + period + 1).min(len);
@@ -466,7 +466,7 @@ pub fn correlation_cycle_into_slices(
         }
     }
 
-    // Enforce warmup prefixes without full-array fills
+    
     let warm_ria = first + period;
     let warm_s = first + period + 1;
     for v in &mut dst_real[..warm_ria] {
@@ -512,21 +512,21 @@ unsafe fn correlation_cycle_compute_into(
     angle: &mut [f64],
     state: &mut [f64],
 ) {
-    // Constants
-    let half_pi = f64::asin(1.0); // π/2
-    let two_pi = 4.0 * f64::asin(1.0); // 2π
+    
+    let half_pi = f64::asin(1.0); 
+    let two_pi = 4.0 * f64::asin(1.0); 
 
-    // Precompute sin/cos tables and their statistics (constant across i)
+    
     let n = period as f64;
     let w = two_pi / n;
 
     let mut cos_table = vec![0.0f64; period];
-    let mut sin_table = vec![0.0f64; period]; // stores -sin
+    let mut sin_table = vec![0.0f64; period]; 
 
     let mut sum_cos = 0.0f64;
-    let mut sum_sin = 0.0f64; // sum of (-sin)
+    let mut sum_sin = 0.0f64; 
     let mut sum_cos2 = 0.0f64;
-    let mut sum_sin2 = 0.0f64; // (-sin)^2
+    let mut sum_sin2 = 0.0f64; 
 
     {
         let mut j = 0usize;
@@ -587,7 +587,7 @@ unsafe fn correlation_cycle_compute_into(
         }
     }
 
-    // Denominator parts constant across i
+    
     let t2_const = n.mul_add(sum_cos2, -(sum_cos * sum_cos));
     let t4_const = n.mul_add(sum_sin2, -(sum_sin * sum_sin));
     let has_t2 = t2_const > 0.0;
@@ -595,11 +595,11 @@ unsafe fn correlation_cycle_compute_into(
     let sqrt_t2c = if has_t2 { t2_const.sqrt() } else { 0.0 };
     let sqrt_t4c = if has_t4 { t4_const.sqrt() } else { 0.0 };
 
-    // earliest indices we can write
-    let start_ria = first + period; // real/imag/angle
-    let start_s = start_ria + 1; // state
+    
+    let start_ria = first + period; 
+    let start_s = start_ria + 1; 
 
-    // Fuse angle + state computation
+    
     let mut prev_angle = f64::NAN;
 
     let dptr = data.as_ptr();
@@ -607,11 +607,11 @@ unsafe fn correlation_cycle_compute_into(
     let sptr = sin_table.as_ptr();
 
     for i in start_ria..data.len() {
-        // Accumulators for the i-th window
+        
         let mut sum_x = 0.0f64;
         let mut sum_x2 = 0.0f64;
-        let mut sum_xc = 0.0f64; // Σ x * cos
-        let mut sum_xs = 0.0f64; // Σ x * (-sin)
+        let mut sum_xc = 0.0f64; 
+        let mut sum_xs = 0.0f64; 
 
         let mut j = 0usize;
         while j + 4 <= period {
@@ -1090,7 +1090,7 @@ pub unsafe fn correlation_cycle_avx512_long(
     correlation_cycle_compute_into(data, period, threshold, first, real, imag, angle, state)
 }
 
-// Row wrappers
+
 #[inline(always)]
 pub unsafe fn correlation_cycle_row_scalar_with_first(
     data: &[f64],
@@ -1105,7 +1105,7 @@ pub unsafe fn correlation_cycle_row_scalar_with_first(
     correlation_cycle_compute_into(data, period, threshold, first, real, imag, angle, state)
 }
 
-// AVX variants can call the same until you write SIMD:
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn correlation_cycle_row_avx2_with_first(
@@ -1140,11 +1140,11 @@ pub unsafe fn correlation_cycle_row_avx512_with_first(
 /// Matches batch semantics and one-tick alignment; NaNs are treated as zeros inside the window.
 #[derive(Debug, Clone)]
 pub struct CorrelationCycleStream {
-    // Params
+    
     period: usize,
     threshold: f64,
 
-    // Circular buffer of sanitized samples (NaN -> 0.0)
+    
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
@@ -1152,30 +1152,30 @@ pub struct CorrelationCycleStream {
     /// Previously computed tuple to emit on the next call (one-tick delay to match batch)
     last: Option<(f64, f64, f64, f64)>,
 
-    // --- O(1) state ---
+    
 
-    // Rolling sums for normalization
+    
     sum_x: f64,
     sum_x2: f64,
 
-    // Complex phasor accumulator for the k=1 bin:
-    // P = sum x_i * [cos(w*(m+1)) + i * (-sin(w*(m+1)))]
-    // We store its real/imag parts directly:
-    phasor_re: f64, // Σ x * cos
-    phasor_im: f64, // Σ x * (-sin)
+    
+    
+    
+    phasor_re: f64, 
+    phasor_im: f64, 
 
-    // Angle memory for state
+    
     prev_angle: f64,
 
-    // Precomputed constants
+    
     n: f64,
     half_pi: f64,
-    z_re: f64,     // cos(w)
-    z_im: f64,     // -sin(w)  (negative!)
-    sum_cos: f64,  // Σ cos(w*(j+1)), j=0..N-1
-    sum_sin: f64,  // Σ (-sin(w*(j+1))), j=0..N-1
-    sqrt_t2c: f64, // sqrt( N*Σcos^2 - (Σcos)^2 )
-    sqrt_t4c: f64, // sqrt( N*Σ(-sin)^2 - (Σ(-sin))^2 )
+    z_re: f64,     
+    z_im: f64,     
+    sum_cos: f64,  
+    sum_sin: f64,  
+    sqrt_t2c: f64, 
+    sqrt_t4c: f64, 
     has_t2: bool,
     has_t4: bool,
 }
@@ -1191,22 +1191,22 @@ impl CorrelationCycleStream {
         }
         let threshold = params.threshold.unwrap_or(9.0);
 
-        // Match batch path constants exactly (asin-based pi to minimize drift)
-        let half_pi = f64::asin(1.0); // π/2
-        let two_pi = 4.0 * half_pi; // 2π
+        
+        let half_pi = f64::asin(1.0); 
+        let two_pi = 4.0 * half_pi; 
         let n = period as f64;
         let w = two_pi / n;
 
-        // z = e^{-jw} = cos(w) + i*(-sin(w))
+        
         let (s_w, c_w) = w.sin_cos();
         let z_re = c_w;
-        let z_im = -s_w; // keep sign consistent with (-sin) convention
+        let z_im = -s_w; 
 
-        // Precompute Σcos, Σ(-sin), and their squares exactly like the batch kernel
+        
         let mut sum_cos = 0.0f64;
-        let mut sum_sin = 0.0f64; // sum of (-sin)
+        let mut sum_sin = 0.0f64; 
         let mut sum_cos2 = 0.0f64;
-        let mut sum_sin2 = 0.0f64; // (-sin)^2
+        let mut sum_sin2 = 0.0f64; 
 
         let mut j = 0usize;
         while j + 4 <= period {
@@ -1244,7 +1244,7 @@ impl CorrelationCycleStream {
             j += 1;
         }
 
-        // Denominator constants (once per stream)
+        
         let t2_const = n.mul_add(sum_cos2, -(sum_cos * sum_cos));
         let t4_const = n.mul_add(sum_sin2, -(sum_sin * sum_sin));
         let has_t2 = t2_const > 0.0;
@@ -1255,7 +1255,7 @@ impl CorrelationCycleStream {
         Ok(Self {
             period,
             threshold,
-            buffer: vec![0.0; period], // sanitized samples (NaN -> 0)
+            buffer: vec![0.0; period], 
             head: 0,
             filled: false,
             last: None,
@@ -1284,20 +1284,20 @@ impl CorrelationCycleStream {
     /// to match the batch alignment (one-tick latency).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
-        // 1) Ingest new sample (sanitize NaN -> 0.0), get outgoing sample from the ring
+        
         let x_new = if value.is_nan() { 0.0 } else { value };
-        let x_old = self.buffer[self.head]; // already sanitized
+        let x_old = self.buffer[self.head]; 
         self.buffer[self.head] = x_new;
         self.head = (self.head + 1) % self.period;
 
-        // 2) O(1) roll the normalization sums
+        
         self.sum_x += x_new - x_old;
-        // fused form for (x_new^2 - x_old^2)
+        
         self.sum_x2 = (x_new * x_new) - (x_old * x_old) + self.sum_x2;
 
-        // 3) O(1) phasor update via sliding DFT at k=1:
-        //    P <- z * (P + (x_new - x_old))
-        //    Using two FMAs: let s = Re(P) + (x_new - x_old)
+        
+        
+        
         let dx = x_new - x_old;
         let s = self.phasor_re + dx;
 
@@ -1307,8 +1307,8 @@ impl CorrelationCycleStream {
         self.phasor_re = new_re;
         self.phasor_im = new_im;
 
-        // Warmup: on the first wrap we compute the first full-window value,
-        // stash it in `last`, and return None (to keep one-tick delay).
+        
+        
         let first_wrap_now = !self.filled && self.head == 0;
         if first_wrap_now {
             self.filled = true;
@@ -1316,8 +1316,8 @@ impl CorrelationCycleStream {
             return None;
         }
 
-        // 4) Compute correlation-coefficient components. For numerical parity with batch,
-        //    recompute exact rolling sums from the ring for normalization (and sum_x in numerators).
+        
+        
         let mut sum_x_exact = 0.0f64;
         let mut sum_x2_exact = 0.0f64;
         let mut k = 0usize;
@@ -1372,7 +1372,7 @@ impl CorrelationCycleStream {
             }
         }
 
-        // Angle & state (exactly as in scalar path)
+        
         let mut ang = if i_val == 0.0 {
             0.0
         } else {
@@ -1384,7 +1384,7 @@ impl CorrelationCycleStream {
             a
         };
 
-        // State warmup behavior: first full window emits NaN (matches batch warmup +1)
+        
         let st = if self.prev_angle.is_finite() && (ang - self.prev_angle).abs() < self.threshold {
             if ang >= 0.0 {
                 1.0
@@ -1397,11 +1397,11 @@ impl CorrelationCycleStream {
             f64::NAN
         };
 
-        // Keep prev angle for next tick's state decision
+        
         self.prev_angle = ang;
 
-        // 5) Respect one-tick delay: emit the previously computed tuple,
-        //    then stash the current result as `last`.
+        
+        
         let to_emit = self.last.take();
         self.last = Some((r_val, i_val, ang, st));
 
@@ -1517,7 +1517,7 @@ pub fn correlation_cycle_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Fallback to scalar for safety
+        _ => Kernel::Scalar, 
     };
     correlation_cycle_batch_par_slice(data, sweep, simd)
 }
@@ -1683,13 +1683,13 @@ fn correlation_cycle_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| CorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Step 1: Allocate uninitialized matrices for each output
+    
     let mut real_mu = make_uninit_matrix(rows, cols);
     let mut imag_mu = make_uninit_matrix(rows, cols);
     let mut angle_mu = make_uninit_matrix(rows, cols);
     let mut state_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row (each parameter combination)
+    
     let ria_warm: Vec<usize> = combos
         .iter()
         .map(|c| first.checked_add(c.period.unwrap()).unwrap_or(usize::MAX))
@@ -1699,13 +1699,13 @@ fn correlation_cycle_batch_inner(
         .map(|c| first.checked_add(c.period.unwrap()).and_then(|v| v.checked_add(1)).unwrap_or(usize::MAX))
         .collect();
 
-    // Step 3: Initialize NaN prefixes for each row
+    
     init_matrix_prefixes(&mut real_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut imag_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut angle_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut state_mu, cols, &st_warm);
 
-    // Step 4: Convert to mutable slices for computation
+    
     let mut real_guard = ManuallyDrop::new(real_mu);
     let mut imag_guard = ManuallyDrop::new(imag_mu);
     let mut angle_guard = ManuallyDrop::new(angle_mu);
@@ -1784,7 +1784,7 @@ fn correlation_cycle_batch_inner(
         }
     }
 
-    // Step 5: Reclaim as Vec<f64>
+    
     let real = unsafe {
         Vec::from_raw_parts(
             real_guard.as_mut_ptr() as *mut f64,
@@ -1887,7 +1887,7 @@ fn correlation_cycle_batch_inner_into(
             }
             _ => correlation_cycle_row_scalar_with_first(data, p, t, first, r, im, an, st),
         }
-        // Warmup prefixes (no full fills)
+        
         let ria = first + p;
         let stp = first + p + 1;
         for v in &mut r[..ria] {
@@ -2199,7 +2199,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_cc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2207,7 +2207,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase coverage
+        
         let test_params = vec![
             CorrelationCycleParams {
                 period: Some(20),
@@ -2224,14 +2224,14 @@ mod tests {
             CorrelationCycleParams {
                 period: None,
                 threshold: None,
-            }, // default params
+            }, 
         ];
 
         for params in test_params {
             let input = CorrelationCycleInput::from_candles(&candles, "close", params.clone());
             let output = correlation_cycle_with_kernel(&input, kernel)?;
 
-            // Check every value in all output arrays for poison patterns
+            
             let arrays = vec![
                 ("real", &output.real),
                 ("imag", &output.imag),
@@ -2241,14 +2241,14 @@ mod tests {
 
             for (array_name, values) in arrays {
                 for (i, &val) in values.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
+                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2256,7 +2256,7 @@ mod tests {
                         );
                     }
 
-                    // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2264,7 +2264,7 @@ mod tests {
                         );
                     }
 
-                    // Check for make_uninit_matrix poison (0x33333333_33333333)
+                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2278,7 +2278,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2324,21 +2324,21 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
 fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
-        // Use the same CSV dataset as the module's other tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Build input with default params
+        
         let input = CorrelationCycleInput::from_candles(
             &candles,
             "close",
             CorrelationCycleParams::default(),
         );
 
-        // Baseline via existing Vec-returning API
+        
         let baseline = correlation_cycle(&input)?;
 
-        // Preallocate outputs and call new into API
+        
         let len = candles.close.len();
         let mut out_real = vec![0.0f64; len];
         let mut out_imag = vec![0.0f64; len];
@@ -2353,13 +2353,13 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             &mut out_state,
         )?;
 
-        // Length parity
+        
         assert_eq!(baseline.real.len(), out_real.len());
         assert_eq!(baseline.imag.len(), out_imag.len());
         assert_eq!(baseline.angle.len(), out_angle.len());
         assert_eq!(baseline.state.len(), out_state.len());
 
-        // Value parity (treat NaN == NaN; exact for finite, epsilon fallback)
+        
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2406,16 +2406,16 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic price data
-        let strat = (5usize..=50) // period range
+        
+        let strat = (5usize..=50) 
             .prop_flat_map(|period| {
                 (
                     prop::collection::vec(
                         (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        period + 10..400, // Ensure we have enough data for warmup + testing
+                        period + 10..400, 
                     ),
                     Just(period),
-                    1.0f64..20.0f64, // threshold range
+                    1.0f64..20.0f64, 
                 )
             });
 
@@ -2427,16 +2427,16 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 };
                 let input = CorrelationCycleInput::from_slice(&data, params);
 
-                // Test with the specified kernel
+                
                 let output = correlation_cycle_with_kernel(&input, kernel).unwrap();
 
-                // Test with scalar reference for comparison
+                
                 let ref_output = correlation_cycle_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Calculate warmup period (first non-NaN should be at index period)
+                
                 let warmup_period = period;
 
-                // Property 1: Check warmup period - values before period should be NaN
+                
                 for i in 0..warmup_period {
                     prop_assert!(
                         output.real[i].is_nan(),
@@ -2461,7 +2461,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                // State warmup is period + 1
+                
                 for i in 0..=period {
                     prop_assert!(
                         output.state[i].is_nan(),
@@ -2472,7 +2472,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                // Property 2: Check bounds for real and imag (correlation coefficients should be in [-1, 1])
+                
                 for i in warmup_period..data.len() {
                     if !output.real[i].is_nan() {
                         prop_assert!(
@@ -2494,7 +2494,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Property 3: Check angle bounds (should be in degrees between -180 and 180)
+                
                 for i in warmup_period..data.len() {
                     if !output.angle[i].is_nan() {
                         prop_assert!(
@@ -2507,7 +2507,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Property 4: Check state values (should be exactly -1, 0, or 1)
+                
                 for i in (period + 1)..data.len() {
                     if !output.state[i].is_nan() {
                         let state_val = output.state[i];
@@ -2523,9 +2523,9 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Property 5: Check kernel consistency
+                
                 for i in 0..data.len() {
-                    // Compare real values
+                    
                     let real_bits = output.real[i].to_bits();
                     let ref_real_bits = ref_output.real[i].to_bits();
 
@@ -2551,7 +2551,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    // Compare imag values
+                    
                     let imag_bits = output.imag[i].to_bits();
                     let ref_imag_bits = ref_output.imag[i].to_bits();
 
@@ -2577,7 +2577,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    // Compare angle values
+                    
                     let angle_bits = output.angle[i].to_bits();
                     let ref_angle_bits = ref_output.angle[i].to_bits();
 
@@ -2603,7 +2603,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    // Compare state values
+                    
                     let state_bits = output.state[i].to_bits();
                     let ref_state_bits = ref_output.state[i].to_bits();
 
@@ -2628,11 +2628,11 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Property 6: Test specific mathematical properties of correlation cycle
-                // When all data is constant, correlation should be near 0 or NaN
+                
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                     for i in warmup_period..data.len() {
-                        // For constant data, correlation is undefined (0/0) so could be NaN or 0
+                        
                         if !output.real[i].is_nan() {
                             prop_assert!(
                                 output.real[i].abs() < 1e-6,
@@ -2702,7 +2702,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         };
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2710,14 +2710,14 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CorrelationCycleBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 40, 10) // Test periods: 10, 20, 30, 40
-            .threshold_range(5.0, 15.0, 5.0) // Test thresholds: 5.0, 10.0, 15.0
+            .period_range(10, 40, 10) 
+            .threshold_range(5.0, 15.0, 5.0) 
             .apply_candles(&c, "close")?;
 
-        // Check every value in all batch matrices for poison patterns
+        
         let matrices = vec![
             ("real", &output.real),
             ("imag", &output.imag),
@@ -2727,7 +2727,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
 
         for (matrix_name, values) in matrices {
             for (idx, &val) in values.iter().enumerate() {
-                // Skip NaN values as they're expected in warmup periods
+                
                 if val.is_nan() {
                     continue;
                 }
@@ -2738,7 +2738,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 let period = output.combos[row].period.unwrap();
                 let threshold = output.combos[row].threshold.unwrap();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2746,7 +2746,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2754,7 +2754,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2767,7 +2767,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2823,13 +2823,13 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
     }
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32CorrelationCycle", unsendable)]
 pub struct DeviceArrayF32CcPy {
     pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
-    // Keep context alive for the lifetime of the handle; actual DLPack
-    // export uses the shared helper in `dlpack_cuda`.
+    
+    
     pub(crate) _ctx: StdArc<CudaContext>,
     pub(crate) device_id: i32,
 }

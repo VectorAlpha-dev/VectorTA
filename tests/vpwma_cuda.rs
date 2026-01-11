@@ -1,13 +1,13 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaVpwma;
-use my_project::indicators::moving_averages::vpwma::{
+use vector_ta::cuda::moving_averages::CudaVpwma;
+use vector_ta::indicators::moving_averages::vpwma::{
     expand_grid_vpwma, vpwma_batch_inner_into, VpwmaBatchRange, VpwmaBuilder, VpwmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];

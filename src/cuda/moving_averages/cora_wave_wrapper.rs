@@ -216,7 +216,7 @@ impl CudaCoraWave {
     }
 
     fn expand_grid(range: &CoraWaveBatchRange) -> Result<Vec<CoraWaveParams>, CudaCoraWaveError> {
-        // Mirror scalar expand_grid_cw logic
+        
         let (ps, pe, pt) = range.period;
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
@@ -266,15 +266,15 @@ impl CudaCoraWave {
         sweep: &CoraWaveBatchRange,
     ) -> Result<
         (
-            Vec<CoraWaveParams>, // combos
-            usize,               // first_valid
-            usize,               // series_len
-            usize,               // max_period
-            Vec<i32>,            // periods_i32
-            Vec<f32>,            // inv_norms
-            Vec<f32>,            // weights_flat (n_combos * max_period)
-            Vec<i32>,            // smooth_periods
-            Vec<i32>,            // warm0s per combo
+            Vec<CoraWaveParams>, 
+            usize,               
+            usize,               
+            usize,               
+            Vec<i32>,            
+            Vec<f32>,            
+            Vec<f32>,            
+            Vec<i32>,            
+            Vec<i32>,            
         ),
         CudaCoraWaveError,
     > {
@@ -322,8 +322,8 @@ impl CudaCoraWave {
         for (row, prm) in combos.iter().enumerate() {
             let p = prm.period.unwrap();
             let r_multi = prm.r_multi.unwrap_or(2.0);
-            // CoRa host precompute (mirror scalar):
-            // start_wt = 0.01; end_wt = p; base = 1 + r*r_multi; w[j] = start*base^(j+1)
+            
+            
             let start_wt = 0.01f64;
             let end_wt = p as f64;
             let r = (end_wt / start_wt).powf(1.0 / ((p as f64) - 1.0)) - 1.0;
@@ -371,7 +371,7 @@ impl CudaCoraWave {
         }
     }
 
-    // ---------- Public API: one-series × many-params ----------
+    
     pub fn cora_wave_batch_dev(
         &self,
         data_f32: &[f32],
@@ -390,7 +390,7 @@ impl CudaCoraWave {
         ) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate (upper bound when smoothing enabled):
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let prices_bytes = series_len.checked_mul(sz_f32).ok_or_else(|| CudaCoraWaveError::InvalidInput("series_len bytes overflow".into()))?;
@@ -411,7 +411,7 @@ impl CudaCoraWave {
             return Err(CudaCoraWaveError::OutOfMemory { required, free, headroom });
         }
 
-        // Stage inputs (pinned -> async copy)
+        
         let h_prices = LockedBuffer::from_slice(data_f32)?;
         let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
         unsafe {
@@ -424,7 +424,7 @@ impl CudaCoraWave {
         let n_tmp = n_combos.checked_mul(series_len).ok_or_else(|| CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into()))?;
         let mut d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
 
-        // Launch CoRa batch
+        
         let mut func = self
             .module
             .get_function("cora_wave_batch_f32")
@@ -475,7 +475,7 @@ impl CudaCoraWave {
             });
         }
 
-        // Smoothing pass (per-combo WMA over CoRa outputs)
+        
         let d_smooth = DeviceBuffer::from_slice(&smooth_periods)?;
         let d_warm0s = DeviceBuffer::from_slice(&warm0s)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
@@ -515,7 +515,7 @@ impl CudaCoraWave {
         })
     }
 
-    // ---------- Public API: many-series × one param (time-major) ----------
+    
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,
@@ -546,7 +546,7 @@ impl CudaCoraWave {
         if period == 0 || period > rows {
             return Err(CudaCoraWaveError::InvalidInput("invalid period".into()));
         }
-        // Weights (host) like scalar path
+        
         let r_multi = params.r_multi.unwrap_or(2.0);
         let start_wt = 0.01f64;
         let end_wt = period as f64;
@@ -573,7 +573,7 @@ impl CudaCoraWave {
         let (first_valids, period, weights, inv_norm, _rows) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate (include temp if smoothing)
+        
         let prices_bytes = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -601,14 +601,14 @@ impl CudaCoraWave {
             return Err(CudaCoraWaveError::OutOfMemory { required, free, headroom });
         }
 
-        // Stage inputs
+        
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_weights = DeviceBuffer::from_slice(&weights)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let n_tmp = cols.checked_mul(rows).ok_or_else(|| CudaCoraWaveError::InvalidInput("cols*rows overflow".into()))?;
         let mut d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
 
-        // Launch CoRa many-series
+        
         let mut func = self
             .module
             .get_function("cora_wave_multi_series_one_param_time_major_f32")
@@ -661,7 +661,7 @@ impl CudaCoraWave {
             });
         }
 
-        // Smoothing pass per series
+        
         let wma_m = ((period as f64).sqrt().round() as i32).max(1);
         let mut warm0s = vec![0i32; cols];
         for s in 0..cols {
@@ -712,7 +712,7 @@ impl CudaCoraWave {
     }
 }
 
-// ---------------------------- Benches --------------------------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1028,7 +1028,7 @@ pub mod benches {
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out_tm");
 
-        // Kernel 1: CoRa
+        
         let func = cuda
             .module
             .get_function("cora_wave_multi_series_one_param_time_major_f32")
@@ -1044,7 +1044,7 @@ pub mod benches {
         };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
 
-        // Kernel 2: smoothing WMA
+        
         let func_wma = cuda
             .module
             .get_function("cora_wave_ms1p_wma_time_major_f32")

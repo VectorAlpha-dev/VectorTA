@@ -44,14 +44,14 @@ pub enum CudaUltoscError {
     NotImplemented,
 }
 
-// ---- PODs mirroring CUDA float2/int3 for coalesced vector IO ----
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 struct Float2 {
     x: f32,
     y: f32,
 }
-// SAFETY: Plain-old-data suitable for device copy
+
 unsafe impl DeviceCopy for Float2 {}
 
 #[repr(C)]
@@ -61,7 +61,7 @@ struct Int3 {
     y: i32,
     z: i32,
 }
-// SAFETY: Plain-old-data suitable for device copy
+
 unsafe impl DeviceCopy for Int3 {}
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -270,7 +270,7 @@ impl CudaUltosc {
         }
     }
 
-    // ---------------- Batch (one series × many params) ----------------
+    
 
     pub fn ultosc_batch_dev(
         &self,
@@ -283,7 +283,7 @@ impl CudaUltosc {
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
         let (pcmtl, ptr) = build_prefix_sums_ulthlc(high_f32, low_f32, close_f32, first_valid);
 
-        // VRAM estimate + headroom (~64MB)
+        
         let headroom = 64 * 1024 * 1024usize;
         let prefix_bytes = (len
             .checked_add(1)
@@ -318,13 +318,13 @@ impl CudaUltosc {
             }
         }
 
-        // Device staging (async)
+        
         let d_pcmtl: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::from_slice_async(&pcmtl, &self.stream)? };
         let d_ptr: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::from_slice_async(&ptr, &self.stream)? };
 
-        // pack periods into Int3
+        
         let mut periods = Vec::with_capacity(combos.len());
         for c in &combos {
             periods.push(Int3 {
@@ -440,7 +440,7 @@ impl CudaUltosc {
             return Err(CudaUltoscError::InvalidInput("empty input".into()));
         }
         let len = high.len();
-        // Find first valid index where both i-1 and i are finite
+        
         let mut first_valid = None;
         for i in 1..len {
             if high[i - 1].is_finite()
@@ -463,7 +463,7 @@ impl CudaUltosc {
                 "no parameter combinations".into(),
             ));
         }
-        // Validate each combo
+        
         for c in &combos {
             let p1 = c.timeperiod1.unwrap_or(7);
             let p2 = c.timeperiod2.unwrap_or(14);
@@ -486,7 +486,7 @@ impl CudaUltosc {
         Ok((combos, first, len))
     }
 
-    // ---------------- Many-series × one param (time-major) ----------------
+    
 
     pub fn ultosc_many_series_one_param_time_major_dev(
         &self,
@@ -518,7 +518,7 @@ impl CudaUltosc {
             &prep.first_valids,
         );
 
-        // VRAM estimate + headroom (~64MB)
+        
         let headroom = 64 * 1024 * 1024usize;
         let prefix_bytes = pcmtl_tm
             .len()
@@ -649,7 +649,7 @@ impl CudaUltosc {
                 }
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                // 2D tiling maps block.x to time, block.y to series
+                
                 let block: BlockSize = (tx, ty, 1).into();
                 let grid_x = ((rows as u32) + tx - 1) / tx;
                 let grid_y = ((cols as u32) + ty - 1) / ty;
@@ -724,7 +724,7 @@ impl CudaUltosc {
             return Err(CudaUltoscError::InvalidInput("periods must be > 0".into()));
         }
 
-        // first_valid per series where (t-1,t) rows are all finite
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -759,7 +759,7 @@ struct PreparedManySeries {
     first_valids: Vec<i32>,
 }
 
-// ---------------- Prefix builders ----------------
+
 
 #[inline]
 fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
@@ -772,7 +772,7 @@ fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
     v
 }
 
-// Build prefix sums for CMTL and TR on a single series (len+1 each) as Float2 (hi,lo)
+
 fn build_prefix_sums_ulthlc(
     high: &[f32],
     low: &[f32],
@@ -808,7 +808,7 @@ fn build_prefix_sums_ulthlc(
     (split_f64_to_float2_vec(&pcmtl64), split_f64_to_float2_vec(&ptr64))
 }
 
-// Build time-major prefixes for many-series. Shapes: [(rows+1) x cols]
+
 fn build_prefix_sums_time_major_ulthlc(
     high_tm: &[f32],
     low_tm: &[f32],
@@ -828,7 +828,7 @@ fn build_prefix_sums_time_major_ulthlc(
                 let hi = high_tm[idx] as f64;
                 let lo = low_tm[idx] as f64;
                 let ci = close_tm[idx] as f64;
-                let pc = close_tm[idx - cols] as f64; // previous row same series
+                let pc = close_tm[idx - cols] as f64; 
                 let tl = if lo < pc { lo } else { pc };
                 let mut trv = hi - lo;
                 let d1 = (hi - pc).abs();
@@ -842,7 +842,7 @@ fn build_prefix_sums_time_major_ulthlc(
                 add_c = ci - tl;
                 add_t = trv;
             }
-            let prev = t * cols + s; // prefix at row t
+            let prev = t * cols + s; 
             let cur = (t + 1) * cols + s;
             pcmtl_tm64[cur] = pcmtl_tm64[prev] + add_c;
             ptr_tm64[cur] = ptr_tm64[prev] + add_t;
@@ -854,7 +854,7 @@ fn build_prefix_sums_time_major_ulthlc(
     )
 }
 
-// Local copy of expand_grid to avoid relying on private items in the indicator
+
 fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUltoscError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaUltoscError> {
         if step == 0 || start == end {
@@ -925,26 +925,26 @@ fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUlt
     Ok(out)
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 60_000;
-    const PARAM_SWEEP: usize = 125; // ~125 combos
+    const PARAM_SWEEP: usize = 125; 
     const MS_COLS: usize = 128;
     const MS_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        // two Float2 prefixes + Int3 vector + f32 output + headroom
+        
         let in_bytes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>();
         let params_bytes = PARAM_SWEEP * std::mem::size_of::<Int3>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
-        // two Float2 prefixes in TM + first_valids + f32 output + headroom
+        
         let in_bytes = 2 * (MS_ROWS + 1) * MS_COLS * std::mem::size_of::<Float2>();
         let meta = MS_COLS * std::mem::size_of::<i32>();
         let out_bytes = MS_ROWS * MS_COLS * std::mem::size_of::<f32>();
@@ -1052,7 +1052,7 @@ pub mod benches {
             let _ = self.cuda.stream.synchronize();
         }
     }
-    // simple HLC generator from a synthetic close TM array
+    
     fn synth_hlc_tm(cols: usize, rows: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut close_tm = vec![f32::NAN; cols * rows];
         let mut high_tm = vec![f32::NAN; cols * rows];

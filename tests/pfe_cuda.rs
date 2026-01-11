@@ -1,16 +1,16 @@
-// CUDA integration tests for Polarized Fractal Efficiency (PFE)
 
-use my_project::indicators::pfe::{
+
+use vector_ta::indicators::pfe::{
     pfe_batch_with_kernel, pfe_with_kernel, PfeBatchRange, PfeData, PfeInput, PfeParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::pfe_wrapper::CudaPfe;
+use vector_ta::cuda::pfe_wrapper::CudaPfe;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -45,10 +45,10 @@ fn pfe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         smoothing: (3, 9, 2),
     };
 
-    // CPU baseline
+    
     let cpu = pfe_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
-    // GPU
+    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaPfe::new(0).expect("CudaPfe::new");
     let dev = cuda
@@ -60,12 +60,12 @@ fn pfe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
 
-    let tol = 5e-2; // FP32 drift tolerance (EMA + sqrt accumulations)
+    let tol = 5e-2; 
     for idx in 0..got.len() {
         if !approx_eq(cpu.values[idx], got[idx] as f64, tol) {
             if std::env::var("PFE_DEBUG").ok().as_deref() == Some("1") {
                 eprintln!("idx={} cpu={} gpu={}", idx, cpu.values[idx], got[idx]);
-                // Dump a small window
+                
                 let row0 = 0usize;
                 let cols = cpu.cols;
                 for k in 0..6 {
@@ -94,8 +94,8 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; // series
-    let rows = 1024usize; // time
+    let cols = 8usize; 
+    let rows = 1024usize; 
     let mut tm = vec![0.0f64; cols * rows];
     for s in 0..cols {
         for t in 0..rows {
@@ -106,7 +106,7 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let period = 10usize;
     let smoothing = 5usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -127,7 +127,7 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // GPU
+    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaPfe::new(0).expect("CudaPfe::new");
     let dev = cuda

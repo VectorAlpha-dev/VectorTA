@@ -28,7 +28,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-const MEDIUM_AD_MAX_PERIOD: usize = 512; // must match kernels/cuda/medium_ad_kernel.cu
+const MEDIUM_AD_MAX_PERIOD: usize = 512; 
 
 #[derive(Debug, Error)]
 pub enum CudaMediumAdError {
@@ -259,12 +259,12 @@ impl CudaMediumAd {
                 name: "medium_ad_batch_f32",
             })?;
 
-        // Prefer L1 cache and pick launch size via occupancy
+        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
 
-        // Chunk grid.y to avoid launch limits and large VRAM spikes
+        
         const max_y: usize = 65_535;
         let chunk_rows = n_combos.min(max_y).max(1);
         let mut launched = 0usize;
@@ -361,14 +361,14 @@ impl CudaMediumAd {
             })?;
         Self::will_fit(total_bytes, 64 << 20)?;
 
-        // Prefer async copies
+        
         let h_data = LockedBuffer::from_slice(data_f32)?;
         let mut d_data =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
         unsafe { d_data.async_copy_from(&h_data, &self.stream) }?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-        // Pinned host memory + async copy for the smaller params vector too
+        
         let h_periods = LockedBuffer::from_slice(&periods)?;
         let mut d_periods =
             unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
@@ -403,7 +403,7 @@ impl CudaMediumAd {
         self.run_batch_kernel(data_f32, &combos, first_valid)
     }
 
-    // ---------------- Many-series × one-param (time-major) ----------------
+    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -560,14 +560,14 @@ impl CudaMediumAd {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    // Keep sizes modest due to O(p log p) per output cost on GPU
+    
     const ONE_SERIES_LEN: usize = 200_000;
     const PARAM_SWEEP: usize = 64;
 

@@ -1,14 +1,14 @@
-// CUDA tests for PRB (Polynomial Regression Bands)
 
-use my_project::indicators::prb::{
+
+use vector_ta::indicators::prb::{
     prb_batch_with_kernel, prb_with_kernel, PrbBatchRange, PrbData, PrbInput, PrbParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, CudaPrb};
+use vector_ta::cuda::{cuda_available, CudaPrb};
 
 fn approx_close(a: f64, b: f64, rtol: f64, atol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -34,7 +34,7 @@ fn prb_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[prb_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    // Synthetic series with a few NaNs
+    
     let len = 4096usize;
     let mut data = vec![f64::NAN; len];
     for i in 5..len {
@@ -42,7 +42,7 @@ fn prb_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         data[i] = (x * 0.00123).sin() + 0.00011 * x;
     }
     data[521] = f64::NAN;
-    data[1000] = f64::NAN; // trigger resets
+    data[1000] = f64::NAN; 
 
     let sweep = PrbBatchRange {
         smooth_period: (10, 10, 0),
@@ -67,7 +67,7 @@ fn prb_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_up.buf.copy_to(&mut g_up)?;
     dev_lo.buf.copy_to(&mut g_lo)?;
 
-    // Tolerance is moderately loose due to f32 GPU path and polynomial LS
+    
     let rtol = 2e-2f64;
     let atol = 1e-3f64;
     for idx in 0..(cpu.rows * cpu.cols) {
@@ -119,7 +119,7 @@ fn prb_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         equ_from: Some(0),
     };
 
-    // CPU baseline per series
+    
     let mut cpu_m = vec![f64::NAN; cols * rows];
     let mut cpu_u = vec![f64::NAN; cols * rows];
     let mut cpu_l = vec![f64::NAN; cols * rows];
@@ -141,7 +141,7 @@ fn prb_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
 
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
-    // end debug
+    
     let cuda = CudaPrb::new(0).expect("CudaPrb::new");
     let (dev_m, dev_u, dev_l) = cuda
         .prb_many_series_one_param_time_major_dev(&tm_f32, cols, rows, &params)

@@ -1,17 +1,17 @@
-// CUDA tests for Decycler Oscillator (DEC_OSC)
 
-use my_project::indicators::dec_osc::{
+
+use vector_ta::indicators::dec_osc::{
     dec_osc_batch_with_kernel, dec_osc_with_kernel, DecOscBatchBuilder, DecOscBatchRange,
     DecOscInput, DecOscParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaDecOsc;
+use vector_ta::cuda::oscillators::CudaDecOsc;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -39,7 +39,7 @@ fn dec_osc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 8192usize;
     let mut data = vec![f64::NAN; len];
     for i in 0..len {
-        // ensure some warmup space and realism
+        
         if i >= 2 {
             let x = i as f64;
             data[i] = (x * 0.00123).sin() + 0.00017 * x + 50.0;
@@ -64,7 +64,7 @@ fn dec_osc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 3e-3; // FP32 path tolerance
+    let tol = 3e-3; 
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -103,7 +103,7 @@ fn dec_osc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         k: Some(1.0),
     };
 
-    // CPU baseline
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

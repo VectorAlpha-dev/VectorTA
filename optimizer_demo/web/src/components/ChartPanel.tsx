@@ -55,7 +55,7 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
     return () => { chart.remove(); chartRef.current = null; priceRef.current = null; fastRef.current = null; slowRef.current = null }
   }, [])
 
-  // Try to load WASM bindings from /wasm (served by backend)
+  
   useEffect(() => {
     (async () => {
       const candidates = [
@@ -72,7 +72,7 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
           console.log('Loaded WASM from', c.js)
           break
         } catch (e) {
-          // Try next
+          
         }
       }
     })()
@@ -102,25 +102,25 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
       try {
         if (wasm) {
           if (t === 'alma' && typeof wasm.alma_js === 'function') return Array.from(wasm.alma_js(series, period, offset, sigma) as Float64Array)
-          // Special: buff_averages returns [fast..., slow...] and requires volume + both periods
+          
           if (t === 'buff_averages' && typeof wasm.buff_averages_js === 'function' && fast != null && slow != null) {
             const vol = new Array(series.length).fill(1.0)
             const flat = wasm.buff_averages_js(series, vol, fast, slow) as Float64Array
-            // Caller will decide which half to use. Return both concatenated for now.
+            
             return Array.from(flat)
           }
-          // Special: Ehlers PMA returns object with 2 rows; no period
+          
           if (t === 'ehlers_pma' && typeof wasm.ehlers_pma === 'function') {
             const obj = wasm.ehlers_pma(series)
-            // Expect { values: number[], rows:2, cols:len }
+            
             const values = obj && obj.values ? obj.values as number[] : []
-            return values.slice() // caller will split
+            return values.slice() 
           }
           const fnName = t + '_js'
           const altName = t
           if (typeof (wasm as any)[fnName] === 'function' || typeof (wasm as any)[altName] === 'function') {
             const fn = (wasm as any)[fnName] || (wasm as any)[altName]
-            // Special case: FRAMA needs high/low/close; derive synthetic high/low if we only have close
+            
             if (t === 'frama') {
               const close = series
               const high: number[] = []; const low: number[] = []
@@ -139,11 +139,11 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
           }
         }
       } catch (e) { console.warn('WASM call failed for', typ, e) }
-      // Fallbacks: only ALMA JS implemented here; others would need JS versions if no WASM
+      
       if (t === 'alma') return computeALMA(series, period, offset, sigma)
       return new Array(series.length).fill(NaN)
     }
-    // Pre-handle special paired indicators
+    
     let pairedPredict: number[] | null = null
     let pairedTrigger: number[] | null = null
     if (wasm && (fastType.toLowerCase() === 'ehlers_pma' || slowType.toLowerCase() === 'ehlers_pma')) {
@@ -160,7 +160,7 @@ export const ChartPanel: React.FC<ChartPanelProps> = ({ series, fast, slow, offs
 
     let f = callMA(fastType, fast)
     let s = callMA(slowType, slow)
-    // If buff_averages used, split the concatenated result
+    
     if (fastType.toLowerCase() === 'buff_averages' || slowType.toLowerCase() === 'buff_averages') {
       try {
         if (typeof (wasm as any)?.buff_averages_js === 'function' && fast != null && slow != null) {

@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -40,7 +40,7 @@ test.before(async () => {
 });
 
 test('UI partial params', () => {
-    // Test with default parameters - mirrors check_ui_partial_params
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.ui_js(close, 14, 100.0);
@@ -48,14 +48,14 @@ test('UI partial params', () => {
 });
 
 test('UI accuracy', async () => {
-    // Test UI matches expected values from Rust tests - mirrors check_ui_accuracy
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.ui_js(close, 14, 100.0);
     
     assert.strictEqual(result.length, close.length);
     
-    // Expected values from Rust tests
+    
     const expectedLastFive = [
         3.514342861283708,
         3.304986039846459,
@@ -64,7 +64,7 @@ test('UI accuracy', async () => {
         2.909612553474519,
     ];
     
-    // Check last 5 values match expected
+    
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -73,18 +73,18 @@ test('UI accuracy', async () => {
         "UI last 5 values mismatch"
     );
     
-    // Check warmup period (first period*2-2 values should be NaN)
-    const warmupPeriod = 14 * 2 - 2; // 26
+    
+    const warmupPeriod = 14 * 2 - 2; 
     for (let i = 0; i < warmupPeriod; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i} during warmup period`);
     }
     
-    // Compare full output with Rust
+    
     await compareWithRust('ui', result, 'close', { period: 14, scalar: 100.0 });
 });
 
 test('UI default candles', () => {
-    // Test UI with default parameters - mirrors check_ui_default_candles
+    
     const close = new Float64Array(testData.close);
     
     const result = wasm.ui_js(close, 14, 100.0);
@@ -92,7 +92,7 @@ test('UI default candles', () => {
 });
 
 test('UI zero period', () => {
-    // Test UI fails with zero period - mirrors check_ui_zero_period
+    
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -101,7 +101,7 @@ test('UI zero period', () => {
 });
 
 test('UI period exceeds length', () => {
-    // Test UI fails when period exceeds data length - mirrors check_ui_period_exceeds_length
+    
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
     
     assert.throws(() => {
@@ -110,7 +110,7 @@ test('UI period exceeds length', () => {
 });
 
 test('UI very small dataset', () => {
-    // Test UI fails with insufficient data - mirrors check_ui_very_small_dataset
+    
     const singlePoint = new Float64Array([42.0]);
     
     assert.throws(() => {
@@ -119,7 +119,7 @@ test('UI very small dataset', () => {
 });
 
 test('UI empty input', () => {
-    // Test UI fails with empty input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -128,7 +128,7 @@ test('UI empty input', () => {
 });
 
 test('UI all NaN input', () => {
-    // Test UI fails with all NaN values
+    
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
     
@@ -138,21 +138,21 @@ test('UI all NaN input', () => {
 });
 
 test('UI different scalars', () => {
-    // Test UI with different scalar values
+    
     const close = new Float64Array(testData.close);
     
-    // Test with scalar = 50.0
+    
     const result1 = wasm.ui_js(close, 14, 50.0);
     assert.strictEqual(result1.length, close.length);
     
-    // Test with scalar = 200.0
+    
     const result2 = wasm.ui_js(close, 14, 200.0);
     assert.strictEqual(result2.length, close.length);
     
-    // Results should be different with different scalars
-    // Values should scale linearly with scalar
+    
+    
     const resultDefault = wasm.ui_js(close, 14, 100.0);
-    for (let i = 14 * 2 - 2; i < close.length; i++) { // After warmup
+    for (let i = 14 * 2 - 2; i < close.length; i++) { 
         if (!isNaN(resultDefault[i]) && !isNaN(result2[i])) {
             const ratio = result2[i] / resultDefault[i];
             assert(Math.abs(ratio - 2.0) < 0.01, `Scalar scaling incorrect at index ${i}`);
@@ -161,7 +161,7 @@ test('UI different scalars', () => {
 });
 
 test('UI batch single parameter set', () => {
-    // Test batch with single parameter combination
+    
     const close = new Float64Array(testData.close);
     
     const batchResult = wasm.ui_batch(close, {
@@ -169,7 +169,7 @@ test('UI batch single parameter set', () => {
         scalar_range: [100.0, 100.0, 0]
     });
     
-    // Should match single calculation
+    
     const singleResult = wasm.ui_js(close, 14, 100.0);
     
     assert.strictEqual(batchResult.values.length, singleResult.length);
@@ -177,21 +177,21 @@ test('UI batch single parameter set', () => {
 });
 
 test('UI batch multiple periods', () => {
-    // Test batch with multiple period values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Multiple periods: 10, 12, 14
+    const close = new Float64Array(testData.close.slice(0, 100)); 
+    
+    
     const batchResult = wasm.ui_batch(close, {
         period_range: [10, 14, 2],
         scalar_range: [100.0, 100.0, 0]
     });
     
-    // Should have 3 rows * 100 cols = 300 values
+    
     assert.strictEqual(batchResult.values.length, 3 * 100);
     assert.strictEqual(batchResult.rows, 3);
     assert.strictEqual(batchResult.cols, 100);
     
-    // Verify each row matches individual calculation
+    
     const periods = [10, 12, 14];
     for (let i = 0; i < periods.length; i++) {
         const rowStart = i * 100;
@@ -209,86 +209,86 @@ test('UI batch multiple periods', () => {
 });
 
 test('UI batch multiple scalars', () => {
-    // Test batch with multiple scalar values
-    const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
     
-    // Multiple scalars: 50.0, 100.0, 150.0
+    const close = new Float64Array(testData.close.slice(0, 100)); 
+    
+    
     const batchResult = wasm.ui_batch(close, {
         period_range: [14, 14, 0],
         scalar_range: [50.0, 150.0, 50.0]
     });
     
-    // Should have 3 rows * 100 cols = 300 values
+    
     assert.strictEqual(batchResult.values.length, 3 * 100);
     assert.strictEqual(batchResult.rows, 3);
     assert.strictEqual(batchResult.cols, 100);
     assert.strictEqual(batchResult.combos.length, 3);
     
-    // Check scalars
+    
     assert.strictEqual(batchResult.combos[0].scalar, 50.0);
     assert.strictEqual(batchResult.combos[1].scalar, 100.0);
     assert.strictEqual(batchResult.combos[2].scalar, 150.0);
 });
 
 test('UI batch metadata from result', () => {
-    // Test that batch result includes correct parameter combinations
-    // Need at least 27 points for period 14 (warmup = 14*2-2 = 26)
+    
+    
     const close = new Float64Array(30);
     close.fill(100);
     
     const result = wasm.ui_batch(close, {
-        period_range: [10, 14, 2],     // period: 10, 12, 14
-        scalar_range: [50.0, 100.0, 50.0] // scalar: 50.0, 100.0
+        period_range: [10, 14, 2],     
+        scalar_range: [50.0, 100.0, 50.0] 
     });
     
-    // Should have 3 * 2 = 6 combinations
+    
     assert.strictEqual(result.combos.length, 6);
     
-    // Check first combination
+    
     assert.strictEqual(result.combos[0].period, 10);
     assert.strictEqual(result.combos[0].scalar, 50.0);
     
-    // Check last combination
+    
     assert.strictEqual(result.combos[5].period, 14);
     assert.strictEqual(result.combos[5].scalar, 100.0);
 });
 
-// Zero-copy API tests
+
 test('UI zero-copy API (in-place)', () => {
-    // Test the zero-copy API with in-place computation
+    
     const data = new Float64Array([100, 105, 95, 98, 102, 99, 101, 104, 103, 107]);
     const period = 5;
     const scalar = 100.0;
     
-    // Allocate buffer
+    
     const ptr = wasm.ui_alloc(data.length);
     assert(ptr !== 0, 'Failed to allocate memory');
     
-    // Create view into WASM memory
+    
     const memView = new Float64Array(
         wasm.__wasm.memory.buffer,
         ptr,
         data.length
     );
     
-    // Copy data into WASM memory
+    
     memView.set(data);
     
-    // Compute UI in-place
+    
     try {
         wasm.ui_into(ptr, ptr, data.length, period, scalar);
         
-        // Verify results match regular API
+        
         const regularResult = wasm.ui_js(data, period, scalar);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                continue; // Both NaN is OK
+                continue; 
             }
             assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
         }
     } finally {
-        // Always free memory
+        
         wasm.ui_free(ptr, data.length);
     }
 });
@@ -309,16 +309,16 @@ test('UI zero-copy with large dataset', () => {
         
         wasm.ui_into(ptr, ptr, size, 14, 100.0);
         
-        // Recreate view in case memory grew
+        
         const memView2 = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         
-        // Check warmup period has NaN
+        
         const warmup = 14 * 2 - 2;
         for (let i = 0; i < warmup; i++) {
             assert(isNaN(memView2[i]), `Expected NaN at warmup index ${i}`);
         }
         
-        // Check after warmup has values
+        
         for (let i = warmup; i < Math.min(warmup + 10, size); i++) {
             assert(!isNaN(memView2[i]), `Unexpected NaN at index ${i}`);
         }
@@ -327,22 +327,22 @@ test('UI zero-copy with large dataset', () => {
     }
 });
 
-// Error handling for zero-copy API
+
 test('UI zero-copy error handling', () => {
-    // Test null pointer
+    
     assert.throws(() => {
         wasm.ui_into(0, 0, 10, 14, 100.0);
     }, /null pointer|Null pointer/i);
     
-    // Test invalid parameters with allocated memory
+    
     const ptr = wasm.ui_alloc(10);
     try {
-        // Invalid period
+        
         assert.throws(() => {
             wasm.ui_into(ptr, ptr, 10, 0, 100.0);
         }, /Invalid period/);
         
-        // Period exceeds length
+        
         assert.throws(() => {
             wasm.ui_into(ptr, ptr, 10, 15, 100.0);
         }, /Invalid period/);
@@ -351,32 +351,32 @@ test('UI zero-copy error handling', () => {
     }
 });
 
-// Memory leak prevention test
+
 test('UI zero-copy memory management', () => {
-    // Allocate and free multiple times to ensure no leaks
+    
     const sizes = [100, 1000, 10000, 100000];
     
     for (const size of sizes) {
         const ptr = wasm.ui_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
         
-        // Write pattern to verify memory
+        
         const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             memView[i] = i * 1.5;
         }
         
-        // Verify pattern
+        
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(memView[i], i * 1.5, `Memory corruption at index ${i}`);
         }
         
-        // Free memory
+        
         wasm.ui_free(ptr, size);
     }
 });
 
-// Batch fast API test
+
 test('UI batch fast API', () => {
     const size = 100;
     const data = new Float64Array(size);
@@ -384,16 +384,16 @@ test('UI batch fast API', () => {
         data[i] = 100 + Math.sin(i * 0.1) * 5;
     }
     
-    // Allocate input buffer
+    
     const inPtr = wasm.ui_alloc(size);
     assert(inPtr !== 0, 'Failed to allocate input buffer');
     
-    // Copy data to WASM memory
+    
     const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, size);
     inView.set(data);
     
-    // Allocate output buffer for batch results
-    // 3 periods (10, 12, 14) * 2 scalars (50, 100) = 6 combinations
+    
+    
     const outSize = 6 * size;
     const outPtr = wasm.ui_alloc(outSize);
     assert(outPtr !== 0, 'Failed to allocate output buffer');
@@ -401,16 +401,16 @@ test('UI batch fast API', () => {
     try {
         const numCombos = wasm.ui_batch_into(
             inPtr, outPtr, size,
-            10, 14, 2,      // period range
-            50.0, 100.0, 50.0  // scalar range
+            10, 14, 2,      
+            50.0, 100.0, 50.0  
         );
         
         assert.strictEqual(numCombos, 6, 'Expected 6 combinations');
         
-        // Verify results
+        
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, outSize);
         
-        // Check that we have data in the output
+        
         let hasNonNaN = false;
         for (let i = 0; i < outSize; i++) {
             if (!isNaN(outView[i])) {

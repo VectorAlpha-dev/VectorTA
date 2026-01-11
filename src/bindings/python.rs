@@ -2,8 +2,8 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 
-// Re-export all Python functions and classes from indicators
-// Add module initialization here
+
+
 
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
@@ -661,9 +661,9 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
 
-// -----------------------------
-// Unified VAMA Python functions
-// -----------------------------
+
+
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
 #[pyo3(signature = (*args, **kwargs))]
@@ -692,7 +692,7 @@ fn vama_unified_py<'py>(
     if is_volume_variant {
         // Expect: (data, volume, [length, vi_factor, strict, sample_period, kernel]) with kw overrides
         let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
-        // 2nd arg may be positional or kw
+        
         let volume: PyReadonlyArray1<'_, f64> = if args.len() >= 2 {
             args.get_item(1)?.extract()?
         } else {
@@ -711,7 +711,7 @@ fn vama_unified_py<'py>(
         let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
             kwargs.and_then(|k| k.get_item(name).ok().flatten())
         };
-        let mut idx = 2usize; // after data, volume
+        let mut idx = 2usize; 
         let length: usize = if let Some(v) = get_kw("length") {
             v.extract()?
         } else if args.len() > idx {
@@ -764,7 +764,7 @@ fn vama_unified_py<'py>(
         return Ok(arr.into_any());
     }
 
-    // Volatility-adjusted variant: (data, [base_period, vol_period, smoothing, smooth_type, smooth_period, kernel])
+    
     let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
     let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
         kwargs.and_then(|k| k.get_item(name).ok().flatten())
@@ -773,7 +773,7 @@ fn vama_unified_py<'py>(
     let base_period: usize = if let Some(v) = get_kw("base_period") {
         v.extract()?
     } else if let Some(v) = get_kw("length") {
-        // allow alias 'length' for base_period
+        
         v.extract()?
     } else if args.len() > idx && args.get_item(idx)?.extract::<usize>().is_ok() {
         let out: usize = args.get_item(idx)?.extract()?;
@@ -894,7 +894,7 @@ fn vama_batch_unified_py<'py>(
         );
     }
 
-    // Volatility-adjusted batch: (data, base_period_range=(...), vol_period_range=(...), kernel=None)
+    
     let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
     let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
         kwargs.and_then(|k| k.get_item(name).ok().flatten())
@@ -913,7 +913,7 @@ fn vama_batch_unified_py<'py>(
     vama_vol::vama_batch_py(py, data, Some(base_period_range), vol_period_range, kernel, None)
 }
 
-// Unified stream with dual signatures
+
 #[cfg(feature = "python")]
 #[pyclass(name = "VamaStream")]
 pub struct VamaStreamUnifiedPy {
@@ -942,7 +942,7 @@ impl VamaStreamUnifiedPy {
         smooth_type: Option<usize>,
         smooth_period: Option<usize>,
     ) -> PyResult<Self> {
-        // Prefer volume-adjusted when any of its params are specified
+        
         if length.is_some() || vi_factor.is_some() || strict.is_some() || sample_period.is_some() {
             let s = vama_volu::VolumeAdjustedMaStream::try_new(vama_volu::VolumeAdjustedMaParams {
                 length: Some(length.unwrap_or(13)),
@@ -953,7 +953,7 @@ impl VamaStreamUnifiedPy {
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             return Ok(Self { inner: VamaStreamKind::Volume(s) });
         }
-        // Otherwise assume volatility-adjusted
+        
         let s = vama_vol::VamaStream::try_new(vama_vol::VamaParams {
             base_period: Some(base_period.unwrap_or(113)),
             vol_period: Some(vol_period.unwrap_or(51)),
@@ -1174,7 +1174,7 @@ use crate::indicators::trix::{trix_batch_py, trix_py, TrixStreamPy};
 use crate::indicators::trix::{trix_cuda_batch_dev_py, trix_cuda_many_series_one_param_dev_py};
 #[cfg(feature = "python")]
 use crate::indicators::tsf::{tsf_batch_py, tsf_py, TsfStreamPy};
-// CUDA TSF pyfunctions (explicit import so wrap_pyfunction! can resolve reliably)
+
 #[cfg(feature = "python")]
 use crate::indicators::tsi::{tsi_batch_py, tsi_py, TsiStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1197,7 +1197,7 @@ use crate::indicators::vi::{vi_batch_py, vi_py, ViStreamPy};
 use crate::indicators::vi::{vi_cuda_batch_dev_py, vi_cuda_many_series_one_param_dev_py};
 #[cfg(feature = "python")]
 use crate::indicators::vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
-// (duplicate removed)
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::ad::{ad_cuda_dev_py, ad_cuda_many_series_one_param_dev_py};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1261,8 +1261,8 @@ use crate::indicators::zscore::{
     zscore_cuda_batch_dev_py, zscore_cuda_many_series_one_param_dev_py,
 };
 
-// Local Python+CUDA helpers. Most indicator CUDA bindings are registered directly
-// from their modules; a few shared utilities (like DeviceArrayF32Py) live in dlpack_cuda.
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1280,7 +1280,7 @@ use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::types::PyDict;
 
-// TSF CUDA pyfunction shims
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "tsf_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1339,8 +1339,8 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     Ok(make_device_array_py(device_id, inner)?)
 }
 
-// Older ROC CUDA shim functions have been superseded by the
-// indicator-local `roc_cuda_*` pyfunctions.
+
+
 #[pymodule]
 fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register AD functions with their user-facing names

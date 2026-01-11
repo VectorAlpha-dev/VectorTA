@@ -115,7 +115,7 @@ mod cvi_python_cuda_handle {
             dl_device: Option<pyo3::PyObject>,
             copy: Option<pyo3::PyObject>,
         ) -> PyResult<PyObject> {
-            // Compute target device id and validate `dl_device` hint if provided.
+            
             let (kdl, alloc_dev) = self.__dlpack_device__();
             if let Some(dev_obj) = dl_device.as_ref() {
                 if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -138,7 +138,7 @@ mod cvi_python_cuda_handle {
             }
             let _ = stream;
 
-            // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
+            
             let buf = self
                 .buf
                 .take()
@@ -355,7 +355,7 @@ pub fn cvi_with_kernel(input: &CviInput, kernel: Kernel) -> Result<CviOutput, Cv
 
     let mut cvi_values = alloc_with_nan_prefix(high.len(), first_valid_idx + needed);
 
-    // CVI SIMD underperforms scalar on typical sizes (sequential EMA). Short-circuit Auto → Scalar.
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -390,7 +390,7 @@ pub fn cvi_with_kernel(input: &CviInput, kernel: Kernel) -> Result<CviOutput, Cv
 #[cfg(not(feature = "wasm"))]
 #[inline]
 pub fn cvi_into(input: &CviInput, out: &mut [f64]) -> Result<(), CviError> {
-    // Match cvi_with_kernel's Auto -> Scalar short-circuit to keep exact parity.
+    
     cvi_into_slice(out, input, Kernel::Scalar)
 }
 
@@ -402,25 +402,25 @@ pub fn cvi_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    // alpha = 2/(n+1). Keep update as `val += (range - val) * alpha` to preserve semantics.
+    
     let alpha = 2.0 / (period as f64 + 1.0);
 
-    // Initial EMA seed from the first valid range
+    
     let mut val =
         unsafe { *high.get_unchecked(first_valid_idx) - *low.get_unchecked(first_valid_idx) };
 
-    // Ring buffer for EMA lag (t - period). Avoid zero-init; set_len + write-before-read.
+    
     let mut lag = AVec::<f64>::with_capacity(CACHELINE_ALIGN, period);
     unsafe { lag.set_len(period) };
     unsafe { *lag.get_unchecked_mut(0) = val };
 
     let mut head = 1usize;
     let len = high.len();
-    let needed = 2 * period - 1; // EMA warmup + lag warmup
+    let needed = 2 * period - 1; 
 
-    // Warmup: fill the ring so oldest slot holds EMA[t - period]
+    
     let mut i = first_valid_idx + 1;
-    let end_warm = first_valid_idx + needed; // exclusive
+    let end_warm = first_valid_idx + needed; 
     while i < end_warm {
         let range = unsafe { *high.get_unchecked(i) - *low.get_unchecked(i) };
         val += (range - val) * alpha;
@@ -432,7 +432,7 @@ pub fn cvi_scalar(
         i += 1;
     }
 
-    // Main loop: compute CVI and roll the ring
+    
     let mut j = end_warm;
     while j < len {
         let range = unsafe { *high.get_unchecked(j) - *low.get_unchecked(j) };
@@ -473,7 +473,7 @@ pub fn cvi_avx2(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize
         let len = high.len();
         let needed = 2 * period - 1;
 
-        // Warmup
+        
         let mut i = first_valid_idx + 1;
         let end_warm = first_valid_idx + needed;
         while i < end_warm {
@@ -491,7 +491,7 @@ pub fn cvi_avx2(high: &[f64], low: &[f64], period: usize, first_valid_idx: usize
             i += 1;
         }
 
-        // Main
+        
         let mut j = end_warm;
         while j < len {
             if DO_PREFETCH && j + 64 < len {
@@ -575,7 +575,7 @@ unsafe fn cvi_avx512_core(
     let len = high.len();
     let needed = 2 * period - 1;
 
-    // Warmup
+    
     let mut i = first_valid_idx + 1;
     let end_warm = first_valid_idx + needed;
     while i < end_warm {
@@ -593,7 +593,7 @@ unsafe fn cvi_avx512_core(
         i += 1;
     }
 
-    // Main
+    
     let mut j = end_warm;
     while j < len {
         if DO_PREFETCH && j + 96 < len {
@@ -772,7 +772,7 @@ pub fn cvi_batch_with_kernel(
             let k = detect_best_batch_kernel();
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             {
-                // AVX2 batch is typically faster than AVX-512 for this recurrence-heavy workload (downclock).
+                
                 if k == Kernel::Avx512Batch
                     && std::arch::is_x86_feature_detected!("avx2")
                     && std::arch::is_x86_feature_detected!("fma")
@@ -831,7 +831,7 @@ fn expand_grid(r: &CviBatchRange) -> Vec<CviParams> {
         if start <= end {
             return (start..=end).step_by(step.max(1)).collect();
         }
-        // reversed bounds supported
+        
         let mut v = Vec::new();
         let s = step.max(1);
         let mut cur = start;
@@ -934,7 +934,7 @@ fn cvi_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute shared (high-low) range for scalar batch to reduce memory traffic when many rows
+    
     let shared_range: Option<Vec<f64>> = match kern {
         Kernel::Scalar | Kernel::Auto => {
             let mut r = Vec::with_capacity(cols);
@@ -1059,7 +1059,7 @@ fn cvi_batch_inner_into(
         });
     }
 
-    // 1) Pre-seed warm prefixes with NaN, zero-copy
+    
     let out_mu = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1069,7 +1069,7 @@ fn cvi_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warms);
 
-    // 2) Optionally precompute shared range for scalar batch
+    
     let shared_range: Option<Vec<f64>> = match kern {
         Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
             let mut r = Vec::with_capacity(cols);
@@ -1087,7 +1087,7 @@ fn cvi_batch_inner_into(
         _ => None,
     };
 
-    // 3) Compute rows in place
+    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let dst = unsafe {
@@ -1132,18 +1132,18 @@ fn cvi_batch_inner_into(
     Ok(combos)
 }
 
-// Streaming kernel: aligned to offline semantics
-// - Warmup emits first value after 2*period - 1 samples
-// - Read lagged EMA before overwriting (matches batch/scalar loops)
-// - O(1) per tick; no modulo in hot path
+
+
+
+
 #[derive(Debug, Clone)]
 pub struct CviStream {
     period: usize,
     alpha: f64,
-    lag_buffer: Vec<f64>, // ring of last `period` EMA values
-    head: usize,          // next slot to write [0..period-1]
+    lag_buffer: Vec<f64>, 
+    head: usize,          
     warmup_remaining: usize,
-    state_val: f64, // EMA(H-L)
+    state_val: f64, 
 }
 
 impl CviStream {
@@ -1161,21 +1161,21 @@ impl CviStream {
             });
         }
 
-        // alpha = 2/(n+1)
+        
         let alpha = 2.0 / (period as f64 + 1.0);
 
-        // Seed EMA with the first range (exact semantics across kernels)
+        
         let ema0 = initial_high - initial_low;
 
-        // Prepare ring buffer; put the seed at slot 0.
+        
         let mut lag_buffer = vec![0.0; period.max(1)];
         lag_buffer[0] = ema0;
 
-        // Next write position: 1 (or 0 for period==1 to avoid out-of-bounds)
+        
         let head = if period > 1 { 1 } else { 0 };
 
-        // Warmup writes before the first CVI value in the core stream.
-        // (Python bindings may expose different warmup semantics.)
+        
+        
         let warmup_remaining = period.saturating_mul(2).saturating_sub(2);
 
         Ok(Self {
@@ -1198,11 +1198,11 @@ impl CviStream {
     /// Update with a precomputed range (high - low). Same semantics as `update`.
     #[inline(always)]
     pub fn update_range(&mut self, range: f64) -> Option<f64> {
-        // EMA_t = EMA_{t-1} + (range - EMA_{t-1}) * alpha
-        // Prefer fused mul_add when available for accuracy/perf parity with scalar FMA codegen.
+        
+        
         self.state_val = (range - self.state_val).mul_add(self.alpha, self.state_val);
 
-        // During warmup, write EMA into the ring and rotate the head.
+        
         if self.warmup_remaining != 0 {
             self.lag_buffer[self.head] = self.state_val;
             let next = self.head + 1;
@@ -1211,8 +1211,8 @@ impl CviStream {
             return None;
         }
 
-        // Matured: read EMA[t - period] from the slot we're about to overwrite,
-        // then compute CVI and write the current EMA.
+        
+        
         let old = self.lag_buffer[self.head];
         let out = 100.0 * (self.state_val - old) / old;
 
@@ -1371,9 +1371,9 @@ pub fn cvi_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ============================
-// Python CUDA (zero-copy device)
-// ============================
+
+
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cvi_cuda_batch_dev")]
@@ -1648,32 +1648,32 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations for CVI
+        
         let test_params = vec![
-            CviParams::default(),            // period: 10
-            CviParams { period: Some(2) },   // minimum viable period
-            CviParams { period: Some(5) },   // small period
-            CviParams { period: Some(10) },  // default
-            CviParams { period: Some(14) },  // common period
-            CviParams { period: Some(20) },  // medium period
-            CviParams { period: Some(50) },  // large period
-            CviParams { period: Some(100) }, // very large period
-            CviParams { period: Some(200) }, // extreme period
+            CviParams::default(),            
+            CviParams { period: Some(2) },   
+            CviParams { period: Some(5) },   
+            CviParams { period: Some(10) },  
+            CviParams { period: Some(14) },  
+            CviParams { period: Some(20) },  
+            CviParams { period: Some(50) },  
+            CviParams { period: Some(100) }, 
+            CviParams { period: Some(200) }, 
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
-            // Test with high/low data
+            
             let input = CviInput::from_candles(&candles, params.clone());
             let output = cvi_with_kernel(&input, kernel)?;
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1723,7 +1723,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_cvi_tests {
@@ -1805,12 +1805,12 @@ mod tests {
     #[test]
     #[cfg(not(feature = "wasm"))]
     fn test_cvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Construct a small but non-trivial input with a NaN prefix and varying ranges
+        
         let len = 256usize;
         let mut high = vec![0.0f64; len];
         let mut low = vec![0.0f64; len];
 
-        // NaN warmup prefix
+        
         high[0] = f64::NAN;
         low[0] = f64::NAN;
         high[1] = f64::NAN;
@@ -1821,7 +1821,7 @@ mod tests {
         for i in 3..len {
             let i_f = i as f64;
             let base = 100.0 + 0.1 * i_f;
-            // add small, varying wiggles
+            
             high[i] = base + (i % 7) as f64 * 0.03;
             let spread = 1.0 + (i % 5) as f64 * 0.2;
             low[i] = high[i] - spread.max(0.001);
@@ -1829,10 +1829,10 @@ mod tests {
 
         let input = CviInput::from_slices(&high, &low, CviParams::default());
 
-        // Baseline via allocating API
+        
         let baseline = cvi(&input)?.values;
 
-        // Into API writes in-place with identical warmup semantics
+        
         let mut into_out = vec![0.0f64; len];
         cvi_into(&input, &mut into_out)?;
 
@@ -1862,15 +1862,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for CVI
+        
         let test_configs = vec![
-            (2, 10, 2),    // Small periods with step 2
-            (5, 25, 5),    // Medium periods with step 5
-            (10, 50, 10),  // Common periods
-            (2, 5, 1),     // Dense small range
-            (30, 60, 15),  // Large periods
-            (14, 21, 7),   // Common trading periods
-            (50, 100, 25), // Very large periods
+            (2, 10, 2),    
+            (5, 25, 5),    
+            (10, 50, 10),  
+            (2, 5, 1),     
+            (30, 60, 15),  
+            (14, 21, 7),   
+            (50, 100, 25), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1889,7 +1889,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1945,7 +1945,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(test)]
@@ -1957,39 +1957,39 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic high/low data with varying volatility
-        let strat = (2usize..=50) // CVI requires minimum period of 2
+        
+        let strat = (2usize..=50) 
             .prop_flat_map(|period| {
                 (
-                    // Base price for the series
+                    
                     100.0f64..5000.0f64,
-                    // Length of data (ensure we have enough for warmup)
+                    
                     (2 * period + 20)..400,
-                    // Volatility factor (percentage of price)
+                    
                     0.001f64..0.1f64,
-                    // Trend factor
+                    
                     -0.01f64..0.01f64,
-                    // Period
+                    
                     Just(period),
                 )
             })
             .prop_map(|(base_price, data_len, volatility, trend, period)| {
-                // Generate realistic high/low data
+                
                 let mut high_data = Vec::with_capacity(data_len);
                 let mut low_data = Vec::with_capacity(data_len);
                 let mut current_price = base_price;
 
                 for i in 0..data_len {
-                    // Apply trend
+                    
                     current_price *= 1.0 + trend;
-                    current_price = current_price.max(10.0); // Minimum price floor
+                    current_price = current_price.max(10.0); 
 
-                    // Generate volatility-based range
-                    // Use a sinusoidal pattern to create varying volatility
+                    
+                    
                     let volatility_factor = volatility * (1.0 + (i as f64 * 0.1).sin() * 0.5);
                     let range = current_price * volatility_factor;
 
-                    // Ensure high >= low
+                    
                     let high = current_price + range * 0.5;
                     let low = (current_price - range * 0.5).max(1.0);
 
@@ -2007,13 +2007,13 @@ mod tests {
                 };
                 let input = CviInput::from_slices(&high_data, &low_data, params);
 
-                // Get outputs from different kernels
+                
                 let out = cvi_with_kernel(&input, kernel)?;
                 let ref_out = cvi_with_kernel(&input, Kernel::Scalar)?;
 
-                // Test 1: Verify warmup period
-                // CVI fills NaN up to index (first_valid_idx + 2*period - 1)
-                // With first_valid_idx=0 (clean data), the first non-NaN is at index 2*period - 1
+                
+                
+                
                 let expected_first_valid = 2 * period - 1;
                 let first_valid_idx = out.values.iter().position(|&v| !v.is_nan());
 
@@ -2028,7 +2028,7 @@ mod tests {
                     );
                 }
 
-                // Test 2: Verify all non-NaN values are finite and within reasonable bounds
+                
                 for (i, &val) in out.values.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -2039,8 +2039,8 @@ mod tests {
                             i
                         );
 
-                        // CVI is a percentage change, typically between -100% and high values
-                        // during volatility spikes, but 1000% is a more realistic upper bound
+                        
+                        
                         prop_assert!(
 							val > -100.0 && val < 1000.0,
 							"[{}] CVI value {} at index {} outside reasonable bounds [-100%, 1000%]",
@@ -2049,7 +2049,7 @@ mod tests {
                     }
                 }
 
-                // Test 3: Verify output length matches input
+                
                 prop_assert_eq!(
                     out.values.len(),
                     high_data.len(),
@@ -2057,7 +2057,7 @@ mod tests {
                     test_name
                 );
 
-                // Test 4: Kernel consistency - all kernels should produce identical results
+                
                 prop_assert_eq!(
                     out.values.len(),
                     ref_out.values.len(),
@@ -2079,7 +2079,7 @@ mod tests {
                         continue;
                     }
 
-                    // Allow small floating point differences
+                    
                     let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -2092,9 +2092,9 @@ mod tests {
                     );
                 }
 
-                // Test 5: Edge case - minimum period (2)
+                
                 if period == 2 {
-                    // With period=2, first non-NaN should be at index 2*2-1 = 3
+                    
                     let warmup_count = out.values.iter().take_while(|&&v| v.is_nan()).count();
                     prop_assert_eq!(
                         warmup_count,
@@ -2105,15 +2105,15 @@ mod tests {
                     );
                 }
 
-                // Test 6: Check that ranges affect CVI values
-                // Calculate actual ranges to verify CVI responds to volatility changes
+                
+                
                 let ranges: Vec<f64> = high_data
                     .iter()
                     .zip(low_data.iter())
                     .map(|(&h, &l)| h - l)
                     .collect();
 
-                // If we have enough valid CVI values, check for movement
+                
                 let valid_cvi: Vec<f64> = out
                     .values
                     .iter()
@@ -2122,11 +2122,11 @@ mod tests {
                     .collect();
 
                 if valid_cvi.len() > 10 {
-                    // Check that CVI values vary (not all the same)
+                    
                     let min_cvi = valid_cvi.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_cvi = valid_cvi.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-                    // Unless volatility is extremely constant, we should see some variation
+                    
                     let range_variance = ranges
                         .windows(period)
                         .map(|w| {
@@ -2136,7 +2136,7 @@ mod tests {
                         .fold(0.0f64, f64::max);
 
                     if range_variance > 1e-10 {
-                        // CVI should show meaningful variation (at least 1%) when volatility changes
+                        
                         prop_assert!(
 							(max_cvi - min_cvi).abs() > 1.0,
 							"[{}] CVI should show meaningful variation (>1%) when volatility changes, got range: {}",
@@ -2145,7 +2145,7 @@ mod tests {
                     }
                 }
 
-                // Test 7: Zero or near-zero ranges should not cause infinity
+                
                 let min_range = ranges.iter().cloned().fold(f64::INFINITY, f64::min);
                 if min_range < 1e-10 {
                     for &val in &out.values {
@@ -2159,16 +2159,16 @@ mod tests {
                     }
                 }
 
-                // Test 8: Constant volatility convergence
-                // If all ranges are nearly identical, CVI should converge towards 0
+                
+                
                 if ranges.len() > period * 3 {
                     let mean_range = ranges.iter().sum::<f64>() / ranges.len() as f64;
                     let all_similar = ranges
                         .iter()
-                        .all(|&r| (r - mean_range).abs() < mean_range * 0.01); // Within 1% of mean
+                        .all(|&r| (r - mean_range).abs() < mean_range * 0.01); 
 
                     if all_similar && mean_range > 1e-10 {
-                        // Take the last quarter of valid CVI values
+                        
                         let last_quarter_start = valid_cvi.len() * 3 / 4;
                         if last_quarter_start < valid_cvi.len() {
                             let last_quarter: Vec<f64> = valid_cvi[last_quarter_start..].to_vec();
@@ -2186,10 +2186,10 @@ mod tests {
                     }
                 }
 
-                // Test 9: Volatility spike test
-                // Check CVI response to sudden volatility changes
+                
+                
                 if ranges.len() > period * 2 {
-                    // Find the maximum ratio between consecutive range averages
+                    
                     let mut max_volatility_change = 1.0;
                     let mut max_change_idx = 0;
 
@@ -2206,9 +2206,9 @@ mod tests {
                         }
                     }
 
-                    // If there's a significant volatility change (>5x), CVI should respond strongly
+                    
                     if max_volatility_change > 5.0 {
-                        // Look for CVI values around the spike
+                        
                         let spike_start =
                             (max_change_idx + expected_first_valid).saturating_sub(period);
                         let spike_end = (max_change_idx + expected_first_valid + period * 2)
@@ -2264,7 +2264,7 @@ pub fn cvi_into_slice(
 
     let period = input.params.period.unwrap_or(10);
 
-    // Validate inputs
+    
     if high.is_empty() || low.is_empty() {
         return Err(CviError::EmptyData);
     }
@@ -2281,7 +2281,7 @@ pub fn cvi_into_slice(
         return Err(CviError::OutputLengthMismatch { expected: high.len(), got: output.len() });
     }
 
-    // Find first valid index
+    
     let first_valid_idx = match find_first_valid_idx(high, low) {
         Some(idx) => idx,
         None => return Err(CviError::AllValuesNaN),
@@ -2290,7 +2290,7 @@ pub fn cvi_into_slice(
     let warmup = period - 1;
     let min_data_points = warmup + period;
 
-    // Check we have enough valid data
+    
     if high.len() - first_valid_idx < min_data_points {
         return Err(CviError::NotEnoughValidData {
             needed: min_data_points,
@@ -2298,13 +2298,13 @@ pub fn cvi_into_slice(
         });
     }
 
-    // Fill prefix with NaN
+    
     let out_start = first_valid_idx + 2 * period - 1;
     for i in 0..out_start {
         output[i] = f64::NAN;
     }
 
-    // Use kernel-specific implementation
+    
     match kernel {
         Kernel::Scalar => cvi_scalar(high, low, period, first_valid_idx, output),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2326,7 +2326,7 @@ pub fn cvi_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsVa
     };
     let input = CviInput::from_slices(high, low, params);
 
-    // Use the main cvi function which already uses alloc_with_nan_prefix
+    
     let output = cvi(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output.values)
@@ -2375,16 +2375,16 @@ pub fn cvi_into(
         };
         let input = CviInput::from_slices(high, low, params);
 
-        // Check for aliasing with output
+        
         let aliased = high_ptr == out_ptr || low_ptr == out_ptr;
 
         if aliased {
-            // Use the main cvi function which uses alloc_with_nan_prefix for aliasing case
+            
             let result = cvi(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&result.values);
         } else {
-            // Direct write if not aliased
+            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             cvi_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

@@ -1,12 +1,12 @@
-// CUDA kernels for Absolute Price Oscillator (APO).
-//
-// APO = EMA(short_period) - EMA(long_period)
-//
-// Semantics (must match scalar):
-// - Prefix [0..first_valid) is NaN
-// - At t = first_valid: output 0.0 (both EMAs seeded to the same first valid price)
-// - Thereafter, sequential EMA updates per timestep; no extended warmup NaNs
-// - Mid-stream NaNs in input propagate through the recurrence (no special handling)
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -41,25 +41,25 @@ void apo_batch_f32(const float* __restrict__ prices,
 
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    // Initialize only the NaN prefix; remaining cells will be overwritten
+    
     for (int i = threadIdx.x; i < first_valid; i += blockDim.x) {
         out[base + static_cast<size_t>(i)] = NAN;
     }
 
-    // Compatibility: if launched with < 1 warp, fall back to the sequential path.
+    
     if (blockDim.x < 32) {
-        // Single-threaded sequential scan per combo
+        
         if (threadIdx.x != 0) return;
 
-        // Seed EMAs at first_valid
+        
         float se = prices[first_valid];
         float le = se;
         out[base + static_cast<size_t>(first_valid)] = 0.0f;
 
-        // Advance
+        
         for (int i = first_valid + 1; i < series_len; ++i) {
             const float x = prices[i];
-            // Propagate NaNs naturally via arithmetic
+            
             se = a_s * x + oma_s * se;
             le = a_l * x + oma_l * le;
             out[base + static_cast<size_t>(i)] = se - le;
@@ -67,11 +67,11 @@ void apo_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    // Warp-cooperative scan: one warp per combo, emitting 32 outputs per iteration.
-    // Launch with blockDim.x == 32 for best occupancy (extra threads early-out below).
+    
+    
     if (threadIdx.x >= 32) return;
 
-    const unsigned lane = static_cast<unsigned>(threadIdx.x); // 0..31
+    const unsigned lane = static_cast<unsigned>(threadIdx.x); 
     const unsigned mask = 0xffffffffu;
 
     float se_prev = prices[first_valid];
@@ -95,9 +95,9 @@ void apo_batch_f32(const float* __restrict__ prices,
             B_l = a_l * x;
         }
 
-        // Inclusive warp scan: compose transforms (A,B) left-to-right.
-        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
-        // We want prefix up to lane: T_lane ∘ ... ∘ T_0.
+        
+        
+        
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_s_prev = __shfl_up_sync(mask, A_s, offset);
             const float B_s_prev = __shfl_up_sync(mask, B_s, offset);
@@ -121,7 +121,7 @@ void apo_batch_f32(const float* __restrict__ prices,
             out[base + static_cast<size_t>(t)] = se - le;
         }
 
-        // Advance to next tile using the last valid lane.
+        
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         se_prev = __shfl_sync(mask, se, last_lane);
@@ -129,7 +129,7 @@ void apo_batch_f32(const float* __restrict__ prices,
     }
 }
 
-// Many-series, one (short,long) param. Time-major layout.
+
 extern "C" __global__
 void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    const int*   __restrict__ first_valids,
@@ -141,11 +141,11 @@ void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int series_len,
                                    float* __restrict__ out_tm)
 {
-    const int series_idx = blockIdx.x; // one block per series; thread 0 scans
+    const int series_idx = blockIdx.x; 
     if (series_idx >= num_series || series_len <= 0) return;
     if (short_period <= 0 || long_period <= 0 || short_period >= long_period) return;
 
-    const int stride = num_series; // time-major stride
+    const int stride = num_series; 
     int fv = first_valids[series_idx];
     if (fv < 0) fv = 0;
     if (fv >= series_len) return;
@@ -155,13 +155,13 @@ void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float oma_s = 1.0f - a_s;
     const float oma_l = 1.0f - a_l;
 
-    // Initialize only the NaN prefix for this series
+    
     for (int t = threadIdx.x; t < fv; t += blockDim.x) {
         out_tm[t * stride + series_idx] = NAN;
     }
     if (threadIdx.x != 0) return;
 
-    // Seed at first_valid
+    
     float se = prices_tm[fv * stride + series_idx];
     float le = se;
     out_tm[fv * stride + series_idx] = 0.0f;

@@ -23,8 +23,8 @@
 //!
 //! Decision note: Streaming enabled with constant‑time updates (ring buffer Hilbert/IFM) and alpha caching; matches batch TR and cutoff logic while avoiding heap churn.
 
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -36,13 +36,13 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-// Feature-gated imports for WASM bindings
+
 #[cfg(feature = "wasm")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// Core imports
+
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -52,22 +52,22 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// SIMD imports for AVX optimizations
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
+
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
+
 use std::convert::AsRef;
 use std::error::Error;
 use std::f64::consts::PI;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== DATA STRUCTURES ====================
+
 /// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum LpcData<'a> {
@@ -195,7 +195,7 @@ impl<'a> LpcInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
+
 /// Builder for ergonomic API usage
 #[derive(Clone, Debug)]
 pub struct LpcBuilder {
@@ -323,14 +323,14 @@ impl LpcBuilder {
     }
 }
 
-// ==================== BATCH PROCESSING STRUCTURES ====================
+
 #[derive(Clone, Debug)]
 pub struct LpcBatchRange {
     pub fixed_period: (usize, usize, usize),
     pub cycle_mult: (f64, f64, f64),
     pub tr_mult: (f64, f64, f64),
-    pub cutoff_type: String, // "fixed" or "adaptive" (single choice for sweep)
-    pub max_cycle_limit: usize, // only used if adaptive
+    pub cutoff_type: String, 
+    pub max_cycle_limit: usize, 
 }
 
 impl Default for LpcBatchRange {
@@ -409,13 +409,13 @@ impl LpcBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct LpcBatchOutput {
-    pub values: Vec<f64>, // rows x cols, rows = combos * 3
+    pub values: Vec<f64>, 
     pub combos: Vec<LpcParams>,
-    pub rows: usize, // combos * 3
+    pub rows: usize, 
     pub cols: usize,
 }
 
-// ==================== ERROR HANDLING ====================
+
 #[derive(Debug, Error)]
 pub enum LpcError {
     #[error("lpc: Input data slice is empty.")]
@@ -446,7 +446,7 @@ pub enum LpcError {
     InvalidKernelForBatch(Kernel),
 }
 
-// ==================== CORE COMPUTATION FUNCTIONS ====================
+
 /// Dominant Cycle Detection Function Using In Phase & Quadrature IFM
 pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     let len = src.len();
@@ -466,7 +466,7 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     for i in 7..len {
         let val1 = src[i] - src[i - 7];
 
-        // Calculate In Phase component
+        
         if i >= 4 {
             let val1_4 = if i >= 4 {
                 src[i - 4] - src[i.saturating_sub(11)]
@@ -482,7 +482,7 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 + if i >= 3 { 0.635 * in_phase[i - 3] } else { 0.0 };
         }
 
-        // Calculate Quadrature component
+        
         if i >= 2 {
             let val1_2 = src[i - 2] - src[i.saturating_sub(9)];
             quadrature[i] = val1_2 - 0.338 * val1
@@ -493,7 +493,7 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 };
         }
 
-        // Calculate Real and Imaginary parts
+        
         if i >= 1 {
             real_part[i] = 0.2
                 * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1])
@@ -503,12 +503,12 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 + 0.8 * imag_part[i - 1];
         }
 
-        // Calculate Delta Phase
+        
         if real_part[i] != 0.0 {
             delta_phase[i] = (imag_part[i] / real_part[i]).atan();
         }
 
-        // Calculate Instantaneous Period
+        
         let mut val2 = 0.0;
         let mut found_period = false;
         for j in 0..=max_cycle_limit.min(i) {
@@ -526,7 +526,7 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
             inst_per[i] = if i > 0 { inst_per[i - 1] } else { 20.0 };
         }
 
-        // Smooth the dominant cycle
+        
         if i > 0 && !dom_cycles[i - 1].is_nan() {
             dom_cycles[i] = 0.25 * inst_per[i] + 0.75 * dom_cycles[i - 1];
         } else {
@@ -549,12 +549,12 @@ fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
     let omega = 2.0 * PI / (period as f64);
     let alpha = (1.0 - omega.sin()) / omega.cos();
 
-    // Initialize first value
+    
     if !src[0].is_nan() {
         output[0] = src[0];
     }
 
-    // Apply filter
+    
     for i in 1..len {
         if !src[i].is_nan() && !src[i - 1].is_nan() && !output[i - 1].is_nan() {
             output[i] = 0.5 * (1.0 - alpha) * (src[i] + src[i - 1]) + alpha * output[i - 1];
@@ -575,10 +575,10 @@ fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         return tr;
     }
 
-    // First value is just high - low
+    
     tr[0] = high[0] - low[0];
 
-    // Subsequent values use Pine's formula with previous high/low
+    
     for i in 1..len {
         let hl = high[i] - low[i];
         let c_low1 = (close[i] - low[i - 1]).abs();
@@ -608,14 +608,14 @@ pub fn lpc_scalar(
     out_low: &mut [f64],
 ) {
     let len = src.len();
-    // NaN prefixes
+    
     if first > 0 {
         out_filter[..first].fill(f64::NAN);
         out_high[..first].fill(f64::NAN);
         out_low[..first].fill(f64::NAN);
     }
 
-    // Optional dominant-cycle vector (kept to preserve kernel logic)
+    
     let dc = if cutoff_type.eq_ignore_ascii_case("adaptive") {
         Some(dom_cycle(src, max_cycle_limit))
     } else {
@@ -626,7 +626,7 @@ pub fn lpc_scalar(
         return;
     }
 
-    // Seed
+    
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
@@ -635,7 +635,7 @@ pub fn lpc_scalar(
     out_high[first] = out_filter[first] + tr_prev * tm;
     out_low[first] = out_filter[first] - tr_prev * tm;
 
-    // Helpers
+    
     #[inline(always)]
     fn alpha_from_period(p: usize) -> f64 {
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
@@ -656,7 +656,7 @@ pub fn lpc_scalar(
         }
     }
 
-    // Cache alpha when the (rounded) period does not change
+    
     let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
     let mut alpha: f64 = if dc.is_none() {
         alpha_from_period(fixed_period)
@@ -664,10 +664,10 @@ pub fn lpc_scalar(
         0.0
     };
 
-    // Main loop (unrolled by 2)
+    
     let mut i = first + 1;
     while i + 1 < len {
-        // i
+        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -690,7 +690,7 @@ pub fn lpc_scalar(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        // i+1
+        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -715,7 +715,7 @@ pub fn lpc_scalar(
         i += 2;
     }
 
-    // Tail (at most one)
+    
     if i < len {
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
@@ -756,9 +756,9 @@ pub fn lpc_avx2(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    // Light prefetch before using the same optimized scalar core.
+    
     unsafe {
-        // SAFETY: Pointers are derived from valid slices; prefetch does not dereference.
+        
         if src.len() > first + 32 {
             _mm_prefetch(src.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
             _mm_prefetch(high.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
@@ -800,9 +800,9 @@ pub fn lpc_avx512(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    // Light prefetch before using the same optimized scalar core.
+    
     unsafe {
-        // SAFETY: Pointers are derived from valid slices; prefetch does not dereference.
+        
         if src.len() > first + 64 {
             _mm_prefetch(src.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(high.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
@@ -939,7 +939,7 @@ fn lpc_compute_into_prefilled(
         return;
     }
 
-    // seed (assumes [..first] already NaN)
+    
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
@@ -980,10 +980,10 @@ fn lpc_compute_into_prefilled(
         0.0
     };
 
-    // Main loop (unrolled by 2)
+    
     let mut i = first + 1;
     while i + 1 < len {
-        // i
+        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -1003,7 +1003,7 @@ fn lpc_compute_into_prefilled(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        // i+1
+        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -1050,7 +1050,7 @@ fn lpc_compute_into_prefilled(
 /// Variant of compute-into that uses a precomputed true range slice
 #[inline(always)]
 fn lpc_compute_into_prefilled_pretr(
-    // high/low/close are unused when TR is provided, but kept for signature parity
+    
     _high: &[f64],
     _low: &[f64],
     _close: &[f64],
@@ -1071,7 +1071,7 @@ fn lpc_compute_into_prefilled_pretr(
         return;
     }
 
-    // seed (assumes [..first] already NaN)
+    
     out_filter[first] = src[first];
     let mut tr_prev = tr[first];
     let mut ftr_prev = tr_prev;
@@ -1112,10 +1112,10 @@ fn lpc_compute_into_prefilled_pretr(
         0.0
     };
 
-    // Main loop (unrolled by 2)
+    
     let mut i = first + 1;
     while i + 1 < len {
-        // i
+        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -1132,7 +1132,7 @@ fn lpc_compute_into_prefilled_pretr(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        // i+1
+        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -1441,29 +1441,29 @@ impl DomCycleState {
         let v9 = self.at(9);
         let v11 = self.at(11);
 
-        // Keep previous for real/imag EMA cross-terms
+        
         let ip_prev = self.ip_l1;
         let q_prev = self.q_l1;
 
-        // Ehlers coefficients (same as batch):
-        // InPhase[i] = 1.25*((src[i-4]-src[i-11]) - 0.635*(src[i-2]-src[i-9])) + 0.635*InPhase[i-3]
+        
+        
         let ip_cur = 1.25 * ((v4 - v11) - 0.635 * (v2 - v9)) + 0.635 * self.ip_l3;
 
-        // Quadrature[i] = (src[i-2]-src[i-9]) - 0.338*(src[i]-src[i-7]) + 0.338*Quadrature[i-2]
+        
         let q_cur = (v2 - v9) - 0.338 * (v0 - v7) + 0.338 * self.q_l2;
 
-        // Real/Imag parts (EMA 0.2 / 0.8) as in batch
+        
         let real_cur = 0.2 * (ip_cur * ip_prev + q_cur * q_prev) + 0.8 * self.real_prev;
         let imag_cur = 0.2 * (ip_cur * q_prev - ip_prev * q_cur) + 0.8 * self.imag_prev;
 
-        // Delta phase: match batch (atan(imag/real)) for parity
+        
         let delta = if real_cur != 0.0 {
             (imag_cur / real_cur).atan()
         } else {
             0.0
         };
 
-        // Accumulate phase until > 2π; count bars since last crossing.
+        
         const TAU: f64 = std::f64::consts::PI * 2.0;
         self.phase_accum += delta;
         self.bars_since_cross = self.bars_since_cross.saturating_add(1);
@@ -1476,10 +1476,10 @@ impl DomCycleState {
             self.last_inst_per = inst;
         }
 
-        // Smooth dominant cycle (same 0.25/0.75 as batch)
+        
         let dom = 0.25 * inst + 0.75 * self.dom_cycle_prev;
 
-        // Roll state forward
+        
         self.ip_l3 = self.ip_l2;
         self.ip_l2 = self.ip_l1;
         self.ip_l1 = ip_cur;
@@ -1535,7 +1535,7 @@ impl LpcStream {
             dc: DomCycleState::default(),
         };
 
-        // Prime alpha cache with fixed period
+        
         s.set_alpha(fixed_period);
         Ok(s)
     }
@@ -1545,12 +1545,12 @@ impl LpcStream {
         if p == self.last_p {
             return;
         }
-        // α(n) = (1 - sin(ω)) / cos(ω), ω = 2π / n ; guard cos ≈ 0
+        
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
         let (s, c) = omega.sin_cos();
         let a = if c.abs() < 1e-12 {
-            // avoid blowup at n ≈ 4
-            // fall back to previous α; if uninitialized, use EMA α as a sane default
+            
+            
             if self.last_p == 0 {
                 2.0 / (p as f64 + 1.0)
             } else {
@@ -1567,19 +1567,19 @@ impl LpcStream {
     /// O(1) update. Returns the triple once inputs are finite; otherwise None.
     /// Uses fixed cutoff immediately; adaptive cutoff activates automatically once IFM is warmed.
     pub fn update(&mut self, high: f64, low: f64, close: f64, src: f64) -> Option<(f64, f64, f64)> {
-        // Validate bar
+        
         if !(high.is_finite() && low.is_finite() && close.is_finite() && src.is_finite()) {
             return None;
         }
 
-        // Feed source to IFM ring regardless of mode (nearly free & keeps it hot)
+        
         self.dc.push_src(src);
 
-        // Determine period
+        
         let mut period = self.fixed_period;
         if self.adaptive_enabled {
             if let Some(dom) = self.dc.update_ifm() {
-                // Same rounding as batch: >= 3 bars, and respect a practical top cap
+                
                 let p = (dom * self.cycle_mult).round().max(3.0) as usize;
                 period = if self.max_cycle_limit > 0 {
                     p.min(self.max_cycle_limit)
@@ -1590,7 +1590,7 @@ impl LpcStream {
         }
         self.set_alpha(period);
 
-        // 1-pole filtered value (uses src[i] and src[i-1]), seed sensibly on first tick
+        
         let filt = if self.prev_filter.is_nan() || self.prev_src.is_nan() {
             src
         } else {
@@ -1600,7 +1600,7 @@ impl LpcStream {
             )
         };
 
-        // Wilder TR with previous high/low (correct formula matching batch)
+        
         let tr = if self.prev_high.is_nan() || self.prev_low.is_nan() || self.prev_close.is_nan() {
             (high - low).abs()
         } else {
@@ -1610,7 +1610,7 @@ impl LpcStream {
             hl.max(c_low1).max(c_high1)
         };
 
-        // Filtered TR re-uses the same α (exactly like batch)
+        
         let ftr = if self.prev_ftr.is_nan() || self.prev_tr.is_nan() {
             tr
         } else {
@@ -1623,7 +1623,7 @@ impl LpcStream {
         let band_high = filt + ftr * self.tr_mult;
         let band_low = filt - ftr * self.tr_mult;
 
-        // Roll state
+        
         self.prev_src = src;
         self.prev_high = high;
         self.prev_low = low;
@@ -1637,7 +1637,7 @@ impl LpcStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "lpc")]
 #[pyo3(signature = (high, low, close, src, cutoff_type=None, fixed_period=None, max_cycle_limit=None, cycle_mult=None, tr_mult=None, kernel=None))]
@@ -1775,11 +1775,11 @@ pub fn lpc_batch_py<'py>(
         .find(|&i| !s[i].is_nan() && !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
         .unwrap_or(0);
 
-    // single contiguous output buffer, no copies
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Pre-fill NaN values for first entries of each row
+    
     for row in 0..rows {
         for col in 0..first {
             slice_out[row * cols + col] = f64::NAN;
@@ -1817,7 +1817,7 @@ pub fn lpc_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    // Row order mapping for multi-output
+    
     let order_list = PyList::new(py, vec!["filter", "high", "low"])?;
     dict.set_item("order", order_list)?;
     dict.set_item("rows", rows)?;
@@ -2437,7 +2437,7 @@ pub fn lpc_into_slices(
     Ok(())
 }
 
-// Helper functions for batch processing
+
 #[inline]
 fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, LpcError> {
     if step == 0 || start == end {
@@ -2597,7 +2597,7 @@ pub fn lpc_batch_with_kernel(
         other => return Err(LpcError::InvalidKernelForBatch(other)),
     };
 
-    // allocate rows×cols without initializing, then set warm prefixes
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm = vec![first; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
@@ -2606,7 +2606,7 @@ pub fn lpc_batch_with_kernel(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // fill
+    
     lpc_batch_inner_into(high, low, close, src, sweep, kernel, first, out)?;
 
     let values = unsafe {
@@ -2638,7 +2638,7 @@ fn lpc_batch_inner_into(
     let _ = k;
     let combos = expand_grid_lpc(sweep)?;
     let cols = src.len();
-    // Precompute TR once across all rows to avoid redundant work
+    
     let tr_series = calculate_true_range(high, low, close);
 
     let out_mu = unsafe {
@@ -2721,11 +2721,11 @@ pub fn lpc_batch_par_slice(
     src: &[f64],
     sweep: &LpcBatchRange,
 ) -> Result<LpcBatchOutput, LpcError> {
-    // Uses parallel processing via rayon (already implemented in lpc_batch_with_kernel)
+    
     lpc_batch_with_kernel(high, low, close, src, sweep, detect_best_batch_kernel())
 }
 
-// ==================== UNIT TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2736,7 +2736,7 @@ mod tests {
 
     #[test]
     fn test_lpc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Small but non-trivial synthetic OHLC with NaN warmup prefix
+        
         let n = 256usize;
         let warm = 8usize;
         let mut ts = Vec::with_capacity(n);
@@ -2768,22 +2768,22 @@ mod tests {
         );
         let input = LpcInput::from_candles(&candles, "close", LpcParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = lpc(&input)?;
 
-        // Pre-allocated output buffers
+        
         let mut f = vec![0.0; n];
         let mut hb = vec![0.0; n];
         let mut lb = vec![0.0; n];
 
-        // Native no-allocation API
+        
         #[cfg(not(feature = "wasm"))]
         {
             lpc_into(&input, &mut f, &mut hb, &mut lb)?;
         }
         #[cfg(feature = "wasm")]
         {
-            // In wasm builds, exercise the slice variant directly
+            
             lpc_into_slices(&mut f, &mut hb, &mut lb, &input, Kernel::Auto)?;
         }
 
@@ -2812,7 +2812,7 @@ mod tests {
         let input = LpcInput::from_candles(&candles, "close", params);
         let result = lpc_with_kernel(&input, kernel)?;
 
-        // Reference values from actual implementation output
+        
         let expected_filter = vec![
             59346.30519969,
             59327.59393858,
@@ -3026,7 +3026,7 @@ mod tests {
         let input = LpcInput::from_slices(&nan_data, &nan_data, &nan_data, &nan_data, params);
 
         let res = lpc_with_kernel(&input, kernel);
-        // Should return AllValuesNaN error
+        
         assert!(
             matches!(res, Err(LpcError::AllValuesNaN)),
             "[{}] LPC should fail with AllValuesNaN error",
@@ -3050,7 +3050,7 @@ mod tests {
         let first_input = LpcInput::from_candles(&candles, "close", first_params);
         let first_result = lpc_with_kernel(&first_input, kernel)?;
 
-        // Use filter output as new source
+        
         let second_params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(20),
@@ -3161,7 +3161,7 @@ mod tests {
 
         assert_eq!(batch_output.filter.len(), stream_filter.len());
 
-        // Streaming may differ slightly from batch, just verify reasonable values
+        
         for i in 20..100.min(stream_filter.len()) {
             if !stream_filter[i].is_nan() {
                 assert!(
@@ -3211,7 +3211,7 @@ mod tests {
             let input = LpcInput::from_candles(&candles, "close", params.clone());
             let output = lpc_with_kernel(&input, kernel)?;
 
-            // Check all three outputs for poison values
+            
             for i in 0..output.filter.len() {
                 let f = output.filter[i];
                 let hi = output.high_band[i];
@@ -3278,13 +3278,13 @@ mod tests {
                 let result = lpc_with_kernel(&input, kernel).unwrap();
                 let ref_result = lpc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Basic sanity checks
+                
                 prop_assert_eq!(result.filter.len(), data.len());
                 prop_assert_eq!(result.high_band.len(), data.len());
                 prop_assert_eq!(result.low_band.len(), data.len());
 
-                // Check filter is between bands
-                // Skip first few bars after warmup to avoid edge effects
+                
+                
                 let check_start = (period * 2).min(data.len());
                 for i in check_start..data.len() {
                     let f = result.filter[i];
@@ -3292,16 +3292,16 @@ mod tests {
                     let l = result.low_band[i];
 
                     if !f.is_nan() && !h.is_nan() && !l.is_nan() {
-                        // Note: Due to the lagging nature of the true range filter,
-                        // bands can temporarily invert during extreme price jumps.
-                        // This is expected behavior for the indicator.
-                        // We'll just check that values are finite and reasonable.
+                        
+                        
+                        
+                        
                         prop_assert!(f.is_finite(), "filter at {i} not finite");
                         prop_assert!(h.is_finite(), "high_band at {i} not finite");
                         prop_assert!(l.is_finite(), "low_band at {i} not finite");
                     }
 
-                    // Compare with scalar reference
+                    
                     if !f.is_nan() && !ref_result.filter[i].is_nan() {
                         let diff = (f - ref_result.filter[i]).abs();
                         prop_assert!(
@@ -3343,7 +3343,7 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macros
+    
     macro_rules! generate_all_lpc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3397,7 +3397,7 @@ mod tests {
 
     #[test]
     fn test_lpc_streaming_basic() {
-        // Basic test for streaming functionality
+        
         let params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(10),
@@ -3408,7 +3408,7 @@ mod tests {
 
         let mut stream = LpcStream::try_new(params).unwrap();
 
-        // Feed some data
+        
         let test_data = vec![
             (100.0, 95.0, 98.0, 98.0),
             (102.0, 97.0, 101.0, 101.0),
@@ -3445,7 +3445,7 @@ mod tests {
             max_cycle_limit: 60,
         };
         let out = lpc_batch_with_kernel(&c.high, &c.low, &c.close, &c.close, &sweep, kernel)?;
-        let combos = 3; // 10,11,12
+        let combos = 3; 
         assert_eq!(out.rows, combos * 3);
         assert_eq!(out.cols, c.close.len());
         assert_eq!(out.values.len(), out.rows * out.cols);

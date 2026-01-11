@@ -231,11 +231,11 @@ fn cci_prepare<'a>(
     (
         // data
         &'a [f64],
-        // period
+        
         usize,
-        // first
+        
         usize,
-        // chosen
+        
         Kernel,
     ),
     CciError,
@@ -251,7 +251,7 @@ fn cci_prepare<'a>(
         .ok_or(CciError::AllValuesNaN)?;
     let period = input.get_period();
 
-    // ---- same guards as before ----
+    
     if period == 0 || period > len {
         return Err(CciError::InvalidPeriod {
             period,
@@ -265,7 +265,7 @@ fn cci_prepare<'a>(
         });
     }
 
-    // kernel auto-detection only once
+    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -277,7 +277,7 @@ fn cci_prepare<'a>(
 pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, CciError> {
     let (data, period, first, chosen) = cci_prepare(input, kernel)?;
 
-    // Use alloc_with_nan_prefix helper like ALMA does
+    
     let prefix = first + period - 1;
     let mut out = alloc_with_nan_prefix(data.len(), prefix);
 
@@ -290,7 +290,7 @@ pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, Cc
             Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, &mut out),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
+                
                 cci_scalar(data, period, first, &mut out)
             }
             _ => unreachable!(),
@@ -310,7 +310,7 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
         });
     }
 
-    // Compute directly into the output slice
+    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => cci_scalar(data, period, first, dst),
@@ -320,14 +320,14 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
             Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, dst),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
+                
                 cci_scalar(data, period, first, dst)
             }
             _ => unreachable!(),
         }
     }
 
-    // Set warmup period to NaN
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -347,7 +347,7 @@ pub fn cci_into(input: &CciInput, out: &mut [f64]) -> Result<(), CciError> {
     cci_into_slice(out, input, Kernel::Auto)
 }
 
-// ---- Scalar + AVX2/AVX512 ----
+
 
 /// Optimized safe scalar implementation.
 ///
@@ -364,13 +364,13 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
     let inv_p = 1.0 / (period as f64);
 
-    // ---- initial window sum ----
+    
     let start0 = first_valid;
     let end0 = start0 + period;
     let mut sum: f64 = data[start0..end0].iter().sum();
     let mut sma = sum * inv_p;
 
-    // ---- initial MAD ----
+    
     let mut sum_abs = 0.0;
     for &v in &data[start0..end0] {
         sum_abs += (v - sma).abs();
@@ -387,7 +387,7 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
         }
     };
 
-    // ---- rolling steps ----
+    
     for i in (first_out + 1)..n {
         let exiting = data[i - period];
         let entering = data[i];
@@ -395,7 +395,7 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
         sma = sum * inv_p;
 
         let wstart = i + 1 - period;
-        let wend = i + 1; // exclusive
+        let wend = i + 1; 
         let mut sabs = 0.0;
         for &v in &data[wstart..wend] {
             sabs += (v - sma).abs();
@@ -415,14 +415,14 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // Experimental SIMD slower on this workload; short-circuit to scalar
+    
     cci_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // Experimental SIMD slower on this workload; short-circuit to scalar
+    
     cci_scalar(data, period, first_valid, out)
 }
 
@@ -436,7 +436,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     let inv_p = 1.0 / (period as f64);
     let scale = (period as f64) * (1.0 / 0.015);
 
-    // Initial sum (scalar)
+    
     let base = data.as_ptr().add(first_valid);
     let mut sum = 0.0;
     {
@@ -458,7 +458,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     let first_out = first_valid + period - 1;
     let mut sma = sum * inv_p;
 
-    // Initial MAD (vectorized compute, scalar Kahan accumulation in element order)
+    
     {
         let vmean = _mm256_set1_pd(sma);
         let vsgn = _mm256_set1_pd(-0.0f64);
@@ -471,7 +471,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
             let a = _mm256_andnot_pd(vsgn, d);
             let mut lane = [0.0f64; 4];
             _mm256_storeu_pd(lane.as_mut_ptr(), a);
-            // accumulate in element order
+            
             for &val in &lane {
                 let y = val - comp;
                 let t = sum_abs + y;
@@ -497,7 +497,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         };
     }
 
-    // Rolling
+    
     let mut i = first_out + 1;
     while i < n {
         let exiting = *data.get_unchecked(i - period);
@@ -568,7 +568,7 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     let inv_p = 1.0 / (period as f64);
     let scale = (period as f64) * (1.0 / 0.015);
 
-    // Initial sum (scalar)
+    
     let base = data.as_ptr().add(first_valid);
     let mut sum = 0.0;
     {
@@ -590,11 +590,11 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     let first_out = first_valid + period - 1;
     let mut sma = sum * inv_p;
 
-    // abs mask (preserve NaNs)
+    
     let pos_mask_i = _mm512_set1_epi64(0x7FFF_FFFF_FFFF_FFFFu64 as i64);
     let pos_mask = _mm512_castsi512_pd(pos_mask_i);
 
-    // Initial MAD (vectorized compute, scalar Kahan accumulation in element order)
+    
     {
         let vmean = _mm512_set1_pd(sma);
         let mut k = 0usize;
@@ -603,7 +603,7 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         while k + 8 <= period {
             let x = _mm512_loadu_pd(base.add(k));
             let d = _mm512_sub_pd(x, vmean);
-            let a = _mm512_and_pd(d, pos_mask); // abs
+            let a = _mm512_and_pd(d, pos_mask); 
             let mut lane = [0.0f64; 8];
             _mm512_storeu_pd(lane.as_mut_ptr(), a);
             for &val in &lane {
@@ -631,7 +631,7 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         };
     }
 
-    // Rolling
+    
     let mut i = first_out + 1;
     while i < n {
         let exiting = *data.get_unchecked(i - period);
@@ -678,7 +678,7 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     }
 }
 
-// ---- Row functions (all AVX variants point to correct level) ----
+
 
 #[inline(always)]
 pub unsafe fn cci_row_scalar(
@@ -690,9 +690,9 @@ pub unsafe fn cci_row_scalar(
     _inv: f64,
     out: &mut [f64],
 ) {
-    // Important: For batch processing, 'out' is a single row of the output matrix
-    // with the same length as 'data'. We should write directly to the indices
-    // corresponding to the data indices.
+    
+    
+    
     cci_scalar(data, period, first, out)
 }
 
@@ -752,10 +752,10 @@ pub unsafe fn cci_row_avx512_long(
     cci_avx512_long(data, period, first, out)
 }
 
-// ---- Stream ----
 
-// Decision: Streaming uses an order‑statistics treap for exact O(log n) MAD.
-// Replaces prior O(n) scan per tick; API and warmup semantics unchanged.
+
+
+
 
 #[derive(Debug, Clone)]
 pub struct CciStream {
@@ -764,17 +764,17 @@ pub struct CciStream {
     head: usize,
     filled: bool,
 
-    // Rolling sum of the window (exact)
+    
     sum: f64,
 
-    // Precompute scale = period / 0.015 so CCI = (price - mean) * scale / sum_abs
+    
     scale: f64,
 
-    // Order statistics tree over the current window values
+    
     ost: OrderStatsTreap,
 }
 
-// Simple deterministic SplitMix64 for treap priorities (fast, dependency-free)
+
 #[inline(always)]
 fn splitmix64(mut x: u64) -> u64 {
     x = x.wrapping_add(0x9E3779B97F4A7C15);
@@ -792,11 +792,11 @@ struct OrderStatsTreap {
 
 #[derive(Debug, Clone)]
 struct Node {
-    key: f64,    // value
-    prio: u64,   // heap priority
-    cnt: u32,    // multiplicity of key
-    size: usize, // total count in subtree (including multiplicities)
-    sum: f64,    // sum of all values in subtree
+    key: f64,    
+    prio: u64,   
+    cnt: u32,    
+    size: usize, 
+    sum: f64,    
     left: Option<Box<Node>>,
     right: Option<Box<Node>>,
 }
@@ -833,7 +833,7 @@ impl Node {
 impl OrderStatsTreap {
     #[inline(always)]
     fn new() -> Self {
-        // any non-zero seed; use address entropy
+        
         let seed = splitmix64((&() as *const () as usize as u64) ^ 0xA5A5_A5A5_A5A5_A5A5);
         Self { root: None, seed }
     }
@@ -844,7 +844,7 @@ impl OrderStatsTreap {
         self.seed
     }
 
-    // Merge assumes all keys in 'a' <= all keys in 'b'
+    
     fn merge(a: Option<Box<Node>>, b: Option<Box<Node>>) -> Option<Box<Node>> {
         match (a, b) {
             (None, t) | (t, None) => t,
@@ -862,7 +862,7 @@ impl OrderStatsTreap {
         }
     }
 
-    // Split into (<= key, > key)
+    
     fn split(mut t: Option<Box<Node>>, key: f64) -> (Option<Box<Node>>, Option<Box<Node>>) {
         match t.take() {
             None => (None, None),
@@ -882,13 +882,13 @@ impl OrderStatsTreap {
         }
     }
 
-    // Insert one occurrence of key
+    
     fn insert(&mut self, key: f64) {
         debug_assert!(key.is_finite());
         self.root = match self.root.take() {
             None => Some(Box::new(Node::new(key, self.next_prio()))),
             Some(mut _n) => {
-                // put it back; recurse with helper
+                
                 self.root = Some(_n);
                 Self::insert_into(self.root.take(), key, self.next_prio())
             }
@@ -923,7 +923,7 @@ impl OrderStatsTreap {
         }
     }
 
-    // Erase one occurrence of key (no-op if missing)
+    
     fn erase(&mut self, key: f64) {
         debug_assert!(key.is_finite());
         self.root = Self::erase_from(self.root.take(), key);
@@ -954,7 +954,7 @@ impl OrderStatsTreap {
         }
     }
 
-    // Return (count_le, sum_le) for all keys <= 'key'
+    
     fn prefix_le(&self, key: f64) -> (usize, f64) {
         debug_assert!(key.is_finite());
         let mut t = &self.root;
@@ -965,7 +965,7 @@ impl OrderStatsTreap {
             if key < n.key {
                 t = &n.left;
             } else {
-                // take left subtree + this node multiplicity
+                
                 count += sz(&n.left) + n.cnt as usize;
                 sum += sm(&n.left) + (n.key * n.cnt as f64);
                 t = &n.right;
@@ -989,7 +989,7 @@ impl CciStream {
                 data_len: 0,
             });
         }
-        // Initialize ring buffer with NaNs to match warmup behavior
+        
         let buffer = alloc_with_nan_prefix(period, period);
         let scale = (period as f64) * (1.0 / 0.015);
 
@@ -1012,7 +1012,7 @@ impl CciStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         debug_assert!(value.is_finite(), "CCI stream expects finite inputs");
 
-        // ring write
+        
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
@@ -1021,13 +1021,13 @@ impl CciStream {
         }
 
         if !self.filled {
-            // warmup: accumulate partial sum and treap; no output yet
+            
             self.sum += value;
             self.ost.insert(value);
             return None;
         }
 
-        // rolling sum and treap maintenance
+        
         if !old.is_nan() {
             self.sum -= old;
             self.ost.erase(old);
@@ -1035,27 +1035,27 @@ impl CciStream {
         self.sum += value;
         self.ost.insert(value);
 
-        // exact mean of the window
+        
         let mean = self.sum / (self.period as f64);
 
-        // prefix (<= mean): count & sum
+        
         let (k_le, sum_le) = self.ost.prefix_le(mean);
 
-        // Sum of absolute deviations using counts and sums:
-        // sum_abs = mean*(2k - n) + (S - 2*sum_le)
+        
+        
         let n = self.period as f64;
         let sum_abs = mean.mul_add(2.0 * (k_le as f64) - n, self.sum - 2.0 * sum_le);
 
         if sum_abs == 0.0 {
             Some(0.0)
         } else {
-            // CCI = (value - mean) / (0.015 * (sum_abs / n)) = (value - mean) * (n / (0.015 * sum_abs))
+            
             Some((value - mean) * (self.scale / sum_abs))
         }
     }
 }
 
-// ---- Batch/Range ----
+
 
 #[derive(Clone, Debug)]
 pub struct CciBatchRange {
@@ -1135,7 +1135,7 @@ impl CciBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &CciBatchRange) -> Result<Vec<CciParams>, CciError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CciError> {
-        // Zero step => static; start==end => singleton; support reversed bounds.
+        
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1157,13 +1157,13 @@ fn expand_grid(r: &CciBatchRange) -> Result<Vec<CciParams>, CciError> {
             if v.is_empty() { return Err(CciError::InvalidRange { start, end, step }); }
             Ok(v)
         } else {
-            // reversed bounds
+            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
                 v.push(cur);
                 if cur <= end { break; }
-                // prevent underflow
+                
                 if cur < step { break; }
                 cur -= step;
                 if cur == end { v.push(cur); break; }
@@ -1252,26 +1252,26 @@ fn cci_batch_inner(
         });
     }
 
-    // Guard potential overflow in matrix allocation.
+    
     rows.checked_mul(cols).ok_or(CciError::InvalidRange {
         start: sweep.period.0,
         end: sweep.period.1,
         step: sweep.period.2,
     })?;
 
-    // 1. Allocate *uninitialised* matrix
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let out_ptr = buf_mu.as_mut_ptr() as *mut f64;
     let out_len = buf_mu.len();
     let out_cap = buf_mu.capacity();
     let out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
 
-    // 2. Compute into it in place
-    // Safety: the batch compute fills [first+period-1..] per row and we write NaN prefixes.
-    // Errors are pre-validated above to avoid leaking the backing buffer.
+    
+    
+    
     let _ = cci_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // 3. Reclaim the buffer as a normal Vec<f64> for the return value
+    
     let values = unsafe { Vec::from_raw_parts(out_ptr, out_len, out_cap) };
     core::mem::forget(buf_mu);
 
@@ -1322,7 +1322,7 @@ fn cci_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Checked matrix size and output slice length.
+    
     let expected = rows
         .checked_mul(cols)
         .ok_or(CciError::InvalidRange {
@@ -1337,7 +1337,7 @@ fn cci_batch_inner_into(
         });
     }
 
-    // Resolve kernel selection
+    
     let kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::Scalar => Kernel::ScalarBatch,
@@ -1352,18 +1352,18 @@ fn cci_batch_inner_into(
         _ => unreachable!(),
     };
 
-    // Initialize NaN prefixes for warmup periods
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // Convert output slice to MaybeUninit for initialization
+    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Initialize the NaN prefixes row-wise
+    
     for (row, &warmup) in warm.iter().enumerate() {
         let row_start = row * cols;
         for col in 0..warmup.min(cols) {
@@ -1374,10 +1374,10 @@ fn cci_batch_inner_into(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        // Cast the row slice (which is definitely ours to mutate) to f64
+        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        // Ensure the output slice has the correct length
+        
         assert_eq!(dst.len(), cols, "Output row length mismatch");
 
         match simd {
@@ -1388,7 +1388,7 @@ fn cci_batch_inner_into(
             Kernel::Avx512 => cci_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => {
-                // Fallback to scalar when AVX is not available
+                
                 cci_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, dst)
             }
             _ => unreachable!(),
@@ -1419,7 +1419,7 @@ fn cci_batch_inner_into(
     Ok(combos)
 }
 
-// ---- Tests ----
+
 
 #[cfg(test)]
 mod tests {
@@ -1669,7 +1669,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_cci_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1677,27 +1677,27 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
+        
         let input = CciInput::from_candles(&candles, "close", CciParams::default());
         let output = cci_with_kernel(&input, kernel)?;
 
-        // Also test with different parameters to increase coverage
+        
         let params_20 = CciParams { period: Some(20) };
         let input_20 = CciInput::from_candles(&candles, "hlc3", params_20);
         let output_20 = cci_with_kernel(&input_20, kernel)?;
 
-        // Check both outputs
+        
         for output in [output, output_20] {
-            // Check every value for poison patterns
+            
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
+                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1705,7 +1705,7 @@ mod tests {
                     );
                 }
 
-                // Check for init_matrix_prefixes poison (0x22222222_22222222)
+                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1713,7 +1713,7 @@ mod tests {
                     );
                 }
 
-                // Check for make_uninit_matrix poison (0x33333333_33333333)
+                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1726,7 +1726,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_cci_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1738,7 +1738,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data with period and price data
+        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1755,12 +1755,12 @@ mod tests {
             };
             let input = CciInput::from_slice(&data, params);
 
-            // Calculate CCI with the specified kernel
+            
             let CciOutput { values: out } = cci_with_kernel(&input, kernel).unwrap();
-            // Calculate reference output with scalar kernel for comparison
+            
             let CciOutput { values: ref_out } = cci_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Test 1: Warmup period validation - first (period - 1) values should be NaN
+            
             for i in 0..(period - 1) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1771,7 +1771,7 @@ mod tests {
                 );
             }
 
-            // Test 2: Non-NaN values after warmup
+            
             for i in (period - 1)..data.len() {
                 prop_assert!(
                     !out[i].is_nan(),
@@ -1781,16 +1781,16 @@ mod tests {
                 );
             }
 
-            // Test 3: Kernel consistency - all kernels should produce identical results
+            
             for i in 0..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
                 if y.is_nan() && r.is_nan() {
-                    continue; // Both NaN is ok
+                    continue; 
                 }
 
-                // Use ULP comparison for floating point equality
+                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = if y_bits > r_bits {
@@ -1810,7 +1810,7 @@ mod tests {
                 );
             }
 
-            // Test 4: Constant price property - when all prices are equal, CCI should be 0
+            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= period {
                 for i in (period - 1)..data.len() {
                     prop_assert!(
@@ -1823,19 +1823,19 @@ mod tests {
                 }
             }
 
-            // Test 5: Mathematical correctness - verify CCI calculation
+            
             for i in (period - 1)..data.len() {
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
 
-                // Calculate SMA
+                
                 let sum: f64 = window.iter().sum();
                 let sma = sum / period as f64;
 
-                // Calculate Mean Absolute Deviation
+                
                 let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
 
-                // Calculate expected CCI
+                
                 let price = data[i];
                 let expected_cci = if mad == 0.0 {
                     0.0
@@ -1843,7 +1843,7 @@ mod tests {
                     (price - sma) / (0.015 * mad)
                 };
 
-                // Compare with actual output
+                
                 let actual_cci = out[i];
                 let diff = (actual_cci - expected_cci).abs();
 
@@ -1858,9 +1858,9 @@ mod tests {
                 );
             }
 
-            // Test 6: Edge case - period = 1
+            
             if period == 1 {
-                // With period=1, SMA is just the current value, MAD is 0, so CCI should be 0
+                
                 for i in 0..data.len() {
                     prop_assert!(
                         out[i].abs() < 1e-9,
@@ -1872,11 +1872,11 @@ mod tests {
                 }
             }
 
-            // Test 7: Reasonable bounds - CCI typically ranges between -300 and 300
-            // (this is a soft check, extreme values are possible but rare)
+            
+            
             for i in (period - 1)..data.len() {
                 if out[i].abs() > 500.0 {
-                    // Just a warning, not a failure - extreme values are mathematically possible
+                    
                     eprintln!(
 							"[{}] Warning: Extreme CCI value {} at index {} (typical range is -300 to 300)",
 							test_name,
@@ -1886,8 +1886,8 @@ mod tests {
                 }
             }
 
-            // Test 8: Very small MAD values - ensure no overflow/underflow issues
-            // When prices vary by tiny amounts, MAD can be very small, producing extreme CCIs
+            
+            
             for i in (period - 1)..data.len() {
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
@@ -1895,10 +1895,10 @@ mod tests {
                 let sma = sum / period as f64;
                 let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
 
-                // If MAD is extremely small but non-zero
+                
                 if mad > 0.0 && mad < 1e-12 {
                     let actual_cci = out[i];
-                    // CCI should still be finite (not infinite or NaN)
+                    
                     prop_assert!(
 							actual_cci.is_finite(),
 							"[{}] CCI should be finite even with very small MAD ({}) at index {}, got {}",
@@ -1908,12 +1908,12 @@ mod tests {
 							actual_cci
 						);
 
-                    // The calculation should still be mathematically correct
+                    
                     let price = data[i];
                     let expected_cci = (price - sma) / (0.015 * mad);
                     let relative_error = ((actual_cci - expected_cci) / expected_cci).abs();
 
-                    // Allow slightly more tolerance for extreme values due to floating point precision
+                    
                     prop_assert!(
 							relative_error < 1e-8 || (actual_cci - expected_cci).abs() < 1e-10,
 							"[{}] CCI calculation with small MAD at index {}: expected {}, got {}, relative error {}",
@@ -1976,7 +1976,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_cci_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with an initial NaN prefix.
+        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253usize {
@@ -1986,10 +1986,10 @@ mod tests {
 
         let input = CciInput::from_slice(&data, CciParams::default());
 
-        // Baseline via existing Vec-returning API.
+        
         let baseline = cci(&input)?.values;
 
-        // Preallocate output; function will write warmups as NaN.
+        
         let mut out = vec![0.0; data.len()];
         cci_into(&input, &mut out)?;
 
@@ -2042,7 +2042,7 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in batch output - only runs in debug mode
+    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2050,15 +2050,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch with multiple parameter combinations
+        
         let output = CciBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 30, 10) // Test with periods 10, 20, 30
+            .period_range(10, 30, 10) 
             .apply_candles(&c, "close")?;
 
-        // Check every value in the entire batch matrix for poison patterns
+        
         for (idx, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in warmup periods
+            
             if val.is_nan() {
                 continue;
             }
@@ -2067,7 +2067,7 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check for alloc_with_nan_prefix poison (0x11111111_11111111)
+            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2075,7 +2075,7 @@ mod tests {
 				);
             }
 
-            // Check for init_matrix_prefixes poison (0x22222222_22222222)
+            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2083,7 +2083,7 @@ mod tests {
 				);
             }
 
-            // Check for make_uninit_matrix poison (0x33333333_33333333)
+            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2095,7 +2095,7 @@ mod tests {
         Ok(())
     }
 
-    // Release mode stub - does nothing
+    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2145,7 +2145,7 @@ pub fn cci_py<'py>(
     };
     let cci_in = CciInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| cci_with_kernel(&cci_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2198,16 +2198,16 @@ pub fn cci_batch_py<'py>(
         period: period_range,
     };
 
-    // Use the existing batch function that handles everything
+    
     let output = py
         .allow_threads(|| cci_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Convert output to NumPy arrays
+    
     let values_arr = output.values.into_pyarray(py);
     let reshaped = values_arr.reshape((output.rows, output.cols))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", reshaped)?;
     dict.set_item(
@@ -2223,9 +2223,9 @@ pub fn cci_batch_py<'py>(
     Ok(dict)
 }
 
-// -------- Python CUDA bindings --------
 
-// Dedicated CCI VRAM handle with CAI v3 + DLPack v1.x
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "CciDeviceArrayF32", unsendable)]
 pub struct CciDeviceArrayF32Py {

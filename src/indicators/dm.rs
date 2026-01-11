@@ -226,8 +226,8 @@ fn dm_prepare<'a>(
         });
     }
 
-    // SIMD implemented but disabled by default for Auto: minimal/negative gains observed.
-    // Users can still request Avx2/Avx512 explicitly via `kernel`.
+    
+    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -256,9 +256,9 @@ fn dm_compute_into_scalar(
         let mut sum_plus = 0.0f64;
         let mut sum_minus = 0.0f64;
 
-        // Warmup accumulation over (period - 1) steps
+        
         let mut i = first + 1;
-        let warm_stop = end_init + 1; // exclusive
+        let warm_stop = end_init + 1; 
 
         let mut prev_high = *high.get_unchecked(first);
         let mut prev_low = *low.get_unchecked(first);
@@ -282,7 +282,7 @@ fn dm_compute_into_scalar(
         *plus_out.get_unchecked_mut(end_init) = sum_plus;
         *minus_out.get_unchecked_mut(end_init) = sum_minus;
 
-        // Smoothed (Wilder) update for remaining samples
+        
         if end_init + 1 >= n {
             return;
         }
@@ -370,7 +370,7 @@ unsafe fn dm_compute_into_avx2(
     let inv_p = 1.0 / (period as f64);
     let zero = _mm256_setzero_pd();
 
-    // Warmup accumulate
+    
     let mut sum_plus = 0.0f64;
     let mut sum_minus = 0.0f64;
     let mut i = first + 1;
@@ -537,7 +537,7 @@ unsafe fn dm_compute_into_avx512(
     let inv_p = 1.0 / (period as f64);
     let zero = _mm512_set1_pd(0.0);
 
-    // Warmup accumulate
+    
     let mut sum_plus = 0.0f64;
     let mut sum_minus = 0.0f64;
     let mut i = first + 1;
@@ -661,7 +661,7 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
     let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
     let warm = first + period - 1;
 
-    // allocate without full init
+    
     let mut plus = alloc_with_nan_prefix(high.len(), warm);
     let mut minus = alloc_with_nan_prefix(high.len(), warm);
 
@@ -681,10 +681,10 @@ pub fn dm_into(
     plus_out: &mut [f64],
     minus_out: &mut [f64],
 ) -> Result<(), DmError> {
-    // Match default behavior: Auto short-circuits to Scalar for DM
+    
     let (high, low, period, first, chosen) = dm_prepare(input, Kernel::Auto)?;
 
-    // Length validation
+    
     if plus_out.len() != high.len() {
         return Err(DmError::OutputLengthMismatch { expected: high.len(), got: plus_out.len() });
     }
@@ -692,7 +692,7 @@ pub fn dm_into(
         return Err(DmError::OutputLengthMismatch { expected: high.len(), got: minus_out.len() });
     }
 
-    // Prefill NaN warmups with the same quiet-NaN bit pattern as alloc_with_nan_prefix
+    
     let warm = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm_end = warm.min(high.len());
@@ -703,7 +703,7 @@ pub fn dm_into(
         *v = qnan;
     }
 
-    // Compute into provided buffers
+    
     dm_compute_into(high, low, period, first, chosen, plus_out, minus_out);
     Ok(())
 }
@@ -811,7 +811,7 @@ pub unsafe fn dm_avx512(
     })
 }
 
-// Long and short variants for AVX512, required by API parity
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn dm_avx512_short(
@@ -837,7 +837,7 @@ pub unsafe fn dm_avx512_long(
 #[derive(Debug, Clone)]
 pub struct DmStream {
     period: usize,
-    inv_period: f64, // cached 1.0 / period for O(1) updates without per-tick division
+    inv_period: f64, 
     sum_plus: f64,
     sum_minus: f64,
     prev_high: f64,
@@ -870,46 +870,46 @@ impl DmStream {
     /// Returns None until warmup completes; then returns smoothed (+DM, -DM).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
-        // First sample only seeds prev_* (keeps identical warmup semantics to original).
+        
         if self.count == 0 {
             self.prev_high = high;
             self.prev_low = low;
         }
 
-        // Raw directional moves versus previous bar.
+        
         let dp = high - self.prev_high;
         let dm = self.prev_low - low;
 
-        // Advance prev_* for next tick.
+        
         self.prev_high = high;
         self.prev_low = low;
 
-        // Positive parts (branchless clamp to zero).
+        
         let dp_pos = dp.max(0.0);
         let dm_pos = dm.max(0.0);
 
-        // Apply Wilder’s “use only the larger, zero the other”.
+        
         let plus_val = if dp_pos > dm_pos { dp_pos } else { 0.0 };
         let minus_val = if dm_pos > dp_pos { dm_pos } else { 0.0 };
 
-        // Warmup: accumulate the first (period-1) diffs.
+        
         if self.count < self.period - 1 {
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return None;
         } else if self.count == self.period - 1 {
-            // Final warmup step: emit the initial Wilder sums.
+            
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return Some((self.sum_plus, self.sum_minus));
         }
 
-        // Steady state: Wilder smoothing sum <- sum - sum/period + new
+        
         #[cfg(target_feature = "fma")]
         {
-            // sum_next = (-inv).mul_add(sum, sum + new) == sum - sum*inv + new
+            
             self.sum_plus = (-self.inv_period).mul_add(self.sum_plus, self.sum_plus + plus_val);
             self.sum_minus = (-self.inv_period).mul_add(self.sum_minus, self.sum_minus + minus_val);
         }
@@ -1022,7 +1022,7 @@ fn expand_grid(r: &DmBatchRange) -> Result<Vec<DmParams>, DmError> {
             }
             return Ok(v);
         }
-        // reversed bounds
+        
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -1100,7 +1100,7 @@ fn dm_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
-    // Checked arithmetic for rows*cols
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
@@ -1186,16 +1186,16 @@ fn dm_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
-    // Checked arithmetic for rows*cols
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    // allocate uninit matrices
+    
     let mut plus_mu = make_uninit_matrix(rows, cols);
     let mut minus_mu = make_uninit_matrix(rows, cols);
 
-    // warm prefixes per row
+    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1203,7 +1203,7 @@ fn dm_batch_inner(
     init_matrix_prefixes(&mut plus_mu, cols, &warm);
     init_matrix_prefixes(&mut minus_mu, cols, &warm);
 
-    // alias as &mut [f64] safely
+    
     let mut plus_guard = core::mem::ManuallyDrop::new(plus_mu);
     let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
     let plus_out: &mut [f64] = unsafe {
@@ -1215,7 +1215,7 @@ fn dm_batch_inner(
 
     let combos = dm_batch_inner_into(high, low, sweep, kern, parallel, first, plus_out, minus_out)?;
 
-    // take ownership of filled buffers
+    
     let plus = unsafe {
         Vec::from_raw_parts(
             plus_guard.as_mut_ptr() as *mut f64,
@@ -1358,7 +1358,7 @@ unsafe fn dm_row_avx512_long(
     dm_row_avx512(high, low, first, period, plus, minus)
 }
 
-//------------------ TESTS ----------------------------
+
 
 #[cfg(test)]
 mod tests {
@@ -1567,26 +1567,26 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            // Default parameters
+            
             DmParams::default(),
-            // Minimum viable period
+            
             DmParams { period: Some(2) },
-            // Small periods
+            
             DmParams { period: Some(3) },
             DmParams { period: Some(5) },
             DmParams { period: Some(7) },
-            // Medium periods
+            
             DmParams { period: Some(10) },
-            DmParams { period: Some(14) }, // default value
+            DmParams { period: Some(14) }, 
             DmParams { period: Some(20) },
             DmParams { period: Some(30) },
-            // Large periods
+            
             DmParams { period: Some(50) },
             DmParams { period: Some(100) },
             DmParams { period: Some(200) },
-            // Edge case close to common usage
+            
             DmParams { period: Some(25) },
         ];
 
@@ -1594,15 +1594,15 @@ mod tests {
             let input = DmInput::from_candles(&candles, params.clone());
             let output = dm_with_kernel(&input, kernel)?;
 
-            // Check plus array
+            
             for (i, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in plus array \
@@ -1631,15 +1631,15 @@ mod tests {
                 }
             }
 
-            // Check minus array
+            
             for (i, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in minus array \
@@ -1677,7 +1677,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     #[cfg(feature = "proptest")]
@@ -1689,13 +1689,13 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic high/low data
+        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                // Generate base prices, volatility, and random changes for price movement
+                
                 (100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
                     .prop_flat_map(move |(base_price, volatility, data_len)| {
-                        // Generate random changes and spreads for each data point
+                        
                         (
                             Just(base_price),
                             Just(volatility),
@@ -1706,23 +1706,23 @@ mod tests {
                     })
                     .prop_map(
                         move |(base_price, volatility, data_len, changes, spreads)| {
-                            // Generate synthetic high/low data with realistic movement
+                            
                             let mut high = Vec::with_capacity(data_len);
                             let mut low = Vec::with_capacity(data_len);
                             let mut current_price = base_price;
 
                             for i in 0..data_len {
-                                // Random walk with volatility
+                                
                                 let change = changes[i] * volatility * current_price;
-                                current_price = (current_price + change).max(10.0); // Prevent negative prices
+                                current_price = (current_price + change).max(10.0); 
 
-                                // Generate high/low with spread
+                                
                                 let spread = current_price * 0.01 * spreads[i];
                                 let daily_high = current_price + spread;
                                 let daily_low = current_price - spread;
 
                                 high.push(daily_high);
-                                low.push(daily_low.max(1.0)); // Ensure low is positive
+                                low.push(daily_low.max(1.0)); 
                             }
 
                             (high, low)
@@ -1738,23 +1738,23 @@ mod tests {
             };
             let input = DmInput::from_slices(&high, &low, params);
 
-            // Test with the specified kernel
+            
             let DmOutput {
                 plus: out_plus,
                 minus: out_minus,
             } = dm_with_kernel(&input, kernel)?;
 
-            // Test with scalar reference
+            
             let DmOutput {
                 plus: ref_plus,
                 minus: ref_minus,
             } = dm_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: Output length matches input
+            
             prop_assert_eq!(out_plus.len(), high.len());
             prop_assert_eq!(out_minus.len(), high.len());
 
-            // Property 2: Warmup period handling
+            
             let warmup_period = period - 1;
             for i in 0..warmup_period {
                 prop_assert!(
@@ -1769,7 +1769,7 @@ mod tests {
                 );
             }
 
-            // Property 3: Non-negative values after warmup
+            
             for i in warmup_period..high.len() {
                 if !out_plus[i].is_nan() {
                     prop_assert!(
@@ -1789,7 +1789,7 @@ mod tests {
                 }
             }
 
-            // Property 4: Kernel consistency (compare with scalar)
+            
             const MAX_ULP: i64 = 3;
             for i in 0..high.len() {
                 let plus_y = out_plus[i];
@@ -1797,7 +1797,7 @@ mod tests {
                 let minus_y = out_minus[i];
                 let minus_r = ref_minus[i];
 
-                // Check plus values
+                
                 if plus_y.is_nan() {
                     prop_assert!(
                         plus_r.is_nan(),
@@ -1820,7 +1820,7 @@ mod tests {
                     );
                 }
 
-                // Check minus values
+                
                 if minus_y.is_nan() {
                     prop_assert!(
                         minus_r.is_nan(),
@@ -1846,12 +1846,12 @@ mod tests {
                 }
             }
 
-            // Property 5: Constant data produces near-zero DM after initial period
+            
             let all_high_equal = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
             let all_low_equal = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
             if all_high_equal && all_low_equal {
-                // After the initial period, DM values should decay to near zero
+                
                 for i in (period * 2).min(high.len() - 1)..high.len() {
                     if !out_plus[i].is_nan() {
                         prop_assert!(
@@ -1896,13 +1896,13 @@ mod tests {
 
     #[test]
     fn test_dm_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial synthetic HL series (all finite)
+        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
         let mut price = 100.0f64;
         for i in 0..n {
-            // Mild drift and oscillation
+            
             let drift = ((i % 7) as i32 - 3) as f64 * 0.3;
             price = (price + drift).max(1.0);
             let spread = 0.5 + 0.1 * ((i % 5) as f64);
@@ -1912,16 +1912,16 @@ mod tests {
 
         let input = DmInput::from_slices(&high, &low, DmParams::default());
 
-        // Baseline via Vec-returning API
+        
         let base = dm(&input)?;
 
-        // Into API with preallocated buffers
+        
         let mut plus = vec![0.0; n];
         let mut minus = vec![0.0; n];
         #[cfg(not(feature = "wasm"))]
         dm_into(&input, &mut plus, &mut minus)?;
 
-        // Helper: treat NaN == NaN as equal
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             a == b || (a.is_nan() && b.is_nan())
         }
@@ -1995,23 +1995,23 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            // Small periods
-            (2, 10, 2), // 2, 4, 6, 8, 10
-            // Medium periods
-            (5, 25, 5), // 5, 10, 15, 20, 25
-            // Large periods
-            (30, 60, 15), // 30, 45, 60
-            // Dense small range
-            (2, 5, 1), // 2, 3, 4, 5
-            // Single value (no sweep)
-            (14, 14, 0), // Just 14 (default)
-            // Wide range
-            (10, 100, 10), // 10, 20, 30, ..., 100
-            // Very large periods
-            (100, 200, 50), // 100, 150, 200
+            
+            
+            (2, 10, 2), 
+            
+            (5, 25, 5), 
+            
+            (30, 60, 15), 
+            
+            (2, 5, 1), 
+            
+            (14, 14, 0), 
+            
+            (10, 100, 10), 
+            
+            (100, 200, 50), 
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2020,7 +2020,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            // Check plus matrix
+            
             for (idx, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2031,7 +2031,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in plus \
@@ -2060,7 +2060,7 @@ mod tests {
                 }
             }
 
-            // Check minus matrix
+            
             for (idx, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2071,7 +2071,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in minus \
@@ -2109,7 +2109,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2167,7 +2167,7 @@ pub fn dm_py<'py>(
     let input = DmInput::from_slices(h, l, params);
     let kern = validate_kernel(kernel, false)?;
 
-    // pre-allocate numpy outputs, then compute into them
+    
     let out_plus = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
     let out_minus = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
     let plus_slice = unsafe { out_plus.as_slice_mut()? };

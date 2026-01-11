@@ -49,7 +49,7 @@ use thiserror::Error;
 #[cfg(feature = "wasm")]
 use wasm_bindgen::prelude::*;
 
-// ---- Input data structures ----
+
 
 impl<'a> AsRef<[f64]> for LinearRegInterceptInput<'a> {
     #[inline(always)]
@@ -121,7 +121,7 @@ impl<'a> LinearRegInterceptInput<'a> {
     }
 }
 
-// ---- Builder pattern ----
+
 
 #[derive(Copy, Clone, Debug)]
 pub struct LinearRegInterceptBuilder {
@@ -181,7 +181,7 @@ impl LinearRegInterceptBuilder {
     }
 }
 
-// ---- Error type ----
+
 
 #[derive(Debug, Error)]
 pub enum LinearRegInterceptError {
@@ -201,7 +201,7 @@ pub enum LinearRegInterceptError {
     InvalidKernelForBatch(Kernel),
 }
 
-// ---- Main entrypoints ----
+
 
 #[inline]
 pub fn linearreg_intercept(
@@ -311,7 +311,7 @@ pub fn linearreg_intercept_into(
         });
     }
 
-    // Prefill warmup with the same quiet-NaN bit pattern used by alloc_with_nan_prefix.
+    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -407,7 +407,7 @@ pub fn linearreg_intercept_into_slice(
 
 #[inline]
 pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Fast path: period == 1 → passthrough after warmup
+    
     if period == 1 {
         for i in first_val..data.len() {
             out[i] = data[i];
@@ -418,12 +418,12 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
     let n = period as f64;
     let inv_n = 1.0 / n;
 
-    // Closed-form sums for x = 1..n
-    let sum_x = 0.5_f64 * n * (n + 1.0); // n(n+1)/2
-    let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; // n(n+1)(2n+1)/6
+    
+    let sum_x = 0.5_f64 * n * (n + 1.0); 
+    let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; 
     let denom = n * sum_x2 - sum_x * sum_x;
-    let bd = 1.0 / denom; // 1/(n*Σx^2 − (Σx)^2)
-    let k = 1.0 - sum_x * inv_n; // 1 − Σx/n
+    let bd = 1.0 / denom; 
+    let k = 1.0 - sum_x * inv_n; 
 
     let start = first_val;
     let end = data.len();
@@ -431,7 +431,7 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
         return;
     }
 
-    // Initial window sums on [start .. start+period)
+    
     let mut sum_y = 0.0f64;
     let mut sum_xy = 0.0f64;
     for j in 0..period {
@@ -441,18 +441,18 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
         sum_xy += y * x;
     }
 
-    // Emit first value at the last index of first window
+    
     let mut i = start + period - 1;
     out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
 
-    // Slide the window in O(1) per step
+    
     while i + 1 < end {
         let y_in = data[i + 1];
         let y_out = data[i + 1 - period];
 
         let prev_sum_y = sum_y;
-        sum_y = prev_sum_y + y_in - y_out; // Σy' = Σy + in − out
-        sum_xy = (sum_xy - prev_sum_y) + n * y_in; // Σ(xy)' = (Σxy − Σy) + n*in
+        sum_y = prev_sum_y + y_in - y_out; 
+        sum_xy = (sum_xy - prev_sum_y) + n * y_in; 
 
         i += 1;
         out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
@@ -477,8 +477,8 @@ pub unsafe fn linearreg_intercept_avx2(
     first_val: usize,
     out: &mut [f64],
 ) {
-    // Unsafe, pointer-based optimized variant (non-SIMD) using mul_add
-    // and avoiding bounds checks. Retains identical semantics.
+    
+    
     if period == 1 {
         let mut i = first_val;
         let end = data.len();
@@ -505,7 +505,7 @@ pub unsafe fn linearreg_intercept_avx2(
         return;
     }
 
-    // Initial window accumulation via pointer math + mul_add
+    
     let mut sum_y = 0.0f64;
     let mut sum_xy = 0.0f64;
     let base = data.as_ptr().add(start);
@@ -519,13 +519,13 @@ pub unsafe fn linearreg_intercept_avx2(
         j += 1;
     }
 
-    // Emit first value
+    
     let mut i = start + period - 1;
     let outp = out.as_mut_ptr();
     let mut b = n.mul_add(sum_xy, -sum_x * sum_y) * bd;
     *outp.add(i) = b.mul_add(k, sum_y * inv_n);
 
-    // Slide with O(1) updates
+    
     let dptr = data.as_ptr();
     while i + 1 < end {
         let y_in = *dptr.add(i + 1);
@@ -563,7 +563,7 @@ pub unsafe fn linearreg_intercept_avx512_long(
     linearreg_intercept_avx2(data, period, first_val, out)
 }
 
-// ---- Streaming struct ----
+
 
 #[derive(Debug, Clone)]
 pub struct LinearRegInterceptStream {
@@ -590,10 +590,10 @@ impl LinearRegInterceptStream {
             });
         }
 
-        // Closed-form precomputation (no loop) for x = 1..n
+        
         let n = period as f64;
-        let sum_x = 0.5_f64 * n * (n + 1.0); // n(n+1)/2
-        let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; // n(n+1)(2n+1)/6
+        let sum_x = 0.5_f64 * n * (n + 1.0); 
+        let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; 
         let denom = n * sum_x2 - sum_x * sum_x;
         let bd = if period == 1 { 0.0 } else { 1.0 / denom };
 
@@ -603,7 +603,7 @@ impl LinearRegInterceptStream {
             head: 0,
             filled: false,
             sum_x,
-            sum_x2, // kept; not used after init
+            sum_x2, 
             n,
             bd,
             sum_y: 0.0,
@@ -614,16 +614,16 @@ impl LinearRegInterceptStream {
     /// O(1) update from the very first output; no O(n) "first wrap" recompute.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Fast path
+        
         if self.period == 1 {
             return Some(value);
         }
 
-        // Position to overwrite this tick (also the outgoing element if already filled)
+        
         let tail = self.head;
         let y_out = self.buffer[tail];
 
-        // Write incoming element and advance head
+        
         self.buffer[tail] = value;
         self.head = if self.head + 1 == self.period {
             0
@@ -632,32 +632,32 @@ impl LinearRegInterceptStream {
         };
 
         if !self.filled {
-            // Warmup: maintain Σy and Σ(xy) with correct x index = (tail + 1)
-            // so the last warmup insert uses x = n (no need to rescan).
-            let x = (tail as f64) + 1.0; // x in [1..n]
+            
+            
+            let x = (tail as f64) + 1.0; 
             self.sum_y += value;
-            self.sum_xy = value.mul_add(x, self.sum_xy); // sum_xy += value * x
+            self.sum_xy = value.mul_add(x, self.sum_xy); 
 
-            // We become "filled" precisely after writing into the last slot.
+            
             if self.head == 0 {
                 self.filled = true;
-                // fall through to compute first output for the just-filled window
+                
             } else {
                 return None;
             }
         } else {
-            // Steady state: true O(1) slide
+            
             let sum_y_old = self.sum_y;
             self.sum_y = sum_y_old + value - y_out;
-            // Σ(xy)' = Σ(xy) − Σy(old) + n·y_in
+            
             self.sum_xy = (self.sum_xy - sum_y_old) + self.n * value;
         }
 
-        // Emit y at the "last point" with our reference convention: a + b
-        // a + b = Σy/n + b*(1 − Σx/n)
+        
+        
         let inv_n = 1.0 / self.n;
         let k = 1.0 - self.sum_x * inv_n;
-        // b = (n·Σ(xy) − Σx·Σy) * bd   (use mul_add to encourage FMA)
+        
         let t = self.n.mul_add(self.sum_xy, -(self.sum_x * self.sum_y));
         let b = t * self.bd;
         let y = self.sum_y.mul_add(inv_n, b * k);
@@ -665,7 +665,7 @@ impl LinearRegInterceptStream {
     }
 }
 
-// ---- Batch range & builder ----
+
 
 #[derive(Clone, Debug)]
 pub struct LinearRegInterceptBatchRange {
@@ -776,7 +776,7 @@ impl LinearRegInterceptBatchOutput {
     }
 }
 
-// ---- Batch helpers ----
+
 
 #[inline(always)]
 fn expand_grid(
@@ -1086,9 +1086,9 @@ fn expand_grid_reg(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptPa
     expand_grid(r).unwrap_or_else(|_| Vec::new())
 }
 
-// ============================
-// Python CUDA (zero-copy device)
-// ============================
+
+
+
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;

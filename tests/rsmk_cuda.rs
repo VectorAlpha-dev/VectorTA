@@ -1,16 +1,16 @@
-// Integration tests for CUDA RSMK kernels
 
-use my_project::indicators::rsmk::{
+
+use vector_ta::indicators::rsmk::{
     rsmk_batch_with_kernel, rsmk_with_kernel, RsmkBatchRange, RsmkData, RsmkInput, RsmkParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaRsmk;
+use vector_ta::cuda::CudaRsmk;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -110,7 +110,7 @@ fn rsmk_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let period = 3usize;
     let sigp = 10usize;
 
-    // CPU baseline per series
+    
     let mut cpu_ind_tm = vec![f64::NAN; cols * rows];
     let mut cpu_sig_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

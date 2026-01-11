@@ -95,7 +95,7 @@ impl CudaSrsi {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-        // Query true 1D grid X cap for chunking (often 2^31-1 on modern GPUs)
+        
         let max_grid_x = dev
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .unwrap_or(65_535) as u32;
@@ -190,7 +190,7 @@ impl CudaSrsi {
         Ok(())
     }
 
-    // --------- Batch (one series × many params) ---------
+    
     pub fn srsi_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -228,7 +228,7 @@ impl CudaSrsi {
             ));
         }
 
-        // VRAM estimate (inputs + outputs + params + headroom)
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let in_bytes = len
@@ -255,22 +255,22 @@ impl CudaSrsi {
         let headroom = 64usize * 1024 * 1024;
         let required = logical;
         Self::will_fit(required, headroom)?;
-        // Group by rsi_period but preserve original row order
+        
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (i, p) in combos.iter().enumerate() {
             groups.entry(p.rsi_period.unwrap()).or_default().push(i);
         }
-        // Allocate outputs for all rows in original order
+        
         let total = len
             .checked_mul(combos.len())
             .ok_or_else(|| CudaSrsiError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
         let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total)? };
 
-        // Build prices_f64 once (host RSI source)
+        
         let prices_f64: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
 
-        // Cache kernel handles & limits (3-pass batch)
+        
         let fk_func = self
             .module
             .get_function("srsi_fk_batch_f32")
@@ -297,17 +297,17 @@ impl CudaSrsi {
         }
         let max_grid_y = 65_535usize;
 
-        // Keep allocations alive until after sync
+        
         let mut keep_alive: Vec<(DeviceBuffer<f32>, DeviceBuffer<i32>, DeviceBuffer<i32>, DeviceBuffer<i32>)> = Vec::new();
 
         for (rp, idxs) in groups {
-            // Build RSI for this rp
+            
             let rsi_out = rsi(&RsiInput::from_slice(&prices_f64, RsiParams { period: Some(rp) }))
                 .map_err(|e| CudaSrsiError::InvalidInput(e.to_string()))?;
             let rsi_f32: Vec<f32> = rsi_out.values.into_iter().map(|v| v as f32).collect();
             let d_rsi = DeviceBuffer::from_slice(&rsi_f32)?;
 
-            // Per-group parameter arrays following original index order
+            
             let mut sp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut kp: Vec<i32> = Vec::with_capacity(idxs.len());
             let mut dp: Vec<i32> = Vec::with_capacity(idxs.len());
@@ -325,7 +325,7 @@ impl CudaSrsi {
             let d_kp = DeviceBuffer::from_slice(&kp)?;
             let d_dp = DeviceBuffer::from_slice(&dp)?;
 
-            // In current expand order, idxs are contiguous; use group_start and chunk by grid.y cap
+            
             let group_start = *idxs.first().expect("group start");
             let mut base = 0usize;
             while base < idxs.len() {
@@ -356,7 +356,7 @@ impl CudaSrsi {
                         &mut out_k_ptr as *mut _ as *mut c_void,
                         &mut out_d_ptr as *mut _ as *mut c_void,
                     ];
-                    // FK -> out_d (scratch), Slow K -> out_k, Slow D -> out_d final
+                    
                     self.stream.launch(&fk_func, grid, block, 0, &mut args)?;
                     self.stream.launch(&k_func, grid, block, 0, &mut args)?;
                     self.stream.launch(&d_func, grid, block, 0, &mut args)?;
@@ -367,7 +367,7 @@ impl CudaSrsi {
             keep_alive.push((d_rsi, d_sp, d_kp, d_dp));
         }
 
-        // One sync for all groups
+        
         self.stream.synchronize()?;
 
         Ok((
@@ -387,7 +387,7 @@ impl CudaSrsi {
         ))
     }
 
-    // --------- Many-series, one param (time-major) ---------
+    
     pub fn srsi_many_series_one_param_time_major_dev(
         &self,
         prices_tm: &[f32],
@@ -414,7 +414,7 @@ impl CudaSrsi {
             ));
         }
 
-        // Build first_valid per series on host
+        
         let mut firsts = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -426,7 +426,7 @@ impl CudaSrsi {
             }
         }
 
-        // VRAM estimate
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let n = cols
@@ -513,7 +513,7 @@ impl CudaSrsi {
     }
 }
 
-// ---------------- Benches ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -524,9 +524,9 @@ pub mod benches {
     const MANY_ROWS: usize = 8192;
 
     fn bytes_one_series_many_params(rows: usize) -> usize {
-        // prices + RSI surface + outputs
+        
         let in_b = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let out_b = ONE_SERIES_LEN * rows * std::mem::size_of::<f32>() * 2; // K + D
+        let out_b = ONE_SERIES_LEN * rows * std::mem::size_of::<f32>() * 2; 
         in_b + out_b + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {

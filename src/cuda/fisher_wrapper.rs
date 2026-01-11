@@ -227,13 +227,13 @@ impl CudaFisher {
 
     #[inline]
     fn validate_launch_dims(grid: GridSize, block: BlockSize) -> Result<(), CudaFisherError> {
-        // coarse checks; avoid pathological configs
+        
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
         if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
             return Err(CudaFisherError::InvalidInput("zero-sized launch dims".into()));
         }
-        // conservative limits
+        
         if bx > 1024 || by > 1024 || bz > 64 { return Err(CudaFisherError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz }); }
         if gx > 2_147_483_647 || gy > 65_535 || gz > 65_535 { return Err(CudaFisherError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz }); }
         Ok(())
@@ -246,10 +246,10 @@ impl CudaFisher {
     ) -> Result<
         (
             Vec<FisherParams>,
-            usize,             // first_valid
-            usize,             // len
-            LockedBuffer<f32>, // pinned HL2
-            usize,             // max period
+            usize,             
+            usize,             
+            LockedBuffer<f32>, 
+            usize,             
         ),
         CudaFisherError,
     > {
@@ -260,7 +260,7 @@ impl CudaFisher {
         if len == 0 {
             return Err(CudaFisherError::InvalidInput("empty input".into()));
         }
-        // first_valid where both high/low are valid
+        
         let mut first_valid: Option<usize> = None;
         for i in 0..len {
             let h = high_f32[i];
@@ -293,7 +293,7 @@ impl CudaFisher {
             ));
         }
 
-        // Precompute HL2 midpoints directly into pinned memory for async copies
+        
         let mut hl2 = unsafe { LockedBuffer::uninitialized(len) }?;
         {
             let dst = hl2.as_mut_slice();
@@ -313,7 +313,7 @@ impl CudaFisher {
         let (combos, first_valid, len, hl2_locked, max_p) =
             Self::prepare_batch_inputs(high_f32, low_f32, sweep)?;
 
-        // VRAM estimate: hl2 + periods + 2 outputs
+        
         let bytes_in = len.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
         let bytes_periods = combos.len().checked_mul(std::mem::size_of::<i32>()).ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
         let two = 2usize;
@@ -324,7 +324,7 @@ impl CudaFisher {
         let headroom = 64 * 1024 * 1024;
         Self::ensure_will_fit(required, headroom)?;
 
-        // Periods into pinned memory for true async copy
+        
         let mut periods_locked = LockedBuffer::new(&0i32, combos.len())?;
         {
             let p = periods_locked.as_mut_slice();
@@ -332,7 +332,7 @@ impl CudaFisher {
                 p[i] = c.period.unwrap_or(0) as i32;
             }
         }
-        // Device buffers + async copies from pinned memory
+        
         let mut d_hl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
         unsafe { d_hl.async_copy_from(&hl2_locked, &self.stream) }?;
         let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized_async(combos.len(), &self.stream) }?;
@@ -346,7 +346,7 @@ impl CudaFisher {
             .module
             .get_function("fisher_batch_f32")
             .map_err(|_| CudaFisherError::MissingKernelSymbol { name: "fisher_batch_f32" })?;
-        // Dynamic shared memory for two int deques (min/max)
+        
         let shmem_bytes = (2 * max_p * std::mem::size_of::<i32>()) as usize;
         if shmem_bytes >= 32 * 1024 {
             func.set_cache_config(CacheConfig::PreferShared)?;
@@ -370,7 +370,7 @@ impl CudaFisher {
                 )
             };
         }
-        // Occupancy-based suggestion; still one block per combo
+        
         let (auto_block, _) = func.suggested_launch_configuration(shmem_bytes, BlockSize::x(256)).unwrap_or((128, 0));
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => auto_block.clamp(64, 256),
@@ -445,7 +445,7 @@ impl CudaFisher {
             return Err(CudaFisherError::InvalidInput("invalid period".into()));
         }
 
-        // Build HL2 (time-major) and first_valids into pinned memory for true async copies
+        
         let n = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaFisherError::InvalidInput("size overflow".into()))?;
@@ -507,7 +507,7 @@ impl CudaFisher {
             .module
             .get_function("fisher_many_series_one_param_f32")
             .map_err(|_| CudaFisherError::MissingKernelSymbol { name: "fisher_many_series_one_param_f32" })?;
-        // Occupancy-aware suggestion (no dynamic smem)
+        
         let (auto_block, _) = func
             .suggested_launch_configuration(0, BlockSize::x(256))
             .unwrap_or((128, 0));
@@ -560,18 +560,18 @@ impl CudaFisher {
     }
 }
 
-// ------------------------ Benches ------------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::indicators::fisher::FisherBatchRange;
 
-    const ONE_SERIES_LEN: usize = 200_000; // O(period) window scans; keep moderate
+    const ONE_SERIES_LEN: usize = 200_000; 
     const PARAM_SWEEP: usize = 64;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>(); // hl2 only
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>(); 
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

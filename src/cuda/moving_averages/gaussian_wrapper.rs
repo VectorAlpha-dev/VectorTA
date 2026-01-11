@@ -29,7 +29,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const COEFF_STRIDE: usize = 5; // coefficient slots per combo (max poles = 4)
+const COEFF_STRIDE: usize = 5; 
 
 use thiserror::Error;
 
@@ -53,7 +53,7 @@ pub enum CudaGaussianError {
     DeviceMismatch { buf: u32, current: u32 },
 }
 
-// -------- Kernel selection policy (mirror ALMA style; single plain path used) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -82,7 +82,7 @@ impl Default for CudaGaussianPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -197,7 +197,7 @@ impl CudaGaussian {
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
 
-        // Use pinned host memory + async copy for better D2H throughput.
+        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len())? };
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
         self.stream.synchronize()?;
@@ -332,7 +332,7 @@ impl CudaGaussian {
             .checked_add(period_bytes).and_then(|v| v.checked_add(pole_bytes))
             .and_then(|v| v.checked_add(coeff_bytes)).and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64 MiB safety margin
+        let headroom = 64 * 1024 * 1024; 
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(prices)?;
@@ -381,8 +381,8 @@ impl CudaGaussian {
             .and_then(|v| v.checked_add(fv_bytes))
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; // lighter workload, smaller margin
-        // VRAM guard with headroom
+        let headroom = 32 * 1024 * 1024; 
+        
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(prices_tm)
@@ -397,7 +397,7 @@ impl CudaGaussian {
         let period = params.period.unwrap_or(14);
         let poles = params.poles.unwrap_or(4);
 
-        // Optional: populate GAUSS_COEFFS64 constant if present in the module.
+        
         if let Ok(mut sym) = self.module.get_global::<[f64; COEFF_STRIDE]>(unsafe {
             CStr::from_bytes_with_nul_unchecked(b"GAUSS_COEFFS64\0")
         }) {
@@ -443,24 +443,24 @@ impl CudaGaussian {
             .get_function("gaussian_batch_f32")
             .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_batch_f32" })?;
 
-        // Prefer L1 (harmless hint on arch where fixed)
+        
         func.set_cache_config(CacheConfig::PreferL1)?;
 
-        // Ask CUDA for an occupancy-guided block size suggestion.
+        
         let (_min_grid, suggested_block) = func.suggested_launch_configuration(0, BlockSize::xy(1024, 1))?;
 
-        // Allow explicit policy override (benches); else use suggestion.
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
             BatchKernelPolicy::Auto => suggested_block.max(128),
         };
         let block: BlockSize = BlockSize::xyz(block_x, 1, 1);
 
-        // Grid-stride across combos: single launch covers all work.
+        
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = GridSize::xyz(grid_x.max(1), 1, 1);
 
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -510,7 +510,7 @@ impl CudaGaussian {
             .get_function("gaussian_many_series_one_param_f32")
             .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_many_series_one_param_f32" })?;
 
-        // Hint: prefer L1
+        
         func.set_cache_config(CacheConfig::PreferL1)?;
 
         let block_x = match self.policy.many_series {
@@ -520,7 +520,7 @@ impl CudaGaussian {
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (block_x.min(1), 1, 1).into();
 
-        // Introspection
+        
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
@@ -756,7 +756,7 @@ impl CudaGaussian {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;
@@ -1050,7 +1050,7 @@ fn expand_grid_checked(range: &GaussianBatchRange) -> Result<Vec<GaussianParams>
     Ok(combos)
 }
 
-// -------------------- Python: CUDA Array Interface v3 + DLPack v1.x ----------------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1061,7 +1061,7 @@ use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32Py {
-    // Allow one-time move-out on __dlpack__ while keeping shape metadata
+    
     pub inner: Option<DeviceArrayF32>,
     stream_handle: usize,
     _ctx_guard: Arc<Context>,
@@ -1104,7 +1104,7 @@ impl Drop for PrimaryCtxGuard {
 impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        // Synchronize producer stream so CAI can omit 'stream'.
+        
         unsafe { let _ = cu::cuStreamSynchronize(self.stream_handle as cu::CUstream); }
         let itemsize = std::mem::size_of::<f32>();
         let inner = self.inner.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__"))?;
@@ -1117,7 +1117,7 @@ impl DeviceArrayF32Py {
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         if self.stream_handle != 0 {
-            // Per CAI v3: integer stream sentinel semantics (1 legacy, 2 PTDS, else pointer)
+            
             d.set_item("stream", self.stream_handle)?;
         }
         Ok(d.into())
@@ -1136,8 +1136,8 @@ impl DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        
+        let (kdl, alloc_dev) = self.__dlpack_device__(); 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1158,10 +1158,10 @@ impl DeviceArrayF32Py {
             }
         }
 
-        // Ignore stream parameter because kernels synchronized before handle return.
+        
         let _ = stream;
 
-        // Move ownership of the device buffer into the shared DLPack manager.
+        
         let inner = self
             .inner
             .take()

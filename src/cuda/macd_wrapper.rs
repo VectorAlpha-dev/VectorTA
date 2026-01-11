@@ -154,7 +154,7 @@ impl CudaMacd {
         (((grid_x, 1, 1)).into(), ((block_x, 1, 1)).into(), block_x)
     }
 
-    // -------- Batch: one series × many params (EMA-only) --------
+    
     pub fn macd_batch_dev(
         &self,
         data_f32: &[f32],
@@ -169,7 +169,7 @@ impl CudaMacd {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaMacdError::InvalidInput("all values are NaN".into()))?;
 
-        // Enforce EMA path for now (parity with scalar classic kernel)
+        
         let ma0 = &sweep.ma_type.0;
         if !ma0.eq_ignore_ascii_case("ema") {
             return Err(CudaMacdError::InvalidInput(format!(
@@ -184,7 +184,7 @@ impl CudaMacd {
             return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
         }
 
-        // Host param arrays
+        
         let rows = combos.len();
         let mut fasts: Vec<i32> = Vec::with_capacity(rows);
         let mut slows: Vec<i32> = Vec::with_capacity(rows);
@@ -208,7 +208,7 @@ impl CudaMacd {
             signals.push(g);
         }
 
-        // VRAM estimate: prices + params + 3 outputs (checked arithmetic)
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_prices = len
@@ -231,13 +231,13 @@ impl CudaMacd {
         let headroom = 64usize * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        // Upload inputs and params once
+        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_f = DeviceBuffer::from_slice(&fasts)?;
         let d_s = DeviceBuffer::from_slice(&slows)?;
         let d_g = DeviceBuffer::from_slice(&signals)?;
 
-        // Allocate final outputs once
+        
         let mut d_macd: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems_out) }?;
         let mut d_sig: DeviceBuffer<f32> =
@@ -304,7 +304,7 @@ impl CudaMacd {
             return Ok(());
         }
 
-        // Warp-per-combo: grid.x is sized by warps_per_block, not threads.
+        
         let func = self
             .module
             .get_function("macd_batch_f32")
@@ -376,7 +376,7 @@ impl CudaMacd {
         Ok(())
     }
 
-    // -------- Many series: time-major, one param --------
+    
     pub fn macd_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -410,7 +410,7 @@ impl CudaMacd {
             return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
         }
 
-        // Per-series first_valids
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -434,7 +434,7 @@ impl CudaMacd {
             first_valids[s] = fv as i32;
         }
 
-        // VRAM estimate: data + first_valids + 3 outs
+        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_data = expected
@@ -456,7 +456,7 @@ impl CudaMacd {
         let headroom = 64usize * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        // Device buffers
+        
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_macd: DeviceBuffer<f32> =
@@ -661,7 +661,7 @@ impl CudaMacd {
     }
 }
 
-// ---------- Benches ----------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

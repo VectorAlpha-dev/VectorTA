@@ -8,7 +8,7 @@ fn main() {
     let data = CandleData::from_csv(path).expect("failed to load data");
     let size = data.len();
 
-    // ADX needs high, low, close; one output
+    
     let inputs: Vec<&[f64]> = vec![&data.high, &data.low, &data.close];
     let options: Vec<f64> = vec![14.0];
     let mut out = vec![0.0; size];
@@ -27,7 +27,7 @@ fn main() {
         let res = tulip::call_indicator("adx", size, &inputs, &options, &mut outs);
         let dt = t0.elapsed();
         println!("call_indicator returned: {:?} in {:?}", res, dt);
-        // Touch output so optimizer cannot ignore it
+        
         let s: f64 = out.iter().take(10).sum();
         println!("first10 sum = {}", s);
     }

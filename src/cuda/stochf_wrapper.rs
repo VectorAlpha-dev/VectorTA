@@ -157,7 +157,7 @@ impl CudaStochf {
     pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
     pub fn device_id(&self) -> u32 { self.device_id }
 
-    // ---- Batch: one series × many params ----
+    
     pub fn stochf_batch_dev(
         &self,
         high_f32: &[f32],
@@ -173,7 +173,7 @@ impl CudaStochf {
             return Err(CudaStochfError::InvalidInput("empty input".into()));
         }
 
-        // Expand parameter grid
+        
         fn axis_usize(
             (start, end, step): (usize, usize, usize),
         ) -> Result<Vec<usize>, CudaStochfError> {
@@ -198,7 +198,7 @@ impl CudaStochf {
                 }
                 return Ok(v);
             }
-            // reversed bounds
+            
             let mut v = Vec::new();
             let st = step.max(1) as isize;
             let mut x = start as isize;
@@ -232,13 +232,13 @@ impl CudaStochf {
             ));
         }
 
-        // first_valid
+        
         let first_valid = (0..len)
             .find(|&i| {
                 high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
             })
             .ok_or_else(|| CudaStochfError::InvalidInput("all values NaN".into()))?;
-        // Check sufficient data for max fastk
+        
         let max_fk = combos
             .iter()
             .map(|p| p.fastk_period.unwrap())
@@ -260,8 +260,8 @@ impl CudaStochf {
             ));
         }
 
-        // ── VRAM estimate (device): close + WILLR tables + param arrays + outputs
-        // We do NOT upload high/low for the batch path.
+        
+        
         let rows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -281,7 +281,7 @@ impl CudaStochf {
         let out_bytes = out_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaStochfError::InvalidInput("out_bytes overflow".into()))?;
-        // Rough WILLR table upper bound (host->device): keep as ballpark
+        
         let tables_overhead = len
             .checked_mul(8)
             .and_then(|n| n.checked_mul(sz_f32))
@@ -293,10 +293,10 @@ impl CudaStochf {
             .ok_or_else(|| CudaStochfError::InvalidInput("required bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Build WILLR tables once on host (reuse across rows)
+        
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        // Precise VRAM check using actual table sizes
+        
         let tables_bytes =
             tables.log2.len().saturating_mul(sz_i32) +
             tables.level_offsets.len().saturating_mul(sz_i32) +
@@ -309,7 +309,7 @@ impl CudaStochf {
             .saturating_add(out_bytes);
         let _ = Self::will_fit(required_exact, 64 * 1024 * 1024);
 
-        // Upload ONLY close (kernel does not deref high/low in batch path)
+        
         let use_pinned = len >= 131_072;
         let mut pinned_close: Option<LockedBuffer<f32>> = None;
         let d_close = if use_pinned {
@@ -323,21 +323,21 @@ impl CudaStochf {
             DeviceBuffer::from_slice(close_f32)?
         };
 
-        // Upload WILLR tables
+        
         let d_log2 = DeviceBuffer::from_slice(&tables.log2)?;
         let d_offs = DeviceBuffer::from_slice(&tables.level_offsets)?;
         let d_st_max = DeviceBuffer::from_slice(&tables.st_max)?;
         let d_st_min = DeviceBuffer::from_slice(&tables.st_min)?;
         let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum)?;
 
-        // Allocate outputs
+        
         let out_len = rows
             .checked_mul(len)
             .ok_or_else(|| CudaStochfError::InvalidInput("rows*len overflow".into()))?;
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
 
-        // Flatten param arrays once, upload once, then offset per launch
+        
         let fk_host: Vec<i32> = combos.iter().map(|p| p.fastk_period.unwrap() as i32).collect();
         let fd_host: Vec<i32> = combos.iter().map(|p| p.fastd_period.unwrap() as i32).collect();
         let mt_host: Vec<i32> = combos.iter().map(|p| p.fastd_matype.unwrap_or(0) as i32).collect();
@@ -346,7 +346,7 @@ impl CudaStochf {
         let d_fd_all = DeviceBuffer::from_slice(&fd_host)?;
         let d_mt_all = DeviceBuffer::from_slice(&mt_host)?;
 
-        // Prepare kernel
+        
         let mut func: Function = self.module
             .get_function("stochf_batch_f32")
             .map_err(|_| CudaStochfError::MissingKernelSymbol { name: "stochf_batch_f32" })?;
@@ -355,7 +355,7 @@ impl CudaStochf {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
         };
-        let combos_per_launch = 65_535usize; // grid.x limit
+        let combos_per_launch = 65_535usize; 
         let mut row0 = 0usize;
         while row0 < rows {
             let n = (rows - row0).min(combos_per_launch);
@@ -374,7 +374,7 @@ impl CudaStochf {
             }
 
             unsafe {
-                // Kernel ignores high/low; pass null device pointers
+                
                 let mut high_ptr: u64 = 0;
                 let mut low_ptr:  u64 = 0;
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
@@ -431,7 +431,7 @@ impl CudaStochf {
         ))
     }
 
-    // ---- Many-series: time-major, one param ----
+    
     pub fn stochf_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -461,7 +461,7 @@ impl CudaStochf {
         let fd = params.fastd_period.unwrap_or(3);
         let mt = params.fastd_matype.unwrap_or(0);
 
-        // first_valid per series
+        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -486,7 +486,7 @@ impl CudaStochf {
             first_valids[s] = f;
         }
 
-        // Upload inputs (use pinned host and async copies when large)
+        
         let mut pinned_h: Option<LockedBuffer<f32>> = None;
         let mut pinned_l: Option<LockedBuffer<f32>> = None;
         let mut pinned_c: Option<LockedBuffer<f32>> = None;
@@ -519,7 +519,7 @@ impl CudaStochf {
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
 
-        // Prepare kernel
+        
         let mut func: Function = self.module
             .get_function("stochf_many_series_one_param_f32")
             .map_err(|_| CudaStochfError::MissingKernelSymbol { name: "stochf_many_series_one_param_f32" })?;
@@ -580,7 +580,7 @@ impl CudaStochf {
                 ?;
         }
 
-        // Ensure results are ready (match batch path semantics) and keep pinned buffers alive
+        
         self.stream.synchronize()?;
         drop(pinned_h); drop(pinned_l); drop(pinned_c);
 
@@ -591,7 +591,7 @@ impl CudaStochf {
     }
 }
 
-// ------------------- Benches -------------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -599,7 +599,7 @@ pub mod benches {
     use crate::indicators::stochf::StochfBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 256; // sweep fastk only
+    const PARAM_SWEEP: usize = 256; 
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -616,7 +616,7 @@ pub mod benches {
     }
 
     fn bytes_one_series_many_params() -> usize {
-        // Batch kernel reads only close on device (HH/LL via WILLR tables)
+        
         let in_bytes = 1 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024

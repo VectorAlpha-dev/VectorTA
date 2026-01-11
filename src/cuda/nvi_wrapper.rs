@@ -59,7 +59,7 @@ impl CudaNvi {
         let device = Device::get_device(device_id as u32)?;
         let ctx = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/nvi_kernel.ptx"));
-        // Prefer arch from current context + O2 with fallbacks for brittle drivers.
+        
         let primary_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -171,7 +171,7 @@ impl CudaNvi {
         let first = Self::first_valid_pair(close, volume)?;
         let len = close.len();
 
-        // VRAM estimate: 2 inputs + 1 output
+        
         let elem = std::mem::size_of::<f32>();
         let elems = 3usize
             .checked_mul(len)
@@ -193,7 +193,7 @@ impl CudaNvi {
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-        // Launch one-warp kernel (warp-scan over 32-step tiles)
+        
         let func = self
             .module
             .get_function("nvi_batch_f32")
@@ -247,7 +247,7 @@ impl CudaNvi {
             ));
         }
 
-        // First-valid per series (host) — row-major scan for cache locality.
+        
         let rows_i32 = rows as i32;
         let mut first_valids = vec![rows_i32; cols];
         let mut remaining = cols;
@@ -269,7 +269,7 @@ impl CudaNvi {
             }
         }
 
-        // Require at least 2 valid samples per series for a non-trivial scan
+        
         for s in 0..cols {
             if (rows_i32 - first_valids[s]) < 2 {
                 return Err(CudaNviError::InvalidInput(format!(
@@ -279,7 +279,7 @@ impl CudaNvi {
             }
         }
 
-        // VRAM estimate: 2 inputs + 1 output + first_valids
+        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let elems_main = 3usize
@@ -324,7 +324,7 @@ impl CudaNvi {
                 name: "nvi_many_series_one_param_f32",
             })?;
 
-        // One thread per series
+        
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid_dims = (grid_x.max(1), 1u32, 1u32);
@@ -438,7 +438,7 @@ impl CudaNvi {
                 name: "nvi_many_series_one_param_f32",
             })?;
 
-        // One thread per series; kernel grid-strides over s.
+        
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let grid_dims = (grid_x.max(1), 1u32, 1u32);
@@ -468,7 +468,7 @@ impl CudaNvi {
     }
 }
 
-// ---------------- Bench profiles ----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -479,7 +479,7 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series() -> usize {
-        // 2 inputs + 1 output + ~64MB headroom
+        
         (3 * ONE_SERIES_LEN * std::mem::size_of::<f32>()) + (64 << 20)
     }
     fn bytes_many_series() -> usize {
@@ -514,7 +514,7 @@ pub mod benches {
         let cuda = CudaNvi::new(0).expect("cuda nvi");
         let mut close = gen_series(ONE_SERIES_LEN);
         let mut volume = gen_series(ONE_SERIES_LEN);
-        // Ensure a valid warmup starts at 0
+        
         if close[0].is_nan() || volume[0].is_nan() {
             close[0] = 100.0;
             volume[0] = 1000.0;
@@ -566,7 +566,7 @@ pub mod benches {
         let mut close_tm = vec![f32::NAN; n];
         let mut volume_tm = vec![f32::NAN; n];
         for s in 0..cols {
-            // Stagger warmups per series
+            
             for t in s.min(8)..rows {
                 let x = (t as f32) + (s as f32) * 0.11;
                 close_tm[t * cols + s] = (x * 0.0021).sin() + 0.0002 * x + 100.0;
@@ -574,7 +574,7 @@ pub mod benches {
             }
         }
 
-        // First-valid per series (host) - row-major scan for cache locality.
+        
         let rows_i32 = rows as i32;
         let mut first_valids = vec![rows_i32; cols];
         let mut remaining = cols;

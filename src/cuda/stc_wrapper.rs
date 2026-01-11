@@ -87,7 +87,7 @@ pub struct CudaStc {
 impl CudaStc {
     #[inline(always)]
     fn stc_batch_smem_bytes(max_k: usize) -> usize {
-        // 2 float rings + 4 int index-deques
+        
         max_k * (2 * size_of::<f32>() + 4 * size_of::<i32>())
     }
     pub fn new(device_id: usize) -> Result<Self, CudaStcError> {
@@ -232,7 +232,7 @@ impl CudaStc {
         Ok(first)
     }
 
-    // ---------- Batch: one series × many params (EMA/EMA path) ----------
+    
     pub fn stc_batch_dev(
         &self,
         data: &[f32],
@@ -258,7 +258,7 @@ impl CudaStc {
             .unwrap();
         let first_valid = Self::validate_first_valid(data, max_needed)?;
 
-        // VRAM estimate: input + param arrays + output
+        
         let rows = combos.len();
         let rows_len = rows
             .checked_mul(len)
@@ -291,7 +291,7 @@ impl CudaStc {
             }
         }
 
-        // Upload input
+        
         let h = LockedBuffer::from_slice(data)?;
         let mut d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
@@ -300,7 +300,7 @@ impl CudaStc {
                 .async_copy_from(&h, &self.stream)?;
         }
 
-        // Prepare param arrays (host pinned)
+        
         let fasts: Vec<i32> = combos
             .iter()
             .map(|c| c.fast_period.unwrap() as i32)
@@ -317,7 +317,7 @@ impl CudaStc {
         let h_k = LockedBuffer::from_slice(&ks)?;
         let h_d = LockedBuffer::from_slice(&ds)?;
 
-        // Upload parameter arrays once (async)
+        
         let mut d_f: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized_async(rows, &self.stream) }?;
         let mut d_s: DeviceBuffer<i32> =
@@ -337,28 +337,28 @@ impl CudaStc {
                 ?;
         }
 
-        // Output buffer
+        
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows_len, &self.stream) }?;
 
-        // Launch in chunks to respect grid limit
+        
         let mut func = self
             .module
             .get_function("stc_batch_f32")
             .map_err(|_| CudaStcError::MissingKernelSymbol { name: "stc_batch_f32" })?;
-        // Kernel is sequential per-row; use 1 thread per block by default for best occupancy.
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 1,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
-        // Prefer shared carveout and 4-byte banks for FP32 traffic
+        
         func.set_cache_config(CacheConfig::PreferShared)
             ?;
         func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
             ?;
 
         for (start, count) in Self::grid_x_chunks(rows) {
-            // Per-chunk dynamic shared mem sizing based on local max(k)
+            
             let local_max_k = ks[start..start + count]
                 .iter()
                 .copied()
@@ -381,7 +381,7 @@ impl CudaStc {
                 let grid: GridSize = (count as u32, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
-                // param pointers offset to chunk start
+                
                 let mut f_ptr = d_f.as_device_ptr().add(start).as_raw();
                 let mut s_ptr = d_s.as_device_ptr().add(start).as_raw();
                 let mut k_ptr = d_k.as_device_ptr().add(start).as_raw();
@@ -390,7 +390,7 @@ impl CudaStc {
                 let mut fv_i = first_valid as i32;
                 let mut r_i = count as i32;
                 let mut mk_i = local_max_k as i32;
-                // out pointer offset to the start of this chunk
+                
                 let mut o_ptr = d_out
                     .as_device_ptr()
                     .add(start * len)
@@ -429,7 +429,7 @@ impl CudaStc {
         
     }
 
-    // ---------- Many-series × one param (time-major; EMA/EMA) ----------
+    
     pub fn stc_many_series_one_param_time_major_dev(
         &self,
         data_tm: &[f32],
@@ -453,7 +453,7 @@ impl CudaStc {
         let k = params.k_period.unwrap_or(10);
         let d = params.d_period.unwrap_or(3);
 
-        // Per-series first_valids
+        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -474,7 +474,7 @@ impl CudaStc {
             }
         }
 
-        // VRAM estimate: inputs + first_valids + outputs
+        
         let elem = std::mem::size_of::<f32>();
         let data_bytes = cells
             .checked_mul(elem)
@@ -504,7 +504,7 @@ impl CudaStc {
             }
         }
 
-        // Upload inputs (pinned + async)
+        
         let h_tm = LockedBuffer::from_slice(data_tm)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
         let mut d_data: DeviceBuffer<f32> =
@@ -520,7 +520,7 @@ impl CudaStc {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cells, &self.stream) }?;
 
-        // Launch kernel
+        
         
         let func = self
             .module
@@ -570,7 +570,7 @@ impl CudaStc {
     }
 }
 
-// -------- Bench Profiles --------
+
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -589,7 +589,7 @@ pub mod benches {
                         let x = i as f32;
                         data[i] = (x * 0.0013).sin() + 0.0002 * x;
                     }
-                    // 4x4x4 = 64 combos
+                    
                     let sweep = StcBatchRange {
                         fast_period: (10, 25, 5),
                         slow_period: (30, 60, 10),

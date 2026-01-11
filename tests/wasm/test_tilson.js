@@ -21,15 +21,15 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
-        // Prefer the local CommonJS wrapper that works reliably in Node without ESM WASM support
-        // This avoids Node trying to import the .wasm module directly (which can fail on some versions)
-        // tests/wasm/my_project.cjs bundles the same exports as the pkg wrapper
-        // and loads my_project_bg.wasm from the tests/wasm directory.
-        // If that fails, fall back to the pkg JS wrapper.
+        
+        
+        
+        
+        
         const localCjsPath = join(__dirname, './my_project.cjs');
-        // eslint-disable-next-line n/no-unsupported-features/es-syntax
+        
         wasm = await import('node:module').then(m => m.createRequire(import.meta.url)(localCjsPath));
     } catch (e1) {
         try {
@@ -38,7 +38,7 @@ test.before(async () => {
                 ? 'file:///' + wasmPath.replace(/\\/g, '/')
                 : wasmPath;
             wasm = await import(importPath);
-            // Initialize the wasm module (align with other tests' fallback logic)
+            
             try {
                 if (typeof wasm.default === 'function') {
                     await wasm.default();
@@ -64,7 +64,7 @@ test.before(async () => {
 
 test.describe('Tilson T3 Moving Average', () => {
     test('Tilson accuracy', async () => {
-        // Test Tilson matches expected values from Rust tests - mirrors check_tilson_accuracy
+        
         const close = new Float64Array(testData.close);
         const expected = EXPECTED_OUTPUTS.tilson;
 
@@ -76,7 +76,7 @@ test.describe('Tilson T3 Moving Average', () => {
 
         assert.strictEqual(result.length, close.length);
 
-        // Check last 5 values match expected
+        
         const last5 = result.slice(-5);
         assertArrayClose(
             last5,
@@ -85,21 +85,21 @@ test.describe('Tilson T3 Moving Average', () => {
             "Tilson last 5 values mismatch"
         );
 
-        // Compare full output with Rust
-        // Use absolute-equivalent tolerance <= Rust's 1e-8 by passing a very small relative tol
-        // so that tol * (1 + |x|) <= 1e-8 for our data range.
+        
+        
+        
         await compareWithRust('tilson', result, 'close', expected.defaultParams, 1e-13);
     });
 
     test('Tilson default params', () => {
-        // Test Tilson with default parameters - mirrors check_tilson_default_candles
+        
         const close = new Float64Array(testData.close);
 
         const result = wasm.tilson_js(close, 5, 0.0);
         assert.strictEqual(result.length, close.length);
 
-        // Check warmup period
-        const warmup = 6 * (5 - 1); // 24
+        
+        const warmup = 6 * (5 - 1); 
         for (let i = 0; i < warmup; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN during warmup`);
         }
@@ -124,12 +124,12 @@ test.describe('Tilson T3 Moving Average', () => {
         assert(result instanceof Float64Array, 'Result should be Float64Array');
         assert.strictEqual(result.length, data.length, 'Result length should match input');
         
-        // Tilson has warmup period of 6 * (period - 1) = 24 for period=5
+        
         for (let i = 0; i < 24; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN during warmup`);
         }
         
-        // Check that remaining values are not NaN
+        
         for (let i = 24; i < result.length; i++) {
             assert(!isNaN(result[i]), `Index ${i} should not be NaN after warmup`);
         }
@@ -162,14 +162,14 @@ test.describe('Tilson T3 Moving Average', () => {
     test('error handling - invalid period', () => {
         const data = new Float64Array([1, 2, 3, 4, 5]);
         
-        // Period exceeds data length
+        
         assert.throws(
             () => wasm.tilson_js(data, 6, 0.0),
             /Invalid period/,
             'Should throw error when period exceeds data length'
         );
         
-        // Period is zero
+        
         assert.throws(
             () => wasm.tilson_js(data, 0, 0.0),
             /Invalid period/,
@@ -178,7 +178,7 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('error handling - not enough valid data', () => {
-        // First 8 values are NaN, only 2 valid values, but need more for period 5
+        
         const data = new Float64Array([NaN, NaN, NaN, NaN, NaN, NaN, NaN, NaN, 1, 2]);
         const period = 5;
         const volumeFactor = 0.0;
@@ -196,14 +196,14 @@ test.describe('Tilson T3 Moving Average', () => {
             data[i] = Math.random() * 100;
         }
         
-        // NaN volume factor
+        
         assert.throws(
             () => wasm.tilson_js(data, 5, NaN),
             /Invalid volume factor/,
             'Should throw error for NaN volume factor'
         );
         
-        // Infinite volume factor
+        
         assert.throws(
             () => wasm.tilson_js(data, 5, Infinity),
             /Invalid volume factor/,
@@ -222,8 +222,8 @@ test.describe('Tilson T3 Moving Average', () => {
         
         const result = wasm.tilson_js(data, period, volumeFactor);
         
-        // First valid index is 2, Tilson warmup is 6 * (period-1) = 12
-        // So first valid output is at index 2+12 = 14
+        
+        
         for (let i = 0; i < 14; i++) {
             assert(isNaN(result[i]), `Index ${i} should be NaN`);
         }
@@ -233,7 +233,7 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('Tilson zero period', () => {
-        // Test Tilson fails with zero period - mirrors check_tilson_zero_period
+        
         const inputData = new Float64Array([10.0, 20.0, 30.0]);
 
         assert.throws(() => {
@@ -242,7 +242,7 @@ test.describe('Tilson T3 Moving Average', () => {
     });
 
     test('Tilson period exceeds length', () => {
-        // Test Tilson fails when period exceeds data length - mirrors check_tilson_period_exceeds_length
+        
         const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
 
         assert.throws(() => {
@@ -251,7 +251,7 @@ test.describe('Tilson T3 Moving Average', () => {
     });
 
     test('Tilson very small dataset', () => {
-        // Test Tilson fails with insufficient data - mirrors check_tilson_very_small_dataset
+        
         const singlePoint = new Float64Array([42.0]);
 
         assert.throws(() => {
@@ -260,25 +260,25 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('Tilson NaN handling', () => {
-        // Test Tilson handles NaN values correctly - mirrors check_tilson_nan_handling
+        
         const close = new Float64Array(testData.close);
 
         const result = wasm.tilson_js(close, 5, 0.0);
         assert.strictEqual(result.length, close.length);
 
-        // After warmup period (240), no NaN values should exist
+        
         if (result.length > 240) {
             for (let i = 240; i < result.length; i++) {
                 assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
             }
         }
 
-        // First 24 values should be NaN (warmup = 6 * (5-1) = 24)
+        
         assertAllNaN(result.slice(0, 24), "Expected NaN in warmup period");
     });
 
     test('Tilson all NaN input', () => {
-        // Test Tilson with all NaN values
+        
         const allNaN = new Float64Array(100);
         allNaN.fill(NaN);
 
@@ -305,7 +305,7 @@ test.describe('Tilson T3 Moving Average', () => {
         const metadata = wasm.tilson_batch_metadata_js(periodStart, periodEnd, periodStep,
                                                        vFactorStart, vFactorEnd, vFactorStep);
         
-        // Expected combinations
+        
         const expectedPeriods = [3, 5, 7];
         const expectedVFactors = [0.0, 0.3, 0.6];
         const expectedCombos = expectedPeriods.length * expectedVFactors.length;
@@ -316,11 +316,11 @@ test.describe('Tilson T3 Moving Average', () => {
         assert.strictEqual(metadata.length, rows * 2, 'Metadata should contain periods and volume factors');
         assert.strictEqual(values.length, rows * cols, 'Values array size should be rows*cols');
         
-        // Extract periods and volume factors from metadata
+        
         const periods = new Float64Array(metadata.slice(0, rows));
         const vFactors = new Float64Array(metadata.slice(rows));
         
-        // Verify combinations
+        
         let comboIdx = 0;
         for (const period of expectedPeriods) {
             for (const vFactor of expectedVFactors) {
@@ -337,18 +337,18 @@ test.describe('Tilson T3 Moving Average', () => {
             data[i] = i + 1;
         }
         
-        // Test different periods
+        
         const periods = [2, 3, 4, 5, 6];
         for (const period of periods) {
             const result = wasm.tilson_js(data, period, 0.0);
             const warmup = 6 * (period - 1);
             
-            // Check warmup period
+            
             for (let i = 0; i < warmup && i < result.length; i++) {
                 assert(isNaN(result[i]), `Period ${period}: Index ${i} should be NaN`);
             }
             
-            // Check values after warmup
+            
             for (let i = warmup; i < result.length; i++) {
                 assert(!isNaN(result[i]), `Period ${period}: Index ${i} should not be NaN`);
             }
@@ -361,12 +361,12 @@ test.describe('Tilson T3 Moving Average', () => {
             data[i] = Math.random() * 100;
         }
         
-        // Minimum valid period
+        
         const result1 = wasm.tilson_js(data, 1, 0.0);
-        // Period 1 has warmup = 6 * (1-1) = 0, so no NaN values
+        
         assert(!isNaN(result1[0]), 'Period 1 should have no NaN values');
         
-        // Maximum volume factor
+        
         const result2 = wasm.tilson_js(data, 5, 1.0);
         const warmup = 6 * (5 - 1);
         for (let i = 0; i < warmup; i++) {
@@ -378,19 +378,19 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('Tilson reinput', () => {
-        // Test Tilson applied twice (re-input) - mirrors check_tilson_reinput
+        
         const close = new Float64Array(testData.close);
         const expected = EXPECTED_OUTPUTS.tilson;
 
-        // First pass with default params
+        
         const firstResult = wasm.tilson_js(close, 5, 0.0);
         assert.strictEqual(firstResult.length, close.length);
 
-        // Second pass - apply Tilson to Tilson output
+        
         const secondResult = wasm.tilson_js(firstResult, 3, 0.7);
         assert.strictEqual(secondResult.length, firstResult.length);
 
-        // Check last 5 values match expected
+        
         const last5 = secondResult.slice(-5);
         assertArrayClose(
             last5,
@@ -401,16 +401,16 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('Tilson batch single parameter set', () => {
-        // Test batch with single parameter combination
+        
         const close = new Float64Array(testData.close);
 
-        // Using the new ergonomic batch API for single parameter
+        
         const batchResult = wasm.tilson_batch(close, {
             period_range: [5, 5, 0],
             volume_factor_range: [0.0, 0.0, 0]
         });
 
-        // Should match single calculation
+        
         const singleResult = wasm.tilson_js(close, 5, 0.0);
 
         assert.strictEqual(batchResult.values.length, singleResult.length);
@@ -423,7 +423,7 @@ test.describe('Tilson T3 Moving Average', () => {
             data[i] = Math.random() * 100;
         }
         
-        // Single combination
+        
         const values = wasm.tilson_batch_js(data, 5, 5, 0, 0.7, 0.7, 0.0);
         const metadata = wasm.tilson_batch_metadata_js(5, 5, 0, 0.7, 0.7, 0.0);
         
@@ -432,7 +432,7 @@ test.describe('Tilson T3 Moving Average', () => {
         assert.strictEqual(metadata[0], 5, 'Period should be 5');
         assert(Math.abs(metadata[1] - 0.7) < 1e-10, 'Volume factor should be 0.7');
         
-        // Should match single calculation
+        
         const singleResult = wasm.tilson_js(data, 5, 0.7);
         assertArrayClose(values, singleResult, 1e-10, 'Batch with single combo should match single calc');
     });
@@ -444,14 +444,14 @@ test.describe('Tilson T3 Moving Average', () => {
         }
         const period = 5;
         
-        // Compare different volume factors
+        
         const result0 = wasm.tilson_js(data, period, 0.0);
         const result5 = wasm.tilson_js(data, period, 0.5);
         const result9 = wasm.tilson_js(data, period, 0.9);
         
         const warmup = 6 * (period - 1);
         
-        // Different volume factors should produce different results
+        
         let differences0_5 = 0;
         let differences5_9 = 0;
         
@@ -465,21 +465,21 @@ test.describe('Tilson T3 Moving Average', () => {
     });
     
     test('Tilson batch multiple periods', () => {
-        // Test batch with multiple period values and verify against single calculations
-        const close = new Float64Array(testData.close.slice(0, 100)); // Use smaller dataset for speed
+        
+        const close = new Float64Array(testData.close.slice(0, 100)); 
 
-        // Multiple periods and volume factors using ergonomic API
+        
         const batchResult = wasm.tilson_batch(close, {
-            period_range: [3, 7, 2],           // periods: 3, 5, 7
-            volume_factor_range: [0.0, 0.6, 0.3] // volume_factors: 0.0, 0.3, 0.6
+            period_range: [3, 7, 2],           
+            volume_factor_range: [0.0, 0.6, 0.3] 
         });
 
-        // Should have 3 * 3 = 9 combinations
+        
         assert.strictEqual(batchResult.rows, 9);
         assert.strictEqual(batchResult.cols, 100);
         assert.strictEqual(batchResult.values.length, 9 * 100);
 
-        // Verify each combination matches individual calculation
+        
         const periods = [3, 5, 7];
         const vFactors = [0.0, 0.3, 0.6];
         let comboIdx = 0;
@@ -491,7 +491,7 @@ test.describe('Tilson T3 Moving Average', () => {
 
                 const singleResult = wasm.tilson_js(close, period, vFactor);
                 
-                // Compare where both are not NaN
+                
                 let validCount = 0;
                 for (let i = 0; i < 100; i++) {
                     if (!isNaN(rowData[i]) && !isNaN(singleResult[i])) {
@@ -519,7 +519,7 @@ test.describe('Tilson T3 Moving Average', () => {
         
         const result = wasm.tilson_batch(data, config);
         
-        // Expected combinations
+        
         const expectedPeriods = [3, 5, 7];
         const expectedVFactors = [0.0, 0.3, 0.6];
         const expectedCombos = expectedPeriods.length * expectedVFactors.length;
@@ -529,7 +529,7 @@ test.describe('Tilson T3 Moving Average', () => {
         assert.strictEqual(result.cols, data.length, 'Cols should match data length');
         assert.strictEqual(result.values.length, expectedCombos * data.length, 'Values array size should be rows*cols');
         
-        // Verify parameter combinations
+        
         let comboIdx = 0;
         for (const period of expectedPeriods) {
             for (const vFactor of expectedVFactors) {
@@ -549,35 +549,35 @@ test.describe('Tilson T3 Moving Average', () => {
         const period = 5;
         const volumeFactor = 0.0;
         
-        // Allocate buffer
+        
         const ptr = wasm.tilson_alloc(data.length);
         assert(ptr !== 0, 'Failed to allocate memory');
         
-        // Create view into WASM memory
+        
         const memView = new Float64Array(
             wasm.__wasm.memory.buffer,
             ptr,
             data.length
         );
         
-        // Copy data into WASM memory
+        
         memView.set(data);
         
-        // Compute Tilson in-place
+        
         try {
             wasm.tilson_into(ptr, ptr, data.length, period, volumeFactor);
             
-            // Verify results match regular API
+            
             const regularResult = wasm.tilson_js(data, period, volumeFactor);
             for (let i = 0; i < data.length; i++) {
                 if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                    continue; // Both NaN is OK
+                    continue; 
                 }
                 assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                        `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
             }
         } finally {
-            // Always free memory
+            
             wasm.tilson_free(ptr, data.length);
         }
     });
@@ -595,11 +595,11 @@ test.describe('Tilson T3 Moving Average', () => {
         const vFactorEnd = 0.6;
         const vFactorStep = 0.6;
         
-        // Expected: periods [3, 5], vFactors [0.0, 0.6] = 4 combinations
+        
         const expectedRows = 4;
         const totalSize = expectedRows * data.length;
         
-        // Allocate buffers
+        
         const inPtr = wasm.tilson_alloc(data.length);
         const outPtr = wasm.tilson_alloc(totalSize);
         
@@ -607,11 +607,11 @@ test.describe('Tilson T3 Moving Average', () => {
         assert(outPtr !== 0, 'Failed to allocate output buffer');
         
         try {
-            // Copy data to input buffer
+            
             const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, data.length);
             inView.set(data);
             
-            // Run batch computation
+            
             const rows = wasm.tilson_batch_into(
                 inPtr, outPtr, data.length,
                 periodStart, periodEnd, periodStep,
@@ -620,7 +620,7 @@ test.describe('Tilson T3 Moving Average', () => {
             
             assert.strictEqual(rows, expectedRows, 'Should return correct number of rows');
             
-            // Verify at least that we have data
+            
             const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, totalSize);
             let hasNonNaN = false;
             for (let i = 0; i < totalSize; i++) {
@@ -640,13 +640,13 @@ test.describe('Tilson T3 Moving Average', () => {
         const period = 5;
         const volumeFactor = 0.7;
         
-        // Create context
+        
         const context = new wasm.TilsonContext(period, volumeFactor);
         
-        // Test warmup period
+        
         assert.strictEqual(context.get_warmup_period(), 6 * (period - 1), 'Warmup period should be 6*(period-1)');
         
-        // Feed data and verify warmup
+        
         const testData = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30];
         const results = [];
         
@@ -655,23 +655,23 @@ test.describe('Tilson T3 Moving Average', () => {
             results.push(result === undefined ? null : result);
         }
         
-        // Check warmup period
-        const warmup = 6 * (period - 1); // 24 for period=5
+        
+        const warmup = 6 * (period - 1); 
         for (let i = 0; i < warmup && i < results.length; i++) {
             assert(results[i] === null, `Should return null during warmup at index ${i}`);
         }
         
-        // Should have values after warmup
+        
         for (let i = warmup; i < results.length; i++) {
             assert(results[i] !== null && !isNaN(results[i]), `Should return valid value after warmup at index ${i}`);
         }
         
-        // Test reset
+        
         context.reset();
         const afterReset = context.update(10.0);
         assert(afterReset === null || afterReset === undefined, 'Should return null/undefined after reset');
         
-        // Test error handling
+        
         assert.throws(() => {
             new wasm.TilsonContext(0, 0.5);
         }, /Invalid period/, 'Should throw for invalid period');
@@ -682,7 +682,7 @@ test.describe('Tilson T3 Moving Average', () => {
     });
 });
 
-// Run tests if this file is executed directly
+
 if (import.meta.url === `file://${process.argv[1]}`) {
     console.log('Running Tilson T3 tests...');
 }

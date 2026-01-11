@@ -1,5 +1,5 @@
 /// Common test utilities for comparing binding outputs with Rust outputs
-use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
+use vector_ta::utilities::data_loader::{read_candles_from_csv, Candles};
 use std::error::Error;
 
 /// Test data holder that matches the structure used in Python/WASM tests
@@ -47,7 +47,7 @@ pub fn assert_array_close(actual: &[f64], expected: &[f64], rtol: f64, atol: f64
 
     for (i, (&a, &e)) in actual.iter().zip(expected.iter()).enumerate() {
         if a.is_nan() && e.is_nan() {
-            continue; // Both NaN is ok
+            continue; 
         }
 
         let diff = (a - e).abs();

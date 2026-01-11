@@ -1,13 +1,13 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::CudaTsf;
-use my_project::indicators::tsf::{
+use vector_ta::cuda::moving_averages::CudaTsf;
+use vector_ta::indicators::tsf::{
     tsf_batch_with_kernel, TsfBatchOutput, TsfBatchRange, TsfBuilder, TsfParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];
@@ -113,7 +113,7 @@ fn tsf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for col in 0..cols {
         let mut series = vec![f64::NAN; rows];

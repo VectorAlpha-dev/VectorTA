@@ -34,9 +34,9 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
 
-// ==================== PYTHON CUDA HANDLE (CAI v3 + DLPack) ====================
-// For CUDA-enabled Python builds, provide a VOSC-specific VRAM handle that keeps
-// the CUDA context alive and exposes both CAI v3 and DLPack v1.x.
+
+
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 mod vosc_python_cuda_handle {
     use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
@@ -858,9 +858,9 @@ impl VoscStream {
             0.0 // won't be used
         };
 
-        // ---- Add the new value into both running sums / NaN counters
+        
         if value.is_nan() {
-            // The new sample contributes a NaN to both windows immediately.
+            
             self.long_nan += 1;
             self.short_nan += 1;
         } else {
@@ -868,20 +868,20 @@ impl VoscStream {
             self.short_sum += value;
         }
 
-        // ---- Remove the sample that falls out of the long window (only after the long window filled)
+        
         if self.count >= L {
             if old_long.is_nan() {
-                // a previously-counted NaN leaves the window
+                
                 self.long_nan -= 1;
             } else {
                 self.long_sum -= old_long;
             }
         } else {
-            // We are still in long warmup; reduce the implicit "all-NaN" count by 1
+            
             self.long_nan -= 1;
         }
 
-        // ---- Remove the sample that falls out of the short window (only after the short window filled)
+        
         if self.count >= S {
             if old_short.is_nan() {
                 self.short_nan -= 1;
@@ -889,11 +889,11 @@ impl VoscStream {
                 self.short_sum -= old_short;
             }
         } else {
-            // We are still in short warmup; reduce the implicit "all-NaN" count by 1
+            
             self.short_nan -= 1;
         }
 
-        // ---- Commit: write new sample, advance head, bump count
+        
         unsafe {
             *self.buf.get_unchecked_mut(head) = value;
         }
@@ -903,26 +903,26 @@ impl VoscStream {
         }
         self.head = next;
 
-        // Bump count (saturating at L) and emit None until we have L samples total
+        
         if self.count < L {
             self.count += 1;
             if self.count < L {
-                // Still warming the long window -> no output yet
+                
                 return None;
             }
         }
 
-        // Short is guaranteed full if long is full (since S <= L).
+        
         debug_assert!(self.count >= S);
 
-        // If either window contains a NaN, the oscillator is NaN (matches batch semantics).
+        
         if self.long_nan != 0 || self.short_nan != 0 {
             return Some(f64::NAN);
         }
 
-        // Match the batch formula exactly to avoid rounding drift:
-        //   lavg = long_sum / L,  savg = short_sum / S
-        //   VOSC = 100 * (savg - lavg) / lavg
+        
+        
+        
         let lavg = self.long_sum * self.inv_long;
         let savg = self.short_sum * self.inv_short;
         Some(100.0 * (savg - lavg) / lavg)
@@ -1000,7 +1000,7 @@ pub fn vosc_batch_with_kernel(
     sweep: &VoscBatchRange,
     k: Kernel,
 ) -> Result<VoscBatchOutput, VoscError> {
-    // Batch SIMD underperforms vs. row-specific prefix-sum scalar; default to ScalarBatch.
+    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -1014,7 +1014,7 @@ pub fn vosc_batch_with_kernel(
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
-    // On stable builds (no nightly-avx), coerce to Scalar to avoid unreachable paths in benches
+    
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
         simd = Kernel::Scalar;
@@ -1171,7 +1171,7 @@ fn vosc_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Guard against rows * cols overflow before allocation
+    
     let _total = rows
         .checked_mul(cols)
         .ok_or(VoscError::InvalidRange {
@@ -1180,10 +1180,10 @@ fn vosc_batch_inner(
             step: sweep.short_period.2,
         })?;
 
-    // Use uninitialized memory with proper prefixes, matching ALMA pattern
+    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
+    
     let mut warmup_periods = Vec::with_capacity(combos.len());
     for c in &combos {
         let lp = c.long_period.unwrap();
@@ -1199,7 +1199,7 @@ fn vosc_batch_inner(
 
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to Vec<f64> from MaybeUninit
+    
     let values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
         let len = buf_mu.len();
@@ -1208,11 +1208,11 @@ fn vosc_batch_inner(
         Vec::from_raw_parts(ptr, len, cap)
     };
 
-    // Convert back to mutable slices for processing
+    
     let mut values = values;
 
-    // Shared prefix sums for all rows to avoid redundant sliding sums
-    // prefix[k] = sum(data[0..k]) with prefix[0] = 0, length = data.len() + 1
+    
+    
     let mut prefix = Vec::with_capacity(cols + 1);
     prefix.push(0.0f64);
     let mut acc = 0.0f64;
@@ -1333,7 +1333,7 @@ fn vosc_batch_inner_into(
         });
     }
 
-    // Initialize NaN prefixes in-place using the same helper ALMA uses.
+    
     let mut warm = Vec::with_capacity(combos.len());
     for c in &combos {
         let lp = c.long_period.unwrap();
@@ -1355,7 +1355,7 @@ fn vosc_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Shared prefix sums for all rows
+    
     let mut prefix = Vec::with_capacity(cols + 1);
     prefix.push(0.0f64);
     let mut acc = 0.0f64;
@@ -1364,7 +1364,7 @@ fn vosc_batch_inner_into(
         prefix.push(acc);
     }
 
-    // Row executor
+    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let s = combos[row].short_period.unwrap();
         let l = combos[row].long_period.unwrap();
@@ -1589,43 +1589,43 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
+        
         let test_params = vec![
-            VoscParams::default(), // short: 2, long: 5
+            VoscParams::default(), 
             VoscParams {
-                short_period: Some(1), // minimum viable
+                short_period: Some(1), 
                 long_period: Some(2),
             },
             VoscParams {
-                short_period: Some(1), // minimum short with larger long
+                short_period: Some(1), 
                 long_period: Some(5),
             },
             VoscParams {
-                short_period: Some(2), // small
+                short_period: Some(2), 
                 long_period: Some(10),
             },
             VoscParams {
-                short_period: Some(5), // medium
+                short_period: Some(5), 
                 long_period: Some(20),
             },
             VoscParams {
-                short_period: Some(10), // large
+                short_period: Some(10), 
                 long_period: Some(50),
             },
             VoscParams {
-                short_period: Some(20), // very large
+                short_period: Some(20), 
                 long_period: Some(100),
             },
             VoscParams {
-                short_period: Some(3), // edge case: close periods
+                short_period: Some(3), 
                 long_period: Some(5),
             },
             VoscParams {
-                short_period: Some(10), // edge case: equal ratio
+                short_period: Some(10), 
                 long_period: Some(10),
             },
             VoscParams {
-                short_period: Some(4), // specific combinations
+                short_period: Some(4), 
                 long_period: Some(12),
             },
             VoscParams {
@@ -1644,12 +1644,12 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue; 
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1702,7 +1702,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! generate_all_vosc_tests {
@@ -1751,7 +1751,7 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, (short_period, long_period))| {
-                // Skip invalid combinations
+                
                 if short_period > long_period {
                     return Ok(());
                 }
@@ -1766,8 +1766,8 @@ mod tests {
                 let VoscOutput { values: ref_out } =
                     vosc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Warmup period validation
-                // First (long_period - 1) values should be NaN
+                
+                
                 for i in 0..(long_period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1777,8 +1777,8 @@ mod tests {
                     );
                 }
 
-                // Property 2: Kernel consistency
-                // All kernels should produce identical results
+                
+                
                 for i in (long_period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1809,11 +1809,11 @@ mod tests {
                     );
                 }
 
-                // Property 3: Mathematical formula verification
-                // VOSC = 100 * ((short_avg - long_avg) / long_avg)
-                // Only verify for indices where we have full windows
+                
+                
+                
                 for i in long_period..data.len() {
-                    // For sliding window, we look at the most recent 'period' values
+                    
                     let short_start = i + 1 - short_period;
                     let long_start = i + 1 - long_period;
 
@@ -1835,8 +1835,8 @@ mod tests {
                     );
                 }
 
-                // Property 4: Zero oscillation for equal periods
-                // When short_period == long_period, VOSC should be 0
+                
+                
                 if short_period == long_period {
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
@@ -1848,8 +1848,8 @@ mod tests {
                     }
                 }
 
-                // Property 5: Constant volume stability
-                // If all volumes are the same, VOSC should be 0
+                
+                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
@@ -1919,18 +1919,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
+        
         let test_configs = vec![
-            // (short_start, short_end, short_step, long_start, long_end, long_step)
-            (1, 5, 1, 2, 10, 2),     // Small periods
-            (2, 10, 2, 5, 20, 5),    // Medium periods
-            (10, 20, 5, 20, 50, 10), // Large periods
-            (1, 3, 1, 3, 6, 1),      // Dense small range
-            (5, 15, 2, 10, 30, 5),   // Medium range with overlap
-            (2, 2, 0, 5, 25, 5),     // Static short, varying long
-            (1, 10, 3, 10, 10, 0),   // Varying short, static long
-            (3, 9, 3, 9, 27, 9),     // Specific ratio patterns
-            (1, 5, 1, 5, 5, 0),      // Edge case: converging to equal
+            
+            (1, 5, 1, 2, 10, 2),     
+            (2, 10, 2, 5, 20, 5),    
+            (10, 20, 5, 20, 50, 10), 
+            (1, 3, 1, 3, 6, 1),      
+            (5, 15, 2, 10, 30, 5),   
+            (2, 2, 0, 5, 25, 5),     
+            (1, 10, 3, 10, 10, 0),   
+            (3, 9, 3, 9, 27, 9),     
+            (1, 5, 1, 5, 5, 0),      
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in
@@ -1952,7 +1952,7 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
+                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2011,7 +2011,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(()) 
     }
 
     macro_rules! gen_batch_tests {
@@ -2040,7 +2040,7 @@ mod tests {
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_vosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use existing CSV candles and default VOSC params (volume source)
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let volume = candles
@@ -2049,10 +2049,10 @@ mod tests {
 
         let input = VoscInput::with_default_candles(&candles);
 
-        // Baseline via allocating API
+        
         let baseline = vosc(&input)?.values;
 
-        // Compute via no-allocation API
+        
         let mut out = vec![0.0f64; volume.len()];
         vosc_into(&input, &mut out)?;
 
@@ -2077,9 +2077,9 @@ mod tests {
     }
 }
 
-// ================================================================================================
-// Python Bindings
-// ================================================================================================
+
+
+
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vosc")]
@@ -2102,7 +2102,7 @@ pub fn vosc_py<'py>(
     };
     let input = VoscInput::from_slice(slice_in, params);
 
-    // Get Vec<f64> from Rust function and convert to NumPy with zero-copy
+    
     let result_vec: Vec<f64> = py
         .allow_threads(|| vosc_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2158,7 +2158,7 @@ pub fn vosc_batch_py<'py>(
         long_period: long_period_range,
     };
 
-    // Expand grid to know dimensions
+    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err("No valid parameter combinations"));
@@ -2170,20 +2170,20 @@ pub fn vosc_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow in vosc_batch_py"))?;
 
-    // Pre-allocate uninitialized NumPy array (acceptable for batch operations)
+    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Heavy work without the GIL
+    
     let combos = py
         .allow_threads(|| -> Result<Vec<VoscParams>, VoscError> {
-            // Resolve Kernel::Auto to a specific kernel
+            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            // Map batch kernel to regular kernel
+            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2191,12 +2191,12 @@ pub fn vosc_batch_py<'py>(
                 _ => kernel,
             };
 
-            // Use vosc_batch_inner_into to write directly to the pre-allocated buffer
+            
             vosc_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
+    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2219,7 +2219,7 @@ pub fn vosc_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vosc_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, short_period_range, long_period_range, device_id=0))]
@@ -2301,9 +2301,9 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
     })
 }
 
-// ============================================================================
-// WASM API
-// ============================================================================
+
+
+
 
 #[inline]
 pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Result<(), VoscError> {
@@ -2376,7 +2376,7 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
         }
     }
 
-    // Warmup NaNs
+    
     let warm = match first
         .checked_add(long_period)
         .and_then(|v| v.checked_sub(1))

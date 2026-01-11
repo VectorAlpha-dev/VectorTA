@@ -3,27 +3,27 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 pub struct OptimizeRequest {
     pub backend: Backend,
-    pub series: Option<Vec<f64>>,         // if None, use synthetic_len
+    pub series: Option<Vec<f64>>,         
     pub synthetic_len: Option<usize>,
     pub fast_period: (usize, usize, usize),
     pub slow_period: (usize, usize, usize),
-    pub fast_type: Option<String>,        // e.g., "alma", "ema", "sma" ... default alma
+    pub fast_type: Option<String>,        
     pub slow_type: Option<String>,
-    // Optional OHLCV data (for OHLC/volume-based indicators)
+    
     pub open: Option<Vec<f64>>,
     pub high: Option<Vec<f64>>,
     pub low: Option<Vec<f64>>,
-    pub close: Option<Vec<f64>>, // overrides series if provided
+    pub close: Option<Vec<f64>>, 
     pub volume: Option<Vec<f64>>,
-    pub timestamps: Option<Vec<i64>>,     // for VWAP and anchored calculations
-    // Optional per-indicator parameters (JSON object), e.g., { "phase": 0, "power": 2 }
+    pub timestamps: Option<Vec<i64>>,     
+    
     pub fast_params: Option<serde_json::Value>,
     pub slow_params: Option<serde_json::Value>,
-    pub anchor: Option<String>,           // for VWAP, e.g., "1d"
+    pub anchor: Option<String>,           
     pub offset: f64,
     pub sigma: f64,
     pub commission: f32,
-    pub metrics: usize, // number of metrics, default 5
+    pub metrics: usize, 
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]

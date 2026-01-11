@@ -22,14 +22,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -39,27 +39,27 @@ test.before(async () => {
 });
 
 test('Stoch partial params', () => {
-    // Test with default parameters - mirrors check_stoch_partial_params
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // Default params: fastk_period=14, slowk_period=3, slowk_ma_type="sma", 
-    // slowd_period=3, slowd_ma_type="sma"
+    
+    
     const result = wasm.stoch(high, low, close, 14, 3, "sma", 3, "sma");
     
-    assert.strictEqual(result.values.length, high.length * 2); // K and D concatenated
+    assert.strictEqual(result.values.length, high.length * 2); 
     assert.strictEqual(result.rows, 2);
     assert.strictEqual(result.cols, high.length);
 });
 
 test('Stoch accuracy', () => {
-    // Test Stoch matches expected values from Rust tests - mirrors check_stoch_accuracy
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // Expected values from Rust test
+    
     const expectedK = [
         42.51122827572717,
         40.13864479593807,
@@ -77,14 +77,14 @@ test('Stoch accuracy', () => {
     
     const result = wasm.stoch(high, low, close, 14, 3, "sma", 3, "sma");
     
-    // Extract K and D from flattened result
+    
     const k = result.values.slice(0, result.cols);
     const d = result.values.slice(result.cols);
     
     assert.strictEqual(k.length, close.length);
     assert.strictEqual(d.length, close.length);
     
-    // Check last 5 values match expected
+    
     const lastK = k.slice(-5);
     const lastD = d.slice(-5);
     
@@ -104,7 +104,7 @@ test('Stoch accuracy', () => {
 });
 
 test('Stoch default candles', () => {
-    // Test Stoch with default parameters - mirrors check_stoch_default_candles
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
@@ -114,7 +114,7 @@ test('Stoch default candles', () => {
 });
 
 test('Stoch zero period', () => {
-    // Test Stoch fails with zero period - mirrors check_stoch_zero_period
+    
     const high = new Float64Array([10.0, 11.0, 12.0]);
     const low = new Float64Array([9.0, 9.5, 10.5]);
     const close = new Float64Array([9.5, 10.6, 11.5]);
@@ -125,7 +125,7 @@ test('Stoch zero period', () => {
 });
 
 test('Stoch period exceeds length', () => {
-    // Test Stoch fails when period exceeds data length - mirrors check_stoch_period_exceeds_length
+    
     const high = new Float64Array([10.0, 11.0, 12.0]);
     const low = new Float64Array([9.0, 9.5, 10.5]);
     const close = new Float64Array([9.5, 10.6, 11.5]);
@@ -136,7 +136,7 @@ test('Stoch period exceeds length', () => {
 });
 
 test('Stoch all NaN', () => {
-    // Test Stoch fails with all NaN values - mirrors check_stoch_all_nan
+    
     const nanData = new Float64Array(20).fill(NaN);
     
     assert.throws(() => {
@@ -145,7 +145,7 @@ test('Stoch all NaN', () => {
 });
 
 test('Stoch empty input', () => {
-    // Test Stoch fails with empty input
+    
     const empty = new Float64Array([]);
     
     assert.throws(() => {
@@ -154,9 +154,9 @@ test('Stoch empty input', () => {
 });
 
 test('Stoch mismatched lengths', () => {
-    // Test Stoch fails with mismatched input lengths
+    
     const high = new Float64Array([10.0, 11.0, 12.0]);
-    const low = new Float64Array([9.0, 9.5]); // Different length
+    const low = new Float64Array([9.0, 9.5]); 
     const close = new Float64Array([9.5, 10.6, 11.5]);
     
     assert.throws(() => {
@@ -165,81 +165,81 @@ test('Stoch mismatched lengths', () => {
 });
 
 test('Stoch batch single parameter', () => {
-    // Test Stoch batch with single parameter set - mirrors check_batch_default_row
+    
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     
-    // Single parameter set (default values)
+    
     const result = wasm.stoch_batch(
         high, low, close,
-        14, 14, 0, // fastk_range
-        3, 3, 0,   // slowk_range  
-        "sma",     // slowk_ma_type
-        3, 3, 0,   // slowd_range
-        "sma"      // slowd_ma_type
+        14, 14, 0, 
+        3, 3, 0,   
+        "sma",     
+        3, 3, 0,   
+        "sma"      
     );
     
     assert.ok(result.values);
     assert.ok(result.combos);
-    assert.strictEqual(result.rows_per_combo, 2); // K and D
+    assert.strictEqual(result.rows_per_combo, 2); 
     assert.strictEqual(result.cols, close.length);
     
-    // Should have 1 combo
+    
     assert.strictEqual(result.combos.length, 1);
     
-    // Values should be [all K rows..., all D rows...]
-    // With 1 combo and 2 rows per combo = 2 total rows
+    
+    
     assert.strictEqual(result.values.length, 2 * close.length);
 });
 
 test('Stoch batch multiple parameters', () => {
-    // Test Stoch batch with parameter sweep
+    
     const high = new Float64Array(testData.high.slice(0, 100));
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
     
-    // Test with parameter sweep
+    
     const result = wasm.stoch_batch(
         high, low, close,
-        10, 20, 5,  // fastk_range: 10, 15, 20
-        2, 4, 1,    // slowk_range: 2, 3, 4
-        "sma",      // slowk_ma_type
-        2, 4, 1,    // slowd_range: 2, 3, 4
-        "sma"       // slowd_ma_type
+        10, 20, 5,  
+        2, 4, 1,    
+        "sma",      
+        2, 4, 1,    
+        "sma"       
     );
     
-    // Should have 3 * 3 * 3 = 27 parameter combinations
+    
     const expectedCombos = 3 * 3 * 3;
     assert.strictEqual(result.combos.length, expectedCombos);
     assert.strictEqual(result.rows_per_combo, 2);
     assert.strictEqual(result.cols, close.length);
     
-    // Total values = combos * rows_per_combo * cols
+    
     assert.strictEqual(result.values.length, expectedCombos * 2 * close.length);
 });
 
 test('Stoch different MA types', () => {
-    // Test Stoch with different MA types for smoothing
+    
     const high = new Float64Array(testData.high.slice(0, 100));
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
     
-    // Test with SMA (default)
+    
     const resultSMA = wasm.stoch(high, low, close, 14, 3, "sma", 3, "sma");
     const kSMA = resultSMA.values.slice(0, resultSMA.cols);
     const dSMA = resultSMA.values.slice(resultSMA.cols);
     
-    // Test with EMA
+    
     const resultEMA = wasm.stoch(high, low, close, 14, 3, "ema", 3, "ema");
     const kEMA = resultEMA.values.slice(0, resultEMA.cols);
     const dEMA = resultEMA.values.slice(resultEMA.cols);
     
-    // Results should be different
+    
     assert.strictEqual(kSMA.length, kEMA.length);
     assert.strictEqual(dSMA.length, dEMA.length);
     
-    // Values should differ after warmup
+    
     const warmup = 20;
     let kDiffCount = 0;
     let dDiffCount = 0;
@@ -257,7 +257,7 @@ test('Stoch different MA types', () => {
         }
     }
     
-    // At least some values should be different
+    
     assert.ok(kDiffCount > 0, "K values should differ between SMA and EMA");
     assert.ok(dDiffCount > 0, "D values should differ between SMA and EMA");
 });

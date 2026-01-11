@@ -214,16 +214,16 @@ impl CudaAtr {
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
-        // Inputs: 3×len f32; params per combo (periods i32, alphas f32, warms i32); outputs: combos×len f32.
+        
         let input_bytes = 3usize
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
         let params_bytes = n_combos
             .saturating_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
         let out_per_combo = len.saturating_mul(std::mem::size_of::<f32>());
-        let headroom = 64 * 1024 * 1024; // ~64MB
-                                         // Start from all combos and shrink until it fits.
-                                         // Start from all combos and shrink until it fits.
+        let headroom = 64 * 1024 * 1024; 
+                                         
+                                         
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
             let need = input_bytes
@@ -240,9 +240,9 @@ impl CudaAtr {
 
     #[inline]
     fn choose_seed_plan(periods: &[usize], _len: usize) -> SeedPlan {
-        // NOTE: Prefix2 is currently disabled: the existing prefix builder kernel
-        // (`exclusive_prefix_float2_from_tr`) is single-threaded and can dominate
-        // runtime for long series. Prefer TR-only (seed via reduction) or on-the-fly.
+        
+        
+        
         let n = periods.len();
         if n >= 2 {
             SeedPlan::TrOnly
@@ -258,11 +258,11 @@ impl CudaAtr {
         len: usize,
         fixed_input_bytes: usize,
     ) -> usize {
-        // Params per combo: period i32, alpha f32, warm i32
+        
         let params_bytes = n_combos
             .saturating_mul(std::mem::size_of::<i32>() * 2 + std::mem::size_of::<f32>());
         let out_per_combo = len.saturating_mul(std::mem::size_of::<f32>());
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024; 
         let mut chunk = n_combos.max(1);
         while chunk > 1 {
             let need = fixed_input_bytes
@@ -293,7 +293,7 @@ impl CudaAtr {
         }
         let first_valid = Self::first_valid_hlc(high, low, close)?;
 
-        // Expand parameter combos (length axis only)
+        
         let (start, end, step) = sweep.length;
         if start == 0 {
             return Err(CudaAtrError::InvalidInput("period must be > 0".into()));
@@ -324,7 +324,7 @@ impl CudaAtr {
 
         let n_combos = periods.len();
 
-        // Device params (shared across chunks)
+        
         let h_periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
         let h_alphas: Vec<f32> = periods.iter().map(|&p| 1.0f32 / (p as f32)).collect();
         let h_warms: Vec<i32> = periods
@@ -341,10 +341,10 @@ impl CudaAtr {
         let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
         let d_warms = DeviceBuffer::from_slice(&h_warms)?;
 
-        // Heuristic seed plan (no flags)
+        
         let plan = Self::choose_seed_plan(&periods, len);
 
-        // Upload inputs; may be dropped after TR/prefix build.
+        
         let input_elems = len
             .checked_mul(3)
             .ok_or_else(|| CudaAtrError::InvalidInput("input size overflow".into()))?;
@@ -360,17 +360,17 @@ impl CudaAtr {
         let mut d_close: Option<DeviceBuffer<f32>> =
             Some(DeviceBuffer::from_slice(close).map_err(CudaAtrError::Cuda)?);
 
-        // Precompute on device as needed
+        
         let mut d_tr: Option<DeviceBuffer<f32>> = None;
         let mut d_prefix2: Option<DeviceBuffer<[f32; 2]>> = None;
 
-        // Device functions
+        
         let k_batch = match self.module.get_function("atr_batch_unified_f32") {
             Ok(f) => f,
             Err(_e) => {
-                // Fallback to legacy kernels if unified symbol is absent
-                // Keep behavior compatible with older PTX
-                // Try prefix kernel first (legacy), then plain
+                
+                
+                
                 return self.atr_batch_dev_legacy(
                     &d_periods,
                     &d_alphas,
@@ -385,7 +385,7 @@ impl CudaAtr {
             }
         };
 
-        // Try to grab helper kernels; if not found, we can still run on-the-fly path
+        
         let k_tr = self.module.get_function("tr_from_hlc_f32").ok();
         let k_prefix = self
             .module
@@ -393,9 +393,9 @@ impl CudaAtr {
             .ok();
 
         if matches!(plan, SeedPlan::Prefix2 | SeedPlan::TrOnly) {
-            // Require TR kernel for these plans; if missing, fall back to on-the-fly
+            
             if let Some(k_tr_f) = k_tr {
-                // Allocate TR
+                
                 let tr_bytes = len
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| CudaAtrError::InvalidInput("tr buffer size overflow".into()))?;
@@ -403,7 +403,7 @@ impl CudaAtr {
                 let mut db_tr: DeviceBuffer<f32> =
                     unsafe { DeviceBuffer::uninitialized(len) }?;
 
-                // Launch tr_from_hlc_f32
+                
                 let block_tr: BlockSize = (256, 1, 1).into();
                 let grid_tr_x = ((len as u32) + 256 - 1) / 256;
                 let grid_tr: GridSize = (grid_tr_x.max(1), 1, 1).into();
@@ -429,7 +429,7 @@ impl CudaAtr {
 
                 if matches!(plan, SeedPlan::Prefix2) {
                     if let Some(k_pf) = k_prefix {
-                        // Exclusive prefix (float2) length len+1
+                        
                         let pfx_elems = len
                             .checked_add(1)
                             .ok_or_else(|| {
@@ -457,7 +457,7 @@ impl CudaAtr {
                             self.validate_launch(1, 1, 1, 1, 1, 1)?;
                             self.stream.launch(&k_pf, grid_pf, block_pf, 0, args)?;
                         }
-                        // We can drop H/L/C now to free VRAM
+                        
                         self.synchronize()?;
                         d_tr = Some(db_tr);
                         d_prefix2 = Some(db_pfx);
@@ -465,7 +465,7 @@ impl CudaAtr {
                         d_low = None;
                         d_close = None;
                     } else {
-                        // Prefix kernel missing; degrade to TR-only
+                        
                         self.synchronize()?;
                         d_tr = Some(db_tr);
                         d_high = None;
@@ -473,7 +473,7 @@ impl CudaAtr {
                         d_close = None;
                     }
                 } else {
-                    // TR-only
+                    
                     self.synchronize()?;
                     d_tr = Some(db_tr);
                     d_high = None;
@@ -483,7 +483,7 @@ impl CudaAtr {
             }
         }
 
-        // Fixed input bytes for chunking
+        
         let fixed_input_bytes = match (&d_tr, &d_prefix2) {
             (Some(_), Some(_)) => {
                 len * std::mem::size_of::<f32>() + (len + 1) * std::mem::size_of::<[f32; 2]>()
@@ -493,17 +493,17 @@ impl CudaAtr {
             _ => unreachable!(),
         };
 
-        // Chunk combos given current fixed inputs
+        
         let chunk = self.chunk_size_for_batch_with_inputs(n_combos, len, fixed_input_bytes);
 
-        // Launch unified batch kernel (pointers decide seed path)
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 64,
         };
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Output buffer (n_combos x len)
+        
         let out_elems = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaAtrError::InvalidInput("n_combos*len overflow".into()))?;
@@ -735,7 +735,7 @@ impl CudaAtr {
         Ok(())
     }
 
-    // Legacy fallback if unified symbol missing; keep API stable
+    
     fn atr_batch_dev_legacy(
         &self,
         d_periods: &DeviceBuffer<i32>,
@@ -748,10 +748,10 @@ impl CudaAtr {
         d_low: &mut Option<DeviceBuffer<f32>>,
         d_close: &mut Option<DeviceBuffer<f32>>,
     ) -> Result<DeviceArrayF32Atr, CudaAtrError> {
-        // Prefer old prefix kernel if available; else plain
+        
         if let Ok(func) = self.module.get_function("atr_batch_from_tr_prefix_f32") {
-            // Build TR+prefix on host would be required, but we avoid FP64: fall back to plain kernel
-            // to keep code simple here when unified is missing.
+            
+            
             drop(func);
         }
         let func = self
@@ -908,7 +908,7 @@ impl CudaAtr {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        // Prefer coalesced time-major kernel name if present, else fallback to legacy symbol.
+        
         let func = match self.module.get_function("atr_many_series_one_param_f32_tm_coalesced") {
             Ok(f) => f,
             Err(_) => self
@@ -916,12 +916,12 @@ impl CudaAtr {
                 .get_function("atr_many_series_one_param_f32")
                 .map_err(|_| CudaAtrError::MissingKernelSymbol { name: "atr_many_series_one_param_f32" })?,
         };
-        // Launch config: warp tiles of 32 series; each warp walks time in lockstep.
+        
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
-        block_x = (block_x / 32).max(1) * 32; // align to multiples of warps
+        block_x = (block_x / 32).max(1) * 32; 
         let warps_per_block = (block_x / 32) as usize;
         let series_tiles = (cols + 31) / 32;
         let grid_x = ((series_tiles + warps_per_block - 1) / warps_per_block).max(1) as u32;
@@ -981,7 +981,7 @@ impl CudaAtr {
             ));
         }
 
-        // Prefer coalesced time-major kernel name if present, else fallback to legacy symbol.
+        
         let func = match self.module.get_function("atr_many_series_one_param_f32_tm_coalesced") {
             Ok(f) => f,
             Err(_) => self
@@ -992,12 +992,12 @@ impl CudaAtr {
                 })?,
         };
 
-        // Launch config: warp tiles of 32 series; each warp walks time in lockstep.
+        
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
-        block_x = (block_x / 32).max(1) * 32; // align to multiples of warps
+        block_x = (block_x / 32).max(1) * 32; 
         let warps_per_block = (block_x / 32) as usize;
         let series_tiles = (cols + 31) / 32;
         let grid_x = ((series_tiles + warps_per_block - 1) / warps_per_block).max(1) as u32;
@@ -1035,8 +1035,8 @@ impl CudaAtr {
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaAtrError> { Ok(self.stream.synchronize()?) }
 
-// ---------------- Bench profiles ----------------
-// Exclude from test builds to avoid compiling heavy bench prep when running unit tests.
+
+
 
 }
 

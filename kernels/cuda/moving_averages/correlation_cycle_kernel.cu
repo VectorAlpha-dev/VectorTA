@@ -1,11 +1,11 @@
-// Correlation Cycle (Ehlers) CUDA kernels (FP32)
-//
-// Exports four series per parameter set: real, imag, angle, state.
-// We compute real/imag/angle in a first pass and the discrete state in a
-// second pass to avoid inter-thread ordering hazards across time.
-//
-// Batch layout: one series × many params (grid.y = combo index)
-// Many-series layout: time-major [rows x cols] with one fixed parameter.
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -20,12 +20,12 @@
 
 __device__ __forceinline__ float sanitize_nan(float x) { return isnan(x) ? 0.f : x; }
 
-// --------------------------- Batch: R/I/Angle -----------------------------
-// prices:        [series_len]
-// cos/sin_flat:  [n_combos * max_period]
-// periods:       [n_combos]
-// sums/sqrts:    [n_combos]
-// out_*:         [n_combos * series_len]
+
+
+
+
+
+
 extern "C" __global__ void correlation_cycle_batch_f32_ria(
     const float* __restrict__ prices,
     const float* __restrict__ cos_flat,
@@ -49,9 +49,9 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
 
     const int period   = periods[combo];
     const float n      = (float)period;
-    const int warm_ria = first_valid + period; // match CPU alignment
+    const int warm_ria = first_valid + period; 
 
-    // Per-combo constants (precomputed on host)
+    
     const float sum_cos = sum_cos_arr[combo];
     const float sum_sin = sum_sin_arr[combo];
     const float sqrt_t2 = sqrt_t2_arr[combo];
@@ -59,9 +59,9 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
     const int   base    = combo * series_len;
 
     extern __shared__ float sh[];
-    float* wcos = sh;             // [period]
-    float* wsin = sh + period;    // [period]
-    // Load weights for this combo into shared
+    float* wcos = sh;             
+    float* wsin = sh + period;    
+    
     const float* wcos_src = cos_flat + combo * max_period;
     const float* wsin_src = sin_flat + combo * max_period;
     for (int i = threadIdx.x; i < period; i += blockDim.x) {
@@ -79,14 +79,14 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
             float mean = 0.f, m2 = 0.f;
             float sum_xc = 0.f, sum_xs = 0.f;
             int k = 0;
-            // Window indexes are (t-1, t-2, ..., t-period)
+            
             #pragma unroll 4
             for (int j = 0; j < period; ++j) {
                 int idx = t - (j + 1);
                 float x = sanitize_nan(prices[idx]);
                 float c = wcos[j];
                 float s = wsin[j];
-                // Numerically stable one-pass variance (Welford): m2 = Σ (x-mean)^2
+                
                 ++k;
                 float delta = x - mean;
                 mean += delta / (float)k;
@@ -123,23 +123,23 @@ extern "C" __global__ void correlation_cycle_batch_f32_ria(
     }
 }
 
-// --------------------------- Batch: State pass -----------------------------
+
 extern "C" __global__ void correlation_cycle_state_batch_f32(
-    const float* __restrict__ angle_flat, // [n_combos * series_len]
-    const float* __restrict__ thresholds, // [n_combos]
-    const int*   __restrict__ periods,    // [n_combos]
+    const float* __restrict__ angle_flat, 
+    const float* __restrict__ thresholds, 
+    const int*   __restrict__ periods,    
     int series_len,
     int n_combos,
     int first_valid,
     int combo_offset,
-    float* __restrict__ out_state)        // [n_combos * series_len]
+    float* __restrict__ out_state)        
 {
     const int combo = combo_offset + blockIdx.y;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
     const float thr  = thresholds[combo];
-    const int warm_s = first_valid + period + 1; // first state index
+    const int warm_s = first_valid + period + 1; 
     const int base   = combo * series_len;
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
@@ -160,12 +160,12 @@ extern "C" __global__ void correlation_cycle_state_batch_f32(
     }
 }
 
-// -------------------- Many-series (time-major): R/I/Angle -----------------
-// time-major layout: rows (time) x cols (series)
+
+
 extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(
-    const float* __restrict__ prices_tm,   // [rows * cols]
-    const float* __restrict__ wcos,        // [period]
-    const float* __restrict__ wsin,        // [period]
+    const float* __restrict__ prices_tm,   
+    const float* __restrict__ wcos,        
+    const float* __restrict__ wsin,        
     const float  sum_cos,
     const float  sum_sin,
     const float  sqrt_t2,
@@ -173,19 +173,19 @@ extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(
     int cols,
     int rows,
     int period,
-    const int* __restrict__ first_valids,  // [cols]
-    float* __restrict__ out_real_tm,       // [rows * cols]
+    const int* __restrict__ first_valids,  
+    float* __restrict__ out_real_tm,       
     float* __restrict__ out_imag_tm,
     float* __restrict__ out_angle_tm)
 {
-    const int s = blockIdx.y * blockDim.y + threadIdx.y; // series
-    const int t0 = blockIdx.x * blockDim.x + threadIdx.x; // time
+    const int s = blockIdx.y * blockDim.y + threadIdx.y; 
+    const int t0 = blockIdx.x * blockDim.x + threadIdx.x; 
     if (s >= cols || t0 >= rows) return;
 
     const int warm_ria = first_valids[s] + period;
     const float n = (float)period;
     const int stride_t = gridDim.x * blockDim.x;
-    const int stride_s = gridDim.y * blockDim.y; // unused; we keep s fixed in this thread
+    const int stride_s = gridDim.y * blockDim.y; 
 
     for (int t = t0; t < rows; t += stride_t) {
         const int out_idx = t * cols + s;
@@ -233,15 +233,15 @@ extern "C" __global__ void correlation_cycle_many_series_one_param_f32_ria(
     }
 }
 
-// -------------------- Many-series (time-major): State pass ----------------
+
 extern "C" __global__ void correlation_cycle_state_many_series_one_param_f32(
-    const float* __restrict__ angle_tm,  // [rows * cols]
+    const float* __restrict__ angle_tm,  
     const float  threshold,
     const int* __restrict__ first_valids,
     int cols,
     int rows,
     int period,
-    float* __restrict__ out_state_tm)    // [rows * cols]
+    float* __restrict__ out_state_tm)    
 {
     const int s  = blockIdx.y * blockDim.y + threadIdx.y;
     const int t0 = blockIdx.x * blockDim.x + threadIdx.x;

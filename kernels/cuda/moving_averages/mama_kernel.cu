@@ -1,10 +1,10 @@
-// CUDA kernels for the MESA Adaptive Moving Average (MAMA).
-//
-// Each parameter combination (fast/slow limit pair) is evaluated sequentially
-// while keeping the price series resident on device. The recurrence matches the
-// scalar Rust implementation, including the 10-sample warmup window that remains
-// NaN in the outputs. FP32 storage is used for device buffers while the core
-// arithmetic promotes to FP64 to preserve numerical stability.
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -18,7 +18,7 @@ namespace {
 constexpr double PI_D = 3.14159265358979323846264338327950288;
 constexpr double RAD2DEG_D = 180.0 / PI_D;
 
-// --- helper: 8-deep shift register kept entirely in registers ---
+
 struct Shift8d {
     double r0, r1, r2, r3, r4, r5, r6, r7;
 
@@ -45,7 +45,7 @@ static __device__ __forceinline__ double hilbert_fma(double x0, double x2, doubl
     return fma(H0, x0, t);
 }
 
-// A non-FMA variant to better match CPU scalar code when fused ops are not used
+
 static __device__ __forceinline__ double hilbert_nfma(double x0, double x2, double x4, double x6) {
     const double H0 = 0.0962;
     const double H1 = 0.5769;
@@ -55,25 +55,25 @@ static __device__ __forceinline__ double hilbert_nfma(double x0, double x2, doub
 }
 
 static __device__ __forceinline__ double atan_fast_f64(double z) {
-    // Match Rust atan_fast exactly (FMA sequencing and no extra z* on the +t term).
+    
     const double C0 = 0.2447;
     const double C1 = 0.0663;
-    const double PIO4 = PI_D * 0.25; // FRAC_PI_4
-    const double PIO2 = PI_D * 0.5;  // FRAC_PI_2
+    const double PIO4 = PI_D * 0.25; 
+    const double PIO2 = PI_D * 0.5;  
 
     double a = fabs(z);
     if (a <= 1.0) {
-        // PIO4.mul_add(z, z.mul_add(a - 1.0, t))
-        double t = fma(C1, a, C0);                 // t = C1*a + C0
-        double inner = fma(z, (a - 1.0), t);       // z*(a-1) + t
-        return fma(PIO4, z, inner);                // PIO4*z + inner
+        
+        double t = fma(C1, a, C0);                 
+        double inner = fma(z, (a - 1.0), t);       
+        return fma(PIO4, z, inner);                
     } else {
-        // inv = 1/z; base = PIO4.mul_add(inv, inv.mul_add(|inv|-1.0, t))
+        
         double inv = 1.0 / z;
         double ai = fabs(inv);
-        double t = fma(C1, ai, C0);                // C1*|inv| + C0
-        double inner = fma(inv, (ai - 1.0), t);    // inv*(|inv|-1) + t
-        double base = fma(PIO4, inv, inner);       // PIO4*inv + inner
+        double t = fma(C1, ai, C0);                
+        double inner = fma(inv, (ai - 1.0), t);    
+        double base = fma(PIO4, inv, inner);       
         return (z > 0.0) ? (PIO2 - base) : (-PIO2 - base);
     }
 }
@@ -84,13 +84,13 @@ static __device__ __forceinline__ double clamp_double(double x, double lo, doubl
     return x;
 }
 
-} // namespace
+} 
 
-// Precompute the inverse delta-phase (1/dp) sequence for the MAMA recurrence.
-//
-// dp is derived from the Ehlers Hilbert-transform phase logic and is independent
-// of (fast_limit, slow_limit). In batch mode (one series × many params), we can
-// compute inv_dp once per series and reuse it across all parameter combos.
+
+
+
+
+
 extern "C" __global__
 void mama_inv_dp_f32(const float* __restrict__ prices,
                      int series_len,
@@ -98,7 +98,7 @@ void mama_inv_dp_f32(const float* __restrict__ prices,
                      float* __restrict__ out_inv_dp)
 {
     if (series_len <= 0) return;
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; // one sequential worker
+    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
 
     const float nanf32 = nanf("");
     int fv = first_valid;
@@ -192,8 +192,8 @@ void mama_inv_dp_f32(const float* __restrict__ prices,
     }
 }
 
-// Batch kernel for one series × many params using precomputed inv_dp.
-// One block per combo; warp 0 performs an affine-scan over time tiles of 32.
+
+
 extern "C" __global__
 void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
                                 const float* __restrict__ inv_dp,
@@ -235,13 +235,13 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
     const int nan_end = (warm < series_len ? warm : series_len);
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    // Fill [0, warm) with NaN once per row.
+    
     for (int i = threadIdx.x; i < nan_end; i += blockDim.x) {
         out_mama[base + static_cast<size_t>(i)] = nanf32;
         out_fama[base + static_cast<size_t>(i)] = nanf32;
     }
 
-    // Compatibility: if launched with < 1 warp, fall back to a sequential scan.
+    
     if (blockDim.x < 32) {
         if (threadIdx.x != 0) return;
         float prev_m = prices[fv];
@@ -268,7 +268,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
 
     if (threadIdx.x >= 32) return;
 
-    const unsigned lane = static_cast<unsigned>(threadIdx.x); // 0..31
+    const unsigned lane = static_cast<unsigned>(threadIdx.x); 
     const unsigned mask = 0xffffffffu;
 
     float prev_m = prices[fv];
@@ -291,9 +291,9 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
             B_m = alpha * x;
         }
 
-        // Inclusive warp scan: compose transforms (A,B) left-to-right.
-        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
-        // We want prefix up to lane: T_lane ∘ ... ∘ T_0.
+        
+        
+        
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A_m, offset);
             const float B_prev = __shfl_up_sync(mask, B_m, offset);
@@ -307,7 +307,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
 
         const float mama = __fmaf_rn(A_m, prev_m, B_m);
 
-        // FAMA uses MAMA output as its input series with half-alpha.
+        
         float A_f = 1.0f;
         float B_f = 0.0f;
         if (t < series_len) {
@@ -332,7 +332,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
             out_fama[base + static_cast<size_t>(t)] = fama;
         }
 
-        // Advance to next tile using the last valid lane.
+        
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         prev_m = __shfl_sync(mask, mama, last_lane);
@@ -355,10 +355,10 @@ void mama_batch_f32(const float* __restrict__ prices,
     const int stride = blockDim.x * gridDim.x;
     const float nanf32 = nanf("");
 
-    // Numerically strict path when there's exactly one combo: reproduce the original
-    // ring-buffer algorithm byte-for-byte to minimize divergence from CPU apply_slice.
+    
+    
     if (n_combos == 1) {
-        if (tid != 0) return; // single logical worker for strict path
+        if (tid != 0) return; 
         const int combo = 0;
 
         float* out_m_row = out_mama + combo * series_len;
@@ -375,7 +375,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         double fast = static_cast<double>(fast_limits[combo]);
         double slow = static_cast<double>(slow_limits[combo]);
         const float nn = nanf("");
-        // Initialize entire row to NaN (as original); we will overwrite valid tail
+        
         for (int i = 0; i < series_len; ++i) { out_m_row[i] = nn; out_f_row[i] = nn; }
         if (!(fast > 0.0) || !(slow > 0.0)) {
             return;
@@ -383,7 +383,7 @@ void mama_batch_f32(const float* __restrict__ prices,
 
         const int warm = fv + 10;
 
-        // Original power-of-two ring buffers (may spill, acceptable for combos==1)
+        
         constexpr int RING = 8;
         constexpr int MASK = RING - 1;
         double smooth_buf[RING];
@@ -504,7 +504,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         int fv = first_valid;
         if (fv < 0) fv = 0;
         if (fv >= series_len) {
-            // Entire row NaN if fv beyond series
+            
             for (int i = 0; i < series_len; ++i) { out_m_row[i] = nanf32; out_f_row[i] = nanf32; }
             continue;
         }
@@ -519,7 +519,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         const int warm = fv + 10;
 
         double seed_price = static_cast<double>(prices[fv]);
-        double p1 = seed_price, p2 = seed_price, p3 = seed_price; // legacy state (unused after switch)
+        double p1 = seed_price, p2 = seed_price, p3 = seed_price; 
 
         Shift8d smooth, detrender, i1r, q1r;
         smooth.seed(seed_price);
@@ -536,7 +536,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         double prev_im = 0.0;
         double prev_phase = 0.0;
 
-        // Fill [0, warm) with NaN once
+        
         const int nan_end = (warm < series_len ? warm : series_len);
         for (int i = 0; i < nan_end; ++i) { out_m_row[i] = nanf32; out_f_row[i] = nanf32; }
 
@@ -682,7 +682,7 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         double prev_im = 0.0;
         double prev_phase = 0.0;
 
-        // Fill [0, warm) with NaN prefix
+        
         const int nan_end = (warm < series_len ? warm : series_len);
         for (int t = 0; t < nan_end; ++t) {
             int idx = t * num_series + series_idx;
@@ -707,7 +707,7 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
             double x0, x2, x4, x6; smooth.taps(x0, x2, x4, x6);
 
             double mesa_mult = 0.075 * prev_mesa_period + 0.54;
-            // Use FMA path to mirror scalar mul_add ordering more closely
+            
             double dt_val = hilbert_fma(x0, x2, x4, x6) * mesa_mult;
             detrender.push(dt_val);
 

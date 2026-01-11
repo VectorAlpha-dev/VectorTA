@@ -76,7 +76,7 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
     }
 }
 
-// NAMA-specific device handle that keeps the CUDA context alive for the buffer's lifetime.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32PyNama {
@@ -857,7 +857,7 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Select kernel implementation
+    
     match (k, chosen) {
         (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -876,34 +876,34 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
 /// - `out.len()` must equal the input series length.
 #[cfg(not(feature = "wasm"))]
 pub fn nama_into(input: &NamaInput, out: &mut [f64]) -> Result<(), NamaError> {
-    // Use Kernel::Auto to mirror the default selection of the Vec-returning API
+    
     nama_into_slice(out, input, Kernel::Auto)
 }
 
-// ==================== STREAMING (O(1) UPDATE) ====================
+
 #[derive(Debug, Clone)]
 pub struct NamaStream {
     period: usize,
 
-    // Rings to overwrite oldest slot each tick
+    
     buf_src: Vec<f64>,
     buf_tr: Vec<f64>,
     head: usize,
     filled: bool,
 
-    // Last seen values (for TR and EMA update)
+    
     last_src: f64,
     last_close: f64,
     has_last_close: bool,
     last_out: f64,
     have_out: bool,
 
-    // O(1) window state
-    // - time: absolute index of current sample (monotone, used to age-out deque entries)
-    // - eff_sum: rolling sum of TRs inside the window (ignores NaN entries)
+    
+    
+    
     time: usize,
     eff_sum: f64,
-    // Monotone deques of (index, value) for window max/min
+    
     dq_max: VecDeque<(usize, f64)>,
     dq_min: VecDeque<(usize, f64)>,
 }
@@ -944,7 +944,7 @@ impl NamaStream {
         }
     }
 
-    // ---- internal helpers for monotone deques ----
+    
     #[inline(always)]
     fn dq_push_max(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = dq.back() {
@@ -978,39 +978,39 @@ impl NamaStream {
         }
     }
 
-    // Single-series streaming (degenerate TR on |Δsource|)
+    
     #[inline]
     pub fn update_source(&mut self, s: f64) -> Option<f64> {
-        // new TR uses previous source; first TR is NaN (ignored in sum) to match batch semantics
+        
         let tr_new = if self.last_src.is_nan() {
             f64::NAN
         } else {
             (s - self.last_src).abs()
         };
 
-        // outgoing TR (oldest slot to be overwritten)
+        
         let tr_old = self.buf_tr[self.head];
 
-        // write into rings
+        
         self.buf_src[self.head] = s;
         self.buf_tr[self.head] = tr_new;
         self.last_src = s;
 
-        // update deques with absolute index `t`
+        
         let t = self.time;
         self.time = self.time.wrapping_add(1);
 
         Self::dq_push_max(&mut self.dq_max, t, s);
         Self::dq_push_min(&mut self.dq_min, t, s);
 
-        // once we're filled, age out indices < window start (t + 1 - period)
+        
         if self.filled {
             let win_start = t + 1 - self.period;
             Self::dq_pop_old(&mut self.dq_max, win_start);
             Self::dq_pop_old(&mut self.dq_min, win_start);
         }
 
-        // O(1) rolling sum of TRs (ignore NaN just like the batch warmup)
+        
         if tr_old.is_finite() {
             self.eff_sum -= tr_old;
         }
@@ -1018,18 +1018,18 @@ impl NamaStream {
             self.eff_sum += tr_new;
         }
 
-        // finalize position / warmup detection
+        
         self.advance();
         if !self.filled {
             return None;
         }
 
-        // compute alpha and EMA-style update
+        
         let hi = self.dq_max.front().map(|&(_, v)| v).unwrap_or(s);
         let lo = self.dq_min.front().map(|&(_, v)| v).unwrap_or(s);
         let range = hi - lo;
         let alpha = if self.eff_sum != 0.0 {
-            // micro-opt: avoid divide in hot path
+            
             let inv = self.eff_sum.recip();
             range * inv
         } else {
@@ -1037,10 +1037,10 @@ impl NamaStream {
         };
 
         let y = if self.have_out {
-            // y = prev_y + alpha * (x - prev_y)
+            
             (s - self.last_out).mul_add(alpha, self.last_out)
         } else {
-            // first output right after warmup matches batch: alpha * x
+            
             alpha * s
         };
         self.last_out = y;
@@ -1048,7 +1048,7 @@ impl NamaStream {
         Some(y)
     }
 
-    // Full OHLC streaming TR (Wilder)
+    
     #[inline]
     pub fn update_ohlc(
         &mut self,
@@ -1057,7 +1057,7 @@ impl NamaStream {
         low: f64,
         close_prev: Option<f64>,
     ) -> Option<f64> {
-        // choose prevClose if available, else use stored one; if neither, TR = high - low
+        
         let tr_new = if self.has_last_close || close_prev.is_some() {
             let prev = close_prev.unwrap_or(self.last_close);
             let hl = high - low;
@@ -1072,15 +1072,15 @@ impl NamaStream {
             self.has_last_close = true;
         }
 
-        // outgoing TR (slot to be overwritten)
+        
         let tr_old = self.buf_tr[self.head];
 
-        // write rings
+        
         self.buf_src[self.head] = src;
         self.buf_tr[self.head] = tr_new;
         self.last_src = src;
 
-        // update deques @ index t
+        
         let t = self.time;
         self.time = self.time.wrapping_add(1);
 
@@ -1126,7 +1126,7 @@ impl NamaStream {
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Clone, Debug)]
 pub struct NamaBatchRange {
     pub period: (usize, usize, usize),
@@ -1217,7 +1217,7 @@ fn expand_grid(r: &NamaBatchRange) -> Vec<NamaParams> {
             }
         }
     } else {
-        // reversed bounds supported: descend by step
+        
         let mut cur = s;
         while cur >= e {
             vals.push(cur);
@@ -1226,9 +1226,9 @@ fn expand_grid(r: &NamaBatchRange) -> Vec<NamaParams> {
             if cur == 0 && e > 0 { break; }
             if cur == vals.last().copied().unwrap_or(usize::MAX) { break; }
         }
-        // ensure last element is e if aligned
+        
         if vals.last().copied() != Some(e) {
-            // leave as-is; alignment by step may not hit exactly e
+            
         }
     }
     vals
@@ -1242,7 +1242,7 @@ pub fn nama_batch_with_kernel(
     sweep: &NamaBatchRange,
     k: Kernel,
 ) -> Result<NamaBatchOutput, NamaError> {
-    // Reject explicit non-batch kernels to match other indicators' behavior
+    
     match k {
         Kernel::Avx2 | Kernel::Avx512 | Kernel::Scalar => {
             return Err(NamaError::InvalidKernelForBatch(k));
@@ -1274,7 +1274,7 @@ fn nama_batch_inner(
         return Err(NamaError::EmptyInputData);
     }
     let rows = combos.len();
-    // Guard allocation sizes (rows * cols)
+    
     if rows == 0 {
         return Err(NamaError::InvalidRange {
             start: sweep.period.0,
@@ -1313,17 +1313,17 @@ fn nama_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Precompute degenerate TR once for the slice (no OHLC in batch slice API)
+    
     let mut tr = vec![0.0f64; cols];
     if cols > first {
-        // first < cols guaranteed earlier
+        
         tr[first] = 0.0;
         for j in (first + 1)..cols {
             tr[j] = (data[j] - data[j - 1]).abs();
         }
     }
 
-    // fill rows; parallelize when not wasm
+    
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
@@ -1331,7 +1331,7 @@ fn nama_batch_inner(
             .zip(combos.par_iter())
             .try_for_each(|(row_slice, prm)| -> Result<(), NamaError> {
                 let period = prm.period.unwrap();
-                // warmup prefix is already initialized by init_matrix_prefixes
+                
                 nama_core_with_tr(data, period, first, &tr, row_slice);
                 Ok(())
             })?;
@@ -1359,7 +1359,7 @@ fn nama_batch_inner(
     })
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "nama")]
 #[pyo3(signature = (data, period, kernel=None))]
@@ -1528,11 +1528,11 @@ pub fn nama_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32PyNama { inner, _ctx: ctx, _device_id: dev_id })
 }
 
-// ==================== WASM BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub fn nama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-    // Check for empty data first, before period validation
+    
     if data.is_empty() {
         return Err(JsValue::from_str("Input data slice is empty"));
     }
@@ -1667,7 +1667,7 @@ pub fn nama_batch_into(
     }
 }
 
-// ==================== TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1728,10 +1728,10 @@ mod tests {
         };
     }
 
-    // Test functions
+    
     fn check_nama_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Use CSV data like ALMA tests
+        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1739,16 +1739,16 @@ mod tests {
         let input = NamaInput::from_candles(&candles, "close", params);
         let result = nama_with_kernel(&input, kernel)?;
 
-        // User's reference values (note: shifted by 1 position from our calculation)
-        // These are the values you provided:
-        // 59,309.14340744, 59,304.88975909, 59,283.51109653, 59,243.52850894, 59,228.86200178
-        // Our calculation gives:
+        
+        
+        
+        
         let expected_last_five = [
-            59304.88975909, // matches your 2nd value
-            59283.51109653, // matches your 3rd value
-            59243.52850894, // matches your 4th value
-            59228.86200178, // matches your 5th value
-            59137.33546742, // our additional value
+            59304.88975909, 
+            59283.51109653, 
+            59243.52850894, 
+            59228.86200178, 
+            59137.33546742, 
         ];
 
         let start = result.values.len().saturating_sub(5);
@@ -1767,27 +1767,27 @@ mod tests {
         Ok(())
     }
 
-    // Parity test for native into API (no allocations)
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_nama_into_matches_api() {
-        // Build a small but non-trivial input with a NaN prefix
+        
         let n = 256usize;
         let mut data = vec![0.0f64; n];
         for i in 0..n {
             let x = (i as f64 * 0.37).sin() * 10.0 + (i % 7) as f64 * 0.1;
             data[i] = x;
         }
-        // Introduce NaN warmup prefix to exercise first-valid handling
+        
         data[0] = f64::NAN;
         data[1] = f64::NAN;
 
         let input = NamaInput::from_slice(&data, NamaParams::default());
 
-        // Baseline via Vec-returning API
+        
         let baseline = nama(&input).expect("baseline computation failed").values;
 
-        // Preallocate output and compute via into API
+        
         let mut out = vec![0.0f64; n];
         nama_into(&input, &mut out).expect("into computation failed");
 
@@ -1821,7 +1821,7 @@ mod tests {
         let output = nama_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
 
-        // Verify last 5 values match expected
+        
         let expected_last_five = [
             59304.88975909,
             59283.51109653,
@@ -1951,7 +1951,7 @@ mod tests {
         let params = NamaParams { period: Some(5) };
         let input = NamaInput::from_slice(&data, params);
         let result = nama_with_kernel(&input, kernel);
-        // Should handle infinity gracefully
+        
         assert!(result.is_ok());
         Ok(())
     }
@@ -1963,12 +1963,12 @@ mod tests {
             112.0, 114.0, 113.0, 115.0,
         ];
 
-        // Batch calculation
+        
         let params = NamaParams { period: Some(5) };
         let input = NamaInput::from_slice(&data, params);
         let batch_result = nama_with_kernel(&input, kernel)?;
 
-        // Streaming calculation
+        
         let mut stream = NamaStream::try_new(params)?;
         let mut stream_values = Vec::new();
 
@@ -1980,8 +1980,8 @@ mod tests {
             }
         }
 
-        // Compare results (streaming should match batch after warmup)
-        let warmup = 4; // first + period - 1 = 0 + 5 - 1 = 4
+        
+        let warmup = 4; 
         for i in warmup..data.len() {
             let batch_val = batch_result.values[i];
             let stream_val = stream_values[i];
@@ -2017,7 +2017,7 @@ mod tests {
         Ok(())
     }
 
-    // Batch tests
+    
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 128];
@@ -2041,17 +2041,17 @@ mod tests {
             .period_range(10, 30, 5)
             .apply_candles(&c, "close")?;
 
-        assert_eq!(output.rows, 5); // (30-10)/5 + 1 = 5
+        assert_eq!(output.rows, 5); 
         assert_eq!(output.cols, c.close.len());
 
-        // Verify each row has proper warmup
+        
         for (i, combo) in output.combos.iter().enumerate() {
             let period = combo.period.unwrap();
             let row_start = i * output.cols;
             let row = &output.values[row_start..row_start + output.cols];
 
-            // Check warmup period
-            let warmup = period - 1; // first=0, so warmup = 0 + period - 1
+            
+            let warmup = period - 1; 
             for j in 0..warmup {
                 assert!(
                     row[j].is_nan(),
@@ -2121,7 +2121,7 @@ mod tests {
         };
     }
 
-    // Generate all test variants
+    
     generate_all_nama_tests!(
         check_nama_accuracy,
         check_nama_default_candles,
@@ -2150,7 +2150,7 @@ mod tests {
         use crate::utilities::data_loader::read_candles_from_csv;
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        // single
+        
         let out = nama_with_kernel(&NamaInput::with_default_candles(&c), Kernel::Scalar)?.values;
         for (i, &v) in out.iter().enumerate() {
             if v.is_nan() {
@@ -2161,7 +2161,7 @@ mod tests {
             assert_ne!(b, 0x22222222_22222222, "matrix poison at {i}");
             assert_ne!(b, 0x33333333_33333333, "uninit poison at {i}");
         }
-        // batch
+        
         let b = NamaBatchBuilder::new()
             .period_range(5, 10, 1)
             .apply_candles(&c, "close")?;

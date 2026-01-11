@@ -1,22 +1,22 @@
-// CUDA kernels for NATR (Normalized Average True Range)
-// Optimized for FP32 throughput with compensated arithmetic (no FP64 in hot path)
-//
-// Math: NATR = (ATR / close) * 100, where ATR uses Wilder smoothing
-// with warmup initialized as the arithmetic mean of True Range over the first
-// full window [first_valid, first_valid + period - 1].
-//
-// Batch kernel (one series × many params):
-// - Each block handles one parameter row (period)
-// - Threads cooperatively compute the warmup TR sum using a block-wide reduction
-//   with intrathread compensated partials
-// - A single thread runs the sequential Wilder recurrence (compensated FP32)
-// - Optional helper kernel can precompute inv_close100[t] = 100/close[t]
-//   for sharing across rows (not required for correctness)
-//
-// Many-series kernel (time‑major):
-// - Warp-per-series mapping, identical structure to wilders_many_series
-// - TR is computed on-the-fly from H/L/close
-// - Sequential Wilder recurrence is compensated FP32 in lane 0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -25,7 +25,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-// -------------------- Reductions (borrowed from Wilder kernels) --------------------
+
 static __forceinline__ __device__ float warp_reduce_sum(float v) {
     unsigned mask = 0xFFFFFFFFu;
     #pragma unroll
@@ -45,7 +45,7 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
     float block_sum = 0.0f;
     if (wid == 0 && lane == 0) {
         const int num_warps = (blockDim.x + warpSize - 1) / warpSize;
-        // Kahan-style accumulation across warp partials for improved stability
+        
         float c = 0.0f;
         #pragma unroll 1
         for (int i = 0; i < num_warps; ++i) {
@@ -56,29 +56,29 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         }
         block_sum += c;
     }
-    // Only wid==0,lane==0 carries a valid result in our callers
+    
     return (wid == 0 && lane == 0) ? block_sum : 0.0f;
 }
 
-// -------------------- Helpers --------------------
+
 __device__ __forceinline__ float dev_nan() { return __int_as_float(0x7fffffff); }
 
-// Return 100.0f / close, or NaN if close invalid/zero.
+
 __device__ __forceinline__ float safe_scale_100_over_close(float c) {
     return (isfinite(c) && c != 0.0f) ? (100.0f / c) : dev_nan();
 }
 
-// Compensated EMA update for: atr <- atr + alpha*(x - atr)
+
 __device__ __forceinline__ void ema_update_kahan(float& atr, float& c, float alpha, float x) {
-    // y = alpha * (x - (atr + c)) ; t = atr + y ; c = (t - atr) - y ; atr = t
+    
     float y = __fmaf_rn(alpha, x - (atr + c), 0.0f);
     float t = atr + y;
     c = (t - atr) - y;
     atr = t;
 }
 
-// -------------------- (Optional) Precompute inv_close100 --------------------
-// inv_close100[t] = 100.0f / close[t], or NaN if close[t] invalid/zero.
+
+
 extern "C" __global__ void natr_make_inv_close100(
     const float* __restrict__ close, int len, float* __restrict__ inv_close100)
 {
@@ -88,17 +88,17 @@ extern "C" __global__ void natr_make_inv_close100(
     }
 }
 
-// -------------------- Batch: one series × many params --------------------
 
-// Inputs:
-//  - tr:    True Range per time (length=len). Precomputed on host.
-//  - close: Close price per time (length=len).
-//  - periods: array of periods (length=n_combos)
-//  - series_len, first_valid, n_combos
-// Output:
-//  - out: row-major [n_combos, len]
-// Backward-compatible signature used by Rust wrapper.
-// This variant computes 100/close on the fly inside the kernel.
+
+
+
+
+
+
+
+
+
+
 extern "C" __global__ void natr_batch_f32(
     const float* __restrict__ tr,
     const float* __restrict__ close,
@@ -117,7 +117,7 @@ extern "C" __global__ void natr_batch_f32(
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    // 1) NaN-fill output so it's well-defined.
+    
     if (first_valid >= series_len || warm >= series_len) {
         for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
             out[base + idx] = dev_nan();
@@ -125,13 +125,13 @@ extern "C" __global__ void natr_batch_f32(
         return;
     }
 
-    // Only fill the warmup prefix. The computed region is written once below.
+    
     for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = dev_nan();
     }
     __syncthreads();
 
-    // 2) Accumulate warmup TR sum across threads (intrathread Kahan, then block reduce)
+    
     const int start = first_valid;
     float local_sum = 0.0f;
     float local_c   = 0.0f;
@@ -142,15 +142,15 @@ extern "C" __global__ void natr_batch_f32(
         local_c = (t - local_sum) - y;
         local_sum = t;
     }
-    local_sum += local_c; // fold compensation back
+    local_sum += local_c; 
     const float sum_f = block_reduce_sum(local_sum);
 
-    if (threadIdx.x != 0) return; // single-thread sequential recurrence
+    if (threadIdx.x != 0) return; 
 
     const double inv_p = 1.0 / static_cast<double>(period);
     double atr = static_cast<double>(sum_f) * inv_p;
 
-    // 3) Emit warm value and run sequential Wilder recurrence
+    
     {
         float c = close[warm];
         float scale = safe_scale_100_over_close(c);
@@ -159,18 +159,18 @@ extern "C" __global__ void natr_batch_f32(
 
     for (int t = warm + 1; t < series_len; ++t) {
         const double trv = static_cast<double>(tr[t]);
-        atr = (trv - atr) * inv_p + atr; // FMA-friendly form
+        atr = (trv - atr) * inv_p + atr; 
         float c = close[t];
         float scale = safe_scale_100_over_close(c);
         out[base + t] = (scale == scale) ? static_cast<float>(atr * static_cast<double>(scale)) : dev_nan();
     }
 }
 
-// Optimized batch variant that uses a precomputed, shared scale vector
-// inv_close100[t] = 100.0f / close[t]. This saves per-row divisions.
+
+
 extern "C" __global__ void natr_batch_f32_with_inv(
     const float* __restrict__ tr,
-    const float* __restrict__ inv_close100, // length = series_len
+    const float* __restrict__ inv_close100, 
     const int*   __restrict__ periods,
     int series_len,
     int first_valid,
@@ -229,14 +229,14 @@ extern "C" __global__ void natr_batch_f32_with_inv(
     }
 }
 
-// -------------------- Batch: warp-coalesced IO (one series × many params) --------------------
-//
-// This kernel keeps the exact same sequential Wilder recurrence as the plain batch kernel,
-// but uses one warp per row to coalesce global loads/stores. Lane 0 performs the recurrence
-// while all lanes participate in IO.
-//
-// - blockDim.x must be exactly 32
-// - output is written once: warmup prefix is NaN, then all t>=warm are computed
+
+
+
+
+
+
+
+
 extern "C" __global__ void natr_batch_warp_io_f32(
     const float* __restrict__ tr,
     const float* __restrict__ close,
@@ -270,7 +270,7 @@ extern "C" __global__ void natr_batch_warp_io_f32(
         out[base + idx] = dev_nan();
     }
 
-    // Seed mean over first TR window (warp reduction is sufficient with one warp).
+    
     const int start = first_valid;
     float local_sum = 0.0f;
     float local_c   = 0.0f;
@@ -329,7 +329,7 @@ extern "C" __global__ void natr_batch_warp_io_f32(
 
 extern "C" __global__ void natr_batch_warp_io_f32_with_inv(
     const float* __restrict__ tr,
-    const float* __restrict__ inv_close100, // length = series_len
+    const float* __restrict__ inv_close100, 
     const int*   __restrict__ periods,
     int series_len,
     int first_valid,
@@ -416,9 +416,9 @@ extern "C" __global__ void natr_batch_warp_io_f32_with_inv(
     }
 }
 
-// -------------------- Many-series × one param (time-major) --------------------
 
-// time-major indexing: arr[t * num_series + s]
+
+
 extern "C" __global__ void natr_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
@@ -451,7 +451,7 @@ extern "C" __global__ void natr_many_series_one_param_f32(
             continue;
         }
 
-        const int warm_end = fv + period; // exclusive end
+        const int warm_end = fv + period; 
         if (warm_end > series_len) {
             for (int t = lane; t < series_len; t += warpSize) {
                 out_tm[t * stride + s] = dev_nan();
@@ -464,7 +464,7 @@ extern "C" __global__ void natr_many_series_one_param_f32(
             out_tm[t * stride + s] = dev_nan();
         }
 
-        // Warmup: sum TR over [fv, warm_end) with intrawarp Kahan partials
+        
         float local = 0.0f, csum = 0.0f;
         #pragma unroll 1
         for (int k = lane; k < period; k += warpSize) {

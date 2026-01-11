@@ -189,7 +189,7 @@ test('VAMA batch single parameter set', () => {
     assert.strictEqual(result.values.length, close.length);
     assert.strictEqual(result.combos.length, 1);
 
-    // Batch path uses unsmoothed params (smoothing=false)
+    
     const single = wasm.vama_js(close, 21, 13, false, 3, 5);
     const row = result.values.slice(0, close.length);
     for (let i = 0; i < close.length; i++) {
@@ -201,8 +201,8 @@ test('VAMA batch single parameter set', () => {
 test('VAMA batch multiple parameters', () => {
     const close = new Float64Array(testData.close.slice(0, 256));
     const config = {
-        base_period_range: [20, 30, 5], // 20, 25, 30
-        vol_period_range: [10, 14, 2],  // 10, 12, 14
+        base_period_range: [20, 30, 5], 
+        vol_period_range: [10, 14, 2],  
     };
 
     const result = wasm.vama_batch(close, config);

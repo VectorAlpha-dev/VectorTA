@@ -1,16 +1,16 @@
-// Integration tests for CUDA WTO kernels
 
-use my_project::indicators::wto::{
+
+use vector_ta::indicators::wto::{
     wto_batch_all_outputs_with_kernel, WtoBatchRange, WtoBuilder, WtoParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::{CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
+use vector_ta::cuda::{CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
 
 fn approx_ratio(a: f64, b: f64, tol: f64) -> f64 {
     if a.is_nan() && b.is_nan() {
@@ -54,7 +54,7 @@ fn wto_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         average: (18, 30, 4),
     };
 
-    // Match CUDA input domain (FP32) before computing CPU reference.
+    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let data_cpu: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
 

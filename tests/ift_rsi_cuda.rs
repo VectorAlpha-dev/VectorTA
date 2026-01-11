@@ -1,17 +1,17 @@
-// Integration tests for CUDA IFT RSI kernels
 
-use my_project::indicators::ift_rsi::{
+
+use vector_ta::indicators::ift_rsi::{
     ift_rsi_batch_with_kernel, ift_rsi_with_kernel, IftRsiBatchRange, IftRsiBuilder, IftRsiInput,
     IftRsiParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::oscillators::CudaIftRsi;
+use vector_ta::cuda::oscillators::CudaIftRsi;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -61,7 +61,7 @@ fn ift_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    // FP32 compensated path on GPU differs from CPU f64; allow headroom for batch.
+    
     let tol = 3e-2;
     for idx in 0..host.len() {
         assert!(
@@ -88,7 +88,7 @@ fn ift_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            // stagger validity per series
+            
             let x = (r as f64) + (s as f64) * 0.2;
             data_tm[r * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
@@ -97,7 +97,7 @@ fn ift_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let rsi_p = 5usize;
     let wma_p = 9usize;
 
-    // CPU baseline per series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

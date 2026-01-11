@@ -100,19 +100,19 @@ pub struct FfiOverheadProfile {
 impl FfiOverheadProfile {
     /// Profile FFI overhead for a given data size
     pub fn profile(data_size: usize, iterations: usize) -> Self {
-        // Generate test data
+        
         let data: Vec<f64> = (0..data_size).map(|i| i as f64).collect();
 
-        // Measure pure call overhead
+        
         let call_duration = measure_ffi_overhead(iterations);
         let call_overhead_ns = call_duration.as_nanos() as f64 / iterations as f64;
 
-        // Measure marshalling overhead
+        
         let marshalling_duration = measure_marshalling_overhead(&data, iterations);
         let marshalling_overhead_ns = marshalling_duration.as_nanos() as f64 / iterations as f64;
         let marshalling_overhead_ns_per_kb = marshalling_overhead_ns / (data_size as f64 * 8.0 / 1024.0);
 
-        // Measure validation overhead (already includes call overhead, so subtract it)
+        
         let validation_duration = measure_validation_overhead(&data, iterations);
         let validation_total_ns = validation_duration.as_nanos() as f64 / iterations as f64;
         let validation_overhead_ns = (validation_total_ns - call_overhead_ns).max(0.0);
@@ -148,13 +148,13 @@ mod tests {
     fn test_ffi_overhead_measurement() {
         let profile = FfiOverheadProfile::profile(1000, 10000);
 
-        // Verify all components are positive
+        
         assert!(profile.call_overhead_ns > 0.0);
         assert!(profile.marshalling_overhead_ns_per_kb > 0.0);
         assert!(profile.validation_overhead_ns >= 0.0);
 
-        // Test overhead estimation
-        let overhead = profile.estimate_overhead(8000); // 1000 f64s = 8000 bytes
+        
+        let overhead = profile.estimate_overhead(8000); 
         assert!(overhead.as_nanos() > 0);
     }
 
@@ -164,7 +164,7 @@ mod tests {
         let measured = Duration::from_micros(100);
         let compensated = profile.compensate(measured, 8000);
 
-        // Compensated should be less than measured
+        
         assert!(compensated <= measured);
     }
 }

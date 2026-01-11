@@ -691,7 +691,7 @@ pub fn range_filter_scalar(
         return Ok(());
     }
 
-    // EMA constants hoisted to keep arithmetic identical but reduce per-iter ops
+    
     let alpha_ac = 2.0 / (range_period as f64 + 1.0);
     let one_minus_alpha_ac = 1.0 - alpha_ac;
     let alpha_range = if smooth_range {
@@ -701,28 +701,28 @@ pub fn range_filter_scalar(
     };
     let one_minus_alpha_range = 1.0 - alpha_range;
 
-    // Running state
+    
     let mut ac_ema: f64 = 0.0;
     let mut ac_initialized = false;
     let mut range_ema: f64 = 0.0;
     let mut range_initialized = false;
 
-    // Seed filter and prev price from the first valid element
+    
     let mut prev_filter = if first < n { data[first] } else { f64::NAN };
     let mut prev_price = prev_filter;
 
-    // Nothing to do if there isn't a next element to form a difference
+    
     if first + 1 >= n {
         return Ok(());
     }
 
-    // Start from the element after the first valid price to avoid an i==first branch
+    
     if !smooth_range {
-        // No extra range smoothing path: simpler hot loop
+        
         for i in (first + 1)..n {
             let price = data[i];
 
-            // Average Change EMA update (Donovan Wall style seeding)
+            
             let d = price - prev_price;
             let abs_change = d.abs();
             if !abs_change.is_nan() {
@@ -741,7 +741,7 @@ pub fn range_filter_scalar(
 
             let range = ac_ema * range_size;
 
-            // Clamp previous filter into [price - range, price + range]
+            
             let min_b = price - range;
             let max_b = price + range;
             let current = prev_filter.clamp(min_b, max_b);
@@ -754,11 +754,11 @@ pub fn range_filter_scalar(
             prev_price = price;
         }
     } else {
-        // With range smoothing path
+        
         for i in (first + 1)..n {
             let price = data[i];
 
-            // Average Change EMA update (Donovan Wall style seeding)
+            
             let d = price - prev_price;
             let abs_change = d.abs();
             if !abs_change.is_nan() {
@@ -784,7 +784,7 @@ pub fn range_filter_scalar(
             }
             range = range_ema;
 
-            // Clamp previous filter into [price - range, price + range]
+            
             let min_b = price - range;
             let max_b = price + range;
             let current = prev_filter.clamp(min_b, max_b);
@@ -819,7 +819,7 @@ fn range_filter_scalar_with_abs_change(
         return Ok(());
     }
 
-    // EMA constants
+    
     let alpha_ac = 2.0 / (range_period as f64 + 1.0);
     let one_minus_alpha_ac = 1.0 - alpha_ac;
     let alpha_range = if smooth_range {
@@ -834,7 +834,7 @@ fn range_filter_scalar_with_abs_change(
     let mut range_ema: f64 = 0.0;
     let mut range_initialized = false;
 
-    // Seed prev filter from first valid price
+    
     let mut prev_filter = if first < n { data[first] } else { f64::NAN };
 
     if first + 1 >= n {
@@ -845,7 +845,7 @@ fn range_filter_scalar_with_abs_change(
         for i in (first + 1)..n {
             let price = data[i];
 
-            // Update AC EMA from precomputed abs_change
+            
             let ac = abs_change[i];
             if !ac.is_nan() {
                 if !ac_initialized {
@@ -876,7 +876,7 @@ fn range_filter_scalar_with_abs_change(
         for i in (first + 1)..n {
             let price = data[i];
 
-            // Update AC EMA from precomputed abs_change
+            
             let ac = abs_change[i];
             if !ac.is_nan() {
                 if !ac_initialized {
@@ -915,7 +915,7 @@ fn range_filter_scalar_with_abs_change(
     Ok(())
 }
 
-// AVX2 SIMD implementation stub
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn range_filter_avx2(
@@ -929,8 +929,8 @@ unsafe fn range_filter_avx2(
     high_band: &mut [f64],
     low_band: &mut [f64],
 ) -> Result<(), RangeFilterError> {
-    // AVX2 implementation would go here
-    // For now, fallback to scalar
+    
+    
     range_filter_scalar(
         data,
         range_size,
@@ -944,7 +944,7 @@ unsafe fn range_filter_avx2(
     )
 }
 
-// AVX512 SIMD implementation stub
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn range_filter_avx512(
@@ -958,8 +958,8 @@ unsafe fn range_filter_avx512(
     high_band: &mut [f64],
     low_band: &mut [f64],
 ) -> Result<(), RangeFilterError> {
-    // AVX512 implementation would go here
-    // For now, fallback to scalar
+    
+    
     range_filter_scalar(
         data,
         range_size,
@@ -973,7 +973,7 @@ unsafe fn range_filter_avx512(
     )
 }
 
-// Batch processing implementation
+
 #[inline(always)]
 fn expand_grid(r: &RangeFilterBatchRange) -> Result<Vec<RangeFilterParams>, RangeFilterError> {
     fn axis_usize(
@@ -1152,7 +1152,7 @@ fn range_filter_batch_inner(
         return Err(RangeFilterError::AllValuesNaN);
     }
 
-    // 3 output matrices, uninitialized
+    
     let _ = rows
         .checked_mul(cols)
         .ok_or(RangeFilterError::InvalidRange {
@@ -1164,7 +1164,7 @@ fn range_filter_batch_inner(
     let mut high_mu = make_uninit_matrix(rows, cols);
     let mut low_mu = make_uninit_matrix(rows, cols);
 
-    // Warm prefixes per row
+    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1186,7 +1186,7 @@ fn range_filter_batch_inner(
     init_matrix_prefixes(&mut high_mu, cols, &warms);
     init_matrix_prefixes(&mut low_mu, cols, &warms);
 
-    // Cast to flat f64 slices for compute, without extra allocation
+    
     let mut f_guard = core::mem::ManuallyDrop::new(filter_mu);
     let mut h_guard = core::mem::ManuallyDrop::new(high_mu);
     let mut l_guard = core::mem::ManuallyDrop::new(low_mu);
@@ -1200,7 +1200,7 @@ fn range_filter_batch_inner(
 
     range_filter_batch_inner_into(data, &combos, kern, parallel, filter, high, low)?;
 
-    // Return ownership of the three buffers
+    
     let filter_values = unsafe {
         Vec::from_raw_parts(
             f_guard.as_mut_ptr() as *mut f64,
@@ -1284,8 +1284,8 @@ fn range_filter_batch_inner_into(
         });
     }
 
-    // Compute the maximum warmup needed across all combos and enforce early
-    // failure like alma.rs does.
+    
+    
     let max_needed = combos
         .iter()
         .map(|c| {
@@ -1308,7 +1308,7 @@ fn range_filter_batch_inner_into(
         });
     }
 
-    // Validate once, like you do now
+    
     for c in combos {
         let rp = c.range_period.unwrap_or(14);
         if rp == 0 || rp > cols {
@@ -1331,18 +1331,18 @@ fn range_filter_batch_inner_into(
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
-    // Map batch kernels to single kernels (same pattern as ALMA)
+    
     let chosen_single = match actual {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => actual, // already single
+        _ => actual, 
     };
 
-    // Precompute absolute changes once (shared across rows) to avoid redundant work
-    // Only used for scalar rows; AVX stubs currently delegate to scalar as well.
+    
+    
     let abs_change: Option<Vec<f64>> = {
-        // Only beneficial when multiple rows share it
+        
         if combos.len() > 1 && first + 1 < cols {
             let mut diffs = vec![f64::NAN; cols];
             let mut prev = data[first];
@@ -1364,13 +1364,13 @@ fn range_filter_batch_inner_into(
                   l_row: &mut [f64]|
      -> Result<(), RangeFilterError> {
         let p = &combos[row];
-        // Pull concrete params once
+        
         let range_size = p.range_size.unwrap_or(2.618);
         let range_period = p.range_period.unwrap_or(14);
         let smooth_range = p.smooth_range.unwrap_or(true);
         let smooth_period = p.smooth_period.unwrap_or(27);
 
-        // Fast scalar path uses precomputed abs_change if available
+        
         if let (Kernel::Scalar, Some(ref diffs)) = (chosen_single, &abs_change) {
             range_filter_scalar_with_abs_change(
                 data,
@@ -1385,7 +1385,7 @@ fn range_filter_batch_inner_into(
                 l_row,
             )
         } else {
-            // Fallback to the general kernel dispatch
+            
             range_filter_compute_into(
                 data,
                 range_size,
@@ -1445,7 +1445,7 @@ fn range_filter_batch_inner_into(
         }
     }
 
-    // Apply NaN warmup prefixes per row to match scalar and CUDA semantics
+    
     for (row, p) in combos.iter().enumerate() {
         let rp = p.range_period.unwrap_or(14);
         let sp = if p.smooth_range.unwrap_or(true) {
@@ -1466,7 +1466,7 @@ fn range_filter_batch_inner_into(
     Ok(())
 }
 
-// Python bindings
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "range_filter")]
 #[pyo3(signature = (data, range_size=2.618, range_period=14, smooth_range=true, smooth_period=27, kernel=None))]
@@ -1533,12 +1533,12 @@ pub fn range_filter_batch_py<'py>(
         smooth_period: Some(smooth_period),
     };
 
-    // Expand once to size outputs and metadata
+    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Allocate NumPy outputs first, then compute directly into them
+    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("range_filter_batch_py: rows*cols overflowed"))?;
@@ -1548,13 +1548,13 @@ pub fn range_filter_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    // Get mutable slices before entering allow_threads
+    
     let f_slice = unsafe { f_arr.as_slice_mut() }.unwrap();
     let h_slice = unsafe { h_arr.as_slice_mut() }.unwrap();
     let l_slice = unsafe { l_arr.as_slice_mut() }.unwrap();
 
     py.allow_threads(|| {
-        // Compute directly into NumPy memory
+        
         range_filter_batch_inner_into(slice_in, &combos, kern, true, f_slice, h_slice, l_slice)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1563,7 +1563,7 @@ pub fn range_filter_batch_py<'py>(
     dict.set_item("filter", f_arr.reshape((rows, cols))?)?;
     dict.set_item("high", h_arr.reshape((rows, cols))?)?;
     dict.set_item("low", l_arr.reshape((rows, cols))?)?;
-    // Columnar metadata
+    
     dict.set_item(
         "range_sizes",
         combos
@@ -1601,13 +1601,13 @@ pub fn range_filter_batch_py<'py>(
     Ok(dict)
 }
 
-// WASM bindings
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct RangeFilterJsResult {
-    pub values: Vec<f64>, // [filter..., high..., low...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // data length
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -1631,7 +1631,7 @@ pub fn range_filter_js(
 
     let result = range_filter(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return as object with filter, high_band, low_band arrays
+    
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(
         &obj,
@@ -1695,7 +1695,7 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
     let cfg: RangeFilterBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-    // Validate input
+    
     if data.is_empty() {
         return Err(JsValue::from_str("Input data slice is empty"));
     }
@@ -1710,16 +1710,16 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
     let out = range_filter_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Build a single flat values buffer: [filter..., high..., low...]
+    
     let mut values = Vec::with_capacity(out.rows * out.cols * 3);
     values.extend_from_slice(&out.filter_values);
     values.extend_from_slice(&out.high_band_values);
     values.extend_from_slice(&out.low_band_values);
 
-    // Build JavaScript object directly to ensure proper structure
+    
     let obj = js_sys::Object::new();
 
-    // Add arrays
+    
     js_sys::Reflect::set(
         &obj,
         &JsValue::from_str("values"),
@@ -1741,7 +1741,7 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
         &serde_wasm_bindgen::to_value(&out.low_band_values).unwrap(),
     )?;
 
-    // Add metadata
+    
     js_sys::Reflect::set(
         &obj,
         &JsValue::from_str("rows"),
@@ -1761,11 +1761,11 @@ pub fn range_filter_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
     Ok(obj.into())
 }
 
-// ========================= Python CUDA Bindings =========================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct RangeFilterDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>, 
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -2322,7 +2322,7 @@ impl RangeFilterStream {
             return None;
         }
 
-        // --- Compute / smooth range ---
+        
         let mut range = self.ac_ema * self.range_size;
         if self.smooth_range {
             if !self.range_initialized {
@@ -2334,19 +2334,19 @@ impl RangeFilterStream {
             range = self.range_ema;
         }
 
-        // --- Initialize filter on first actionable tick ---
+        
         if !self.filter_initialized {
-            // Seed to price, then immediately clamp so first output already respects the band.
+            
             self.prev_filter = price;
             self.filter_initialized = true;
         }
 
-        // Clamp previous filter into [price - range, price + range]
+        
         let lo = price - range;
         let hi = price + range;
         let current = Self::clamp_branchless(self.prev_filter, lo, hi);
 
-        // Persist state for next tick
+        
         self.prev_filter = current;
         self.prev_price = price;
 
@@ -2372,7 +2372,7 @@ impl RangeFilterStream {
     }
 }
 
-// Builder pattern extension for streaming
+
 impl RangeFilterBuilder {
     #[inline(always)]
     pub fn into_stream(self) -> Result<RangeFilterStream, RangeFilterError> {
@@ -2386,7 +2386,7 @@ impl RangeFilterBuilder {
     }
 }
 
-// Python streaming support
+
 #[cfg(feature = "python")]
 #[pyclass(name = "RangeFilterStream")]
 pub struct RangeFilterStreamPy {
@@ -2431,7 +2431,7 @@ mod tests {
     use paste::paste;
     use std::error::Error;
 
-    // Test function for accuracy
+    
     fn check_range_filter_accuracy(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2440,7 +2440,7 @@ mod tests {
         let input = RangeFilterInput::with_default_candles(&candles);
         let result = range_filter_with_kernel(&input, kernel)?;
 
-        // Test last 5 values against reference for all three outputs
+        
         let n = result.filter.len();
         let last_5_filter: Vec<f64> = result.filter[(n - 5)..].to_vec();
         let last_5_high: Vec<f64> = result.high_band[(n - 5)..].to_vec();
@@ -2470,14 +2470,14 @@ mod tests {
             58_368.60035759538,
         ];
 
-        let tolerance = 1e-10; // Very tight tolerance as we're comparing against our own implementation
+        let tolerance = 1e-10; 
 
-        // Print actual values for updating expected values
+        
         println!("Actual Filter values: {:?}", last_5_filter);
         println!("Actual High Band values: {:?}", last_5_high);
         println!("Actual Low Band values: {:?}", last_5_low);
 
-        // Test Filter values
+        
         for (i, &val) in last_5_filter.iter().enumerate() {
             let diff = (val - expected_filter[i]).abs();
             assert!(
@@ -2491,7 +2491,7 @@ mod tests {
             );
         }
 
-        // Test High Band values
+        
         for (i, &val) in last_5_high.iter().enumerate() {
             let diff = (val - expected_high[i]).abs();
             assert!(
@@ -2505,7 +2505,7 @@ mod tests {
             );
         }
 
-        // Test Low Band values
+        
         for (i, &val) in last_5_low.iter().enumerate() {
             let diff = (val - expected_low[i]).abs();
             assert!(
@@ -2522,7 +2522,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for default candles
+    
     fn check_range_filter_default_candles(
         test: &str,
         kernel: Kernel,
@@ -2538,7 +2538,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for empty input
+    
     fn check_range_filter_empty_input(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2553,7 +2553,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for all NaN values
+    
     fn check_range_filter_all_nan(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2569,13 +2569,13 @@ mod tests {
         Ok(())
     }
 
-    // Test function for invalid period
+    
     fn check_range_filter_invalid_period(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let params = RangeFilterParams {
-            range_period: Some(10), // Too large for data
+            range_period: Some(10), 
             ..Default::default()
         };
         let input = RangeFilterInput::from_slice(&data, params);
@@ -2588,7 +2588,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for into_slice parity
+    
     fn check_range_filter_into_slice(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2602,8 +2602,8 @@ mod tests {
 
         range_filter_into_slice(&mut f, &mut h, &mut l, &input, kernel)?;
 
-        // Check warmup period is NaN
-        let warmup = 27; // max(14, 27) for default params
+        
+        let warmup = 27; 
         for i in 0..warmup {
             assert!(
                 f[i].is_nan(),
@@ -2625,7 +2625,7 @@ mod tests {
             );
         }
 
-        // Check that values after warmup are not NaN
+        
         for i in warmup..data.len() {
             assert!(
                 !f[i].is_nan(),
@@ -2649,7 +2649,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for kernel parity
+    
     fn check_range_filter_kernel_parity(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2659,13 +2659,13 @@ mod tests {
         let params = RangeFilterParams::default();
         let input = RangeFilterInput::from_slice(&data, params);
 
-        // Get scalar result as baseline
+        
         let scalar_result = range_filter_with_kernel(&input, Kernel::Scalar)?;
 
-        // Compare with the given kernel
+        
         let kernel_result = range_filter_with_kernel(&input, kernel)?;
 
-        // Check values match (allowing for small floating point differences)
+        
         for i in 0..data.len() {
             if scalar_result.filter[i].is_nan() {
                 assert!(
@@ -2690,18 +2690,18 @@ mod tests {
         Ok(())
     }
 
-    // Test function for streaming
+    
     fn check_range_filter_streaming(test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         let data = (0..100)
             .map(|i| (i as f64).sin() * 100.0 + 500.0)
             .collect::<Vec<_>>();
         let params = RangeFilterParams::default();
 
-        // Get batch result
+        
         let input = RangeFilterInput::from_slice(&data, params.clone());
         let batch_result = range_filter(&input)?;
 
-        // Get streaming result
+        
         let mut stream = RangeFilterStream::try_new(params)?;
         let mut streaming_filter = Vec::new();
         let mut streaming_high = Vec::new();
@@ -2719,11 +2719,11 @@ mod tests {
             }
         }
 
-        // Compare results (streaming may have slight differences due to incremental computation)
-        // We just verify that streaming produces reasonable values, not exact matches
-        let start = 30; // Skip warmup differences
+        
+        
+        let start = 30; 
         for i in start..streaming_filter.len().min(batch_result.filter.len()) {
-            // Check that streaming values are reasonable (not NaN after warmup and in expected range)
+            
             assert!(
                 !streaming_filter[i].is_nan(),
                 "[{}] Stream filter[{}] is NaN",
@@ -2743,7 +2743,7 @@ mod tests {
                 i
             );
 
-            // Verify bands relationship
+            
             assert!(
                 streaming_high[i] >= streaming_filter[i],
                 "[{}] High band should be >= filter at [{}]",
@@ -2760,7 +2760,7 @@ mod tests {
         Ok(())
     }
 
-    // Test function for no poison values
+    
     fn check_range_filter_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2788,7 +2788,7 @@ mod tests {
         Ok(())
     }
 
-    // New test functions for full parity with alma.rs
+    
     fn check_rf_partial_params(_name: &str, k: Kernel) -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -2854,22 +2854,22 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let input = RangeFilterInput::from_candles(&c, "close", RangeFilterParams::default());
         let out = range_filter_with_kernel(&input, k)?;
-        // Find first non-NaN value to determine actual warmup period
+        
         let first_non_nan = out
             .filter
             .iter()
             .position(|v| !v.is_nan())
             .unwrap_or(out.filter.len());
-        // Check that we have some warmup period
+        
         assert!(
             first_non_nan > 0,
             "Should have warmup period with NaN values"
         );
-        // Check that all values before first_non_nan are NaN
+        
         assert!(out.filter[..first_non_nan].iter().all(|v| v.is_nan()));
         assert!(out.high_band[..first_non_nan].iter().all(|v| v.is_nan()));
         assert!(out.low_band[..first_non_nan].iter().all(|v| v.is_nan()));
-        // Check that values after warmup are finite
+        
         if first_non_nan < out.filter.len() {
             assert!(out.filter[first_non_nan..].iter().all(|v| v.is_finite()));
         }
@@ -2877,8 +2877,8 @@ mod tests {
     }
 
     fn check_rf_streaming_parity(_name: &str, _k: Kernel) -> Result<(), Box<dyn Error>> {
-        // Streaming implementation has different initialization behavior than batch
-        // We'll just verify it produces reasonable values, not exact parity
+        
+        
         let data = (0..100)
             .map(|i| (i as f64).sin() * 100.0 + 500.0)
             .collect::<Vec<_>>();
@@ -2901,15 +2901,15 @@ mod tests {
             }
         }
 
-        // Check that streaming produces reasonable values after warmup
-        let start = 30; // Skip warmup differences
+        
+        let start = 30; 
         for i in start..stream_filter.len() {
-            // Check that streaming values are reasonable (not NaN after warmup and in expected range)
+            
             assert!(!stream_filter[i].is_nan(), "Stream filter[{}] is NaN", i);
             assert!(!stream_high[i].is_nan(), "Stream high[{}] is NaN", i);
             assert!(!stream_low[i].is_nan(), "Stream low[{}] is NaN", i);
 
-            // Verify bands relationship
+            
             assert!(
                 stream_high[i] >= stream_filter[i],
                 "High band should be >= filter at [{}]",
@@ -2938,15 +2938,15 @@ mod tests {
 
     #[test]
     fn test_range_filter_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV so inputs match other tests
+        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
         let input = RangeFilterInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
+        
         let baseline = range_filter(&input)?;
 
-        // Allocation-free path with identical length
+        
         let n = candles.close.len();
         let mut f = vec![0.0; n];
         let mut h = vec![0.0; n];
@@ -2957,7 +2957,7 @@ mod tests {
         assert_eq!(baseline.high_band.len(), n);
         assert_eq!(baseline.low_band.len(), n);
 
-        // NaN-equals-NaN helper with tight epsilon for finite values
+        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -3020,7 +3020,7 @@ mod tests {
                 let input = RangeFilterInput::from_slice(&data, p);
                 let a = range_filter_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Bands order and finiteness after warmup
+                
                 let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warm = first + rp.max(if smooth { sp } else { 0 });
                 for i in warm..data.len() {
@@ -3038,40 +3038,40 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // First pass on close
+        
         let first = range_filter_with_kernel(&RangeFilterInput::with_default_candles(&c), kernel)?;
 
-        // Reinput: feed the filter output back as the data slice
+        
         let params = RangeFilterParams::default();
         let second =
             range_filter_with_kernel(&RangeFilterInput::from_slice(&first.filter, params), kernel)?;
 
-        // Parity checks: lengths match
+        
         assert_eq!(second.filter.len(), first.filter.len());
 
-        // Find first non-NaN in the original output
+        
         let first_valid = first
             .filter
             .iter()
             .position(|v| !v.is_nan())
             .unwrap_or(first.filter.len());
 
-        // The second pass should also have NaNs in its warmup, accounting for the first pass's NaNs
-        // Find first non-NaN in second output
+        
+        
         let second_valid = second
             .filter
             .iter()
             .position(|v| !v.is_nan())
             .unwrap_or(second.filter.len());
 
-        // Verify we have warmup period with NaNs
+        
         assert!(
             second_valid > 0,
             "[{}] Should have warmup NaNs in reinput",
             test
         );
 
-        // Check that all values before second_valid are NaN
+        
         for i in 0..second_valid {
             assert!(
                 second.filter[i].is_nan(),
@@ -3084,7 +3084,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate tests for all kernels
+    
     macro_rules! generate_all_range_filter_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3132,7 +3132,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_range_filter_tests!(check_range_filter_property);
 
-    // Batch tests
+    
     fn check_range_filter_batch_default(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -3165,7 +3165,7 @@ mod tests {
 
         let output = range_filter_batch_inner(&data, &sweep, kernel, false)?;
 
-        // Should have 3 * 3 = 9 combinations
+        
         assert_eq!(output.rows, 9);
         assert_eq!(output.cols, data.len());
 
@@ -3177,7 +3177,7 @@ mod tests {
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Parallel processing not available on WASM
+            
             eprintln!("[{}] skipped (parallel not supported on WASM)", test);
             return Ok(());
         }
@@ -3190,11 +3190,11 @@ mod tests {
 
             let sweep = RangeFilterBatchRange::default();
 
-            // Compare parallel vs sequential
+            
             let seq = range_filter_batch_slice(&data, &sweep, kernel)?;
             let par = range_filter_batch_par_slice(&data, &sweep, kernel)?;
 
-            // Compare values (allowing for NaN pattern differences)
+            
             assert_eq!(seq.filter_values.len(), par.filter_values.len());
             for i in 0..seq.filter_values.len() {
                 if seq.filter_values[i].is_nan() {
@@ -3256,7 +3256,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch tests
+    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -3297,7 +3297,7 @@ mod tests {
             .kernel(kernel)
             .apply_slice(&c.close)?;
 
-        // Check for poison patterns in all output values
+        
         for v in out
             .filter_values
             .iter()

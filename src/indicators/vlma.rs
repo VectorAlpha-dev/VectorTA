@@ -69,11 +69,11 @@ impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     }
 }
 
-// Fast math helpers used by the optimized scalar path. Keep tiny and always-inline
-// to match ALMA-style patterns and avoid call overhead in hot loops.
+
+
 #[inline(always)]
 fn fast_ema_update(last: f64, x: f64, sc: f64) -> f64 {
-    // last + sc * (x - last), fused when available
+    
     (x - last).mul_add(sc, last)
 }
 
@@ -93,7 +93,7 @@ fn fast_clamp_period(p: isize, min_p: usize, max_p: usize) -> usize {
 #[inline(always)]
 fn fast_std_from_sums(sum: f64, sumsq: f64, inv_n: f64) -> (f64, f64) {
     let m = sum * inv_n;
-    // var = E[x^2] - m^2  ==> (sumsq * inv_n) - m*m
+    
     let var = (-m).mul_add(m, sumsq * inv_n);
     let dv = if var <= 0.0 { 0.0 } else { var.sqrt() };
     (m, dv)
@@ -328,11 +328,11 @@ pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Resu
         });
     }
     vlma_compute_into(data, min_p, max_p, &matype, devtype, first, chosen, dst)?;
-    // Set warmup NaNs, but preserve the initial value at first_valid (VLMA specific)
+    
     let warm_end = first + max_p - 1;
     for i in 0..warm_end {
         if i != first {
-            // Preserve the value at first_valid
+            
             dst[i] = f64::NAN;
         }
     }

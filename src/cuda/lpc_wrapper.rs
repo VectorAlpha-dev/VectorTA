@@ -269,7 +269,7 @@ impl CudaLpc {
             });
         }
 
-        // The kernel supports striding across combos; clamp grid_x to the HW limit.
+        
         let grid_x_full = ((n_combos as u32) + block_x - 1) / block_x;
         let grid_x = grid_x_full.clamp(1, 65_535);
 
@@ -509,7 +509,7 @@ impl CudaLpc {
             ));
         }
 
-        // Build combos
+        
         let combos = Self::expand_grid(range)?;
         if combos.is_empty() {
             return Err(CudaLpcError::InvalidInput(
@@ -526,7 +526,7 @@ impl CudaLpc {
         let n = len;
         let rows = combos.len();
 
-        // VRAM estimate (checked arithmetic)
+        
         let item_bytes = std::mem::size_of::<f32>();
         let inputs_elems = high
             .len()
@@ -539,7 +539,7 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("input bytes overflow".into()))?;
         let bytes_params = rows
             .checked_mul(3 * item_bytes)
-            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?; // approx
+            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?; 
         let bytes_outputs = rows
             .checked_mul(n)
             .and_then(|v| v.checked_mul(3 * item_bytes))
@@ -547,7 +547,7 @@ impl CudaLpc {
         let mut bytes_dom = 0usize;
         let cutoff_adaptive = range.cutoff_type.eq_ignore_ascii_case("adaptive");
         let dom_host_f32: Option<Vec<f32>> = if cutoff_adaptive {
-            // Host-precompute dominant cycle once for the series and upload as FP32
+            
             let src64: Vec<f64> = src.iter().map(|&v| v as f64).collect();
             let dc = dom_cycle(&src64, range.max_cycle_limit);
             let v32: Vec<f32> = dc.iter().map(|&v| v as f32).collect();
@@ -566,13 +566,13 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Device buffers
+        
         let d_h = DeviceBuffer::from_slice(high)?;
         let d_l = DeviceBuffer::from_slice(low)?;
         let d_c = DeviceBuffer::from_slice(close)?;
         let d_s = DeviceBuffer::from_slice(src)?;
 
-        // Shared precompute across rows: True Range once for the series
+        
         fn host_true_range_f32(h: &[f32], l: &[f32], c: &[f32]) -> Vec<f32> {
             let n = h.len();
             let mut tr = vec![0f32; n];
@@ -594,7 +594,7 @@ impl CudaLpc {
         let tr_host = host_true_range_f32(high, low, close);
         let d_tr = DeviceBuffer::from_slice(&tr_host)?;
 
-        // Params
+        
         let periods: Vec<i32> =
             combos.iter().map(|p| p.fixed_period.unwrap() as i32).collect();
         let cms: Vec<f32> = combos.iter().map(|p| p.cycle_mult.unwrap() as f32).collect();
@@ -608,7 +608,7 @@ impl CudaLpc {
             None
         };
 
-        // Optional alpha LUT for adaptive mode
+        
         let (d_alpha_lut, alpha_lut_len_i32, alpha_lut_pmin_i32) = if cutoff_adaptive {
             let p_min = 3i32;
             let max_fixed = *periods.iter().max().unwrap_or(&p_min);
@@ -627,7 +627,7 @@ impl CudaLpc {
             (Some(buf), len_i32, pmin)
         } else { (None, 0, 0) };
 
-        // Outputs row-major [combos, len] to preserve API
+        
         let out_elems = rows
             .checked_mul(n)
             .ok_or_else(|| CudaLpcError::InvalidInput("output length overflow".into()))?;
@@ -635,7 +635,7 @@ impl CudaLpc {
         let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        // Launch v2 kernel; keep out_time_major=0 for API compatibility
+        
         let selected = self.launch_batch_f32_v2(
             &d_h,
             &d_l,
@@ -712,7 +712,7 @@ impl CudaLpc {
         }
         let tr_mult = params.tr_mult.unwrap_or(1.0) as f32;
 
-        // VRAM estimate for many-series path (checked)
+        
         let item_bytes = std::mem::size_of::<f32>();
         let prices_bytes = cols
             .checked_mul(rows)
@@ -731,7 +731,7 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Per-series first_valid
+        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -752,7 +752,7 @@ impl CudaLpc {
             firsts[s] = fv;
         }
 
-        // Device buffers
+        
         let d_h = DeviceBuffer::from_slice(high_tm)?;
         let d_l = DeviceBuffer::from_slice(low_tm)?;
         let d_c = DeviceBuffer::from_slice(close_tm)?;
@@ -836,7 +836,7 @@ impl CudaLpc {
     }
 }
 
-// ---------------- Benches -----------------
+
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;

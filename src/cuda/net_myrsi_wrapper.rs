@@ -376,7 +376,7 @@ impl CudaNetMyrsi {
 
         // Launch (warp-per-combo):
         // - One warp computes one combo (period), parallelizing NET's O(period) update loop.
-        // - Shared-memory FP64 rings (diffs + myr) for parity; use 8-byte shared banks.
+        
         let desired_block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
             BatchKernelPolicy::Auto => 32,
@@ -466,7 +466,7 @@ impl CudaNetMyrsi {
         ))
     }
 
-    // ---------- Many-series × one param (time-major) ----------
+    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -526,18 +526,18 @@ impl CudaNetMyrsi {
         let (_first_valids, _period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // We'll compute each column using the validated batch kernel (one series × one param),
-        // then place results into a time-major output buffer. This keeps correctness and avoids
-        // introducing new flags or API changes.
+        
+        
+        
 
-        // Host output (time-major) we will later upload to GPU once
+        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNetMyrsiError::InvalidInput("cols*rows overflow".into()))?;
         let mut out_tm_host = vec![f32::NAN; elems];
 
         for s in 0..cols {
-            // Build series s in f64 for a perfect scalar baseline
+            
             let mut series64 = vec![f64::NAN; rows];
             for r in 0..rows { series64[r] = data_tm_f32[r * cols + s] as f64; }
             let out = crate::indicators::net_myrsi::net_myrsi_with_kernel(
@@ -548,7 +548,7 @@ impl CudaNetMyrsi {
             for r in 0..rows { out_tm_host[r * cols + s] = out.values[r] as f32; }
         }
 
-        // Upload final time-major result to device with zero-copy allocation
+        
         let mut d_out = unsafe {
             DeviceBuffer::uninitialized_async(elems, &self.stream)?
         };
@@ -565,7 +565,7 @@ impl CudaNetMyrsi {
     }
 }
 
-// ------------------ Benches registration ------------------
+
 #[cfg(feature = "cuda")]
 pub mod benches {
     use super::*;

@@ -23,7 +23,7 @@
 //! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
 //! - **Decision log**: SIMD enabled (AVX2/AVX512) and fastest by >5% at 100k; CUDA wrapper present and returns VRAM handles; Python interop provides CAI v3 + DLPack v1.x (versioned capsules + legacy fallback); numerical outputs unchanged.
 
-// ==================== PYTHON CUDA HANDLE (CAI v3 + DLPack) ====================
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 mod nwe_python_cuda_handle {
     use cust::context::Context;
@@ -449,7 +449,7 @@ fn nwe_prepare<'a>(
     let warm_out = first + lookback - 1;
     let warm_total = warm_out + MAE_LEN - 1;
 
-    // If there can never be a valid output, fail like alma.rs does
+    
     if len <= warm_out {
         return Err(NweError::NotEnoughValidData {
             needed: lookback,
@@ -457,7 +457,7 @@ fn nwe_prepare<'a>(
         });
     }
 
-    // Precompute Gaussian weights
+    
     let mut w = Vec::with_capacity(lookback);
     let mut den = 0.0;
     for k in 0..lookback {
@@ -487,15 +487,15 @@ pub fn nadaraya_watson_envelope_into_slices(
         });
     }
 
-    // Work buffers (no full NaN fill)
+    
     let mut out = alloc_with_nan_prefix(len, warm_out);
     let mut resid = alloc_with_nan_prefix(len, warm_out);
 
-    // Compute endpoint NWE into `out` starting at warm_out
+    
     for t in warm_out..len {
         let mut num = 0.0;
         let mut any_nan = false;
-        // fixed window [t-(lookback-1) .. t]
+        
         for k in 0..lookback {
             let x = data[t - k];
             if x.is_nan() {
@@ -506,10 +506,10 @@ pub fn nadaraya_watson_envelope_into_slices(
         }
         if !any_nan {
             out[t] = num / den;
-        } // else keep NaN
+        } 
     }
 
-    // Residuals from warm_out
+    
     for t in warm_out..len {
         let x = data[t];
         let y = out[t];
@@ -518,7 +518,7 @@ pub fn nadaraya_watson_envelope_into_slices(
         }
     }
 
-    // Upper/Lower outputs with NaN prefix up to warm_total
+    
     for v in &mut upper_out[..warm_total.min(len)] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -526,7 +526,7 @@ pub fn nadaraya_watson_envelope_into_slices(
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Strict SMA_499 over residuals with NaN propagation
+    
     const MAE_LEN: usize = 499;
     if warm_total >= len {
         return Ok(());
@@ -535,7 +535,7 @@ pub fn nadaraya_watson_envelope_into_slices(
     let mut sum = 0.0;
     let mut nan_count = 0usize;
 
-    // Prime window [warm_out .. warm_out + MAE_LEN - 2]
+    
     let start = warm_out;
     let prime_end = (start + MAE_LEN - 1).min(len);
     for t in start..prime_end {
@@ -548,7 +548,7 @@ pub fn nadaraya_watson_envelope_into_slices(
     }
 
     for t in warm_total..len {
-        // include current residual
+        
         let r_cur = resid[t];
         if r_cur.is_nan() {
             nan_count += 1;
@@ -556,7 +556,7 @@ pub fn nadaraya_watson_envelope_into_slices(
             sum += r_cur;
         }
 
-        // window start to drop
+        
         let s = t + 1 - MAE_LEN;
         let mae = if nan_count == 0 {
             (sum / (MAE_LEN as f64)) * mult
@@ -573,7 +573,7 @@ pub fn nadaraya_watson_envelope_into_slices(
             lower_out[t] = f64::NAN;
         }
 
-        // slide: remove resid[s]
+        
         let r_old = resid[s];
         if r_old.is_nan() {
             nan_count -= 1;
@@ -604,7 +604,7 @@ pub fn nadaraya_watson_envelope_into_slices_no_prefix(
     let mut out = alloc_with_nan_prefix(len, warm_out);
     let mut resid = alloc_with_nan_prefix(len, warm_out);
 
-    // endpoint regression
+    
     for t in warm_out..len {
         let mut num = 0.0;
         let mut bad = false;
@@ -621,7 +621,7 @@ pub fn nadaraya_watson_envelope_into_slices_no_prefix(
         }
     }
 
-    // residuals
+    
     for t in warm_out..len {
         let x = data[t];
         let y = out[t];
@@ -630,7 +630,7 @@ pub fn nadaraya_watson_envelope_into_slices_no_prefix(
         }
     }
 
-    // sliding MAE
+    
     const MAE_LEN: usize = 499;
     if warm_total >= len {
         return Ok(warm_total);
@@ -686,7 +686,7 @@ pub fn nadaraya_watson_envelope_into_slices_no_prefix(
 /// Main NWE calculation (non-repainting endpoint method)
 #[inline]
 pub fn nadaraya_watson_envelope(input: &NweInput) -> Result<NweOutput, NweError> {
-    // compute warm length once
+    
     let len = input.as_ref().len();
     let (_, _, _, _, _, warm_total, _, _) = nwe_prepare(input)?;
     let mut upper = alloc_with_nan_prefix(len, warm_total);
@@ -723,7 +723,7 @@ pub fn nadaraya_watson_envelope_with_kernel(
     }
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
-        let _ = chosen; // unused on non-AVX builds
+        let _ = chosen; 
         nadaraya_watson_envelope_into_slices(input, &mut upper, &mut lower)?;
     }
 
@@ -769,12 +769,12 @@ pub fn nadaraya_watson_envelope_into(
 
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
-        let _ = chosen; // silence unused on non-AVX builds
+        let _ = chosen; 
         nadaraya_watson_envelope_into_slices(input, upper_out, lower_out)
     }
 }
 
-// ==================== SIMD KERNELS (optional) ====================
+
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
@@ -816,19 +816,19 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
 
     let mut t = warm_out;
     while t < len {
-        // Vectorized dot product with strict NaN detection
+        
         let mut vacc = _mm256_setzero_pd();
         let mut any_nan = false;
         let mut k = 0usize;
 
         while k + 4 <= lookback {
-            // Load x block in forward order from (t-k-3 .. t-k)
+            
             let x = _mm256_loadu_pd(dptr.add(t - k - 3));
-            // Load weights forward and reverse them to align with x
+            
             let wv = _mm256_loadu_pd(wptr.add(k));
-            let wrev = _mm256_permute4x64_pd(wv, 0x1B); // [w3 w2 w1 w0]
+            let wrev = _mm256_permute4x64_pd(wv, 0x1B); 
 
-            // NaN check: ordered(x, x) == true iff all lanes non-NaN
+            
             let ord = _mm256_cmp_pd(x, x, _CMP_ORD_Q);
             if _mm256_movemask_pd(ord) != 0xF {
                 any_nan = true;
@@ -838,7 +838,7 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
             k += 4;
         }
 
-        // Horizontal add vector accumulator
+        
         let mut num = 0.0f64;
         if !any_nan {
             let hi = _mm256_extractf128_pd(vacc, 1);
@@ -848,7 +848,7 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx2(
             let sum1 = _mm_add_sd(sum2, shuf);
             num = _mm_cvtsd_f64(sum1);
 
-            // Scalar tail with NaN check
+            
             while k < lookback {
                 let x = *dptr.add(t - k);
                 if x != x {
@@ -941,7 +941,7 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
     let dptr = data.as_ptr();
     let wptr = w.as_ptr();
 
-    // idx = [7,6,5,4,3,2,1,0] to reverse weights
+    
     let idx = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
 
     let mut t = warm_out;
@@ -951,13 +951,13 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
         let mut k = 0usize;
 
         while k + 8 <= lookback {
-            // Load x in forward order from (t-k-7 .. t-k)
+            
             let x = _mm512_loadu_pd(dptr.add(t - k - 7));
-            // Load w forward and reverse to align with x
+            
             let wv = _mm512_loadu_pd(wptr.add(k));
             let wrev = _mm512_permutexvar_pd(idx, wv);
 
-            // NaN check via ordered compare
+            
             let mask = _mm512_cmp_pd_mask(x, x, _CMP_ORD_Q);
             if mask != 0xFF {
                 any_nan = true;
@@ -969,7 +969,7 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
 
         let mut num = 0.0f64;
         if !any_nan {
-            // Horizontal add vacc
+            
             let lo = _mm512_castpd512_pd256(vacc);
             let hi = _mm512_extractf64x4_pd(vacc, 1);
             let sum256 = _mm256_add_pd(lo, hi);
@@ -1034,26 +1034,26 @@ pub unsafe fn nadaraya_watson_envelope_into_slices_avx512(
     Ok(())
 }
 
-// ==================== STREAMING SUPPORT ====================
-// Decision: exact O(L) streaming with double-buffer ring and reversed weights.
-// Approximate O(1) streaming is not enabled to keep exactness.
+
+
+
 pub struct NweStream {
     lookback: usize,
 
-    // Precomputed Gaussian weights (forward) and reversed for contiguous dot
+    
     weights: Vec<f64>,
     w_rev: Vec<f64>,
     den: f64,
     inv_den: f64,
 
-    // Price rings
-    ring: Vec<f64>,  // logical ring
-    ring2: Vec<f64>, // mirrored buffer to avoid modulo in dot
+    
+    ring: Vec<f64>,  
+    ring2: Vec<f64>, 
 
     head: usize,
     filled: bool,
 
-    // Residual MAE(499) state
+    
     mae_len: usize,
     resid_ring: Vec<f64>,
     resid_head: usize,
@@ -1062,7 +1062,7 @@ pub struct NweStream {
     resid_nan_count: usize,
 
     multiplier: f64,
-    mae_scale: f64, // = multiplier / mae_len
+    mae_scale: f64, 
 }
 
 impl NweStream {
@@ -1083,7 +1083,7 @@ impl NweStream {
             return Err(NweError::InvalidLookback { lookback });
         }
 
-        // Precompute forward weights and denominator
+        
         let mut weights = vec![0.0; lookback];
         let mut den = 0.0;
         for k in 0..lookback {
@@ -1091,7 +1091,7 @@ impl NweStream {
             weights[k] = wk;
             den += wk;
         }
-        // Reversed order for contiguous dot against oldest..newest window
+        
         let mut w_rev = vec![0.0; lookback];
         for i in 0..lookback {
             w_rev[i] = weights[lookback - 1 - i];
@@ -1118,7 +1118,7 @@ impl NweStream {
             resid_head: 0,
             resid_filled: false,
             resid_sum: 0.0,
-            resid_nan_count: 499, // start as all NaN (not yet filled)
+            resid_nan_count: 499, 
 
             multiplier,
             mae_scale: if 499 > 0 { multiplier / 499.0 } else { 0.0 },
@@ -1127,23 +1127,23 @@ impl NweStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        // Push into ring and mirror buffer
+        
         let pos = self.head;
         self.ring[pos] = value;
         self.ring2[pos] = value;
         self.ring2[pos + self.lookback] = value;
 
-        // Advance head
+        
         self.head = pos + 1;
         if self.head == self.lookback {
             self.head = 0;
             self.filled = true;
         }
 
-        // Endpoint regression when filled
+        
         let y = if self.filled {
-            let slice = &self.ring2[self.head..self.head + self.lookback]; // oldest..newest
-            let w = &self.w_rev; // reversed weights
+            let slice = &self.ring2[self.head..self.head + self.lookback]; 
+            let w = &self.w_rev; 
 
             let mut acc = 0.0;
             let mut any_nan = false;
@@ -1164,14 +1164,14 @@ impl NweStream {
             f64::NAN
         };
 
-        // Update residual ring for MAE(499)
+        
         let resid = if !value.is_nan() && !y.is_nan() {
             (value - y).abs()
         } else {
             f64::NAN
         };
 
-        // Remove old at head
+        
         let old = self.resid_ring[self.resid_head];
         if old.is_nan() {
             self.resid_nan_count = self.resid_nan_count.saturating_sub(1);
@@ -1179,7 +1179,7 @@ impl NweStream {
             self.resid_sum -= old;
         }
 
-        // Insert new
+        
         self.resid_ring[self.resid_head] = resid;
         if resid.is_nan() {
             self.resid_nan_count += 1;
@@ -1194,7 +1194,7 @@ impl NweStream {
         }
 
         if self.filled && self.resid_filled && self.resid_nan_count == 0 && !y.is_nan() {
-            let mae = self.resid_sum * self.mae_scale; // (sum/499)*multiplier
+            let mae = self.resid_sum * self.mae_scale; 
             Some((y + mae, y - mae))
         } else {
             None
@@ -1216,12 +1216,12 @@ impl NweStream {
     }
 }
 
-// ==================== BATCH PROCESSING ====================
+
 #[derive(Debug, Clone)]
 pub struct NweBatchRange {
-    pub bandwidth: (f64, f64, f64),      // (start, end, step)
-    pub multiplier: (f64, f64, f64),     // (start, end, step)
-    pub lookback: (usize, usize, usize), // (start, end, step)
+    pub bandwidth: (f64, f64, f64),      
+    pub multiplier: (f64, f64, f64),     
+    pub lookback: (usize, usize, usize), 
 }
 
 impl Default for NweBatchRange {
@@ -1236,8 +1236,8 @@ impl Default for NweBatchRange {
 
 #[derive(Debug, Clone)]
 pub struct NweBatchOutput {
-    pub values_upper: Vec<f64>, // Flattened upper values (row-major)
-    pub values_lower: Vec<f64>, // Flattened lower values (row-major)
+    pub values_upper: Vec<f64>, 
+    pub values_lower: Vec<f64>, 
     pub combos: Vec<NweParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1267,7 +1267,7 @@ impl NweBatchOutput {
     }
 }
 
-// ==================== BATCH BUILDER ====================
+
 #[derive(Copy, Clone, Debug)]
 pub struct NweBatchBuilder {
     bandwidth: (f64, f64, f64),
@@ -1369,7 +1369,7 @@ impl NweBatchBuilder {
     }
 }
 
-// Helper function to expand parameter grid
+
 #[inline(always)]
 fn expand_grid(r: &NweBatchRange) -> Result<Vec<NweParams>, NweError> {
     fn axis_usize(
@@ -1479,23 +1479,23 @@ fn nwe_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Prepare per-row warm prefixes
+    
     let mut warm_upper = Vec::with_capacity(rows);
     for prm in &combos {
-        // reuse prepare to compute warm points
+        
         let tmp = NweInput::from_slice(data, prm.clone());
         match nwe_prepare(&tmp) {
             Ok((_d, _bw, _m, _lookback, _warm_out, warm_total, _w, _den)) => {
                 warm_upper.push(warm_total.min(cols));
             }
             Err(_) => {
-                // If prepare fails for this combo, use full warmup
+                
                 warm_upper.push(cols);
             }
         }
     }
 
-    // Initialize NaN prefixes in-place
+    
     let out_upper_mu = unsafe {
         core::slice::from_raw_parts_mut(
             out_upper.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1511,13 +1511,13 @@ fn nwe_batch_inner_into(
     init_matrix_prefixes(out_upper_mu, cols, &warm_upper);
     init_matrix_prefixes(out_lower_mu, cols, &warm_upper);
 
-    // For each row compute into borrowed slices (no extra allocs for results)
+    
     for (row, prm) in combos.iter().enumerate() {
         let start = row * cols;
         let u_row = &mut out_upper[start..start + cols];
         let l_row = &mut out_lower[start..start + cols];
         let input = NweInput::from_slice(data, prm.clone());
-        // Ignore errors for individual rows (they'll remain NaN)
+        
         let _ = nadaraya_watson_envelope_into_slices(&input, u_row, l_row);
     }
 
@@ -1565,23 +1565,23 @@ pub fn nwe_batch_par_slice(
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
 
-    // Compute warmup per row using the existing prepare
+    
     let warms: Vec<usize> = combos
         .iter()
         .map(|p| {
             let tmp = NweInput::from_slice(data, p.clone());
             match nwe_prepare(&tmp) {
                 Ok((_d, _bw, _m, _lb, _warm_out, warm_total, _w, _den)) => warm_total.min(cols),
-                Err(_) => cols, // keep fully NaN if invalid
+                Err(_) => cols, 
             }
         })
         .collect();
 
-    // Write NaN prefixes once, in place
+    
     init_matrix_prefixes(&mut upper_mu, cols, &warms);
     init_matrix_prefixes(&mut lower_mu, cols, &warms);
 
-    // Convert MU to f64 slices for writing
+    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
     let upper_slice: &mut [f64] = unsafe {
@@ -1591,18 +1591,18 @@ pub fn nwe_batch_par_slice(
         core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len())
     };
 
-    // Process combinations in parallel
+    
     upper_slice
         .par_chunks_mut(cols)
         .zip(lower_slice.par_chunks_mut(cols))
         .zip(combos.par_iter())
         .for_each(|((u_row, l_row), prm)| {
             let input = NweInput::from_slice(data, prm.clone());
-            // Ignore errors for individual rows (they'll remain NaN)
+            
             let _ = nadaraya_watson_envelope_into_slices(&input, u_row, l_row);
         });
 
-    // Reclaim Vecs without copy
+    
     let values_upper = unsafe {
         Vec::from_raw_parts(
             upper_guard.as_mut_ptr() as *mut f64,
@@ -1634,7 +1634,7 @@ pub fn nwe_batch_par_slice(
     sweep: &NweBatchRange,
     kernel: Kernel,
 ) -> Result<NweBatchOutput, NweError> {
-    // Fall back to sequential on WASM
+    
     nwe_batch_with_kernel(data, sweep, kernel)
 }
 
@@ -1667,7 +1667,7 @@ pub fn nwe_batch_with_kernel(
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
 
-    // Convert MU to f64 slices for writing
+    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
     let upper_slice: &mut [f64] = unsafe {
@@ -1679,7 +1679,7 @@ pub fn nwe_batch_with_kernel(
 
     let combos_final = nwe_batch_inner_into(data, sweep, upper_slice, lower_slice)?;
 
-    // Reclaim Vecs without copy
+    
     let values_upper = unsafe {
         Vec::from_raw_parts(
             upper_guard.as_mut_ptr() as *mut f64,
@@ -1714,7 +1714,7 @@ pub fn nwe_batch_slice(
     nwe_batch_with_kernel(data, sweep, k)
 }
 
-// ==================== PYTHON BINDINGS ====================
+
 #[cfg(feature = "python")]
 #[pyfunction(name = "nadaraya_watson_envelope")]
 #[pyo3(signature = (data, bandwidth=8.0, multiplier=3.0, lookback=500, kernel=None))]
@@ -1870,7 +1870,7 @@ pub fn register_nadaraya_watson_envelope_module(m: &Bound<'_, PyModule>) -> PyRe
     Ok(())
 }
 
-// ---------------- CUDA Python bindings ----------------
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaNwe};
 
@@ -1930,7 +1930,7 @@ pub fn nadaraya_watson_envelope_cuda_batch_dev_py<'py>(
             },
         )?,
     )?;
-    // Return parameter vectors for row mapping
+    
     use numpy::IntoPyArray;
     let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(8.0)).collect();
     let mps: Vec<f64> = combos.iter().map(|c| c.multiplier.unwrap_or(3.0)).collect();
@@ -2014,7 +2014,7 @@ pub fn nadaraya_watson_envelope_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-// ==================== WASM BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct NweJsResult {
@@ -2025,9 +2025,9 @@ pub struct NweJsResult {
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct NweJsFlat {
-    pub values: Vec<f64>, // [upper..., lower...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>, 
+    pub rows: usize,      
+    pub cols: usize,      
 }
 
 #[cfg(feature = "wasm")]
@@ -2072,7 +2072,7 @@ pub fn nadaraya_watson_envelope_js(
 
     let result = nadaraya_watson_envelope(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Flatten as [upper..., lower...]
+    
     let mut output = Vec::with_capacity(data.len() * 2);
     output.extend_from_slice(&result.upper);
     output.extend_from_slice(&result.lower);
@@ -2116,7 +2116,7 @@ pub fn nadaraya_watson_envelope_flat_js(
 #[wasm_bindgen(js_name = nadaraya_watson_envelope_into_flat)]
 pub fn nadaraya_watson_envelope_into_flat(
     data_ptr: *const f64,
-    out_ptr: *mut f64, // length = 2*len
+    out_ptr: *mut f64, 
     len: usize,
     bandwidth: f64,
     multiplier: f64,
@@ -2195,7 +2195,7 @@ pub fn nadaraya_watson_envelope_free(ptr: *mut f64, len: usize) {
     }
 }
 
-// ==================== WASM CONTEXT FOR STATEFUL OPERATIONS ====================
+
 #[cfg(feature = "wasm")]
 #[wasm_bindgen]
 pub struct NweContext {
@@ -2248,14 +2248,14 @@ impl NweContext {
     }
 }
 
-// ==================== WASM BATCH BINDINGS ====================
+
 #[cfg(feature = "wasm")]
 #[derive(Serialize, Deserialize)]
 pub struct NweBatchJsOutput {
-    pub upper: Vec<f64>, // Flattened 2D array
-    pub lower: Vec<f64>, // Flattened 2D array
-    pub rows: usize,     // Number of parameter combinations
-    pub cols: usize,     // Data length
+    pub upper: Vec<f64>, 
+    pub lower: Vec<f64>, 
+    pub rows: usize,     
+    pub cols: usize,     
     pub bandwidths: Vec<f64>,
     pub multipliers: Vec<f64>,
     pub lookbacks: Vec<usize>,
@@ -2265,9 +2265,9 @@ pub struct NweBatchJsOutput {
 #[wasm_bindgen(js_name = nadaraya_watson_envelope_batch)]
 pub fn nadaraya_watson_envelope_batch_unified_js(
     data: &[f64],
-    bandwidth_range: Vec<f64>,  // [start, end, step]
-    multiplier_range: Vec<f64>, // [start, end, step]
-    lookback_range: Vec<usize>, // [start, end, step]
+    bandwidth_range: Vec<f64>,  
+    multiplier_range: Vec<f64>, 
+    lookback_range: Vec<usize>, 
 ) -> Result<JsValue, JsValue> {
     if bandwidth_range.len() != 3 || multiplier_range.len() != 3 || lookback_range.len() != 3 {
         return Err(JsValue::from_str(
@@ -2289,7 +2289,7 @@ pub fn nadaraya_watson_envelope_batch_unified_js(
         nadaraya_watson_envelope_batch_with_kernel(data, &sweep, detect_best_batch_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Extract parameter arrays from combos
+    
     let bandwidths: Vec<f64> = result
         .combos
         .iter()
@@ -2319,7 +2319,7 @@ pub fn nadaraya_watson_envelope_batch_unified_js(
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// ==================== TESTS ====================
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2328,7 +2328,7 @@ mod tests {
     use paste::paste;
     use std::error::Error;
 
-    // Test function implementations
+    
     fn check_nwe_partial_params(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2355,7 +2355,7 @@ mod tests {
         let input = NweInput::from_candles(&candles, "close", NweParams::default());
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel)?;
 
-        // Reference values from PineScript non-repainting mode
+        
         let expected_upper = [
             62141.41569185,
             62108.86018850,
@@ -2406,18 +2406,18 @@ mod tests {
     fn check_nwe_warmup_period(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create data with exactly 1000 points to test warmup
+        
         let data = (0..1000)
             .map(|i| 50000.0 + (i as f64).sin() * 100.0)
             .collect::<Vec<_>>();
         let input = NweInput::from_slice(&data, NweParams::default());
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel)?;
 
-        // With defaults: lookback=500, mae_len=499
-        // First non-NaN should be at index 997 (lookback-1 + mae_len-1)
+        
+        
         const WARMUP: usize = 499 + 498;
 
-        // All values before warmup should be NaN
+        
         for i in 0..WARMUP {
             assert!(
                 result.upper[i].is_nan(),
@@ -2433,7 +2433,7 @@ mod tests {
             );
         }
 
-        // First valid value should be at WARMUP index
+        
         if data.len() > WARMUP {
             assert!(
                 !result.upper[WARMUP].is_nan(),
@@ -2517,7 +2517,7 @@ mod tests {
     fn check_nwe_very_small_dataset(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Single point should succeed but produce all NaN
+        
         let data = vec![42.0];
         let input = NweInput::from_slice(&data, NweParams::default());
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel)?;
@@ -2532,21 +2532,21 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
-        // Test with default parameters and default source (close)
+        
         let input = NweInput::with_default_candles(&candles);
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel)?;
 
         assert_eq!(result.upper.len(), candles.close.len());
         assert_eq!(result.lower.len(), candles.close.len());
 
-        // Find first valid output after warmup
+        
         let first_valid = result
             .upper
             .iter()
             .position(|x| !x.is_nan())
             .expect("[{}] No valid upper values found");
 
-        // Verify upper > lower for valid values
+        
         assert!(
             result.upper[first_valid] > result.lower[first_valid],
             "[{}] Upper not greater than lower at first valid index",
@@ -2565,13 +2565,13 @@ mod tests {
         let params = NweParams {
             bandwidth: Some(8.0),
             multiplier: Some(3.0),
-            lookback: Some(10), // lookback > data length
+            lookback: Some(10), 
         };
 
         let input = NweInput::from_slice(&data, params);
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel);
 
-        // Should return error for insufficient data
+        
         assert!(
             matches!(result, Err(NweError::NotEnoughValidData { .. })),
             "[{}] Expected NotEnoughValidData error when lookback > data length",
@@ -2584,23 +2584,23 @@ mod tests {
     fn check_nwe_reinput(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create sufficient data for non-NaN output
+        
         let data = (0..1100)
             .map(|i| 50000.0 + (i as f64 * 0.1).sin() * 1000.0)
             .collect::<Vec<_>>();
 
-        // Use smaller parameters for faster warmup
+        
         let params = NweParams {
             bandwidth: Some(2.0),
             multiplier: Some(2.0),
             lookback: Some(50),
         };
 
-        // First pass
+        
         let input1 = NweInput::from_slice(&data, params.clone());
         let result1 = nadaraya_watson_envelope_with_kernel(&input1, kernel)?;
 
-        // Extract upper values as new input
+        
         let non_nan_upper: Vec<f64> = result1
             .upper
             .iter()
@@ -2609,11 +2609,11 @@ mod tests {
             .collect();
 
         if non_nan_upper.len() > 100 {
-            // Second pass on upper envelope
+            
             let input2 = NweInput::from_slice(&non_nan_upper, params);
             let result2 = nadaraya_watson_envelope_with_kernel(&input2, kernel)?;
 
-            // Should produce some non-NaN values
+            
             assert!(result2.upper.iter().any(|&x| !x.is_nan()));
         }
 
@@ -2623,7 +2623,7 @@ mod tests {
     fn check_nwe_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Create data with some NaN values
+        
         let mut data = vec![42.0; 1100];
         data[100] = f64::NAN;
         data[200] = f64::NAN;
@@ -2638,7 +2638,7 @@ mod tests {
         let input = NweInput::from_slice(&data, params);
         let result = nadaraya_watson_envelope_with_kernel(&input, kernel)?;
 
-        // Should handle NaN values gracefully
+        
         assert_eq!(result.upper.len(), data.len());
         assert_eq!(result.lower.len(), data.len());
 
@@ -2646,9 +2646,9 @@ mod tests {
     }
 
     fn check_nwe_streaming(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Streaming doesn't use kernel variants, so just test once
+        
 
-        // Need enough data for non-NaN output
+        
         let data = (0..1100)
             .map(|i| 50000.0 + (i as f64 * 0.1).sin() * 1000.0)
             .collect::<Vec<_>>();
@@ -2659,11 +2659,11 @@ mod tests {
             lookback: Some(500),
         };
 
-        // Batch calculation
+        
         let input = NweInput::from_slice(&data, params.clone());
         let batch_result = nadaraya_watson_envelope(&input)?;
 
-        // Streaming calculation
+        
         let mut stream = NweStream::try_new(params)?;
         let mut stream_upper = Vec::new();
         let mut stream_lower = Vec::new();
@@ -2675,21 +2675,21 @@ mod tests {
             }
         }
 
-        // Find first non-NaN in batch
+        
         let batch_start = batch_result
             .upper
             .iter()
             .position(|&x| !x.is_nan())
             .unwrap_or(batch_result.upper.len());
 
-        // Compare where both have values
+        
         if !stream_upper.is_empty() && batch_start < batch_result.upper.len() {
             let batch_end = batch_result.upper.len();
             let stream_end = stream_upper.len();
             let compare_len = stream_end.min(batch_end - batch_start);
 
             if compare_len > 0 {
-                // Compare last few values (streaming catches up to batch)
+                
                 let batch_slice = &batch_result.upper[batch_end - compare_len..];
                 let stream_slice = &stream_upper[stream_end - compare_len..];
 
@@ -2777,19 +2777,19 @@ mod tests {
     fn check_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Use smaller dataset for speed
+        
         let data = (0..1100)
             .map(|i| 50000.0 + (i as f64 * 0.1).sin() * 1000.0)
             .collect::<Vec<_>>();
 
         let output = NweBatchBuilder::new()
             .kernel(kernel)
-            .bandwidth_range(6.0, 10.0, 2.0) // 3 values
-            .multiplier_range(2.0, 4.0, 1.0) // 3 values
-            .lookback_range(400, 500, 100) // 2 values
+            .bandwidth_range(6.0, 10.0, 2.0) 
+            .multiplier_range(2.0, 4.0, 1.0) 
+            .lookback_range(400, 500, 100) 
             .apply_slice(&data)?;
 
-        // Should have 3 * 3 * 2 = 18 combinations
+        
         assert_eq!(output.rows, 18);
         assert_eq!(output.cols, data.len());
         assert_eq!(output.combos.len(), 18);
@@ -2797,7 +2797,7 @@ mod tests {
         Ok(())
     }
 
-    // Macro for generating test variants
+    
     macro_rules! generate_all_nwe_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2808,8 +2808,8 @@ mod tests {
                     }
                 )*
 
-                // These kernels don't affect NWE (it doesn't use SIMD yet)
-                // but we test them for consistency
+                
+                
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 $(
                     #[test]
@@ -2938,7 +2938,7 @@ mod tests {
             multiplier in 0.1f64..10.0,
             lookback in 2usize..100
         )| {
-            // Property: upper envelope should always be >= lower envelope when both are valid
+            
             let params = NweParams {
                 bandwidth: Some(bandwidth),
                 multiplier: Some(multiplier),
@@ -2962,7 +2962,7 @@ mod tests {
         Ok(())
     }
 
-    // Generate all test variants
+    
     generate_all_nwe_tests!(
         check_nwe_partial_params,
         check_nwe_accuracy,
@@ -2980,7 +2980,7 @@ mod tests {
         check_nwe_streaming
     );
 
-    // Add poison check tests only in debug builds
+    
     #[cfg(debug_assertions)]
     generate_all_nwe_tests!(
         check_nwe_no_poison,
@@ -2988,18 +2988,18 @@ mod tests {
         check_batch_par_no_poison
     );
 
-    // Add property-based tests when proptest feature is enabled
+    
     #[cfg(feature = "proptest")]
     generate_all_nwe_tests!(check_nwe_property);
 
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
 
-    // Parity test for native into API vs existing Vec API
+    
     #[cfg(not(feature = "wasm"))]
     #[test]
     fn test_nadaraya_watson_envelope_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use a length that ensures some non-NaN outputs given MAE(499) warmup
+        
         let len = 600usize;
         let data: Vec<f64> = (0..len)
             .map(|i| {
@@ -3015,10 +3015,10 @@ mod tests {
         };
         let input = NweInput::from_slice(&data, params);
 
-        // Baseline via existing Vec-returning API with auto kernel selection
+        
         let baseline = nadaraya_watson_envelope_with_kernel(&input, Kernel::Auto)?;
 
-        // Into API writes directly into caller-provided buffers
+        
         let mut upper = vec![0.0; len];
         let mut lower = vec![0.0; len];
         nadaraya_watson_envelope_into(&input, &mut upper, &mut lower)?;
@@ -3026,7 +3026,7 @@ mod tests {
         assert_eq!(upper.len(), baseline.upper.len());
         assert_eq!(lower.len(), baseline.lower.len());
 
-        // Helper for equality with NaN == NaN and tight epsilon for finite values
+        
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             if a.is_nan() && b.is_nan() {
                 true

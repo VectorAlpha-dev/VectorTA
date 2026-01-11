@@ -23,14 +23,14 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    // Load WASM module
+    
     try {
         const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        // No need to call default() for ES modules
+        
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
@@ -40,16 +40,16 @@ test.before(async () => {
 });
 
 test('RSMK basic functionality', () => {
-    // Test with default parameters
+    
     const close = new Float64Array(testData.close);
     
-    // rsmk_js returns object with values, rows, cols
-    const result = wasm.rsmk_js(close, close, 90, 3, 20, null, null);
-    assert.strictEqual(result.rows, 2); // Indicator and signal
-    assert.strictEqual(result.cols, close.length);
-    assert.strictEqual(result.values.length, close.length * 2); // Two outputs
     
-    // Split results
+    const result = wasm.rsmk_js(close, close, 90, 3, 20, null, null);
+    assert.strictEqual(result.rows, 2); 
+    assert.strictEqual(result.cols, close.length);
+    assert.strictEqual(result.values.length, close.length * 2); 
+    
+    
     const indicator = result.values.slice(0, close.length);
     const signal = result.values.slice(close.length);
     
@@ -65,7 +65,7 @@ test('RSMK accuracy (last 5 values)', () => {
 
     const last5Ind = indicator.slice(-5);
     const last5Sig = signal.slice(-5);
-    const expected = [0.0, 0.0, 0.0, 0.0, 0.0]; // matches Rust test refs
+    const expected = [0.0, 0.0, 0.0, 0.0, 0.0]; 
 
     assertArrayClose(last5Ind, expected, 1e-8, 'RSMK indicator last 5 mismatch');
     assertArrayClose(last5Sig, expected, 1e-8, 'RSMK signal last 5 mismatch');
@@ -116,29 +116,29 @@ test('RSMK fast API - in-place operation', () => {
     const close = new Float64Array(testData.close);
     const len = close.length;
     
-    // Allocate buffers
+    
     const indicatorPtr = wasm.rsmk_alloc(len);
     const signalPtr = wasm.rsmk_alloc(len);
     
     try {
-        // Test in-place (aliasing)
-        const closePtr = indicatorPtr; // Aliased pointer
-        const comparePtr = signalPtr; // Another aliased pointer
         
-        // Copy data to buffers
+        const closePtr = indicatorPtr; 
+        const comparePtr = signalPtr; 
+        
+        
         const indicatorBuf = new Float64Array(wasm.__wasm.memory.buffer, indicatorPtr, len);
         const signalBuf = new Float64Array(wasm.__wasm.memory.buffer, signalPtr, len);
         indicatorBuf.set(close);
         signalBuf.set(close);
         
-        // Call fast API with aliased pointers
+        
         wasm.rsmk_into(closePtr, indicatorPtr, signalPtr, len, comparePtr, 90, 3, 20, null, null);
         
-        // Recreate views after operation in case memory was reallocated
+        
         const indicatorResult = new Float64Array(wasm.__wasm.memory.buffer, indicatorPtr, len);
         const signalResult = new Float64Array(wasm.__wasm.memory.buffer, signalPtr, len);
         
-        // Results should be written correctly despite aliasing
+        
         assert.strictEqual(indicatorResult.length, len);
         assert.strictEqual(signalResult.length, len);
     } finally {
@@ -148,7 +148,7 @@ test('RSMK fast API - in-place operation', () => {
 });
 
 test('RSMK batch processing', () => {
-    const close = new Float64Array(testData.close.slice(0, 1000)); // Use smaller dataset for batch
+    const close = new Float64Array(testData.close.slice(0, 1000)); 
     
     const config = {
         lookback_range: [85, 95, 5],
@@ -160,14 +160,14 @@ test('RSMK batch processing', () => {
     
     const result = wasm.rsmk_batch(close, close, config);
     
-    // Check structure
+    
     assert(result.indicators);
     assert(result.signals);
     assert(result.combos);
     assert(result.rows > 0);
     assert(result.cols === close.length);
     
-    // Check flattened array sizes
+    
     assert.strictEqual(result.indicators.length, result.rows * result.cols);
     assert.strictEqual(result.signals.length, result.rows * result.cols);
     assert.strictEqual(result.combos.length, result.rows);

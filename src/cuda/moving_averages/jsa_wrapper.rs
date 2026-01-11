@@ -30,7 +30,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-// -------- Kernel selection policy (mirrors ALMA; only Plain used here) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -72,7 +72,7 @@ impl Default for CudaJsaPolicy {
     }
 }
 
-// -------- Introspection (selected kernel) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -188,7 +188,7 @@ impl CudaJsa {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        // Query device limit (portable grid chunking)
+        
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
 
         Ok(Self {
@@ -231,7 +231,7 @@ impl CudaJsa {
         self.stream.synchronize().map_err(CudaJsaError::from)
     }
 
-    // ---------- VRAM helpers ----------
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -255,7 +255,7 @@ impl CudaJsa {
         }
     }
 
-    // ---------- Debug logging (once per scenario when BENCH_DEBUG=1) ----------
+    
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
@@ -295,7 +295,7 @@ impl CudaJsa {
         }
     }
 
-    // Chunk combos across grid.x to avoid exceeding device grid limits.
+    
     #[inline]
     fn grid_x_chunks(&self, n: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
         let cap = self.max_grid_x.max(1);

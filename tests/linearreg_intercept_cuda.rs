@@ -1,14 +1,14 @@
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::CudaLinregIntercept;
-use my_project::indicators::linearreg_intercept::{
+use vector_ta::cuda::CudaLinregIntercept;
+use vector_ta::indicators::linearreg_intercept::{
     linearreg_intercept_batch_slice, LinearRegInterceptBatchOutput, LinearRegInterceptBatchRange,
     LinearRegInterceptBuilder, LinearRegInterceptParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 fn make_test_series(len: usize) -> Vec<f64> {
     let mut data = vec![f64::NAN; len];

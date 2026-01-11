@@ -47,7 +47,7 @@ pub enum CudaHwmaError {
     NotImplemented,
 }
 
-// -------- Kernel policy + introspection (subset for recurrence) --------
+
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -104,7 +104,7 @@ impl CudaHwma {
         let context = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
-        // Prefer DetermineTargetFromContext + O2 for stability; fall back to simpler modes.
+        
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -158,7 +158,7 @@ impl CudaHwma {
         self.stream.synchronize().map_err(|e| CudaHwmaError::Cuda(e))
     }
 
-    // -------- Host↔Device helpers (pinned+async by default) --------
+    
     #[inline]
     fn env_flag(name: &str, default: bool) -> bool {
         match env::var(name) {
@@ -189,7 +189,7 @@ impl CudaHwma {
         }
     }
 
-    // VRAM helpers
+    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -308,7 +308,7 @@ impl CudaHwma {
             .ok_or_else(|| CudaHwmaError::InvalidInput("all values are NaN".into()))?;
         let len = data_f32.len();
 
-        // Checked expansion mirrors CPU rules; return typed error instead of fallback
+        
         let combos = Self::expand_grid_cuda_checked(sweep)?;
 
         for (idx, prm) in combos.iter().enumerate() {
@@ -364,7 +364,7 @@ impl CudaHwma {
             .get_function("hwma_batch_f32")
             .map_err(|_| CudaHwmaError::MissingKernelSymbol { name: "hwma_batch_f32" })?;
 
-        // Occupancy-guided block size with optional env override
+        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => std::env::var("HWMA_BLOCK_X")
@@ -377,12 +377,12 @@ impl CudaHwma {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        // Optional sanity: ensure we do not exceed zero/absurd launch sizes
+        
         if block_x == 0 || grid_x == 0 {
             return Err(CudaHwmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
         }
 
-        // Introspection
+        
         unsafe {
             (*(self as *const _ as *mut CudaHwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -449,7 +449,7 @@ impl CudaHwma {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate: prices + 3 param arrays + output
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_bytes = series_len
             .checked_mul(sz_f32)
@@ -487,7 +487,7 @@ impl CudaHwma {
 
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
-        // Single launch: grid-stride kernel covers all combos
+        
         self.launch_batch_kernel(
             &d_prices,
             &d_nas,
@@ -498,7 +498,7 @@ impl CudaHwma {
             n_combos,
             &mut d_out,
         )?;
-        // Producer stream is synchronized here; CAI v3 consumers may omit 'stream' key.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -682,7 +682,7 @@ impl CudaHwma {
         let (first_valids, na, nb, nc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM: prices + first_valids + output
+        
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_elems = cols
             .checked_mul(rows)
@@ -717,7 +717,7 @@ impl CudaHwma {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        // Producer stream synchronized; CAI v3 'stream' key may be omitted.
+        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -728,7 +728,7 @@ impl CudaHwma {
     }
 }
 
-// ---------- Bench profiles ----------
+
 
 pub mod benches {
     use super::*;

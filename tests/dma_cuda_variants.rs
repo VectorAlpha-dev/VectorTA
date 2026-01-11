@@ -1,16 +1,16 @@
-// Integration tests covering DMA CUDA kernel variants via explicit policy selection.
 
-use my_project::indicators::moving_averages::dma::{
+
+use vector_ta::indicators::moving_averages::dma::{
     dma_batch_with_kernel, DmaBatchRange, DmaBuilder, DmaParams,
 };
-use my_project::utilities::enums::Kernel;
+use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
-use my_project::cuda::cuda_available;
+use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use my_project::cuda::moving_averages::dma_wrapper::{
+use vector_ta::cuda::moving_averages::dma_wrapper::{
     BatchKernelPolicy, BatchThreadsPerOutput, CudaDma, CudaDmaPolicy, ManySeriesKernelPolicy,
 };
 
@@ -58,11 +58,11 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     }
 
     let data = gen_series_f64(series_len, 5);
-    // Build a moderately sized grid to force variant selection when needed.
+    
     let sweep = DmaBatchRange {
-        hull_length: (hull_len, hull_len + 6, 3), // 3 combos
-        ema_length: (ema_len, ema_len + 8, 4),    // 3 combos
-        ema_gain_limit: (10, 30, 10),             // 3 combos
+        hull_length: (hull_len, hull_len + 6, 3), 
+        ema_length: (ema_len, ema_len + 8, 4),    
+        ema_gain_limit: (10, 30, 10),             
         hull_ma_type: "WMA".to_string(),
     };
 
@@ -79,8 +79,8 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    // DMA mixes recursive EMA with WMA-based hull; GPU uses fp32 while CPU baseline
-    // uses f64. For long series and tiled paths, allow a slightly looser tolerance.
+    
+    
     let (atol, rtol) = (5e-3, 6e-4);
     for i in 0..host.len() {
         let a = cpu.values[i];
@@ -116,7 +116,7 @@ fn compare_many_series(
         hull_ma_type: Some("WMA".to_string()),
     };
 
-    // CPU baseline per-series
+    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
@@ -159,7 +159,7 @@ fn compare_many_series(
     }
 }
 
-// --------- Tests per-kernel variant ---------
+
 
 #[cfg(feature = "cuda")]
 #[test]
@@ -168,7 +168,7 @@ fn dma_batch_plain_matches_cpu() {
         batch: BatchKernelPolicy::Plain { block_x: 256 },
         many_series: ManySeriesKernelPolicy::Auto,
     };
-    // small combos to steer into plain kernel easily
+    
     compare_batch(policy, 32768, 12, 16);
 }
 
@@ -182,7 +182,7 @@ fn dma_batch_tiled_matches_cpu() {
         },
         many_series: ManySeriesKernelPolicy::Auto,
     };
-    // larger combos steer into tiled path
+    
     compare_batch(policy, 131072, 12, 24);
 }
 
