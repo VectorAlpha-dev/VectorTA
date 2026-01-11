@@ -613,17 +613,44 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct CciBatchState {
+    struct CciBatchDeviceState {
         cuda: CudaCci,
-        data: Vec<f32>,
-        sweep: CciBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        periods_u: Vec<usize>,
+        series_len: usize,
+        first_valid: usize,
+        rows: usize,
     }
-    impl CudaBenchState for CciBatchState {
+    impl CudaBenchState for CciBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cci_batch_dev(&self.data, &self.sweep)
-                .expect("cci batch");
+            let max_blocks: usize = 65_535;
+            let mut launched = 0usize;
+            while launched < self.rows {
+                let n_this = std::cmp::min(max_blocks, self.rows - launched);
+                let max_p_this = self.periods_u[launched..launched + n_this]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0);
+                let dyn_smem_bytes = max_p_this * std::mem::size_of::<f32>();
+                self.cuda
+                    .launch_batch_kernel(
+                        &self.d_prices,
+                        &self.d_periods,
+                        self.series_len,
+                        n_this,
+                        self.first_valid,
+                        &mut self.d_out,
+                        launched,
+                        launched * self.series_len,
+                        dyn_smem_bytes,
+                    )
+                    .expect("cci launch_batch_kernel");
+                launched += n_this;
+            }
+            let _ = self.cuda.stream.synchronize();
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -632,10 +659,24 @@ pub mod benches {
         let sweep = CciBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        let sweep = CciBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-        };
-        Box::new(CciBatchState { cuda, data, sweep })
+        let (combos, first_valid, len) =
+            CudaCci::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let periods_u: Vec<usize> = periods.iter().map(|&p| p as usize).collect();
+        let rows = combos.len();
+        let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+        Box::new(CciBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            periods_u,
+            series_len: len,
+            first_valid,
+            rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

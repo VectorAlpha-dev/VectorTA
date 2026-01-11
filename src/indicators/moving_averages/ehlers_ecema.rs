@@ -491,7 +491,7 @@ fn ehlers_ecema_prepare<'a>(
     let alpha = 2.0 / (length as f64 + 1.0);
     let beta = 1.0 - alpha;
     let chosen = if matches!(kernel, Kernel::Auto) {
-        detect_best_kernel()
+        Kernel::Scalar
     } else {
         kernel
     };
@@ -897,7 +897,7 @@ impl Default for EhlersEcemaBatchBuilder {
     fn default() -> Self {
         Self {
             range: EhlersEcemaBatchRange {
-                length: (20, 20, 0),
+                length: (20, 269, 1),
                 gain_limit: (50, 50, 0),
             },
             kernel: Kernel::Auto,
@@ -1679,7 +1679,7 @@ pub fn ehlers_ecema_js(
 
     let mut output = vec![0.0; data.len()];
 
-    ehlers_ecema_into_slice(&mut output, &input, detect_best_kernel())
+    ehlers_ecema_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
@@ -1798,13 +1798,13 @@ pub fn ehlers_ecema_into(
 
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
-            ehlers_ecema_into_slice(&mut temp, &input, detect_best_kernel())
+            ehlers_ecema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            ehlers_ecema_into_slice(out, &input, detect_best_kernel())
+            ehlers_ecema_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }
@@ -1848,13 +1848,13 @@ pub fn ehlers_ecema_into_ex(
         if in_ptr == out_ptr {
             // preserve zero-copy semantics with a single temporary like ALMA
             let mut temp = vec![0.0; len];
-            ehlers_ecema_into_slice(&mut temp, &input, detect_best_kernel())
+            ehlers_ecema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            ehlers_ecema_into_slice(out, &input, detect_best_kernel())
+            ehlers_ecema_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }

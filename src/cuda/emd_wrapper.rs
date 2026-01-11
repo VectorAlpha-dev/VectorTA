@@ -378,24 +378,9 @@ impl CudaEmd {
         let out_bytes = out_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
-        // Scratch rings: sp/sv (50 each) + bp (2*max_period)
-        let mut ring_stride_mid = max_p
-            .checked_mul(2)
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_elems_per_combo = 50usize
-            .checked_add(50)
-            .and_then(|v| v.checked_add(ring_stride_mid))
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_elems = n
-            .checked_mul(ring_elems_per_combo)
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_bytes = ring_elems
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         let required = in_bytes
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
-            .and_then(|v| v.checked_add(ring_bytes))
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
@@ -428,11 +413,6 @@ impl CudaEmd {
         let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
         let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
         let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
-
-        // Allocate zero-initialized ring buffers on device (no host copy)
-        let mut d_sp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * 50).map_err(CudaEmdError::Cuda)?;
-        let mut d_sv_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * 50).map_err(CudaEmdError::Cuda)?;
-        let mut d_bp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(n * ring_stride_mid).map_err(CudaEmdError::Cuda)?;
 
         // Chunk grid.y to <= 65_535 if needed (rows == combos). Use x dimension like other wrappers.
         // Kernel uses dynamic shared memory for 2*50 rings; choose safe block size
@@ -474,10 +454,6 @@ impl CudaEmd {
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
-            // ring buffers for peaks/valleys/bridge
-            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
-            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
-            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut p_p as *mut _ as *mut c_void,
@@ -489,10 +465,6 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
-                &mut ring_stride_mid as *mut _ as *mut c_void,
-                &mut p_sp as *mut _ as *mut c_void,
-                &mut p_sv as *mut _ as *mut c_void,
-                &mut p_bp as *mut _ as *mut c_void,
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -552,22 +524,9 @@ impl CudaEmd {
         let delta = params.delta.unwrap_or(0.5) as f32;
         let fraction = params.fraction.unwrap_or(0.1) as f32;
 
-        // VRAM estimate (inputs + first_valids + 3 outputs + ring scratch)
+        // VRAM estimate (inputs + first_valids + 3 outputs)
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let per_mid = (period as usize)
-            .checked_mul(2)
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_elems_per_series = 50usize
-            .checked_add(50)
-            .and_then(|v| v.checked_add(per_mid))
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_elems = cols
-            .checked_mul(ring_elems_per_series)
-            .ok_or_else(|| CudaEmdError::InvalidInput("ring size overflow".into()))?;
-        let ring_bytes = ring_elems
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         let input_bytes = data_tm_f32
             .len()
             .checked_mul(sz_f32)
@@ -584,7 +543,6 @@ impl CudaEmd {
         let bytes = input_bytes
             .checked_add(fv_bytes)
             .and_then(|v| v.checked_add(out_bytes))
-            .and_then(|v| v.checked_add(ring_bytes))
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(bytes, 64 * 1024 * 1024)?;
 
@@ -636,19 +594,9 @@ impl CudaEmd {
             let mut delta_f = delta;
             let mut frac_f = fraction;
             let mut p_fv = d_fv.as_device_ptr().as_raw();
-            // Allocate ring buffers for many-series scratch (zeroed on device)
-            let mut ring_stride_mid: i32 = per_mid as i32;
             let mut p_ub = d_ub.as_device_ptr().as_raw();
             let mut p_mb = d_mb.as_device_ptr().as_raw();
             let mut p_lb = d_lb.as_device_ptr().as_raw();
-            // ring buffers pointers again for many-series variant (allocate zeroed on device)
-            let mut d_sp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * 50).map_err(CudaEmdError::Cuda)?;
-            let mut d_sv_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * 50).map_err(CudaEmdError::Cuda)?;
-            let mut d_bp_ring: DeviceBuffer<f32> = DeviceBuffer::zeroed(cols * per_mid).map_err(CudaEmdError::Cuda)?;
-            let mut ring_stride_mid: i32 = per_mid as i32;
-            let mut p_sp = d_sp_ring.as_device_ptr().as_raw();
-            let mut p_sv = d_sv_ring.as_device_ptr().as_raw();
-            let mut p_bp = d_bp_ring.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut p_prices as *mut _ as *mut c_void,
                 &mut cols_i as *mut _ as *mut c_void,
@@ -660,10 +608,6 @@ impl CudaEmd {
                 &mut p_ub as *mut _ as *mut c_void,
                 &mut p_mb as *mut _ as *mut c_void,
                 &mut p_lb as *mut _ as *mut c_void,
-                &mut ring_stride_mid as *mut _ as *mut c_void,
-                &mut p_sp as *mut _ as *mut c_void,
-                &mut p_sv as *mut _ as *mut c_void,
-                &mut p_bp as *mut _ as *mut c_void,
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -720,66 +664,213 @@ pub mod benches {
         ]
     }
 
-    struct EmdBatchState {
+    struct EmdBatchDeviceState {
         cuda: CudaEmd,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: EmdBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_p: DeviceBuffer<i32>,
+        d_d: DeviceBuffer<f32>,
+        d_f: DeviceBuffer<f32>,
+        d_ub: DeviceBuffer<f32>,
+        d_mb: DeviceBuffer<f32>,
+        d_lb: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n: usize,
+        grid_x: u32,
+        block_x: u32,
+        dyn_smem_bytes: u32,
     }
-    impl CudaBenchState for EmdBatchState {
+    impl CudaBenchState for EmdBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .emd_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("emd batch");
-            let _ = self.cuda.synchronize();
+            unsafe {
+                let mut func = self
+                    .cuda
+                    .module
+                    .get_function("emd_batch_f32")
+                    .expect("emd_batch_f32");
+                opt_in_dynamic_smem(&func, self.dyn_smem_bytes).expect("opt-in smem");
+                prefer_shared(&mut func).expect("prefer_shared");
+                let _ = cuFuncSetAttribute(
+                    func.to_raw(),
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                );
+
+                let mut p_prices = self.d_prices.as_device_ptr().as_raw();
+                let mut p_p = self.d_p.as_device_ptr().as_raw();
+                let mut p_d = self.d_d.as_device_ptr().as_raw();
+                let mut p_f = self.d_f.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut n_i = self.n as i32;
+                let mut fv_i = self.first_valid as i32;
+                let mut p_ub = self.d_ub.as_device_ptr().as_raw();
+                let mut p_mb = self.d_mb.as_device_ptr().as_raw();
+                let mut p_lb = self.d_lb.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_prices as *mut _ as *mut c_void,
+                    &mut p_p as *mut _ as *mut c_void,
+                    &mut p_d as *mut _ as *mut c_void,
+                    &mut p_f as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut p_ub as *mut _ as *mut c_void,
+                    &mut p_mb as *mut _ as *mut c_void,
+                    &mut p_lb as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .validate_launch((self.grid_x, 1, 1), (self.block_x, 1, 1))
+                    .expect("launch dims");
+                self.cuda
+                    .stream
+                    .launch(
+                        &func,
+                        (self.grid_x, 1, 1),
+                        (self.block_x, 1, 1),
+                        self.dyn_smem_bytes,
+                        args,
+                    )
+                    .expect("emd batch launch");
+            }
+            self.cuda.stream.synchronize().expect("emd batch sync");
         }
     }
     fn prep_emd_batch_box() -> Box<dyn CudaBenchState> {
-        let mut high = vec![f32::NAN; 60_000];
-        let mut low = vec![f32::NAN; 60_000];
-        for i in 2..60_000 {
+        let cuda = CudaEmd::new(0).expect("cuda emd");
+
+        let len = 60_000usize;
+        let first_valid = 2usize;
+        let mut prices = vec![f32::NAN; len];
+        for i in first_valid..len {
             let x = i as f32;
-            high[i] = (x * 0.001).sin() + 0.0002 * x + 0.5;
-            low[i] = (x * 0.001).sin() + 0.0002 * x - 0.5;
+            prices[i] = (x * 0.001).sin() + 0.0002 * x;
         }
         let sweep = EmdBatchRange {
             period: (8, 20, 4),
             delta: (0.3, 0.7, 0.2),
             fraction: (0.05, 0.15, 0.05),
         };
-        Box::new(EmdBatchState {
-            cuda: CudaEmd::new(0).expect("cuda emd"),
-            high,
-            low,
-            sweep,
+        let combos = CudaEmd::expand_combos(&sweep).expect("expand_combos");
+        let n = combos.len();
+        let mut periods_i32 = Vec::with_capacity(n);
+        let mut deltas_f32 = Vec::with_capacity(n);
+        let mut fracs_f32 = Vec::with_capacity(n);
+        for c in &combos {
+            periods_i32.push(c.period.unwrap_or(20) as i32);
+            deltas_f32.push(c.delta.unwrap_or(0.5) as f32);
+            fracs_f32.push(c.fraction.unwrap_or(0.1) as f32);
+        }
+
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_p = DeviceBuffer::from_slice(&periods_i32).expect("d_p");
+        let d_d = DeviceBuffer::from_slice(&deltas_f32).expect("d_d");
+        let d_f = DeviceBuffer::from_slice(&fracs_f32).expect("d_f");
+        let elems = n * len;
+        let d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_ub");
+        let d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_mb");
+        let d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_lb");
+
+        let req_block = match cuda.policy.batch {
+            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Plain { block_x } => block_x,
+        } as u32;
+        let device = Device::get_device(cuda.device_id).expect("device");
+        let block_x = clamp_block_x_for_smem(device, req_block);
+        let grid_x = ((n as u32) + block_x - 1) / block_x;
+        let dyn_smem_bytes = smem_for(block_x) as u32;
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EmdBatchDeviceState {
+            cuda,
+            d_prices,
+            d_p,
+            d_d,
+            d_f,
+            d_ub,
+            d_mb,
+            d_lb,
+            len,
+            first_valid,
+            n,
+            grid_x,
+            block_x,
+            dyn_smem_bytes,
         })
     }
 
-    struct EmdManySeriesState {
+    struct EmdManyDeviceState {
         cuda: CudaEmd,
-        data_tm: Vec<f32>,
+        d_prices: DeviceBuffer<f32>,
+        d_fv: DeviceBuffer<i32>,
+        d_ub: DeviceBuffer<f32>,
+        d_mb: DeviceBuffer<f32>,
+        d_lb: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: EmdParams,
-        first_valids: Vec<i32>,
+        period: i32,
+        delta: f32,
+        fraction: f32,
+        grid_x: u32,
+        block_x: u32,
+        dyn_smem_bytes: u32,
     }
-    impl CudaBenchState for EmdManySeriesState {
+    impl CudaBenchState for EmdManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .emd_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                    &self.first_valids,
-                )
-                .expect("emd many series");
-            let _ = self.cuda.synchronize();
+            unsafe {
+                let mut func = self
+                    .cuda
+                    .module
+                    .get_function("emd_many_series_one_param_time_major_f32")
+                    .expect("emd_many_series_one_param_time_major_f32");
+                opt_in_dynamic_smem(&func, self.dyn_smem_bytes).expect("opt-in smem");
+                prefer_shared(&mut func).expect("prefer_shared");
+                let _ = cuFuncSetAttribute(
+                    func.to_raw(),
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                );
+
+                let mut p_prices = self.d_prices.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut period_i = self.period;
+                let mut delta_f = self.delta;
+                let mut frac_f = self.fraction;
+                let mut p_fv = self.d_fv.as_device_ptr().as_raw();
+                let mut p_ub = self.d_ub.as_device_ptr().as_raw();
+                let mut p_mb = self.d_mb.as_device_ptr().as_raw();
+                let mut p_lb = self.d_lb.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_prices as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut delta_f as *mut _ as *mut c_void,
+                    &mut frac_f as *mut _ as *mut c_void,
+                    &mut p_fv as *mut _ as *mut c_void,
+                    &mut p_ub as *mut _ as *mut c_void,
+                    &mut p_mb as *mut _ as *mut c_void,
+                    &mut p_lb as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .validate_launch((self.grid_x, 1, 1), (self.block_x, 1, 1))
+                    .expect("launch dims");
+                self.cuda
+                    .stream
+                    .launch(
+                        &func,
+                        (self.grid_x, 1, 1),
+                        (self.block_x, 1, 1),
+                        self.dyn_smem_bytes,
+                        args,
+                    )
+                    .expect("emd many launch");
+            }
+            self.cuda.stream.synchronize().expect("emd many sync");
         }
     }
     fn prep_emd_many_series_box() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEmd::new(0).expect("cuda emd");
         let cols = 128usize;
         let rows = 120_000usize;
         let mut data_tm = vec![f32::NAN; cols * rows];
@@ -796,13 +887,42 @@ pub mod benches {
             delta: Some(0.5),
             fraction: Some(0.1),
         };
-        Box::new(EmdManySeriesState {
-            cuda: CudaEmd::new(0).expect("cuda emd"),
-            data_tm,
+        let period = params.period.unwrap_or(20) as i32;
+        let delta = params.delta.unwrap_or(0.5) as f32;
+        let fraction = params.fraction.unwrap_or(0.1) as f32;
+
+        let d_prices = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let expected = cols * rows;
+        let d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_ub");
+        let d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_mb");
+        let d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_lb");
+
+        let req_block = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 128,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+        } as u32;
+        let device = Device::get_device(cuda.device_id).expect("device");
+        let block_x = clamp_block_x_for_smem(device, req_block);
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let dyn_smem_bytes = smem_for(block_x) as u32;
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EmdManyDeviceState {
+            cuda,
+            d_prices,
+            d_fv,
+            d_ub,
+            d_mb,
+            d_lb,
             cols,
             rows,
-            params,
-            first_valids,
+            period,
+            delta,
+            fraction,
+            grid_x,
+            block_x,
+            dyn_smem_bytes,
         })
     }
 }

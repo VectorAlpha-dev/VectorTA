@@ -1140,7 +1140,7 @@ pub struct WillrBatchRange {
 impl Default for WillrBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 100, 1),
+            period: (14, 263, 1),
         }
     }
 }

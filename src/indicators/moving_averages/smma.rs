@@ -619,7 +619,7 @@ pub struct SmmaBatchRange {
 impl Default for SmmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (7, 100, 1),
+            period: (7, 256, 1),
         }
     }
 }

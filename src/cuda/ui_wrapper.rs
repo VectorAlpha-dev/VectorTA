@@ -781,26 +781,66 @@ impl CudaUi {
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
+    use std::ffi::c_void;
 
     const ONE_SERIES_LEN: usize = 1_000_000; // 1m
-    const MANY_COLS: usize = 128;
-    const MANY_ROWS: usize = 200_000; // 200k
 
     fn bytes_one_series() -> usize {
-        (ONE_SERIES_LEN * 2) * std::mem::size_of::<f32>()
-    }
-    fn bytes_many_series() -> usize {
-        (MANY_COLS * MANY_ROWS * 2 + MANY_COLS) * std::mem::size_of::<f32>()
+        // prices + (periods, scalars) + output + ~64MB headroom
+        let n_params = 11usize; // (10..=60 step 5) x 1 scalar
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = n_params * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = n_params * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct UiBatchState {
         cuda: CudaUi,
-        prices: Vec<f32>,
-        sweep: UiBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_scalars: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_params: usize,
+        max_p: usize,
+        grid: GridSize,
+        block: BlockSize,
+        smem: u32,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for UiBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.ui_batch_dev(&self.prices, &self.sweep).unwrap();
+            let mut func = self
+                .cuda
+                .module
+                .get_function("ui_one_series_many_params_f32")
+                .expect("ui_one_series_many_params_f32");
+            func.set_cache_config(CacheConfig::PreferShared).ok();
+            unsafe {
+                let mut a_prices = self.d_prices.as_device_ptr().as_raw();
+                let mut a_len = self.len as i32;
+                let mut a_periods = self.d_periods.as_device_ptr().as_raw();
+                let mut a_scalars = self.d_scalars.as_device_ptr().as_raw();
+                let mut a_nparams = self.n_params as i32;
+                let mut a_first = self.first_valid as i32;
+                let mut a_maxp = self.max_p as i32;
+                let mut a_out = self.d_out.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 8] = [
+                    &mut a_prices as *mut _ as *mut c_void,
+                    &mut a_len as *mut _ as *mut c_void,
+                    &mut a_periods as *mut _ as *mut c_void,
+                    &mut a_scalars as *mut _ as *mut c_void,
+                    &mut a_nparams as *mut _ as *mut c_void,
+                    &mut a_first as *mut _ as *mut c_void,
+                    &mut a_maxp as *mut _ as *mut c_void,
+                    &mut a_out as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&mut func, self.grid, self.block, self.smem, &mut args)
+                    .expect("ui launch");
+            }
+            self.cuda.stream.synchronize().expect("ui sync");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
@@ -810,48 +850,73 @@ pub mod benches {
             let x = i as f32 * 0.00123;
             prices[i] = (x * 0.91).sin() + 0.0007 * x;
         }
+        let first_valid = prices
+            .iter()
+            .position(|v| v.is_finite())
+            .unwrap_or(ONE_SERIES_LEN);
         let sweep = UiBatchRange {
             period: (10, 60, 5),
             scalar: (100.0, 100.0, 0.0),
         };
-        Box::new(BatchState {
-            cuda,
-            prices,
-            sweep,
-        })
-    }
-
-    struct ManyState {
-        cuda: CudaUi,
-        prices_tm: Vec<f32>,
-    }
-    impl CudaBenchState for ManyState {
-        fn launch(&mut self) {
-            let params = UiParams {
-                period: Some(14),
-                scalar: Some(100.0),
-            };
-            let _ = self
-                .cuda
-                .ui_many_series_one_param_time_major_dev(
-                    &self.prices_tm,
-                    MANY_COLS,
-                    MANY_ROWS,
-                    &params,
-                )
-                .unwrap();
-        }
-    }
-    fn prep_many_series() -> Box<dyn CudaBenchState> {
-        let cuda = CudaUi::new(0).expect("cuda ui");
-        let mut prices_tm = vec![f32::NAN; MANY_COLS * MANY_ROWS];
-        for s in 0..MANY_COLS {
-            for t in 0..MANY_ROWS {
-                let x = t as f32 * 0.002 + s as f32 * 0.01;
-                prices_tm[t * MANY_COLS + s] = (x * 0.73).sin() + 0.0009 * x;
+        let (periods, scalars) = CudaUi::expand_grid(&sweep).expect("expand_grid");
+        let max_p = *periods.iter().max().unwrap_or(&1);
+        let n_params = periods.len() * scalars.len();
+        let mut periods_params: Vec<i32> = Vec::with_capacity(n_params);
+        let mut scalars_params: Vec<f32> = Vec::with_capacity(n_params);
+        for &p in &periods {
+            for &s in &scalars {
+                periods_params.push(p as i32);
+                scalars_params.push(s);
             }
         }
-        Box::new(ManyState { cuda, prices_tm })
+
+        // Mirror ui_batch_dev's launch config for the multi-param kernel.
+        let bytes_per_param = {
+            let deq_idx = CudaUi::align16(max_p * std::mem::size_of::<i32>());
+            let deq_val = CudaUi::align16(max_p * std::mem::size_of::<f32>());
+            let sq_ring = CudaUi::align16(max_p * std::mem::size_of::<f32>());
+            deq_idx + deq_val + sq_ring + max_p * std::mem::size_of::<u8>()
+        };
+        let optin = cuda.device_optin_shared_mem();
+        let mut warps_per_block = (optin / bytes_per_param).max(1) as u32;
+        if warps_per_block > 8 {
+            warps_per_block = 8;
+        }
+        let smem = (bytes_per_param as u64 * warps_per_block as u64) as usize;
+        let block_x = warps_per_block * 32;
+        let grid_x = ((n_params as u32) + warps_per_block - 1) / warps_per_block;
+        cuda.validate_launch(grid_x, 1, 1, block_x, 1, 1)
+            .expect("ui validate_launch");
+
+        // Configure kernel dynamic shared memory once.
+        let mut func = cuda
+            .module
+            .get_function("ui_one_series_many_params_f32")
+            .expect("ui_one_series_many_params_f32");
+        func.set_cache_config(CacheConfig::PreferShared).ok();
+        CudaUi::set_kernel_dynamic_smem(&mut func, smem, 100).expect("set_kernel_dynamic_smem");
+
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_params).expect("d_periods");
+        let d_scalars = DeviceBuffer::from_slice(&scalars_params).expect("d_scalars");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_params * ONE_SERIES_LEN) }.expect("d_out");
+        cuda.stream.synchronize().expect("ui prep sync");
+
+        Box::new(UiBatchState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_scalars,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_params,
+            max_p,
+            grid: GridSize::xyz(grid_x, 1, 1),
+            block: BlockSize::xyz(block_x, 1, 1),
+            smem: smem as u32,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -865,15 +930,6 @@ pub mod benches {
             )
             .with_sample_size(10)
             .with_mem_required(bytes_one_series()),
-            CudaBenchScenario::new(
-                "ui",
-                "many_series_one_param",
-                "ui_cuda_many_series_tm",
-                "200k x 128",
-                prep_many_series,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_many_series()),
         ]
     }
 }

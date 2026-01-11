@@ -77,23 +77,38 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
                            float* __restrict__ out) {
     if (series_len <= 0) return;
 
+    const float nan_f = __int_as_float(0x7fc00000);
     const int strideGrid = blockDim.x * gridDim.x;
     for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
          combo < n_combos;
          combo += strideGrid) {
 
-        const int period = periods[combo];
-        if (period <= 0) continue;
+        const int base = combo * series_len;
+        float* __restrict__ out_row = out + base;
 
+        const int period = periods[combo];
         int first = first_valid;
         if (first < 0) first = 0;
-        if (first >= series_len) continue;
+
+        if (period <= 0 || period > series_len || first >= series_len) {
+            for (int i = 0; i < series_len; ++i) out_row[i] = nan_f;
+            continue;
+        }
+        const int tail_len = series_len - first;
+        if (tail_len < period) {
+            for (int i = 0; i < series_len; ++i) out_row[i] = nan_f;
+            continue;
+        }
 
         const int warm = first + period - 1;
-        const int base = combo * series_len;
 
-        // Assumption: caller prefilled out[base:base+series_len) with NaNs.
-        if (warm >= series_len) continue;
+        if (warm >= series_len) {
+            for (int i = 0; i < series_len; ++i) out_row[i] = nan_f;
+            continue;
+        }
+
+        // Warmup semantics: [0, warm) = NaN
+        for (int i = 0; i < warm; ++i) out_row[i] = nan_f;
 
         const int start = warm;
         int delta_start = start - period + 1;
@@ -125,7 +140,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
         sc *= sc;
 
         float prev = fmaf(sc, cur_price - prev_price, prev_price);
-        out[base + start] = prev;
+        out_row[start] = prev;
 
         // Main loop (window already full; anchor and drop always valid)
         for (int i = start + 1; i < series_len; ++i) {
@@ -158,7 +173,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             sc_i *= sc_i;
             prev = fmaf(sc_i, newest - prev, prev);
 
-            out[base + i] = prev;
+            out_row[i] = prev;
         }
     }
 }

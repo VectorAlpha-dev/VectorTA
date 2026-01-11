@@ -1096,7 +1096,7 @@ pub struct FramaBatchRange {
 impl Default for FramaBatchRange {
     fn default() -> Self {
         Self {
-            window: (10, 32, 0),
+            window: (10, 259, 1),
             sc: (300, 300, 0),
             fc: (1, 1, 0),
         }

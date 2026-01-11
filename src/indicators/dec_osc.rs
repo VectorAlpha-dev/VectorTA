@@ -502,7 +502,7 @@ pub struct DecOscBatchRange {
 impl Default for DecOscBatchRange {
     fn default() -> Self {
         Self {
-            hp_period: (125, 125, 0),
+            hp_period: (125, 374, 1),
             k: (1.0, 1.0, 0.0),
         }
     }

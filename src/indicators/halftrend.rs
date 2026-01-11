@@ -357,7 +357,7 @@ pub fn halftrend_with_kernel(
 ) -> Result<HalfTrendOutput, HalfTrendError> {
     // Choose kernel - use best available if Auto
     let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1256,7 +1256,7 @@ pub fn halftrend_into_slices_kernel(
     }
 
     let mut chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -2251,7 +2251,7 @@ impl Default for HalfTrendBatchRange {
         Self {
             amplitude: (2, 2, 0),
             channel_deviation: (2.0, 2.0, 0.0),
-            atr_period: (100, 100, 0),
+            atr_period: (100, 349, 1),
         }
     }
 }
@@ -3499,7 +3499,7 @@ pub fn halftrend_js(
     let (al, rest) = rest.split_at_mut(cols);
     let (bs, ss) = rest.split_at_mut(cols);
 
-    halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, detect_best_kernel())
+halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     serde_wasm_bindgen::to_value(&HalfTrendJsResult { values, rows, cols })
@@ -3666,7 +3666,7 @@ pub fn halftrend_into(
             },
         );
 
-        halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, detect_best_kernel())
+        halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
     Ok(())
@@ -3724,7 +3724,7 @@ pub fn halftrend_batch_unified_js(
         low,
         close,
         &sweep,
-        detect_best_kernel(),
+        Kernel::Auto,
         &mut ht,
         &mut tr,
         &mut ah,
@@ -3805,7 +3805,7 @@ pub fn halftrend_batch_into(
             l,
             c,
             &sweep,
-            detect_best_kernel(),
+            Kernel::Auto,
             ht,
             tr,
             ah,

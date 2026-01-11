@@ -365,7 +365,7 @@ pub fn vwma_with_kernel(input: &VwmaInput, kernel: Kernel) -> Result<VwmaOutput,
     let mut out = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -756,7 +756,7 @@ pub struct VwmaBatchRange {
 impl Default for VwmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 50, 1),
+            period: (20, 269, 1),
         }
     }
 }
@@ -2228,7 +2228,7 @@ pub fn vwma_into_slice(dst: &mut [f64], input: &VwmaInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

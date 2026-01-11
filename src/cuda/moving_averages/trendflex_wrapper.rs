@@ -291,8 +291,8 @@ impl CudaTrendflex {
         series_len: usize,
         n_combos: usize,
         first_valid: usize,
-        d_ssf: &mut DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
+        max_period: usize,
     ) -> Result<(), CudaTrendflexError> {
         let mut func = self
             .module
@@ -301,18 +301,26 @@ impl CudaTrendflex {
         // Prefer L1 when possible; driver may ignore on unsupported arch
         func.set_cache_config(CacheConfig::PreferL1)?;
 
-        // Auto block size via occupancy; otherwise honor explicit
+        if max_period == 0 {
+            return Err(CudaTrendflexError::InvalidInput("max_period must be positive".into()));
+        }
+        if max_period > i32::MAX as usize {
+            return Err(CudaTrendflexError::InvalidInput(
+                "max_period exceeds i32::MAX".into(),
+            ));
+        }
+        let mut max_period_i = max_period as i32;
+
+        // Shared ring per thread: [thread][max_period]; keep block_x small to stay within shared limits.
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x,
-            BatchKernelPolicy::Auto => {
-                let (_min_grid, block) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
-                if block == 0 {
-                    128
-                } else {
-                    block
-                }
-            }
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            BatchKernelPolicy::Auto => 32,
         };
+        let shared_bytes = (block_x as usize)
+            .checked_mul(max_period)
+            .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaTrendflexError::InvalidInput("shared mem size overflow".into()))?
+            as u32;
         // Chunk by combos to keep grid.x blocks under 65_535
         let max_blocks: u32 = 65_535;
         let chunk_cap: usize = (max_blocks as usize) * (block_x as usize);
@@ -332,7 +340,6 @@ impl CudaTrendflex {
                 let mut len_i = series_len as i32;
                 let mut combos_i = chunk as i32;
                 let mut first_valid_i = first_valid as i32;
-                let mut ssf_ptr = d_ssf.as_device_ptr().add(launched * series_len).as_raw();
                 let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
@@ -341,11 +348,11 @@ impl CudaTrendflex {
                     &mut len_i as *mut _ as *mut c_void,
                     &mut combos_i as *mut _ as *mut c_void,
                     &mut first_valid_i as *mut _ as *mut c_void,
-                    &mut ssf_ptr as *mut _ as *mut c_void,
+                    &mut max_period_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
 
-                self.stream.launch(&func, grid, block, 0, args)?;
+                self.stream.launch(&func, grid, block, shared_bytes, args)?;
             }
             launched += chunk;
         }
@@ -369,9 +376,8 @@ impl CudaTrendflex {
         let n_combos = combos.len();
         let prices_bytes = len * std::mem::size_of::<f32>();
         let periods_bytes = n_combos * std::mem::size_of::<i32>();
-        let scratch_bytes = n_combos * len * std::mem::size_of::<f32>(); // ssf
         let out_bytes = n_combos * len * std::mem::size_of::<f32>();
-        let required = prices_bytes + periods_bytes + scratch_bytes + out_bytes;
+        let required = prices_bytes + periods_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024; // ~64MB
         Self::will_fit(required, headroom)?;
 
@@ -380,8 +386,12 @@ impl CudaTrendflex {
         let d_periods = DeviceBuffer::from_slice(&periods)?;
 
         let elems = combos.len().checked_mul(len).ok_or_else(|| CudaTrendflexError::InvalidInput("size overflow".into()))?;
-        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
 
         self.launch_batch_kernel(
             &d_prices,
@@ -389,8 +399,8 @@ impl CudaTrendflex {
             len,
             combos.len(),
             first_valid,
-            &mut d_ssf,
             &mut d_out,
+            max_period,
         )?;
 
         Ok(DeviceArrayF32 {
@@ -418,7 +428,6 @@ impl CudaTrendflex {
         len: usize,
         combos: &[TrendFlexParams],
         first_valid: usize,
-        d_ssf: &mut DeviceBuffer<f32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTrendflexError> {
         if combos.is_empty() {
@@ -427,14 +436,19 @@ impl CudaTrendflex {
         // Upload small periods list only
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
+        let max_period = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         self.launch_batch_kernel(
             d_prices,
             &d_periods,
             len,
             combos.len(),
             first_valid,
-            d_ssf,
             d_out,
+            max_period,
         )
     }
 
@@ -450,8 +464,6 @@ impl CudaTrendflex {
             return Err(CudaTrendflexError::InvalidInput("no combos".into()));
         }
         let elems = combos.len() * len;
-        let mut d_ssf = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
-            .map_err(CudaTrendflexError::Cuda)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }
             .map_err(CudaTrendflexError::Cuda)?;
 
@@ -460,7 +472,6 @@ impl CudaTrendflex {
             len,
             combos,
             first_valid,
-            &mut d_ssf,
             &mut d_out,
         )?;
         Ok(DeviceArrayF32 {
@@ -756,21 +767,161 @@ impl CudaTrendflex {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::trendflex::{TrendFlexBatchRange, TrendFlexParams};
 
-    define_ma_period_benches!(
-        trendflex_benches,
-        CudaTrendflex,
-        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange,
-        crate::indicators::moving_averages::trendflex::TrendFlexParams,
-        trendflex_batch_dev,
-        trendflex_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trendflex::TrendFlexBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::trendflex::TrendFlexParams { period: Some(64) },
-        "trendflex",
-        "trendflex"
-    );
-    pub use trendflex_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct TrendflexBatchDevState {
+        cuda: CudaTrendflex,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TrendflexBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                    self.max_period,
+                )
+                .expect("trendflex batch kernel");
+            self.cuda.stream.synchronize().expect("trendflex sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTrendflex::new(0).expect("cuda trendflex");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = TrendFlexBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len) =
+            CudaTrendflex::prepare_batch_inputs(&price, &sweep).expect("trendflex prepare batch");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let max_period = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(TrendflexBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            series_len,
+            n_combos,
+            first_valid,
+            max_period,
+            d_out,
+        })
+    }
+
+    struct TrendflexManyDevState {
+        cuda: CudaTrendflex,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_ssf: DeviceBuffer<f32>,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TrendflexManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .trendflex_many_series_one_param_on_device_into(
+                    &self.d_prices_tm,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    self.period,
+                    &mut self.d_ssf,
+                    &mut self.d_out_tm,
+                )
+                .expect("trendflex many-series kernel");
+            self.cuda.stream.synchronize().expect("trendflex sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTrendflex::new(0).expect("cuda trendflex");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = TrendFlexParams { period: Some(64) };
+        let (first_valids, period) =
+            CudaTrendflex::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("trendflex prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = cols * rows;
+        let d_ssf: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_ssf");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(TrendflexManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_ssf,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "trendflex",
+                "one_series_many_params",
+                "trendflex_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "trendflex",
+                "many_series_one_param",
+                "trendflex_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

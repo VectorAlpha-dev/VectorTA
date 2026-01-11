@@ -169,7 +169,7 @@ impl CudaRsx {
         Ok(())
     }
 
-    // ---------- Batch (one series × many params) ----------
+    // ---------- Batch (one series x many params) ----------
     pub fn rsx_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -199,13 +199,23 @@ impl CudaRsx {
         let out_bytes = out_elems
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaRsxError::InvalidInput("size overflow in output bytes".into()))?;
-        let logical = in_bytes
+        let logical_plain = in_bytes
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaRsxError::InvalidInput("total VRAM size overflow".into()))?;
+        let logical_tm = logical_plain
+            .checked_add(out_bytes) // temp out_tm (time-major) + transpose
+            .ok_or_else(|| CudaRsxError::InvalidInput("total VRAM size overflow".into()))?;
         let headroom = 64usize * 1024 * 1024;
-        let required = logical;
-        Self::will_fit(required, headroom)?;
+
+        // Time-major output + transpose can fix strided row-major stores, but adds an extra full-matrix pass.
+        // Keep it opt-in until it shows consistent wins: set `RSX_USE_TM=1`.
+        let prefer_tm = n_combos >= 32 && len >= 4_096;
+        let env_tm = env::var("RSX_USE_TM").ok().as_deref() == Some("1");
+        let use_tm = prefer_tm && env_tm && Self::will_fit(logical_tm, headroom).is_ok();
+        if !use_tm {
+            Self::will_fit(logical_plain, headroom)?;
+        }
 
         let d_prices = unsafe { to_device_buffer_async(&self.stream, prices_f32)? };
         let d_periods = unsafe { to_device_buffer_async(&self.stream, &periods_i32)? };
@@ -216,14 +226,28 @@ impl CudaRsx {
             DeviceBuffer::uninitialized(total)?
         };
 
-        self.launch_batch(
-            &d_prices,
-            &d_periods,
-            len,
-            first_valid,
-            n_combos,
-            &mut d_out,
-        )?;
+        if use_tm {
+            let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
+            self.launch_batch_tm(
+                &d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                n_combos,
+                &mut d_out_tm,
+            )?;
+            self.launch_transpose_tm_to_rm(&d_out_tm, len, n_combos, &mut d_out)?;
+        } else {
+            self.launch_batch(
+                &d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                n_combos,
+                &mut d_out,
+            )?;
+        }
+        self.stream.synchronize().map_err(CudaRsxError::from)?;
         Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
     }
 
@@ -270,10 +294,89 @@ impl CudaRsx {
                 .launch(&func, grid, block, 0, args)
                 .map_err(CudaRsxError::from)?;
         }
-        self.stream.synchronize().map_err(CudaRsxError::from)
+        Ok(())
     }
 
-    // ---------- Many-series × one-param (time-major) ----------
+    fn launch_batch_tm(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRsxError> {
+        if n_combos == 0 {
+            return Ok(());
+        }
+        let func = self
+            .module
+            .get_function("rsx_batch_tm_f32")
+            .map_err(|_| CudaRsxError::MissingKernelSymbol { name: "rsx_batch_tm_f32" })?;
+
+        // One thread per combo (writes time-major; transpose later).
+        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut series_len_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut combos_i = n_combos as i32;
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaRsxError::from)?;
+        }
+        Ok(())
+    }
+
+    fn launch_transpose_tm_to_rm(
+        &self,
+        d_in_tm: &DeviceBuffer<f32>,
+        rows: usize,
+        cols: usize,
+        d_out_rm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRsxError> {
+        let func = self.module.get_function("transpose_tm_to_rm_f32").map_err(|_| {
+            CudaRsxError::MissingKernelSymbol {
+                name: "transpose_tm_to_rm_f32",
+            }
+        })?;
+        let grid_x = ((cols as u32) + 31) / 32;
+        let grid_y = ((rows as u32) + 31) / 32;
+        let block: BlockSize = (32u32, 8u32, 1u32).into();
+        self.validate_launch_dims((grid_x.max(1), grid_y.max(1), 1), (32, 8, 1))?;
+        unsafe {
+            let mut in_ptr = d_in_tm.as_device_ptr().as_raw();
+            let mut r_i = rows as i32;
+            let mut c_i = cols as i32;
+            let mut out_ptr = d_out_rm.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut in_ptr as *mut _ as *mut c_void,
+                &mut r_i as *mut _ as *mut c_void,
+                &mut c_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1u32).into();
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    // ---------- Many-series x one-param (time-major) ----------
     pub fn rsx_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -489,17 +592,28 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct RsxBatchState {
+    struct RsxBatchDeviceState {
         cuda: CudaRsx,
-        prices: Vec<f32>,
-        sweep: RsxBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for RsxBatchState {
+    impl CudaBenchState for RsxBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .rsx_batch_dev(&self.prices, &self.sweep)
-                .expect("rsx batch");
+            self.cuda
+                .launch_batch(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("rsx launch_batch");
+            self.cuda.synchronize().expect("rsx sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -516,34 +630,86 @@ pub mod benches {
         let sweep = RsxBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
-        Box::new(RsxBatchState { cuda, prices, sweep })
+
+        let (combos, first_valid, len) =
+            CudaRsx::prepare_batch_inputs(&prices, &sweep).expect("rsx prepare_batch_inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+
+        let d_prices = unsafe { to_device_buffer_async(&cuda.stream, &prices) }.expect("d_prices");
+        let d_periods =
+            unsafe { to_device_buffer_async(&cuda.stream, &periods_i32) }.expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len * n_combos) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(RsxBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
     }
 
-    struct RsxManyState {
+    struct RsxManySeriesDeviceState {
         cuda: CudaRsx,
-        prices_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
     }
-    impl CudaBenchState for RsxManyState {
+    impl CudaBenchState for RsxManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .rsx_many_series_one_param_time_major_dev(&self.prices_tm, MANY_COLS, MANY_ROWS, 14)
-                .expect("rsx many");
+            self.cuda
+                .launch_many_series(
+                    &self.d_prices_tm,
+                    &self.d_first,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    &mut self.d_out_tm,
+                )
+                .expect("rsx launch_many_series");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsx::new(0).expect("cuda rsx");
-        let n = MANY_COLS * MANY_ROWS;
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
+        let n = cols * rows;
         let mut base = gen_series(n);
         let mut prices = vec![f32::NAN; n];
-        for s in 0..MANY_COLS {
-            for t in s..MANY_ROWS {
-                let idx = t * MANY_COLS + s;
+        for s in 0..cols {
+            for t in s..rows {
+                let idx = t * cols + s;
                 let x = (t as f32) * 0.002 + (s as f32) * 0.01;
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RsxManyState { cuda, prices_tm: prices })
+        let first_valids: Vec<i32> = (0..cols).map(|i| i as i32).collect();
+        let d_prices_tm =
+            unsafe { to_device_buffer_async(&cuda.stream, &prices) }.expect("d_prices_tm");
+        let d_first = unsafe { to_device_buffer_async(&cuda.stream, &first_valids) }.expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(RsxManySeriesDeviceState {
+            cuda,
+            d_prices_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+            period: 14,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

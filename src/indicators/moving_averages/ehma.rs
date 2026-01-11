@@ -783,7 +783,7 @@ pub struct EhmaBatchRange {
 impl Default for EhmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0), // Default to single period 14
+            period: (14, 263, 1), // 250 combos (includes default 14)
         }
     }
 }

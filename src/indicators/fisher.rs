@@ -504,7 +504,7 @@ pub struct FisherBatchRange {
 impl Default for FisherBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 240, 1),
+            period: (9, 258, 1),
         }
     }
 }

@@ -1224,6 +1224,16 @@ pub struct NweBatchRange {
     pub lookback: (usize, usize, usize), // (start, end, step)
 }
 
+impl Default for NweBatchRange {
+    fn default() -> Self {
+        Self {
+            bandwidth: (8.0, 8.0, 0.0),
+            multiplier: (3.0, 3.0, 0.0),
+            lookback: (500, 749, 1),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NweBatchOutput {
     pub values_upper: Vec<f64>, // Flattened upper values (row-major)
@@ -1268,10 +1278,17 @@ pub struct NweBatchBuilder {
 
 impl Default for NweBatchBuilder {
     fn default() -> Self {
+        Self { kernel: Kernel::Auto, ..Self::new_from_range(NweBatchRange::default()) }
+    }
+}
+
+impl NweBatchBuilder {
+    #[inline(always)]
+    fn new_from_range(r: NweBatchRange) -> Self {
         Self {
-            bandwidth: (8.0, 8.0, 0.0),
-            multiplier: (3.0, 3.0, 0.0),
-            lookback: (500, 500, 0),
+            bandwidth: r.bandwidth,
+            multiplier: r.multiplier,
+            lookback: r.lookback,
             kernel: Kernel::Auto,
         }
     }

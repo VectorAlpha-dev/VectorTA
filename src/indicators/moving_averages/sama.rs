@@ -717,7 +717,7 @@ impl SamaBatchBuilder {
 impl Default for SamaBatchRange {
     fn default() -> Self {
         Self {
-            length: (200, 200, 0),
+            length: (200, 449, 1),
             maj_length: (14, 14, 0),
             min_length: (6, 6, 0),
         }

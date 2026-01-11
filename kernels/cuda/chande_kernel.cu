@@ -366,13 +366,18 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
         const int warm = first_valid + period - 1;
         const int base = combo * series_len;
 
-        // Initialize entire row to NaN (one lane per combo does full row).
-        for (int t0 = 0; t0 < series_len; ++t0) {
-            out[base + t0] = NAN;
+        if (period <= 0 || warm >= series_len || first_valid >= series_len) {
+            // Invalid/degenerate: define full row as NaN.
+            for (int t0 = 0; t0 < series_len; ++t0) {
+                out[base + t0] = NAN;
+            }
+            continue;
         }
 
-        if (period <= 0 || warm >= series_len || first_valid >= series_len)
-            continue;
+        // Warmup prefix only; the main loop writes all t >= warm.
+        for (int t0 = 0; t0 < warm; ++t0) {
+            out[base + t0] = NAN;
+        }
 
         // Per-thread deque state mapped into the flat workspaces
         int*   ring_idx = dq_idx + combo * queue_cap;
@@ -476,8 +481,11 @@ void chande_one_series_many_params_from_tr_f32(const float* __restrict__ high,
         const int warm = first_valid + period - 1;
         const int base = combo * series_len;
 
-        for (int t0 = 0; t0 < series_len; ++t0) out[base + t0] = NAN;
-        if (period <= 0 || warm >= series_len || first_valid >= series_len) continue;
+        if (period <= 0 || warm >= series_len || first_valid >= series_len) {
+            for (int t0 = 0; t0 < series_len; ++t0) out[base + t0] = NAN;
+            continue;
+        }
+        for (int t0 = 0; t0 < warm; ++t0) out[base + t0] = NAN;
 
         int*   ring_idx = dq_idx + combo * queue_cap;
         float* ring_val = dq_val + combo * queue_cap;

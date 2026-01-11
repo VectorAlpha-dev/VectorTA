@@ -843,7 +843,7 @@ pub struct SinWmaBatchRange {
 impl Default for SinWmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
         }
     }
 }

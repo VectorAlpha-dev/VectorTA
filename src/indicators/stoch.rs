@@ -802,16 +802,23 @@ fn stoch_classic_sma_into_single_pass(
     prefill_nan_prefix(out_k, k_warm);
     prefill_nan_prefix(out_d, d_warm);
 
-    use std::collections::VecDeque;
+    // Rolling HH/LL using the Tulip-style "maxi/mini with occasional rescan" method.
+    // This is typically faster than a monotone deque for market-like data while preserving
+    // the current tie rules (latest extremum wins, matching the existing VecDeque logic).
+    let mut trail = first;
+    let mut maxi = first;
+    let mut mini = first;
+    let mut max = high[first];
+    let mut min = low[first];
 
-    let mut max_deque: VecDeque<usize> = VecDeque::with_capacity(fastk_period);
-    let mut min_deque: VecDeque<usize> = VecDeque::with_capacity(fastk_period);
-
+    // Ring buffers for SMA(%K) and SMA(%D) without modulo in the hot loop.
     let mut k_buf = vec![0.0f64; slowk_period];
+    let mut k_pos: usize = 0;
     let mut k_sum = 0.0f64;
     let mut k_count: usize = 0;
 
     let mut d_buf = vec![0.0f64; slowd_period];
+    let mut d_pos: usize = 0;
     let mut d_sum = 0.0f64;
     let mut d_count: usize = 0;
 
@@ -819,91 +826,87 @@ fn stoch_classic_sma_into_single_pass(
     const EPS: f64 = f64::EPSILON;
 
     for i in first..len {
-        let window_start = if i + 1 >= fastk_period {
-            i + 1 - fastk_period
-        } else {
-            first
-        };
+        if i >= first + fastk_period {
+            trail += 1;
+        }
 
-        // Maintain rolling max over high
-        while let Some(&idx) = max_deque.front() {
-            if idx < window_start {
-                max_deque.pop_front();
-            } else {
-                break;
+        // Maintain highest high (latest on ties).
+        let bar_h = high[i];
+        if maxi < trail {
+            maxi = trail;
+            max = high[maxi];
+            let mut j = trail;
+            while j < i {
+                j += 1;
+                let v = high[j];
+                if v >= max {
+                    max = v;
+                    maxi = j;
+                }
             }
+        } else if bar_h >= max {
+            maxi = i;
+            max = bar_h;
         }
-        let hi = high[i];
-        while let Some(&idx) = max_deque.back() {
-            if high[idx] <= hi {
-                max_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        max_deque.push_back(i);
 
-        // Maintain rolling min over low
-        while let Some(&idx) = min_deque.front() {
-            if idx < window_start {
-                min_deque.pop_front();
-            } else {
-                break;
+        // Maintain lowest low (latest on ties).
+        let bar_l = low[i];
+        if mini < trail {
+            mini = trail;
+            min = low[mini];
+            let mut j = trail;
+            while j < i {
+                j += 1;
+                let v = low[j];
+                if v <= min {
+                    min = v;
+                    mini = j;
+                }
             }
+        } else if bar_l <= min {
+            mini = i;
+            min = bar_l;
         }
-        let lo = low[i];
-        while let Some(&idx) = min_deque.back() {
-            if low[idx] >= lo {
-                min_deque.pop_back();
-            } else {
-                break;
-            }
-        }
-        min_deque.push_back(i);
 
         if i < k_first_valid {
             continue;
         }
 
-        let max_idx = *max_deque
-            .front()
-            .ok_or_else(|| StochError::Other("stoch: empty max deque".to_string()))?;
-        let min_idx = *min_deque
-            .front()
-            .ok_or_else(|| StochError::Other("stoch: empty min deque".to_string()))?;
-
-        let hh = high[max_idx];
-        let ll = low[min_idx];
         let c = close[i];
-
-        let denom = hh - ll;
+        let denom = max - min;
         let k_raw = if denom.abs() < EPS {
             50.0
         } else {
-            (c - ll).mul_add(SCALE / denom, 0.0)
+            (c - min).mul_add(SCALE / denom, 0.0)
         };
 
         // %K SMA
-        let pos_k = k_count % slowk_period;
         if k_count >= slowk_period {
-            k_sum -= k_buf[pos_k];
+            k_sum -= k_buf[k_pos];
         }
-        k_buf[pos_k] = k_raw;
+        k_buf[k_pos] = k_raw;
         k_sum += k_raw;
         k_count += 1;
+        k_pos += 1;
+        if k_pos == slowk_period {
+            k_pos = 0;
+        }
 
         if i >= k_warm {
             let k_sma = k_sum / slowk_period as f64;
             out_k[i] = k_sma;
 
             // %D SMA over %K
-            let pos_d = d_count % slowd_period;
             if d_count >= slowd_period {
-                d_sum -= d_buf[pos_d];
+                d_sum -= d_buf[d_pos];
             }
-            d_buf[pos_d] = k_sma;
+            d_buf[d_pos] = k_sma;
             d_sum += k_sma;
             d_count += 1;
+            d_pos += 1;
+            if d_pos == slowd_period {
+                d_pos = 0;
+            }
 
             if i >= d_warm {
                 out_d[i] = d_sum / slowd_period as f64;
@@ -1190,7 +1193,7 @@ pub struct StochBatchRange {
 impl Default for StochBatchRange {
     fn default() -> Self {
         Self {
-            fastk_period: (14, 14, 0),
+            fastk_period: (14, 263, 1),
             slowk_period: (3, 3, 0),
             slowk_ma_type: ("sma".to_string(), "sma".to_string(), 0.0),
             slowd_period: (3, 3, 0),
@@ -3697,6 +3700,39 @@ mod tests {
             // Wasm builds don’t expose native stoch_into; fall back to slices helper
             stoch_into_slices(&mut out_k, &mut out_d, &input, detect_best_kernel())?;
         }
+
+        assert_eq!(out_k.len(), baseline.k.len());
+        assert_eq!(out_d.len(), baseline.d.len());
+        for i in 0..out_k.len() {
+            assert!(
+                eq_or_both_nan(out_k[i], baseline.k[i]),
+                "K mismatch at {}: got {}, expected {}",
+                i,
+                out_k[i],
+                baseline.k[i]
+            );
+            assert!(
+                eq_or_both_nan(out_d[i], baseline.d[i]),
+                "D mismatch at {}: got {}, expected {}",
+                i,
+                out_d[i],
+                baseline.d[i]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_stoch_compute_into_matches_api() -> Result<(), Box<dyn Error>> {
+        let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
+        let candles = read_candles_from_csv(file_path)?;
+        let input = StochInput::with_default_candles(&candles);
+
+        let baseline = stoch(&input)?;
+
+        let mut out_k = vec![0.0; baseline.k.len()];
+        let mut out_d = vec![0.0; baseline.d.len()];
+        stoch_compute_into(&input, &mut out_k, &mut out_d, Kernel::Auto)?;
 
         assert_eq!(out_k.len(), baseline.k.len());
         assert_eq!(out_d.len(), baseline.d.len());

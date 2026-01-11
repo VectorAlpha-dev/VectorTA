@@ -175,15 +175,22 @@ extern "C" __global__ void dec_osc_many_series_one_param_time_major_f32(
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_series) return;
 
-    // Prefill with NaN
-    for (int t = 0; t < series_len; ++t) {
-        out_tm[t * num_series + s] = CUDART_NAN_F;
+    const int first = first_valids[s];
+    if (UNLIKELY(period < 2 || period > series_len ||
+                 first < 0 || first >= series_len ||
+                 series_len - first < 2)) {
+        // Invalid path: fill full column with NaNs.
+        for (int t = 0; t < series_len; ++t) {
+            out_tm[t * num_series + s] = CUDART_NAN_F;
+        }
+        return;
     }
 
-    if (UNLIKELY(period < 2 || period > series_len)) return;
-    const int first = first_valids[s];
-    if (UNLIKELY(first < 0 || first >= series_len)) return;
-    if (UNLIKELY(series_len - first < 2)) return;
+    // Prefill only the warmup prefix [0 .. first+2). The scan below writes the rest.
+    const int prefix_len = first + 2;
+    for (int t = 0; t < prefix_len; ++t) {
+        out_tm[t * num_series + s] = CUDART_NAN_F;
+    }
 
     float c1, two_oma1, oma1_sq;
     float c2, two_oma2, oma2_sq;
@@ -199,7 +206,6 @@ extern "C" __global__ void dec_osc_many_series_one_param_time_major_f32(
 
     const int i0 = first;
     const int i1 = first + 1;
-    if (i1 >= series_len) return;
 
     float x2 = load_tm(i0);
     float x1 = load_tm(i1);

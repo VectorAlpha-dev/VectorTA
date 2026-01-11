@@ -8,6 +8,10 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+#ifndef PRB_BATCH_CHUNK_LEN
+#define PRB_BATCH_CHUNK_LEN 4096
+#endif
+
 extern "C" {
 
 // Signed binomial rows (-1)^(r-p) * C(r,p) for r<=7 (k<=7)
@@ -204,6 +208,157 @@ __global__ void prb_batch_f32(   // one price series, many (n,k,offset) rows
         }
 
         // Solve and write
+        float coeffs[8];
+        solve_coeffs_kahan(arow, max_m, m, S, coeffs);
+        const float reg = horner_eval(coeffs, m, x_pos);
+        const float invn = 1.0f / float(n);
+        const float mean = sum * invn;
+        float var = fmaf(sumsq, invn, -mean * mean);
+        if (var < 0.0f) var = 0.0f;
+        const float stdev = sqrtf(var);
+
+        out_main[out_idx] = reg;
+        out_up[out_idx]   = reg + ndev * stdev;
+        out_lo[out_idx]   = reg - ndev * stdev;
+    }
+}
+
+// Chunked parallel batch kernel for dense (no-NaN) inputs:
+// - Splits the time axis into fixed chunks so we get combos * chunks independent threads.
+// - Assumes there are no NaNs after first_valid; contig[] is ignored (kept for signature parity).
+// - Produces identical warmup NaN prefix semantics as prb_batch_f32.
+__global__ void prb_batch_chunked_f32(
+    const float* __restrict__ data,
+    const int len,
+    const int first_valid,
+    const int* __restrict__ periods,
+    const int* __restrict__ orders,
+    const int* __restrict__ offsets,
+    const int combos,
+    const int max_m,
+    const float* __restrict__ a_inv,
+    const int a_stride,
+    const int* __restrict__ contig,
+    const float ndev,
+    const int* __restrict__ row_indices,
+    float* __restrict__ out_main,
+    float* __restrict__ out_up,
+    float* __restrict__ out_lo)
+{
+    (void)contig; // unused in dense fast-path
+
+    const int row = (int)blockIdx.y;
+    if (row >= combos) return;
+
+    const int chunk_id = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int chunk_start = chunk_id * PRB_BATCH_CHUNK_LEN;
+    if (chunk_start >= len) return;
+    const int chunk_end = min(chunk_start + PRB_BATCH_CHUNK_LEN, len);
+
+    const int abs_row = row_indices ? row_indices[row] : row;
+    const int n = periods[row];
+    const int k = orders[row];
+    const int m = k + 1;
+    const int offset = offsets[row];
+    const float x_pos = float(n) - float(offset); // equ_from = 0
+
+    const float* arow = a_inv + row * a_stride;
+    const int warm = first_valid + n - 1;
+    const float nan = qnan32();
+
+    // Precompute n^r (r=0..k)
+    float npow[8]; npow[0] = 1.0f;
+    #pragma unroll
+    for (int r = 1; r <= k; ++r) npow[r] = npow[r - 1] * float(n);
+
+    // Fill NaN prefix for this chunk (if any)
+    if (chunk_end <= warm) {
+        for (int i = chunk_start; i < chunk_end; ++i) {
+            const int out_idx = abs_row * len + i;
+            out_main[out_idx] = nan;
+            out_up[out_idx]   = nan;
+            out_lo[out_idx]   = nan;
+        }
+        return;
+    }
+
+    int i0 = chunk_start;
+    for (; i0 < warm && i0 < chunk_end; ++i0) {
+        const int out_idx = abs_row * len + i0;
+        out_main[out_idx] = nan;
+        out_up[out_idx]   = nan;
+        out_lo[out_idx]   = nan;
+    }
+    if (i0 >= chunk_end) return;
+
+    // --- Initialize S[r], sum, sumsq for the first output in this chunk (i = i0) ---
+    float S[8];
+    float cS[8];
+    #pragma unroll
+    for (int r = 0; r < 8; ++r) { S[r] = 0.0f; cS[r] = 0.0f; }
+
+    float sum = 0.0f, csum = 0.0f;
+    float sumsq = 0.0f, csum2 = 0.0f;
+
+    const int base0 = i0 - n + 1;
+    for (int j = 1; j <= n; ++j) {
+        const float y = data[base0 + j - 1];
+        sum   = kahan_add(sum, y, csum);
+        sumsq = kahan_add(sumsq, y * y, csum2);
+
+        float pwr = float(j);
+        #pragma unroll
+        for (int r = 1; r <= k; ++r) {
+            S[r] = kahan_add(S[r], y * pwr, cS[r]);
+            pwr *= float(j);
+        }
+    }
+    S[0] = sum;
+
+    // Emit i0
+    {
+        float coeffs[8];
+        solve_coeffs_kahan(arow, max_m, m, S, coeffs);
+        const float reg = horner_eval(coeffs, m, x_pos);
+        const float invn = 1.0f / float(n);
+        const float mean = sum * invn;
+        float var = fmaf(sumsq, invn, -mean * mean);
+        if (var < 0.0f) var = 0.0f;
+        const float stdev = sqrtf(var);
+
+        const int out_idx = abs_row * len + i0;
+        out_main[out_idx] = reg;
+        out_up[out_idx]   = reg + ndev * stdev;
+        out_lo[out_idx]   = reg - ndev * stdev;
+    }
+
+    // --- Slide forward within this chunk ---
+    float S_old[8];
+    for (int i = i0 + 1; i < chunk_end; ++i) {
+        const int out_idx = abs_row * len + i;
+
+        #pragma unroll
+        for (int r = 0; r <= k; ++r) S_old[r] = S[r];
+
+        const float y_old = data[i - n];
+        const float y_new = data[i];
+
+        sum   = kahan_add(sum, -y_old, csum);
+        sum   = kahan_add(sum,  y_new, csum);
+        S[0]  = sum;
+        sumsq = kahan_add(sumsq, -y_old * y_old, csum2);
+        sumsq = kahan_add(sumsq,  y_new * y_new, csum2);
+
+        #pragma unroll
+        for (int r = 1; r <= k; ++r) {
+            float acc = 0.0f, c = 0.0f;
+            #pragma unroll
+            for (int p = 0; p <= r; ++p) {
+                acc = kahan_add(acc, PRB_BINOM_SIGN[r][p] * S_old[p], c);
+            }
+            S[r] = fmaf(y_new, npow[r], acc);
+        }
+
         float coeffs[8];
         solve_coeffs_kahan(arow, max_m, m, S, coeffs);
         const float reg = horner_eval(coeffs, m, x_pos);

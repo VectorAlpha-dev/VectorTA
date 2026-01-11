@@ -627,9 +627,9 @@ pub fn donchian_into_slice(
 
     let chosen = match kern {
         #[cfg(target_arch = "wasm32")]
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         #[cfg(not(target_arch = "wasm32"))]
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -745,7 +745,7 @@ pub struct DonchianBatchRange {
 impl Default for DonchianBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 60, 1),
+            period: (20, 269, 1),
         }
     }
 }
@@ -2501,7 +2501,7 @@ pub fn donchian_js(high: &[f64], low: &[f64], period: usize) -> Result<DonchianR
         &mut middle,
         &mut lower,
         &input,
-        detect_best_kernel(),
+        Kernel::Auto,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2568,7 +2568,7 @@ pub fn donchian_into(
                 &mut temp_middle,
                 &mut temp_lower,
                 &input,
-                detect_best_kernel(),
+                Kernel::Auto,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2590,7 +2590,7 @@ pub fn donchian_into(
                 middle_out,
                 lower_out,
                 &input,
-                detect_best_kernel(),
+                Kernel::Auto,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }

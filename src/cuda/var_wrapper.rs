@@ -721,15 +721,32 @@ pub mod benches {
 
     struct VarBatchState {
         cuda: CudaVar,
-        price: Vec<f32>,
-        sweep: VarBatchRange,
+        d_ps: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_pn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_nb2: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
     impl CudaBenchState for VarBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .var_batch_dev(&self.price, &self.sweep)
-                .expect("var batch");
+            self.cuda
+                .launch_batch_kernel_ptrs(
+                    &self.d_ps,
+                    &self.d_ps2,
+                    &self.d_pn,
+                    self.d_periods.as_device_ptr(),
+                    self.d_nb2.as_device_ptr(),
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    self.d_out.as_device_ptr(),
+                )
+                .expect("var launch");
+            self.cuda.stream.synchronize().expect("var sync");
         }
     }
 
@@ -740,7 +757,48 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             nbdev: (1.0, 1.0, 0.0),
         };
-        Box::new(VarBatchState { cuda, price, sweep })
+        let (ps, ps2, pn, first_valid, len) = CudaVar::build_prefixes_1d(&price);
+        let combos = var_expand_grid(&sweep);
+        let n_combos = combos.len();
+        assert_eq!(n_combos, PARAM_SWEEP, "unexpected VAR combo count");
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let nb2: Vec<f32> = combos
+            .iter()
+            .map(|c| {
+                let x = c.nbdev.unwrap_or(1.0) as f32;
+                x * x
+            })
+            .collect();
+
+        let ps_f2: Vec<Float2> = split_f64_to_float2_vec(&ps);
+        let ps2_f2: Vec<Float2> = split_f64_to_float2_vec(&ps2);
+
+        let d_ps = DeviceBuffer::from_slice(&ps_f2).expect("d_ps");
+        let d_ps2 = DeviceBuffer::from_slice(&ps2_f2).expect("d_ps2");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("d_pn");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_nb2 = DeviceBuffer::from_slice(&nb2).expect("d_nb2");
+
+        let out_elems = n_combos
+            .checked_mul(len)
+            .expect("var bench out_elems overflow");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        cuda.stream.synchronize().expect("var prep sync");
+
+        Box::new(VarBatchState {
+            cuda,
+            d_ps,
+            d_ps2,
+            d_pn,
+            d_periods,
+            d_nb2,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

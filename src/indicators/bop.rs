@@ -17,7 +17,7 @@
 //!
 //! ## Example
 //! ```
-//! use my_project::indicators::bop::{bop, BopInput, BopParams};
+//! use vector_ta::indicators::bop::{bop, BopInput, BopParams};
 //! let open = [1.0, 2.0];
 //! let high = [2.0, 3.0];
 //! let low = [0.5, 1.0];
@@ -308,13 +308,31 @@ unsafe fn bop_scalar_from(
     first: usize,
     out: &mut [f64],
 ) {
-    for i in first..open.len() {
-        let denom = high[i] - low[i];
-        out[i] = if denom <= 0.0 {
+    let len = open.len();
+    if first >= len {
+        return;
+    }
+
+    let mut po = open.as_ptr().add(first);
+    let mut ph = high.as_ptr().add(first);
+    let mut pl = low.as_ptr().add(first);
+    let mut pc = close.as_ptr().add(first);
+    let mut pd = out.as_mut_ptr().add(first);
+    let end = open.as_ptr().add(len);
+
+    while po < end {
+        let denom = *ph - *pl;
+        *pd = if denom <= 0.0 {
             0.0
         } else {
-            (close[i] - open[i]) / denom
+            (*pc - *po) / denom
         };
+
+        po = po.add(1);
+        ph = ph.add(1);
+        pl = pl.add(1);
+        pc = pc.add(1);
+        pd = pd.add(1);
     }
 }
 

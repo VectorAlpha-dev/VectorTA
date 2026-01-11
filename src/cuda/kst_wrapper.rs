@@ -300,7 +300,7 @@ impl CudaKst {
         })
     }
 
-    // ------------- Batch (one series × many params) -----------------
+    // ------------- Batch (one series Ã— many params) -----------------
 
     fn expand_grid(range: &KstBatchRange) -> Vec<KstParams> {
         fn axis(t: (usize, usize, usize)) -> Vec<usize> {
@@ -573,7 +573,7 @@ impl CudaKst {
         Ok(())
     }
 
-    // ------------- Many series × one param (time-major) -----------------
+    // ------------- Many series Ã— one param (time-major) -----------------
     pub fn kst_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -787,15 +787,36 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaKst,
-        price: Vec<f32>,
-        sweep: KstBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        packed: PackedParamPtrs,
+        d_line: DeviceBuffer<f32>,
+        d_signal: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .kst_batch_dev(&self.price, &self.sweep)
-                .expect("kst batch");
+            self.cuda
+                .launch_batch_packed(
+                    &self.d_prices,
+                    self.packed.s1,
+                    self.packed.s2,
+                    self.packed.s3,
+                    self.packed.s4,
+                    self.packed.r1,
+                    self.packed.r2,
+                    self.packed.r3,
+                    self.packed.r4,
+                    self.packed.sg,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_line,
+                    &mut self.d_signal,
+                )
+                .expect("kst launch_batch_packed");
+            let _ = self.cuda.synchronize();
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -812,27 +833,60 @@ pub mod benches {
             roc_period4: (30, 30, 0),
             signal_period: (9, 9, 0),
         };
-        Box::new(BatchState { cuda, price, sweep })
+        let combos = CudaKst::expand_grid(&sweep);
+        let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
+        let d_prices = cuda.copy_f32_to_device_async(&price).expect("d_prices");
+        let packed = cuda.pack_params_async(&combos).expect("packed params");
+        let out_len = combos.len() * ONE_SERIES_LEN;
+        let d_line: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &cuda.stream) }.expect("d_line");
+        let d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &cuda.stream) }.expect("d_signal");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(BatchState {
+            cuda,
+            d_prices,
+            packed,
+            d_line,
+            d_signal,
+            series_len: ONE_SERIES_LEN,
+            n_combos: combos.len(),
+            first_valid,
+        })
     }
 
     struct ManyState {
         cuda: CudaKst,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_line_tm: DeviceBuffer<f32>,
+        d_sig_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
         params: KstParams,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .kst_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series(
+                    &self.d_prices_tm,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.params.sma_period1.unwrap(),
+                    self.params.sma_period2.unwrap(),
+                    self.params.sma_period3.unwrap(),
+                    self.params.sma_period4.unwrap(),
+                    self.params.roc_period1.unwrap(),
+                    self.params.roc_period2.unwrap(),
+                    self.params.roc_period3.unwrap(),
+                    self.params.roc_period4.unwrap(),
+                    self.params.signal_period.unwrap(),
+                    &self.d_first,
+                    &mut self.d_line_tm,
+                    &mut self.d_sig_tm,
                 )
-                .expect("kst many");
+                .expect("kst launch_many_series");
+            let _ = self.cuda.synchronize();
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -851,9 +905,21 @@ pub mod benches {
             roc_period4: Some(30),
             signal_period: Some(9),
         };
+        let first_valids: Vec<i32> = (0..cols).map(|s| s as i32).collect();
+        let d_prices_tm = cuda.copy_f32_to_device_async(&data_tm).expect("d_prices_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let elems = cols * rows;
+        let d_line_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_line_tm");
+        let d_sig_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_sig_tm");
+        cuda.synchronize().expect("sync after prep");
         Box::new(ManyState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first,
+            d_line_tm,
+            d_sig_tm,
             cols,
             rows,
             params,

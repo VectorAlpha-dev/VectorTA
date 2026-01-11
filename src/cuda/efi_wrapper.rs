@@ -825,6 +825,202 @@ fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
         .collect()
 }
 
+pub mod benches {
+    use super::*;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+
+    const BATCH_LEN: usize = 100_000;
+    const BATCH_SWEEP: usize = 64;
+    const MANY_COLS: usize = 64;
+    const MANY_ROWS: usize = 4_096;
+
+    fn bytes_batch() -> usize {
+        let diffs_bytes = BATCH_LEN * std::mem::size_of::<f32>();
+        let params_bytes =
+            BATCH_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = BATCH_LEN * BATCH_SWEEP * std::mem::size_of::<f32>();
+        diffs_bytes + params_bytes + out_bytes + 32 * 1024 * 1024
+    }
+
+    fn bytes_many() -> usize {
+        let elems = MANY_COLS * MANY_ROWS;
+        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 16 * 1024 * 1024
+    }
+
+    struct EfiBatchDeviceState {
+        cuda: CudaEfi,
+        d_diffs: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_alphas: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        warm: usize,
+        n_combos: usize,
+    }
+
+    impl CudaBenchState for EfiBatchDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel_with_diffs(
+                    &self.d_diffs,
+                    &self.d_periods,
+                    &self.d_alphas,
+                    self.series_len,
+                    self.warm,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("efi batch launch");
+            self.cuda.synchronize().expect("efi sync");
+        }
+    }
+
+    fn prep_efi_batch() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEfi::new(0).expect("cuda efi");
+
+        let mut prices = vec![f32::NAN; BATCH_LEN];
+        let mut volumes = vec![f32::NAN; BATCH_LEN];
+        for i in 1..BATCH_LEN {
+            let x = i as f32;
+            prices[i] = (x * 0.00123).sin() + 0.00017 * x;
+            volumes[i] = (x * 0.00077).cos().abs() + 0.5;
+        }
+        let sweep = EfiBatchRange {
+            period: (8, 8 + BATCH_SWEEP - 1, 1),
+        };
+
+        let prepared =
+            CudaEfi::prepare_batch_inputs(&prices, &volumes, &sweep).expect("efi prep");
+
+        let mut diffs = vec![f32::NAN; prepared.series_len];
+        for t in prepared.warm..prepared.series_len {
+            let pc = prices[t];
+            let pp = prices[t - 1];
+            let vc = volumes[t];
+            if pc.is_finite() && pp.is_finite() && vc.is_finite() {
+                diffs[t] = (pc - pp) * vc;
+            }
+        }
+
+        let d_diffs = DeviceBuffer::from_slice(&diffs).expect("d_diffs");
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32).expect("d_periods");
+        let d_alphas = DeviceBuffer::from_slice(&prepared.alphas_f32).expect("d_alphas");
+        let out_len = prepared.series_len * prepared.combos.len();
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(EfiBatchDeviceState {
+            cuda,
+            d_diffs,
+            d_periods,
+            d_alphas,
+            d_out,
+            series_len: prepared.series_len,
+            warm: prepared.warm,
+            n_combos: prepared.combos.len(),
+        })
+    }
+
+    struct EfiManyDeviceState {
+        cuda: CudaEfi,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_volumes_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
+        num_series: usize,
+        series_len: usize,
+        period: i32,
+        alpha: f32,
+    }
+
+    impl CudaBenchState for EfiManyDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_volumes_tm,
+                    &self.d_first_valids,
+                    self.period,
+                    self.alpha,
+                    self.num_series,
+                    self.series_len,
+                    &mut self.d_out_tm,
+                )
+                .expect("efi many launch");
+            self.cuda.synchronize().expect("efi many sync");
+        }
+    }
+
+    fn prep_efi_many() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEfi::new(0).expect("cuda efi");
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
+
+        let mut tm_p = vec![f32::NAN; rows * cols];
+        let mut tm_v = vec![f32::NAN; rows * cols];
+        for s in 0..cols {
+            for t in 1..rows {
+                let x = (t as f32) + (s as f32) * 0.3;
+                tm_p[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                tm_v[t * cols + s] = (x * 0.001).cos().abs() + 0.4;
+            }
+        }
+        let prm = EfiParams { period: Some(13) };
+        let prepared =
+            CudaEfi::prepare_many_series_inputs(&tm_p, &tm_v, cols, rows, &prm)
+                .expect("efi prep many");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&tm_p).expect("d_prices_tm");
+        let d_volumes_tm = DeviceBuffer::from_slice(&tm_v).expect("d_volumes_tm");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids_diff).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(EfiManyDeviceState {
+            cuda,
+            d_prices_tm,
+            d_volumes_tm,
+            d_first_valids,
+            d_out_tm,
+            num_series: cols,
+            series_len: rows,
+            period: prepared.period,
+            alpha: prepared.alpha,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "efi",
+                "one_series_many_params",
+                "efi_cuda_batch_dev",
+                "100k_x_64",
+                prep_efi_batch,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_batch()),
+            CudaBenchScenario::new(
+                "efi",
+                "many_series_one_param",
+                "efi_cuda_many_series_one_param_dev",
+                "64x4096",
+                prep_efi_many,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_many()),
+        ]
+    }
+}
+
+#[cfg(any())]
+
 // ---------- Benches ----------
 pub mod benches {
     use super::*;
@@ -871,7 +1067,8 @@ pub mod benches {
                     sweep,
                 })
             },
-        ));
+        )
+        .with_sample_size(10));
         // Many-series × one-param
         v.push(CudaBenchScenario::new(
             "efi",
@@ -916,7 +1113,8 @@ pub mod benches {
                     prm,
                 })
             },
-        ));
+        )
+        .with_sample_size(10));
         v
     }
 }

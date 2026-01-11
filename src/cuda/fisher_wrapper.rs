@@ -576,22 +576,50 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct FisherBatchState {
+    struct FisherBatchDeviceState {
         cuda: CudaFisher,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: FisherBatchRange,
+        func: Function<'static>,
+        d_hl: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_fish: DeviceBuffer<f32>,
+        d_sig: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        shared_bytes: u32,
+        block_x: u32,
     }
-    impl CudaBenchState for FisherBatchState {
+    impl CudaBenchState for FisherBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .fisher_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("fisher batch");
+            unsafe {
+                let grid: GridSize = (self.n_combos as u32, 1, 1).into();
+                let block: BlockSize = (self.block_x, 1, 1).into();
+                let mut hl_ptr = self.d_hl.as_device_ptr().as_raw();
+                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut series_len_i = self.len as i32;
+                let mut n_combos_i = self.n_combos as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut fish_ptr = self.d_fish.as_device_ptr().as_raw();
+                let mut sig_ptr = self.d_sig.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut hl_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut fish_ptr as *mut _ as *mut c_void,
+                    &mut sig_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&self.func, grid, block, self.shared_bytes, args)
+                    .expect("fisher launch");
+            }
+            self.cuda.stream.synchronize().expect("fisher sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaFisher::new(0).expect("CudaFisher");
+        let mut cuda = CudaFisher::new(0).expect("CudaFisher");
         let mut high = gen_series(ONE_SERIES_LEN);
         let mut low = vec![0.0f32; ONE_SERIES_LEN];
         for i in 0..ONE_SERIES_LEN {
@@ -605,11 +633,73 @@ pub mod benches {
         let sweep = FisherBatchRange {
             period: (9, 9 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(FisherBatchState {
+
+        let (combos, first_valid, len, hl2_locked, max_p) =
+            CudaFisher::prepare_batch_inputs(&high, &low, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0) as i32)
+            .collect();
+
+        let d_hl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(hl2_locked.as_slice(), &cuda.stream) }
+                .expect("d_hl");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let total = n_combos * len;
+        let d_fish: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &cuda.stream) }.expect("d_fish");
+        let d_sig: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &cuda.stream) }.expect("d_sig");
+
+        let func = cuda
+            .module
+            .get_function("fisher_batch_f32")
+            .expect("fisher_batch_f32");
+        let mut func: Function<'static> = unsafe { std::mem::transmute(func) };
+        let shmem_bytes = (2 * max_p * std::mem::size_of::<i32>()) as usize;
+        if shmem_bytes >= 32 * 1024 {
+            func.set_cache_config(CacheConfig::PreferShared).expect("cache_config");
+        }
+        if shmem_bytes > 48 * 1024 {
+            let res = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    shmem_bytes as i32,
+                )
+            };
+            if res != sys::CUresult::CUDA_SUCCESS {
+                panic!("failed to set dynamic shared memory attribute");
+            }
+            let _ = unsafe {
+                sys::cuFuncSetAttribute(
+                    func.to_raw(),
+                    sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    100,
+                )
+            };
+        }
+        let (auto_block, _) =
+            func.suggested_launch_configuration(shmem_bytes, BlockSize::x(256)).unwrap_or((128, 0));
+        let block_x: u32 = match cuda.policy.batch {
+            BatchKernelPolicy::Auto => auto_block.clamp(64, 256),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(FisherBatchDeviceState {
             cuda,
-            high,
-            low,
-            sweep,
+            func,
+            d_hl,
+            d_periods,
+            d_fish,
+            d_sig,
+            len,
+            first_valid,
+            n_combos,
+            shared_bytes: shmem_bytes as u32,
+            block_x,
         })
     }
 

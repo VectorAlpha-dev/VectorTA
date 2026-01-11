@@ -1593,9 +1593,9 @@ pub struct RsmkBatchRange {
 impl Default for RsmkBatchRange {
     fn default() -> Self {
         Self {
-            lookback: (90, 90, 1),
-            period: (3, 3, 1),
-            signal_period: (20, 20, 1),
+            lookback: (90, 339, 1),
+            period: (3, 3, 0),
+            signal_period: (20, 20, 0),
         }
     }
 }

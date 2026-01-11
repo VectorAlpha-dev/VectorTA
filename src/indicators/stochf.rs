@@ -1306,7 +1306,7 @@ pub struct StochfBatchRange {
 impl Default for StochfBatchRange {
     fn default() -> Self {
         Self {
-            fastk_period: (5, 14, 1),
+            fastk_period: (5, 254, 1),
             fastd_period: (3, 3, 0),
         }
     }

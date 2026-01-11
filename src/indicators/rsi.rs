@@ -235,7 +235,7 @@ pub fn rsi_with_kernel(input: &RsiInput, kernel: Kernel) -> Result<RsiOutput, Rs
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -335,7 +335,7 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -456,7 +456,7 @@ pub struct RsiBatchRange {
 impl Default for RsiBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

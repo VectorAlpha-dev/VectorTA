@@ -347,31 +347,83 @@ pub fn aroon_osc_scalar_highlow_into(
     // Heuristic: For small windows, a straight rescan is typically fastest.
     // For larger windows, switch to O(n) monotonic deques for max(high) and min(low).
     if length <= 64 {
-        // Precompute scale for final oscillator value: 100/length
+        // Precompute scale for final oscillator value: 100/length.
+        //
+        // Maintain the window's argmax/argmin with occasional rescans only when the
+        // previous extreme falls out of the window. Tie rules are strict (> / <),
+        // preserving earliest-index wins (matching the historical scan behavior).
         let scale = 100.0 / length as f64;
-        for i in start_i..len {
-            let start = i + 1 - window;
-            let mut highest_val = unsafe { *high.get_unchecked(start) };
-            let mut lowest_val = unsafe { *low.get_unchecked(start) };
-            let mut highest_idx = start;
-            let mut lowest_idx = start;
-            for j in (start + 1)..=i {
-                let h_val = unsafe { *high.get_unchecked(j) };
-                if h_val > highest_val {
-                    highest_val = h_val;
-                    highest_idx = j;
+        unsafe {
+            let h_ptr = high.as_ptr();
+            let l_ptr = low.as_ptr();
+            let out_ptr = out.as_mut_ptr();
+
+            // Seed extremes from the first full window [first ..= start_i].
+            let mut maxi = first;
+            let mut mini = first;
+            let mut max = *h_ptr.add(first);
+            let mut min = *l_ptr.add(first);
+            let mut j = first + 1;
+            while j <= start_i {
+                let hv = *h_ptr.add(j);
+                if hv > max {
+                    max = hv;
+                    maxi = j;
                 }
-                let l_val = unsafe { *low.get_unchecked(j) };
-                if l_val < lowest_val {
-                    lowest_val = l_val;
-                    lowest_idx = j;
+                let lv = *l_ptr.add(j);
+                if lv < min {
+                    min = lv;
+                    mini = j;
                 }
+                j += 1;
             }
-            // Aroon Osc = 100/length * ( (i - low_idx) - (i - high_idx) )
-            //            = 100/length * (high_idx - low_idx)
-            let v = (highest_idx as f64 - lowest_idx as f64) * scale;
-            unsafe {
-                *out.get_unchecked_mut(i) = v.max(-100.0).min(100.0);
+
+            let mut i = start_i;
+            while i < len {
+                let start = i - length;
+
+                // Highest high
+                let bar_h = *h_ptr.add(i);
+                if maxi < start {
+                    maxi = start;
+                    max = *h_ptr.add(maxi);
+                    let mut k = start + 1;
+                    while k <= i {
+                        let hv = *h_ptr.add(k);
+                        if hv > max {
+                            max = hv;
+                            maxi = k;
+                        }
+                        k += 1;
+                    }
+                } else if bar_h > max {
+                    maxi = i;
+                    max = bar_h;
+                }
+
+                // Lowest low
+                let bar_l = *l_ptr.add(i);
+                if mini < start {
+                    mini = start;
+                    min = *l_ptr.add(mini);
+                    let mut k = start + 1;
+                    while k <= i {
+                        let lv = *l_ptr.add(k);
+                        if lv < min {
+                            min = lv;
+                            mini = k;
+                        }
+                        k += 1;
+                    }
+                } else if bar_l < min {
+                    mini = i;
+                    min = bar_l;
+                }
+
+                // Aroon Osc = 100/length * (high_idx - low_idx)
+                let v = (maxi as f64 - mini as f64) * scale;
+                *out_ptr.add(i) = v.max(-100.0).min(100.0);
+                i += 1;
             }
         }
         return;
@@ -601,7 +653,7 @@ pub struct AroonOscBatchRange {
 impl Default for AroonOscBatchRange {
     fn default() -> Self {
         Self {
-            length: (14, 30, 1),
+            length: (14, 263, 1),
         }
     }
 }

@@ -19,6 +19,13 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+#ifndef LIKELY
+#define LIKELY(x)   (__builtin_expect(!!(x), 1))
+#endif
+#ifndef UNLIKELY
+#define UNLIKELY(x) (__builtin_expect(!!(x), 0))
+#endif
+
 // ----------------- Helpers -----------------
 __device__ __forceinline__ float inv_or_one(const float x) {
     return (x != 0.0f) ? __fdividef(1.0f, x) : 1.0f;
@@ -86,18 +93,42 @@ extern "C" __global__ void aso_batch_f32(
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
-    if (period <= 0) return;
+
+    const int base = combo * series_len;
+
+    // Invalid paths: fill the whole row with NaNs (rare; keep semantics obvious).
+    auto fill_all_nan = [&]() {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_bulls[base + i] = NAN;
+            out_bears[base + i] = NAN;
+        }
+    };
+
+    if (UNLIKELY(period <= 0 || first_valid < 0 || first_valid >= series_len)) {
+        fill_all_nan();
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+    if (UNLIKELY(warm >= series_len)) {
+        fill_all_nan();
+        return;
+    }
+
+    // Validate sparse-table level once (before we let most threads return).
+    const int k = log2_tbl[period];
+    if (UNLIKELY(k < 0 || k >= level_count)) {
+        fill_all_nan();
+        return;
+    }
 
     // Precompute mode weights once per combo (avoids inner-loop branches).
     const int  mode = modes[combo];
     float w_intra, w_group;
     mode_weights(mode, w_intra, w_group);
 
-    const int base = combo * series_len;
-
-    // Initialize to NaN so warmup region is well-defined.
-    // (Kept here for drop-in compatibility; see the note below for a faster optional prefill.)
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+    // Prefill only the warmup prefix. The scan below writes every index >= warm.
+    for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out_bulls[base + i] = NAN;
         out_bears[base + i] = NAN;
     }
@@ -106,12 +137,7 @@ extern "C" __global__ void aso_batch_f32(
     // Single-lane sequential scan per combo (dependencies across t).
     if (threadIdx.x != 0) return;
 
-    const int warm = first_valid + period - 1;
-    if (warm >= series_len) return;
-
     // Sparse table invariants hoisted out of the loop.
-    const int k = log2_tbl[period];
-    if (k < 0 || k >= level_count) return;
     const int offset   = 1 << k;
     const int lvl_base = level_offsets[k];
     const float* __restrict__ st_max_lvl = st_max + lvl_base;
@@ -199,10 +225,34 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     float* __restrict__ out_bears_tm)
 {
     const int s = blockIdx.x; // series index (column)
-    if (s >= cols || period <= 0) return;
+    if (s >= cols) return;
 
-    // Initialize outputs to NaN (kept for drop-in parity).
-    for (int t = threadIdx.x; t < rows; t += blockDim.x) {
+    auto fill_all_nan = [&]() {
+        for (int t = threadIdx.x; t < rows; t += blockDim.x) {
+            const int idx = t * cols + s;
+            out_bulls_tm[idx] = NAN;
+            out_bears_tm[idx] = NAN;
+        }
+    };
+
+    if (UNLIKELY(period <= 0)) {
+        fill_all_nan();
+        return;
+    }
+
+    const int fv   = first_valids[s];
+    if (UNLIKELY(fv < 0 || fv >= rows)) {
+        fill_all_nan();
+        return;
+    }
+    const int warm = fv + period - 1;
+    if (UNLIKELY(warm >= rows)) {
+        fill_all_nan();
+        return;
+    }
+
+    // Prefill only the warmup prefix; the scan below writes every index >= warm.
+    for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         const int idx = t * cols + s;
         out_bulls_tm[idx] = NAN;
         out_bears_tm[idx] = NAN;
@@ -210,10 +260,6 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     __syncthreads();
 
     if (threadIdx.x != 0) return; // single-lane per series (time dependency)
-
-    const int fv   = first_valids[s];
-    const int warm = fv + period - 1;
-    if (warm >= rows) return;
 
     float w_intra, w_group;
     mode_weights(mode, w_intra, w_group);

@@ -285,7 +285,7 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -348,7 +348,7 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -650,7 +650,7 @@ impl Default for PpoBatchRange {
     fn default() -> Self {
         Self {
             fast_period: (12, 12, 0),
-            slow_period: (26, 26, 0),
+            slow_period: (26, 275, 1),
             ma_type: "sma".to_string(),
         }
     }

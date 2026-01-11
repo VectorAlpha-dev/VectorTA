@@ -872,7 +872,7 @@ pub mod benches {
         let (combos, first_valid, _len) = CudaVosc::prepare_batch_inputs(
             &x,
             &VoscBatchRange {
-                short_period: (2, 2 + PARAM_SWEEP - 1, 1),
+                short_period: (5, 5, 0),
                 long_period: (10, 10 + PARAM_SWEEP - 1, 1),
             },
         )

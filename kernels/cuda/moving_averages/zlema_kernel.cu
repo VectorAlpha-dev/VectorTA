@@ -93,6 +93,120 @@ void zlema_batch_f32(const float* __restrict__ prices,
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Warp-scan batch kernel (one warp per combo).
+// Emits 32 timesteps per iteration via an inclusive scan over affine transforms:
+//   y_next = (1 - a) * y_prev + a * val_t  ==  A*y_prev + B, where A=(1-a), B=a*val_t
+//
+// Notes:
+// - Warmup (t < warm) is handled by writing NaNs and updating EMA state sequentially for <= (period-1) steps.
+// - For t >= warm, we always have t >= first_valid + lag, so val_t uses 2*cur - lagged (no per-step branch).
+// - `blockDim.x` must be a multiple of 32; wrapper rounds/chooses accordingly.
+// ---------------------------------------------------------------------------------------------------------------------
+extern "C" __global__
+void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
+                               const int*   __restrict__ periods,
+                               int series_len,
+                               int n_combos,
+                               int first_valid,
+                               float* __restrict__ out)
+{
+    if (series_len <= 0 || n_combos <= 0) return;
+    if (first_valid < 0 || first_valid >= series_len) return;
+
+    const int lane = threadIdx.x & 31;
+    const int warp_in_block = threadIdx.x >> 5;
+    const int warps_per_block = blockDim.x >> 5;
+    if (warps_per_block <= 0) return;
+
+    const int combo = blockIdx.x * warps_per_block + warp_in_block;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 0) return;
+
+    const int lag = (period - 1) >> 1; // (period - 1) / 2
+    const float alpha = 2.0f / (float(period) + 1.0f);
+    const float one_minus_alpha = 1.0f - alpha;
+
+    const int warm = first_valid + period - 1;
+    const size_t base = (size_t)combo * (size_t)series_len;
+
+    // Warmup prefix NaNs
+    for (int t = lane; t < warm && t < series_len; t += 32) {
+        out[base + (size_t)t] = ZLEMA_NAN;
+    }
+
+    // period == 1 -> ZLEMA reduces to price (alpha == 1, lag == 0)
+    if (period == 1) {
+        for (int t = first_valid + lane; t < series_len; t += 32) {
+            out[base + (size_t)t] = LDG(prices + t);
+        }
+        return;
+    }
+
+    if (warm >= series_len) return;
+
+    // Warmup recurrence (sequential, <= 258 iterations for typical sweeps)
+    float prev = 0.0f;
+    if (lane == 0) {
+        float ema = LDG(prices + first_valid);
+        const int end = warm; // exclusive
+        for (int t = first_valid + 1; t < end; ++t) {
+            const float cur = LDG(prices + t);
+            float val;
+            if (t < first_valid + lag) {
+                val = cur;
+            } else {
+                const float lagged = LDG(prices + (t - lag));
+                val = fmaf(2.0f, cur, -lagged);
+            }
+            ema = fmaf(alpha, (val - ema), ema);
+        }
+        prev = ema;
+    }
+
+    const unsigned mask = 0xffffffffu;
+    prev = __shfl_sync(mask, prev, 0);
+
+    for (int t0 = warm; t0 < series_len; t0 += 32) {
+        const int t = t0 + lane;
+
+        // Affine transform for this timestep
+        float A = 1.0f;
+        float B = 0.0f;
+        if (t < series_len) {
+            const float cur = LDG(prices + t);
+            const float lagged = LDG(prices + (t - lag));
+            const float val = fmaf(2.0f, cur, -lagged);
+            A = one_minus_alpha;
+            B = alpha * val;
+        }
+
+        // Inclusive warp scan to compose transforms left-to-right
+        // Composition: (A1,B1) o (A2,B2) = (A1*A2, A1*B2 + B1)
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+
+        const float y = fmaf(A, prev, B);
+        if (t < series_len) {
+            out[base + (size_t)t] = y;
+        }
+
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        prev = __shfl_sync(mask, y, last_lane);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // New high-throughput batch kernel with shared-memory tiling.
 // API change: extra argument `max_lag` (global maximum of lags[]).
 // Shared memory per block: (ZLEMA_BATCH_TILE + max_lag) * sizeof(float)

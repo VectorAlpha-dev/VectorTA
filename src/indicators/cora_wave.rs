@@ -1034,8 +1034,8 @@ pub struct CoraWaveBatchRange {
 impl Default for CoraWaveBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 60, 1),
-            r_multi: (2.0, 2.0, 0.0),
+            period: (20, 20, 0),
+            r_multi: (2.0, 2.249, 0.001),
             smooth: true,
         }
     }

@@ -1065,7 +1065,7 @@ pub struct CciBatchRange {
 impl Default for CciBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 200, 1),
+            period: (14, 263, 1),
         }
     }
 }

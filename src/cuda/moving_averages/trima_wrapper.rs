@@ -563,57 +563,33 @@ impl CudaTrima {
             ));
         }
 
-        // Policy: prefer tiled for larger problems if it fits
+        // Policy: prefer tiled for larger problems if it fits. The tiled kernel is compiled
+        // with fixed TRIMA_TS/TRIMA_TT; do not vary tile sizes at runtime.
         let mut use_tiled = matches!(
             self.policy.many_series,
             ManySeriesKernelPolicy::Auto | ManySeriesKernelPolicy::Tiled { .. }
         );
-        // Defaults must match TRIMA_TS/TRIMA_TT in the .cu
-        let mut tile_s: u32 = 128;
-        let mut tile_t: u32 = 64;
-        match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => {
-                use_tiled = false;
-                tile_s = block_x;
-            }
-            ManySeriesKernelPolicy::Tiled {
-                tile_s: ts,
-                tile_t: tt,
-            } => {
-                tile_s = ts.max(32);
-                tile_t = tt.max(32);
-            }
-            _ => {}
+        if matches!(self.policy.many_series, ManySeriesKernelPolicy::OneD { .. }) {
+            use_tiled = false;
         }
+        if let ManySeriesKernelPolicy::Tiled { tile_s, tile_t } = self.policy.many_series {
+            if tile_s != TRIMA_TS || tile_t != TRIMA_TT {
+                // Kernel indexing uses TRIMA_TS/TRIMA_TT constants; mismatched runtime tiles would be incorrect.
+                use_tiled = false;
+            }
+        }
+
+        let tile_s: u32 = TRIMA_TS;
+        let tile_t: u32 = TRIMA_TT;
+
         // Require at least one tile in each dimension to benefit
         if cols < tile_s as usize || rows < tile_t as usize {
             use_tiled = false;
         }
 
         let sizeof_f32 = std::mem::size_of::<f32>();
-        let mut shared_bytes_tiled =
+        let shared_bytes_tiled =
             ((period + (tile_s as usize * (tile_t as usize + period - 1))) * sizeof_f32) as u32;
-        if use_tiled {
-            if let Ok(dev) = Device::get_device(self.device_id) {
-                if let Ok(max_smem) =
-                    dev.get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock)
-                {
-                    while shared_bytes_tiled as i32 > max_smem && (tile_s > 64 || tile_t > 32) {
-                        if tile_s > 64 {
-                            tile_s /= 2;
-                        } else if tile_t > 32 {
-                            tile_t /= 2;
-                        }
-                        shared_bytes_tiled = ((period
-                            + (tile_s as usize * (tile_t as usize + period - 1)))
-                            * sizeof_f32) as u32;
-                    }
-                    if shared_bytes_tiled as i32 > max_smem {
-                        use_tiled = false;
-                    }
-                }
-            }
-        }
 
         if use_tiled {
             let mut func = self
@@ -636,7 +612,7 @@ impl CudaTrima {
             let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (tile_s, 1, 1).into();
 
-            unsafe {
+            let launch_res = unsafe {
                 let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
                 let mut weights_ptr = d_weights.as_device_ptr().as_raw();
                 let mut period_i = period as i32;
@@ -653,14 +629,24 @@ impl CudaTrima {
                     &mut first_valids_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-            self.stream.launch(&func, grid, block, shared_bytes_tiled, args)?;
+                self.stream.launch(&func, grid, block, shared_bytes_tiled, args)
+            };
+            match launch_res {
+                Ok(()) => {
+                    unsafe {
+                        (*(self as *const _ as *mut CudaTrima)).last_many =
+                            Some(ManySeriesKernelSelected::Tiled { tile_s, tile_t });
+                    }
+                    self.maybe_log_many_debug();
+                    return Ok(());
+                }
+                Err(_e) => {
+                    // Fall back to the 1D kernel if the tiled launch fails (e.g. insufficient shared memory).
+                }
             }
-            unsafe {
-                (*(self as *const _ as *mut CudaTrima)).last_many =
-                    Some(ManySeriesKernelSelected::Tiled { tile_s, tile_t });
-            }
-            self.maybe_log_many_debug();
-        } else {
+        }
+
+        {
             let func = self
                 .module
                 .get_function("trima_multi_series_one_param_f32")
@@ -889,21 +875,169 @@ impl CudaTrima {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::trima::TrimaParams;
 
-    define_ma_period_benches!(
-        trima_benches,
-        CudaTrima,
-        crate::indicators::moving_averages::trima::TrimaBatchRange,
-        crate::indicators::moving_averages::trima::TrimaParams,
-        trima_batch_dev,
-        trima_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::trima::TrimaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::trima::TrimaParams { period: Some(64) },
-        "trima",
-        "trima"
-    );
-    pub use trima_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct TrimaBatchDevState {
+        cuda: CudaTrima,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warms: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        max_period: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TrimaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_warms,
+                    self.series_len,
+                    self.n_combos,
+                    self.max_period,
+                    &mut self.d_out,
+                )
+                .expect("trima batch kernel");
+            self.cuda.stream.synchronize().expect("trima sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTrima::new(0).expect("cuda trima");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = TrimaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (periods, first_valid) =
+            CudaTrima::prepare_batch_inputs(&price, &sweep).expect("trima prepare batch inputs");
+        let series_len = price.len();
+        let n_combos = periods.len();
+        let max_period = periods.iter().copied().max().unwrap_or(0);
+
+        let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
+        let warms_i32: Vec<i32> = periods
+            .iter()
+            .map(|&p| (first_valid + p - 1) as i32)
+            .collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_warms = DeviceBuffer::from_slice(&warms_i32).expect("d_warms");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(TrimaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_warms,
+            series_len,
+            n_combos,
+            max_period,
+            d_out,
+        })
+    }
+
+    struct TrimaManyDevState {
+        cuda: CudaTrima,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_weights: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TrimaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_weights,
+                    &self.d_first_valids,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("trima many-series kernel");
+            self.cuda.stream.synchronize().expect("trima sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTrima::new(0).expect("cuda trima");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = TrimaParams { period: Some(64) };
+        let (first_valids, period) =
+            CudaTrima::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("trima prepare many-series inputs");
+
+        let weights = CudaTrima::compute_weights(period);
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_weights = DeviceBuffer::from_slice(&weights).expect("d_weights");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(TrimaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_weights,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "trima",
+                "one_series_many_params",
+                "trima_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "trima",
+                "many_series_one_param",
+                "trima_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

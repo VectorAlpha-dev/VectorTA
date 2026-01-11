@@ -64,38 +64,54 @@ extern "C" __global__ void nvi_batch_f32(
 {
     if (len <= 0) return;
 
-    // One thread to preserve strict sequential dependency over time.
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    // One warp: factors are independent (depend only on t and t-1), and NVI is a prefix-product.
+    // This preserves strict time order while allowing 32-step tiles via warp scan.
+    if (blockIdx.x != 0) return;
+    // Use a small subgroup to reduce floating-point scan reordering error vs full-warp,
+    // while still providing a large speedup over the single-lane implementation.
+    const int lane = threadIdx.x & 31;
+    if (threadIdx.x >= 16) return;
+    const unsigned mask = 0x0000ffffu;
 
     const int fv = first_valid < 0 ? 0 : first_valid;
 
     // Warmup prefix -> NaN
     const float nan_f = CUDART_NAN_F;
-    for (int i = 0; i < fv && i < len; ++i) out[i] = nan_f;
+    for (int i = lane; i < fv && i < len; i += 16) out[i] = nan_f;
     if (fv >= len) return;
 
     // Initial value at first valid
-    dsfloat nvi = ds_make(1000.0f);
-    out[fv] = ds_to_float(nvi);
+    if (lane == 0) out[fv] = 1000.0f;
     if (fv + 1 >= len) return;
 
-    float prev_close  = close[fv];
-    float prev_volume = volume[fv];
+    double nvi0 = 1000.0; // lane 0 only
 
-    for (int i = fv + 1; i < len; ++i) {
-        const float c = close[i];
-        const float v = volume[i];
-
-        if (v < prev_volume) {
-            // pct = (c - prev_close) / prev_close
-            const float pct = (c - prev_close) / prev_close;
-            // nvi += nvi * pct (preserve CPU op order)
-            dsfloat prod = ds_mul_scalar(nvi, pct);
-            nvi = ds_add(nvi, prod);
+    for (int t0 = fv + 1; t0 < len; t0 += 16) {
+        const int i = t0 + lane;
+        double f = 1.0;
+        if (i < len) {
+            const float c = close[i];
+            const float c0 = close[i - 1];
+            const float v = volume[i];
+            const float v0 = volume[i - 1];
+            if (v < v0) {
+                const float pct = (c - c0) / c0;
+                f = 1.0 + (double)pct;
+            }
         }
-        out[i] = ds_to_float(nvi);
-        prev_close = c;
-        prev_volume = v;
+
+        // Inclusive prefix product of f within the warp.
+        double prefix = f;
+        for (int offset = 1; offset < 16; offset <<= 1) {
+            double other = __shfl_up_sync(mask, prefix, offset, 16);
+            if (lane >= offset) prefix *= other;
+        }
+
+        double base = __shfl_sync(mask, nvi0, 0, 16);
+        if (i < len) out[i] = (float)(base * prefix);
+
+        double tile_prod = __shfl_sync(mask, prefix, 15, 16);
+        if (lane == 0) nvi0 *= tile_prod;
     }
 }
 

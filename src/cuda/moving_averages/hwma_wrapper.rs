@@ -189,17 +189,6 @@ impl CudaHwma {
         }
     }
 
-    fn h2d_f64(&self, src: &[f64]) -> Result<DeviceBuffer<f64>, CudaHwmaError> {
-        if Self::env_flag("HWMA_PINNED", true) {
-            let host = LockedBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))?;
-            let dev = unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }
-                .map_err(|e| CudaHwmaError::Cuda(e))?;
-            Ok(dev)
-        } else {
-            DeviceBuffer::from_slice(src).map_err(|e| CudaHwmaError::Cuda(e))
-        }
-    }
-
     // VRAM helpers
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -345,10 +334,10 @@ impl CudaHwma {
 
     fn launch_batch_kernel(
         &self,
-        d_prices: &DeviceBuffer<f64>,
-        d_nas: &DeviceBuffer<f64>,
-        d_nbs: &DeviceBuffer<f64>,
-        d_ncs: &DeviceBuffer<f64>,
+        d_prices: &DeviceBuffer<f32>,
+        d_nas: &DeviceBuffer<f32>,
+        d_nbs: &DeviceBuffer<f32>,
+        d_ncs: &DeviceBuffer<f32>,
         first_valid: usize,
         series_len: usize,
         n_combos: usize,
@@ -431,10 +420,10 @@ impl CudaHwma {
 
     pub fn hwma_batch_device(
         &self,
-        d_prices: &DeviceBuffer<f64>,
-        d_nas: &DeviceBuffer<f64>,
-        d_nbs: &DeviceBuffer<f64>,
-        d_ncs: &DeviceBuffer<f64>,
+        d_prices: &DeviceBuffer<f32>,
+        d_nas: &DeviceBuffer<f32>,
+        d_nbs: &DeviceBuffer<f32>,
+        d_ncs: &DeviceBuffer<f32>,
         first_valid: usize,
         series_len: usize,
         n_combos: usize,
@@ -467,7 +456,7 @@ impl CudaHwma {
             .ok_or_else(|| CudaHwmaError::InvalidInput("series_len bytes overflow".into()))?;
         let params_bytes = 3usize
             .checked_mul(n_combos)
-            .and_then(|x| x.checked_mul(std::mem::size_of::<f64>()))
+            .and_then(|x| x.checked_mul(sz_f32))
             .ok_or_else(|| CudaHwmaError::InvalidInput("params bytes overflow".into()))?;
         let out_elems = n_combos
             .checked_mul(series_len)
@@ -482,36 +471,19 @@ impl CudaHwma {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
-        // Promote prices to f64 to reduce accumulation error vs CPU f64 baseline
-        let prices_f64: Vec<f64> = data_f32.iter().map(|&x| x as f64).collect();
-        let d_prices = self.h2d_f64(&prices_f64)?;
+        let d_prices = self.h2d_f32(data_f32)?;
 
-        let mut nas: Vec<f64> = Vec::with_capacity(n_combos);
-        let mut nbs: Vec<f64> = Vec::with_capacity(n_combos);
-        let mut ncs: Vec<f64> = Vec::with_capacity(n_combos);
+        let mut nas: Vec<f32> = Vec::with_capacity(n_combos);
+        let mut nbs: Vec<f32> = Vec::with_capacity(n_combos);
+        let mut ncs: Vec<f32> = Vec::with_capacity(n_combos);
         for prm in &combos {
-            nas.push(prm.na.unwrap_or(0.2));
-            nbs.push(prm.nb.unwrap_or(0.1));
-            ncs.push(prm.nc.unwrap_or(0.1));
+            nas.push(prm.na.unwrap_or(0.2) as f32);
+            nbs.push(prm.nb.unwrap_or(0.1) as f32);
+            ncs.push(prm.nc.unwrap_or(0.1) as f32);
         }
-        let d_nas = if Self::env_flag("HWMA_PINNED", true) {
-            let host = LockedBuffer::from_slice(&nas)?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
-        } else {
-            DeviceBuffer::from_slice(&nas)?
-        };
-        let d_nbs = if Self::env_flag("HWMA_PINNED", true) {
-            let host = LockedBuffer::from_slice(&nbs)?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
-        } else {
-            DeviceBuffer::from_slice(&nbs)?
-        };
-        let d_ncs = if Self::env_flag("HWMA_PINNED", true) {
-            let host = LockedBuffer::from_slice(&ncs)?;
-            unsafe { DeviceBuffer::from_slice_async(&host, &self.stream) }?
-        } else {
-            DeviceBuffer::from_slice(&ncs)?
-        };
+        let d_nas = self.h2d_f32(&nas)?;
+        let d_nbs = self.h2d_f32(&nbs)?;
+        let d_ncs = self.h2d_f32(&ncs)?;
 
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
@@ -760,27 +732,182 @@ impl CudaHwma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::hwma::{HwmaBatchRange, HwmaParams};
 
-    define_ma_period_benches!(
-        hwma_benches,
-        CudaHwma,
-        crate::indicators::moving_averages::hwma::HwmaBatchRange,
-        crate::indicators::moving_averages::hwma::HwmaParams,
-        hwma_batch_dev,
-        hwma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::hwma::HwmaBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct HwmaBatchDevState {
+        cuda: CudaHwma,
+        d_prices: DeviceBuffer<f32>,
+        d_nas: DeviceBuffer<f32>,
+        d_nbs: DeviceBuffer<f32>,
+        d_ncs: DeviceBuffer<f32>,
+        first_valid: usize,
+        series_len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for HwmaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .hwma_batch_device(
+                    &self.d_prices,
+                    &self.d_nas,
+                    &self.d_nbs,
+                    &self.d_ncs,
+                    self.first_valid,
+                    self.series_len,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("hwma batch kernel");
+            self.cuda.stream.synchronize().expect("hwma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHwma::new(0).expect("cuda hwma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = HwmaBatchRange {
             na: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
             nb: (0.1, 0.1, 0.0),
-            nc: (0.1, 0.1, 0.0)
-        },
-        crate::indicators::moving_averages::hwma::HwmaParams {
+            nc: (0.1, 0.1, 0.0),
+        };
+
+        let (combos, first_valid, series_len) =
+            CudaHwma::prepare_batch_inputs(&price, &sweep).expect("hwma prepare batch inputs");
+        let n_combos = combos.len();
+
+        let mut nas: Vec<f32> = Vec::with_capacity(n_combos);
+        let mut nbs: Vec<f32> = Vec::with_capacity(n_combos);
+        let mut ncs: Vec<f32> = Vec::with_capacity(n_combos);
+        for prm in &combos {
+            nas.push(prm.na.unwrap_or(0.2) as f32);
+            nbs.push(prm.nb.unwrap_or(0.1) as f32);
+            ncs.push(prm.nc.unwrap_or(0.1) as f32);
+        }
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_nas = DeviceBuffer::from_slice(&nas).expect("d_nas");
+        let d_nbs = DeviceBuffer::from_slice(&nbs).expect("d_nbs");
+        let d_ncs = DeviceBuffer::from_slice(&ncs).expect("d_ncs");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(HwmaBatchDevState {
+            cuda,
+            d_prices,
+            d_nas,
+            d_nbs,
+            d_ncs,
+            first_valid,
+            series_len,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct HwmaManyDevState {
+        cuda: CudaHwma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        na: f32,
+        nb: f32,
+        nc: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for HwmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .hwma_multi_series_one_param_device(
+                    &self.d_prices_tm,
+                    self.na,
+                    self.nb,
+                    self.nc,
+                    self.cols as i32,
+                    self.rows as i32,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("hwma many-series kernel");
+            self.cuda.stream.synchronize().expect("hwma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHwma::new(0).expect("cuda hwma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = HwmaParams {
             na: Some(0.2),
             nb: Some(0.1),
-            nc: Some(0.1)
-        },
-        "hwma",
-        "hwma"
-    );
-    pub use hwma_benches::bench_profiles;
+            nc: Some(0.1),
+        };
+
+        let (first_valids, na, nb, nc) =
+            CudaHwma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("hwma prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(HwmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            na,
+            nb,
+            nc,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "hwma",
+                "one_series_many_params",
+                "hwma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "hwma",
+                "many_series_one_param",
+                "hwma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

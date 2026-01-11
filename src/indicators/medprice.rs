@@ -10,11 +10,11 @@
 //! - `Vec<f64>` - Median price values matching input length
 //!
 //! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Stub (calls scalar)
+//! **AVX2**: Enabled
+//! **AVX512**: Enabled
 //! **Streaming**: O(1) - Simple calculation
 //! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! **Decision log**: SIMD paths are stubs delegating to the scalar implementation; CUDA wrapper is present with VRAM-backed handles; Python interop follows CAI v3 and DLPack v1.x with scalar-identical outputs.
+//! **Decision log**: SIMD enabled (AVX2/AVX-512) because the scalar loop is memory-bound and vectorizes cleanly; outputs match the scalar path (NaN propagation is identical). CUDA wrapper is present with VRAM-backed handles; Python interop follows CAI v3 and DLPack v1.x with scalar-identical outputs.
 
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
@@ -32,7 +32,8 @@ use wasm_bindgen::prelude::*;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
+    make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -217,8 +218,11 @@ pub fn medprice_with_kernel(
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx);
 
     let chosen = match kernel {
-        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
-        Kernel::Auto => Kernel::Scalar,
+        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -279,8 +283,11 @@ pub fn medprice_compute_into(
         .ok_or(MedpriceError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
-        Kernel::Auto => Kernel::Scalar,
+        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -302,30 +309,187 @@ pub fn medprice_compute_into(
 
 #[inline]
 pub fn medprice_scalar(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
-    // Write every index >= first. NaN input => NaN output.
-    for i in first..high.len() {
-        let h = high[i];
-        let l = low[i];
-        out[i] = if h.is_nan() || l.is_nan() {
-            f64::NAN
-        } else {
-            (h + l) * 0.5
-        };
+    // Write every index >= first. NaN propagation is automatic: (NaN + x) * 0.5 = NaN.
+    let n = high.len();
+    if first >= n {
+        return;
+    }
+    unsafe {
+        let mut hp = high.as_ptr().add(first);
+        let mut lp = low.as_ptr().add(first);
+        let mut op = out.as_mut_ptr().add(first);
+        let end = high.as_ptr().add(n);
+        while hp < end {
+            *op = (*hp + *lp) * 0.5;
+            hp = hp.add(1);
+            lp = lp.add(1);
+            op = op.add(1);
+        }
     }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn medprice_avx2(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
-    // AVX2 stub, just call scalar
-    medprice_scalar(high, low, first, out)
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_body(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
+        let n = high.len();
+        let mut i = first;
+
+        let mut hp = high.as_ptr().add(first);
+        let mut lp = low.as_ptr().add(first);
+        let mut op = out.as_mut_ptr().add(first);
+
+        let vhalf = _mm256_set1_pd(0.5);
+
+        while i + 16 <= n {
+            let h0 = _mm256_loadu_pd(hp);
+            let l0 = _mm256_loadu_pd(lp);
+            let h1 = _mm256_loadu_pd(hp.add(4));
+            let l1 = _mm256_loadu_pd(lp.add(4));
+            let h2 = _mm256_loadu_pd(hp.add(8));
+            let l2 = _mm256_loadu_pd(lp.add(8));
+            let h3 = _mm256_loadu_pd(hp.add(12));
+            let l3 = _mm256_loadu_pd(lp.add(12));
+
+            let r0 = _mm256_mul_pd(_mm256_add_pd(h0, l0), vhalf);
+            let r1 = _mm256_mul_pd(_mm256_add_pd(h1, l1), vhalf);
+            let r2 = _mm256_mul_pd(_mm256_add_pd(h2, l2), vhalf);
+            let r3 = _mm256_mul_pd(_mm256_add_pd(h3, l3), vhalf);
+
+            _mm256_storeu_pd(op, r0);
+            _mm256_storeu_pd(op.add(4), r1);
+            _mm256_storeu_pd(op.add(8), r2);
+            _mm256_storeu_pd(op.add(12), r3);
+
+            hp = hp.add(16);
+            lp = lp.add(16);
+            op = op.add(16);
+            i += 16;
+        }
+
+        while i + 8 <= n {
+            let h0 = _mm256_loadu_pd(hp);
+            let l0 = _mm256_loadu_pd(lp);
+            let h1 = _mm256_loadu_pd(hp.add(4));
+            let l1 = _mm256_loadu_pd(lp.add(4));
+
+            let r0 = _mm256_mul_pd(_mm256_add_pd(h0, l0), vhalf);
+            let r1 = _mm256_mul_pd(_mm256_add_pd(h1, l1), vhalf);
+
+            _mm256_storeu_pd(op, r0);
+            _mm256_storeu_pd(op.add(4), r1);
+
+            hp = hp.add(8);
+            lp = lp.add(8);
+            op = op.add(8);
+            i += 8;
+        }
+
+        while i + 4 <= n {
+            let h = _mm256_loadu_pd(hp);
+            let l = _mm256_loadu_pd(lp);
+            let r = _mm256_mul_pd(_mm256_add_pd(h, l), vhalf);
+            _mm256_storeu_pd(op, r);
+
+            hp = hp.add(4);
+            lp = lp.add(4);
+            op = op.add(4);
+            i += 4;
+        }
+
+        while i < n {
+            *op = (*hp + *lp) * 0.5;
+            hp = hp.add(1);
+            lp = lp.add(1);
+            op = op.add(1);
+            i += 1;
+        }
+    }
+
+    unsafe { avx2_body(high, low, first, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn medprice_avx512(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
-    // AVX512 stub, just call scalar
-    medprice_scalar(high, low, first, out)
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_body(high: &[f64], low: &[f64], first: usize, out: &mut [f64]) {
+        let n = high.len();
+        let mut i = first;
+
+        let mut hp = high.as_ptr().add(first);
+        let mut lp = low.as_ptr().add(first);
+        let mut op = out.as_mut_ptr().add(first);
+
+        let vhalf = _mm512_set1_pd(0.5);
+
+        while i + 32 <= n {
+            let h0 = _mm512_loadu_pd(hp);
+            let l0 = _mm512_loadu_pd(lp);
+            let h1 = _mm512_loadu_pd(hp.add(8));
+            let l1 = _mm512_loadu_pd(lp.add(8));
+            let h2 = _mm512_loadu_pd(hp.add(16));
+            let l2 = _mm512_loadu_pd(lp.add(16));
+            let h3 = _mm512_loadu_pd(hp.add(24));
+            let l3 = _mm512_loadu_pd(lp.add(24));
+
+            let r0 = _mm512_mul_pd(_mm512_add_pd(h0, l0), vhalf);
+            let r1 = _mm512_mul_pd(_mm512_add_pd(h1, l1), vhalf);
+            let r2 = _mm512_mul_pd(_mm512_add_pd(h2, l2), vhalf);
+            let r3 = _mm512_mul_pd(_mm512_add_pd(h3, l3), vhalf);
+
+            _mm512_storeu_pd(op, r0);
+            _mm512_storeu_pd(op.add(8), r1);
+            _mm512_storeu_pd(op.add(16), r2);
+            _mm512_storeu_pd(op.add(24), r3);
+
+            hp = hp.add(32);
+            lp = lp.add(32);
+            op = op.add(32);
+            i += 32;
+        }
+
+        while i + 16 <= n {
+            let h0 = _mm512_loadu_pd(hp);
+            let l0 = _mm512_loadu_pd(lp);
+            let h1 = _mm512_loadu_pd(hp.add(8));
+            let l1 = _mm512_loadu_pd(lp.add(8));
+
+            let r0 = _mm512_mul_pd(_mm512_add_pd(h0, l0), vhalf);
+            let r1 = _mm512_mul_pd(_mm512_add_pd(h1, l1), vhalf);
+
+            _mm512_storeu_pd(op, r0);
+            _mm512_storeu_pd(op.add(8), r1);
+
+            hp = hp.add(16);
+            lp = lp.add(16);
+            op = op.add(16);
+            i += 16;
+        }
+
+        while i + 8 <= n {
+            let h = _mm512_loadu_pd(hp);
+            let l = _mm512_loadu_pd(lp);
+            let r = _mm512_mul_pd(_mm512_add_pd(h, l), vhalf);
+            _mm512_storeu_pd(op, r);
+
+            hp = hp.add(8);
+            lp = lp.add(8);
+            op = op.add(8);
+            i += 8;
+        }
+
+        while i < n {
+            *op = (*hp + *lp) * 0.5;
+            hp = hp.add(1);
+            lp = lp.add(1);
+            op = op.add(1);
+            i += 1;
+        }
+    }
+
+    unsafe { avx512_body(high, low, first, out) }
 }
 
 // Row functions
@@ -433,8 +597,7 @@ pub fn medprice_batch_with_kernel(
     k: Kernel,
 ) -> Result<MedpriceBatchOutput, MedpriceError> {
     let kernel = match k {
-        // Batch SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
-        Kernel::Auto => Kernel::ScalarBatch,
+        Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
         other => return Err(MedpriceError::InvalidKernelForBatch(other)),
     };
@@ -561,8 +724,11 @@ fn medprice_batch_inner(
     };
 
     let chosen = match kern {
-        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
-        Kernel::Auto => Kernel::Scalar,
+        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -666,8 +832,11 @@ pub fn medprice_into_slice(
     };
 
     let chosen = match kern {
-        // SIMD kernels are currently stubs delegating to the scalar path, so Auto skips runtime detection.
-        Kernel::Auto => Kernel::Scalar,
+        // AVX-512 can downclock and underperform vs AVX2 here; prefer AVX2 when both are available.
+        Kernel::Auto => match detect_best_kernel() {
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
 
@@ -687,9 +856,7 @@ pub fn medprice_into_slice(
     }
 
     // Fill warmup period with NaN
-    for v in &mut dst[..first_valid_idx] {
-        *v = f64::NAN;
-    }
+    dst[..first_valid_idx].fill(f64::NAN);
 
     Ok(())
 }

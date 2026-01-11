@@ -704,19 +704,44 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct TtmBatchState {
+    struct TtmBatchDeviceState {
         cuda: CudaTtmSqueeze,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        sweep: TtmSqueezeBatchRange,
+        d_h: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
+        d_c: DeviceBuffer<f32>,
+        d_len: DeviceBuffer<i32>,
+        d_bb: DeviceBuffer<f32>,
+        d_kh: DeviceBuffer<f32>,
+        d_km: DeviceBuffer<f32>,
+        d_kl: DeviceBuffer<f32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_len: usize,
+        d_mo: DeviceBuffer<f32>,
+        d_sq: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for TtmBatchState {
+    impl CudaBenchState for TtmBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ttm_squeeze_batch_dev(&self.h, &self.l, &self.c, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_h,
+                    &self.d_l,
+                    &self.d_c,
+                    &self.d_len,
+                    &self.d_bb,
+                    &self.d_kh,
+                    &self.d_km,
+                    &self.d_kl,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_len,
+                    &mut self.d_mo,
+                    &mut self.d_sq,
+                )
+                .expect("ttm_squeeze launch");
+            self.cuda.stream.synchronize().expect("ttm_squeeze sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -737,7 +762,60 @@ pub mod benches {
             kc_mid: (1.5, 1.5, 0.0),
             kc_low: (2.0, 2.0, 0.0),
         };
-        Box::new(TtmBatchState { cuda, h, l, c, sweep })
+
+        let (combos, first_valid, len) =
+            CudaTtmSqueeze::prepare_batch_inputs(&h, &l, &c, &sweep).expect("prep inputs");
+        let n_combos = combos.len();
+        let v_len: Vec<i32> = combos.iter().map(|c| c.length).collect();
+        let v_bb: Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
+        let v_kh: Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
+        let v_km: Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
+        let v_kl: Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
+        let max_len = combos
+            .iter()
+            .map(|c| c.length as usize)
+            .max()
+            .unwrap_or(0);
+
+        let d_h = unsafe { DeviceBuffer::from_slice_async(&h, &cuda.stream) }.expect("d_h H2D");
+        let d_l = unsafe { DeviceBuffer::from_slice_async(&l, &cuda.stream) }.expect("d_l H2D");
+        let d_c = unsafe { DeviceBuffer::from_slice_async(&c, &cuda.stream) }.expect("d_c H2D");
+
+        let d_len =
+            unsafe { DeviceBuffer::from_slice_async(&v_len, &cuda.stream) }.expect("d_len H2D");
+        let d_bb =
+            unsafe { DeviceBuffer::from_slice_async(&v_bb, &cuda.stream) }.expect("d_bb H2D");
+        let d_kh =
+            unsafe { DeviceBuffer::from_slice_async(&v_kh, &cuda.stream) }.expect("d_kh H2D");
+        let d_km =
+            unsafe { DeviceBuffer::from_slice_async(&v_km, &cuda.stream) }.expect("d_km H2D");
+        let d_kl =
+            unsafe { DeviceBuffer::from_slice_async(&v_kl, &cuda.stream) }.expect("d_kl H2D");
+
+        let elems = n_combos * len;
+        let d_mo: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_mo");
+        let d_sq: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_sq");
+        cuda.stream.synchronize().expect("ttm_squeeze prep sync");
+
+        Box::new(TtmBatchDeviceState {
+            cuda,
+            d_h,
+            d_l,
+            d_c,
+            d_len,
+            d_bb,
+            d_kh,
+            d_km,
+            d_kl,
+            len,
+            n_combos,
+            first_valid,
+            max_len,
+            d_mo,
+            d_sq,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

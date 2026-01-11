@@ -281,7 +281,7 @@ fn bb_prepare<'a>(
         usize,     // period
         f64,       // devup
         f64,       // devdn
-        String,    // matype
+        &'a str,   // matype
         usize,     // devtype
         usize,     // first valid index
         Kernel,    // final kernel
@@ -296,7 +296,8 @@ fn bb_prepare<'a>(
     let period = input.get_period();
     let devup = input.get_devup();
     let devdn = input.get_devdn();
-    let matype = input.get_matype();
+    // Hot-path: borrow MA type instead of cloning/allocating a new `String` per call.
+    let matype = input.params.matype.as_deref().unwrap_or("sma");
     let devtype = input.get_devtype();
 
     let first = data
@@ -319,7 +320,7 @@ fn bb_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -436,7 +437,7 @@ pub fn bollinger_bands_with_kernel(
         period,
         devup,
         devdn,
-        &matype,
+        matype,
         devtype,
         first,
         chosen,
@@ -497,7 +498,7 @@ pub fn bollinger_bands_into(
         period,
         devup,
         devdn,
-        &matype,
+        matype,
         devtype,
         first,
         chosen,
@@ -525,7 +526,7 @@ pub fn bollinger_bands_into_slices(
     }
 
     bollinger_bands_compute_into(
-        data, period, devup, devdn, &matype, devtype, first, chosen, out_u, out_m, out_l,
+        data, period, devup, devdn, matype, devtype, first, chosen, out_u, out_m, out_l,
     )?;
 
     let warm = first + period - 1;
@@ -708,7 +709,7 @@ unsafe fn bb_row_scalar_classic_sma(
     for _ in 0..period {
         let v = unsafe { *p };
         sum += v;
-        sum_sq = v.mul_add(v, sum_sq);
+        sum_sq += v * v;
         p = unsafe { p.add(1) };
     }
 
@@ -716,7 +717,7 @@ unsafe fn bb_row_scalar_classic_sma(
     let mean = sum * inv_n;
     // Population variance: Var = E[x^2] - (E[x])^2
     let var0 = if !use_sample {
-        (-mean).mul_add(mean, sum_sq * inv_n)
+        (sum_sq * inv_n) - (mean * mean)
     } else if period > 1 {
         (sum_sq - sum * mean) / ((period - 1) as f64)
     } else {
@@ -726,8 +727,8 @@ unsafe fn bb_row_scalar_classic_sma(
 
     unsafe {
         *out_m.get_unchecked_mut(warm) = mean;
-        *out_u.get_unchecked_mut(warm) = devup.mul_add(std0, mean);
-        *out_l.get_unchecked_mut(warm) = (-devdn).mul_add(std0, mean);
+        *out_u.get_unchecked_mut(warm) = mean + devup * std0;
+        *out_l.get_unchecked_mut(warm) = mean - devdn * std0;
     }
 
     // Rolling update with two moving pointers for old/new elements.
@@ -740,12 +741,11 @@ unsafe fn bb_row_scalar_classic_sma(
 
         // Update sum and sum of squares
         sum += new - old;
-        let tmp = sum_sq - old * old;
-        sum_sq = new.mul_add(new, tmp);
+        sum_sq = (sum_sq - old * old) + new * new;
 
         let m = sum * inv_n;
         let var = if !use_sample {
-            (-m).mul_add(m, sum_sq * inv_n)
+            (sum_sq * inv_n) - (m * m)
         } else if period > 1 {
             (sum_sq - sum * m) / ((period - 1) as f64)
         } else {
@@ -755,8 +755,8 @@ unsafe fn bb_row_scalar_classic_sma(
 
         unsafe {
             *out_m.get_unchecked_mut(i) = m;
-            *out_u.get_unchecked_mut(i) = devup.mul_add(sd, m);
-            *out_l.get_unchecked_mut(i) = (-devdn).mul_add(sd, m);
+            *out_u.get_unchecked_mut(i) = m + devup * sd;
+            *out_l.get_unchecked_mut(i) = m - devdn * sd;
         }
 
         i += 1;
@@ -1232,7 +1232,7 @@ pub struct BollingerBandsBatchRange {
 impl Default for BollingerBandsBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 20, 0),
+            period: (20, 269, 1),
             devup: (2.0, 2.0, 0.0),
             devdn: (2.0, 2.0, 0.0),
             matype: ("sma".to_string(), "sma".to_string(), 0),
@@ -2974,7 +2974,7 @@ pub fn bollinger_bands_js(
     let mut u = vec![0.0; data.len()];
     let mut m = vec![0.0; data.len()];
     let mut l = vec![0.0; data.len()];
-    bollinger_bands_into_slices(&mut u, &mut m, &mut l, &input, detect_best_kernel())
+    bollinger_bands_into_slices(&mut u, &mut m, &mut l, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let mut values = u;
@@ -3271,13 +3271,13 @@ pub fn bollinger_bands_into(
             let mut tu = vec![0.0; len];
             let mut tm = vec![0.0; len];
             let mut tl = vec![0.0; len];
-            bollinger_bands_into_slices(&mut tu, &mut tm, &mut tl, &input, detect_best_kernel())
+            bollinger_bands_into_slices(&mut tu, &mut tm, &mut tl, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             u.copy_from_slice(&tu);
             m.copy_from_slice(&tm);
             l.copy_from_slice(&tl);
         } else {
-            bollinger_bands_into_slices(&mut u, &mut m, &mut l, &input, detect_best_kernel())
+            bollinger_bands_into_slices(&mut u, &mut m, &mut l, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }

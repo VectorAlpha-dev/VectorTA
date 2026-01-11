@@ -546,57 +546,138 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        // Batch: 100k samples, ~64 combos
         v.push(
             CudaBenchScenario::new(
                 "avsl",
                 "one_series_many_params",
                 "avsl/batch",
                 "100k x 64",
-                || {
-                    struct State {
-                        cuda: CudaAvsl,
-                        close: Vec<f32>,
-                        low: Vec<f32>,
-                        vol: Vec<f32>,
-                        sweep: AvslBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.avsl_batch_dev(
-                                &self.close,
-                                &self.low,
-                                &self.vol,
-                                &self.sweep,
-                            );
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut close = vec![f32::NAN; n];
-                    let mut low = vec![f32::NAN; n];
-                    let mut vol = vec![f32::NAN; n];
-                    for i in 200..n {
-                        let x = i as f32;
-                        close[i] = (x * 0.00123).sin() + 0.0002 * x;
-                        low[i] = close[i] - 0.5 * (0.5 + (x * 0.01).cos().abs());
-                        vol[i] = (x * 0.0007).cos().abs() + 0.7;
-                    }
-                    let sweep = AvslBatchRange {
-                        fast_period: (4, 28, 4),
-                        slow_period: (32, 128, 16),
-                        multiplier: (2.0, 2.0, 0.0),
-                    };
-                    Box::new(State {
-                        cuda: CudaAvsl::new(0).unwrap(),
-                        close,
-                        low,
-                        vol,
-                        sweep,
-                    })
-                },
+                prep_avsl_batch_dev,
             )
             .with_sample_size(20),
         );
         v
+    }
+
+    struct AvslBatchDevState {
+        cuda: CudaAvsl,
+        d_close: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_vol: DeviceBuffer<f32>,
+        d_fast: DeviceBuffer<i32>,
+        d_slow: DeviceBuffer<i32>,
+        d_mult: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        grid: GridSize,
+        block: BlockSize,
+        d_out: DeviceBuffer<f32>,
+    }
+
+    impl CudaBenchState for AvslBatchDevState {
+        fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("avsl_batch_f32")
+                .expect("avsl_batch_f32");
+            unsafe {
+                let mut p_close = self.d_close.as_device_ptr().as_raw();
+                let mut p_low = self.d_low.as_device_ptr().as_raw();
+                let mut p_vol = self.d_vol.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut p_fast = self.d_fast.as_device_ptr().as_raw();
+                let mut p_slow = self.d_slow.as_device_ptr().as_raw();
+                let mut p_mult = self.d_mult.as_device_ptr().as_raw();
+                let mut p_out = self.d_out.as_device_ptr().as_raw();
+                let mut rows_i = self.rows as i32;
+
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_close as *mut _ as *mut c_void,
+                    &mut p_low as *mut _ as *mut c_void,
+                    &mut p_vol as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut p_fast as *mut _ as *mut c_void,
+                    &mut p_slow as *mut _ as *mut c_void,
+                    &mut p_mult as *mut _ as *mut c_void,
+                    &mut p_out as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("avsl launch");
+            }
+            self.cuda.stream.synchronize().expect("avsl sync");
+        }
+    }
+
+    fn prep_avsl_batch_dev() -> Box<dyn CudaBenchState> {
+        let n = 100_000usize;
+        let mut close = vec![f32::NAN; n];
+        let mut low = vec![f32::NAN; n];
+        let mut vol = vec![f32::NAN; n];
+        for i in 200..n {
+            let x = i as f32;
+            close[i] = (x * 0.00123).sin() + 0.0002 * x;
+            low[i] = close[i] - 0.5 * (0.5 + (x * 0.01).cos().abs());
+            vol[i] = (x * 0.0007).cos().abs() + 0.7;
+        }
+        let sweep = AvslBatchRange {
+            fast_period: (4, 28, 4),
+            slow_period: (32, 128, 16),
+            multiplier: (2.0, 2.0, 0.0),
+        };
+        let cuda = CudaAvsl::new(0).expect("cuda avsl");
+        let (combos, first_valid, len) =
+            CudaAvsl::prepare_batch_inputs(&close, &low, &vol, &sweep).expect("prepare_batch_inputs");
+        let rows = combos.len();
+        let fast: Vec<i32> = combos.iter().map(|c| c.fast_period.unwrap() as i32).collect();
+        let slow: Vec<i32> = combos.iter().map(|c| c.slow_period.unwrap() as i32).collect();
+        let mult: Vec<f32> = combos.iter().map(|c| c.multiplier.unwrap() as f32).collect();
+
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_vol = DeviceBuffer::from_slice(&vol).expect("d_vol");
+        let d_fast = DeviceBuffer::from_slice(&fast).expect("d_fast");
+        let d_slow = DeviceBuffer::from_slice(&slow).expect("d_slow");
+        let d_mult = DeviceBuffer::from_slice(&mult).expect("d_mult");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+
+        // Match wrapper's block selection once in prep.
+        let block_x: u32 = match std::env::var("AVSL_BLOCK_X").ok().as_deref() {
+            Some("auto") | None => {
+                let func = cuda.module.get_function("avsl_batch_f32").expect("avsl_batch_f32");
+                let (_min, suggested) = func
+                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                    .expect("suggested launch config");
+                suggested
+            }
+            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
+        };
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(AvslBatchDevState {
+            cuda,
+            d_close,
+            d_low,
+            d_vol,
+            d_fast,
+            d_slow,
+            d_mult,
+            len,
+            first_valid,
+            rows,
+            grid,
+            block,
+            d_out,
+        })
     }
 }

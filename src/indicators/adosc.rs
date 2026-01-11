@@ -509,8 +509,8 @@ pub struct AdoscBatchRange {
 impl Default for AdoscBatchRange {
     fn default() -> Self {
         Self {
-            short_period: (3, 10, 1),
-            long_period: (10, 30, 1),
+            short_period: (3, 3, 0),
+            long_period: (10, 259, 1),
         }
     }
 }
@@ -1848,6 +1848,15 @@ mod tests {
                 },
             )
             .map_err(|e| e.into())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_adosc_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
     }
 
     generate_all_adosc_tests!(

@@ -139,6 +139,11 @@ impl CudaMarketefi {
         self.device_id
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaMarketefiError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     pub fn set_policy(&mut self, policy: CudaMarketefiPolicy) {
         self.policy = policy;
     }
@@ -516,13 +521,24 @@ pub mod benches {
             || {
                 struct State {
                     cuda: CudaMarketefi,
-                    h: Vec<f32>,
-                    l: Vec<f32>,
-                    v: Vec<f32>,
+                    d_h: DeviceBuffer<f32>,
+                    d_l: DeviceBuffer<f32>,
+                    d_v: DeviceBuffer<f32>,
+                    len: usize,
+                    first_valid: usize,
+                    d_out: DeviceBuffer<f32>,
                 }
                 impl CudaBenchState for State {
                     fn launch(&mut self) {
-                        let _ = self.cuda.marketefi_dev(&self.h, &self.l, &self.v);
+                        let _ = self.cuda.marketefi_device(
+                            &self.d_h,
+                            &self.d_l,
+                            &self.d_v,
+                            self.len,
+                            self.first_valid,
+                            &mut self.d_out,
+                        );
+                        let _ = self.cuda.synchronize();
                     }
                 }
                 let n = 100_000usize;
@@ -536,7 +552,22 @@ pub mod benches {
                     vv[i] = (x * 0.002).cos().abs() + 0.1;
                 }
                 let cuda = CudaMarketefi::new(0).unwrap();
-                Box::new(State { cuda, h, l, v: vv })
+                let first = (0..n)
+                    .find(|&i| h[i].is_finite() && l[i].is_finite() && vv[i].is_finite())
+                    .unwrap_or(0);
+                let d_h = DeviceBuffer::from_slice(&h).unwrap();
+                let d_l = DeviceBuffer::from_slice(&l).unwrap();
+                let d_v = DeviceBuffer::from_slice(&vv).unwrap();
+                let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.unwrap();
+                Box::new(State {
+                    cuda,
+                    d_h,
+                    d_l,
+                    d_v,
+                    len: n,
+                    first_valid: first,
+                    d_out,
+                })
             },
         ));
         // Many-series (64 x 16k)
@@ -548,17 +579,26 @@ pub mod benches {
             || {
                 struct State {
                     cuda: CudaMarketefi,
-                    h: Vec<f32>,
-                    l: Vec<f32>,
-                    v: Vec<f32>,
+                    d_h: DeviceBuffer<f32>,
+                    d_l: DeviceBuffer<f32>,
+                    d_v: DeviceBuffer<f32>,
+                    d_first_valids: DeviceBuffer<i32>,
                     cols: usize,
                     rows: usize,
+                    d_out: DeviceBuffer<f32>,
                 }
                 impl CudaBenchState for State {
                     fn launch(&mut self) {
-                        let _ = self.cuda.marketefi_many_series_one_param_time_major_dev(
-                            &self.h, &self.l, &self.v, self.cols, self.rows,
+                        let _ = self.cuda.marketefi_many_series_one_param_device(
+                            &self.d_h,
+                            &self.d_l,
+                            &self.d_v,
+                            &self.d_first_valids,
+                            self.cols,
+                            self.rows,
+                            &mut self.d_out,
                         );
+                        let _ = self.cuda.synchronize();
                     }
                 }
                 let cols = 64usize;
@@ -575,13 +615,21 @@ pub mod benches {
                     }
                 }
                 let cuda = CudaMarketefi::new(0).unwrap();
+                let first_valids = vec![0i32; cols];
+                let d_h = DeviceBuffer::from_slice(&h).unwrap();
+                let d_l = DeviceBuffer::from_slice(&l).unwrap();
+                let d_v = DeviceBuffer::from_slice(&vv).unwrap();
+                let d_first_valids = DeviceBuffer::from_slice(&first_valids).unwrap();
+                let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }.unwrap();
                 Box::new(State {
                     cuda,
-                    h,
-                    l,
-                    v: vv,
+                    d_h,
+                    d_l,
+                    d_v,
+                    d_first_valids,
                     cols,
                     rows,
+                    d_out,
                 })
             },
         ));

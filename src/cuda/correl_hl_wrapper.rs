@@ -349,12 +349,6 @@ impl CudaCorrelHl {
         let mut ps_l2 = vec![0.0f64; n + 1];
         let mut ps_hl = vec![0.0f64; n + 1];
         let mut ps_nan = vec![0i32; n + 1];
-        let mut ps_h = vec![0.0f64; n + 1];
-        let mut ps_h2 = vec![0.0f64; n + 1];
-        let mut ps_l = vec![0.0f64; n + 1];
-        let mut ps_l2 = vec![0.0f64; n + 1];
-        let mut ps_hl = vec![0.0f64; n + 1];
-        let mut ps_nan = vec![0i32; n + 1];
         for i in 0..n {
             let h = high[i];
             let l = low[i];
@@ -366,21 +360,7 @@ impl CudaCorrelHl {
                 ps_l2[i + 1] = pl2;
                 ps_hl[i + 1] = phl;
                 ps_nan[i + 1] = ps_nan[i] + 1;
-                ps_h[i + 1] = ph;
-                ps_h2[i + 1] = ph2;
-                ps_l[i + 1] = pl;
-                ps_l2[i + 1] = pl2;
-                ps_hl[i + 1] = phl;
-                ps_nan[i + 1] = ps_nan[i] + 1;
             } else {
-                let hd = h as f64;
-                let ld = l as f64;
-                ps_h[i + 1] = ph + hd;
-                ps_h2[i + 1] = ph2 + hd * hd;
-                ps_l[i + 1] = pl + ld;
-                ps_l2[i + 1] = pl2 + ld * ld;
-                ps_hl[i + 1] = phl + hd * ld;
-                ps_nan[i + 1] = ps_nan[i];
                 let hd = h as f64;
                 let ld = l as f64;
                 ps_h[i + 1] = ph + hd;
@@ -812,25 +792,45 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let prefix_bytes = 5 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<f64>()
+        let prefix_bytes = 5 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>()
             + (ONE_SERIES_LEN + 1) * std::mem::size_of::<i32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + prefix_bytes + out_bytes + 64 * 1024 * 1024
+        prefix_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct CorrelHlBatchState {
+    struct CorrelHlBatchDevState {
         cuda: CudaCorrelHl,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: CorrelHlBatchRange,
+        d_ps_h: DeviceBuffer<Float2>,
+        d_ps_h2: DeviceBuffer<Float2>,
+        d_ps_l: DeviceBuffer<Float2>,
+        d_ps_l2: DeviceBuffer<Float2>,
+        d_ps_hl: DeviceBuffer<Float2>,
+        d_ps_nan: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for CorrelHlBatchState {
+    impl CudaBenchState for CorrelHlBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .correl_hl_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("correl_hl batch");
+            self.cuda
+                .launch_batch_ds(
+                    &self.d_ps_h,
+                    &self.d_ps_h2,
+                    &self.d_ps_l,
+                    &self.d_ps_l2,
+                    &self.d_ps_hl,
+                    &self.d_ps_nan,
+                    self.len,
+                    self.first_valid,
+                    &self.d_periods,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("correl_hl launch");
+            self.cuda.stream.synchronize().expect("correl_hl sync");
         }
     }
 
@@ -850,11 +850,39 @@ pub mod benches {
         let sweep = CorrelHlBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(CorrelHlBatchState {
+
+        let (combos, first_valid, len) = CudaCorrelHl::prepare_batch_inputs(&high, &low, &sweep)
+            .expect("prep correl_hl inputs");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+
+        let (ps_h, ps_h2, ps_l, ps_l2, ps_hl, ps_nan) =
+            CudaCorrelHl::build_prefixes_ds_pinned(&high, &low).expect("build DS prefixes");
+
+        // Use sync allocations for large buffers to avoid WDDM stream-ordered alloc OOM.
+        let d_ps_h = DeviceBuffer::from_slice(ps_h.as_slice()).expect("ps_h H2D");
+        let d_ps_h2 = DeviceBuffer::from_slice(ps_h2.as_slice()).expect("ps_h2 H2D");
+        let d_ps_l = DeviceBuffer::from_slice(ps_l.as_slice()).expect("ps_l H2D");
+        let d_ps_l2 = DeviceBuffer::from_slice(ps_l2.as_slice()).expect("ps_l2 H2D");
+        let d_ps_hl = DeviceBuffer::from_slice(ps_hl.as_slice()).expect("ps_hl H2D");
+        let d_ps_nan = DeviceBuffer::from_slice(ps_nan.as_slice()).expect("ps_nan H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("periods H2D");
+
+        let elems = len * combos.len();
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out");
+
+        Box::new(CorrelHlBatchDevState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_ps_h,
+            d_ps_h2,
+            d_ps_l,
+            d_ps_l2,
+            d_ps_hl,
+            d_ps_nan,
+            d_periods,
+            len,
+            first_valid,
+            n_combos: combos.len(),
+            d_out,
         })
     }
 

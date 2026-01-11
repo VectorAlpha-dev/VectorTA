@@ -40,10 +40,10 @@ static __device__ __forceinline__ float warp_broadcast0(float v) {
 
 // -------------------------------------------
 // 1) Param-sweep over periods (one price series)
-//    One warp handles up to 32 combos (periods).
+//    One warp handles one combo (period) and emits 32 timesteps per iteration
+//    via a warp-level inclusive scan over affine transforms.
 // -------------------------------------------
 extern "C" __global__
-__launch_bounds__(TEMA_WARPS_PER_BLOCK * 32, 2)
 void tema_batch_f32(const float* __restrict__ prices,
                     const int*   __restrict__ periods,
                     int series_len,
@@ -53,17 +53,25 @@ void tema_batch_f32(const float* __restrict__ prices,
 {
     if (series_len <= 0 || n_combos <= 0) return;
 
-    // Warp decomposition
-    const int lane     = threadIdx.x & 31;
-    const int warp_in_block = threadIdx.x >> 5; // / 32
-    const int warp_global   = blockIdx.x * TEMA_WARPS_PER_BLOCK + warp_in_block;
-    const int combo         = warp_global * 32 + lane;
+    // Warp decomposition: one combo per warp.
+    const int lane         = threadIdx.x & 31;
+    const int warp_in_block= threadIdx.x >> 5; // / 32
+    const int warps_pb     = blockDim.x >> 5;
+    if (warps_pb <= 0) return;
+    const int combo        = blockIdx.x * warps_pb + warp_in_block;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
-    if (period <= 0) return;
+    const size_t base_out = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    const int base_out = combo * series_len;
+    // Invalid/degenerate inputs: fill this row with NaNs so the host can treat it uniformly.
+    if (period <= 0 || first_valid >= series_len) {
+        if (lane == 0) {
+            const float qn = tema_qnan();
+            for (int i = 0; i < series_len; ++i) out[base_out + static_cast<size_t>(i)] = qn;
+        }
+        return;
+    }
 
     // Lookback / warm indices (period-specific)
     const int lookback   = (period - 1) * 3;
@@ -71,52 +79,159 @@ void tema_batch_f32(const float* __restrict__ prices,
     const int ema3_start = first_valid + 2 * (period - 1);
     const int warm       = first_valid + lookback;
 
-    // Prefill NaN only up to warm (earlier code wrote whole series).
-    // If first_valid is out of range, mark all NaN like before.
-    if (first_valid >= series_len) {
-        float qn = tema_qnan();
-        for (int i = 0; i < series_len; ++i) out[base_out + i] = qn;
-        return;
-    } else {
+    // Prefill NaN only up to warm. Warmup is small (<= 3*(period-1)), so lane 0 does it.
+    if (lane == 0) {
         const int nan_to = warm < series_len ? warm : series_len;
-        float qn = tema_qnan();
-        for (int i = 0; i < nan_to; ++i) out[base_out + i] = qn;
+        const float qn = tema_qnan();
+        for (int i = 0; i < nan_to; ++i) out[base_out + static_cast<size_t>(i)] = qn;
+    }
+    if (warm >= series_len) {
+        // No valid output for this combo.
+        return;
     }
 
     // Per-combo constants
     const float alpha = 2.0f / (float(period) + 1.0f);
+    const float one_minus_alpha = 1.0f - alpha;
 
-    // Initialize EMA1 from prices[first_valid], broadcast so only one global load per warp
-    float p0 = (lane == 0) ? prices[first_valid] : 0.0f;
-    p0 = warp_broadcast0(p0);
-    float ema1 = p0;
-    float ema2 = 0.0f;
-    float ema3 = 0.0f;
+    // Warmup: compute EMA1/EMA2/EMA3 state at t = warm-1 sequentially in lane 0.
+    float ema1_prev = 0.0f;
+    float ema2_prev = 0.0f;
+    float ema3_prev = 0.0f;
+    if (lane == 0) {
+        float ema1 = prices[first_valid];
+        float ema2 = 0.0f;
+        float ema3 = 0.0f;
 
-    // Sequential time loop; broadcast price each step so every combo in the warp reuses it
-    for (int t = first_valid; t < series_len; ++t) {
-        float px = (lane == 0) ? prices[t] : 0.0f;
-        px = warp_broadcast0(px);
+        // Phase 0: EMA1 only (until EMA2 becomes valid)
+        int end0 = ema2_start;
+        if (end0 > warm) end0 = warm;
+        for (int t = first_valid; t < end0; ++t) {
+            ema1 = ema_step(ema1, prices[t], alpha);
+        }
 
-        // EMA1
-        ema1 = ema_step(ema1, px, alpha);
-
-        // EMA2 (seed on first step it becomes active, then update)
-        if (t >= ema2_start) {
-            if (t == ema2_start) ema2 = ema1;
+        // Phase 1: EMA1 + EMA2
+        if (ema2_start < warm) {
+            // t == ema2_start: preserve init/update order
+            const float px = prices[ema2_start];
+            ema1 = ema_step(ema1, px, alpha);
+            ema2 = ema1;
             ema2 = ema_step(ema2, ema1, alpha);
+
+            int end1 = ema3_start;
+            if (end1 > warm) end1 = warm;
+            for (int t = ema2_start + 1; t < end1; ++t) {
+                const float p = prices[t];
+                ema1 = ema_step(ema1, p, alpha);
+                ema2 = ema_step(ema2, ema1, alpha);
+            }
+
+            // Phase 2/3: EMA1 + EMA2 + EMA3 (until warm)
+            if (ema3_start < warm) {
+                // t == ema3_start: preserve init/update order
+                const float p = prices[ema3_start];
+                ema1 = ema_step(ema1, p, alpha);
+                ema2 = ema_step(ema2, ema1, alpha);
+                ema3 = ema2;
+                ema3 = ema_step(ema3, ema2, alpha);
+
+                for (int t = ema3_start + 1; t < warm; ++t) {
+                    const float p2 = prices[t];
+                    ema1 = ema_step(ema1, p2, alpha);
+                    ema2 = ema_step(ema2, ema1, alpha);
+                    ema3 = ema_step(ema3, ema2, alpha);
+                }
+            }
         }
 
-        // EMA3
-        if (t >= ema3_start) {
-            if (t == ema3_start) ema3 = ema2;
-            ema3 = ema_step(ema3, ema2, alpha);
+        ema1_prev = ema1;
+        ema2_prev = ema2;
+        ema3_prev = ema3;
+    }
+
+    // Broadcast warmup terminal state to all lanes.
+    const unsigned mask = 0xffffffffu;
+    ema1_prev = __shfl_sync(mask, ema1_prev, 0);
+    ema2_prev = __shfl_sync(mask, ema2_prev, 0);
+    ema3_prev = __shfl_sync(mask, ema3_prev, 0);
+
+    // Main loop: all stages are active once t >= warm.
+    for (int t0 = warm; t0 < series_len; t0 += 32) {
+        const int t = t0 + lane;
+
+        // ---- EMA1 scan (input: price) ----
+        float A1 = 1.0f;
+        float B1 = 0.0f;
+        if (t < series_len) {
+            A1 = one_minus_alpha;
+            B1 = alpha * prices[t];
+        }
+        float A = A1;
+        float B = B1;
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float ema1 = fmaf(A, ema1_prev, B);
+
+        // ---- EMA2 scan (input: ema1) ----
+        float A2 = 1.0f;
+        float B2 = 0.0f;
+        if (t < series_len) {
+            A2 = one_minus_alpha;
+            B2 = alpha * ema1;
+        }
+        A = A2;
+        B = B2;
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float ema2 = fmaf(A, ema2_prev, B);
+
+        // ---- EMA3 scan (input: ema2) ----
+        float A3 = 1.0f;
+        float B3 = 0.0f;
+        if (t < series_len) {
+            A3 = one_minus_alpha;
+            B3 = alpha * ema2;
+        }
+        A = A3;
+        B = B3;
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float ema3 = fmaf(A, ema3_prev, B);
+
+        if (t < series_len) {
+            out[base_out + static_cast<size_t>(t)] = fmaf(3.0f, (ema1 - ema2), ema3);
         }
 
-        if (t >= warm) {
-            // TEMA = ema3 + 3*(ema1 - ema2)
-            out[base_out + t] = fmaf(3.0f, (ema1 - ema2), ema3);
-        }
+        // Advance state to end of tile.
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        ema1_prev = __shfl_sync(mask, ema1, last_lane);
+        ema2_prev = __shfl_sync(mask, ema2, last_lane);
+        ema3_prev = __shfl_sync(mask, ema3, last_lane);
     }
 }
 

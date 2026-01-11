@@ -96,7 +96,7 @@ void lrsi_batch_f32(const float* __restrict__ prices,
 
         // Phase 1: advance to warm-1 without output
         for (int t = first_valid + 1; t < warm; ++t) {
-            const float p = prices[t];
+            const float p = warp_broadcast_ldg(prices + t);
             if (isnan(p)) continue;
             const float t0 = fmaf(alpha, (p - l0), l0);
             const float t1 = fmaf(gamma, l1, fmaf(mgamma, t0, l0));
@@ -107,7 +107,7 @@ void lrsi_batch_f32(const float* __restrict__ prices,
 
         // Phase 2: output path
         for (int t = warm; t < series_len; ++t) {
-            const float p = prices[t];
+            const float p = warp_broadcast_ldg(prices + t);
             if (isnan(p)) { out[base + t] = NAN; continue; }
 
             const float t0 = fmaf(alpha, (p - l0), l0);
@@ -120,16 +120,15 @@ void lrsi_batch_f32(const float* __restrict__ prices,
             const float d01 = t0 - t1;
             const float d12 = t1 - t2;
             const float d23 = t2 - t3;
-            // Match f64 baseline more closely using double in final ratio
-            const double a01 = fabs((double)d01);
-            const double a12 = fabs((double)d12);
-            const double a23 = fabs((double)d23);
-            const double sum_abs = a01 + a12 + a23;
-            if (sum_abs <= (double)FLT_EPSILON) {
+            const float a01 = fabsf(d01);
+            const float a12 = fabsf(d12);
+            const float a23 = fabsf(d23);
+            const float sum_abs = a01 + a12 + a23;
+            if (sum_abs <= FLT_EPSILON) {
                 out[base + t] = 0.0f;
             } else {
-                const double cu = 0.5 * ((double)d01 + a01 + (double)d12 + a12 + (double)d23 + a23);
-                out[base + t] = (float)(cu / sum_abs);
+                const float cu = 0.5f * (d01 + a01 + d12 + a12 + d23 + a23);
+                out[base + t] = cu / sum_abs;
             }
         }
     }

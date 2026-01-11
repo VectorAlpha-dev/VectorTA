@@ -147,27 +147,15 @@ impl CudaGatorOsc {
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged {
-            return;
-        }
-        if self.debug_many_logged {
-            return;
-        }
+        if self.debug_many_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario =
-                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 let per_scenario =
                     std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR many-series selected kernel: {:?}", sel);
                 }
-                unsafe {
-                    (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
-                }
+                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true; }
             }
         }
     }
@@ -188,6 +176,10 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep)?;
+        // IMPORTANT: The warp-scan batch path is experimental (has exhibited hangs on some
+        // systems under WDDM). Keep it opt-in only.
+        let warp_scan_enabled =
+            std::env::var("GATOROSC_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
 
         // Flatten params and validate
         let mut jl: Vec<i32> = Vec::with_capacity(combos.len());
@@ -270,15 +262,23 @@ impl CudaGatorOsc {
                 .module
                 .get_function("gatorosc_batch_f32")
                 .map_err(|_| CudaGatorOscError::MissingKernelSymbol { name: "gatorosc_batch_f32" })?;
-            let block_x = this.policy.batch_block_x.unwrap_or(256);
+            let block_x = if warp_scan_enabled {
+                // One warp per combo is the intended fast path for `gatorosc_batch_f32`.
+                // Keep block_x a multiple of 32 (ideally exactly 32).
+                let mut bx = this.policy.batch_block_x.unwrap_or(32).max(32);
+                bx -= bx % 32;
+                if bx == 0 { bx = 32; }
+                bx
+            } else {
+                // Force the kernel's sequential fallback (blockDim.x < 32).
+                1
+            };
             let grid: GridSize = (chunk as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             if (chunk as u32) as usize > this.max_grid_x {
                 return Err(CudaGatorOscError::LaunchConfigTooLarge { gx: chunk as u32, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
             }
             unsafe {
-                (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x });
                 (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x });
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -335,7 +335,15 @@ impl CudaGatorOsc {
         while launched < rows {
             let chunk = (rows - launched).min(self.max_grid_x);
             let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
-            let ring_len_i = (chunk_max_shift + 1) as i32;
+            let ring_len_i = if warp_scan_enabled {
+                // Pad the ring to a multiple of 32 so the kernel can process 32-wide time tiles
+                // without any ring wrap inside a warp iteration (better shared-memory access).
+                let min_ring = (chunk_max_shift + 1).max(64);
+                ((min_ring + 31) / 32 * 32) as i32
+            } else {
+                // Minimal ring for the sequential fallback.
+                (chunk_max_shift + 1) as i32
+            };
             launch_chunk(self, launched, chunk, ring_len_i)?;
             launched += chunk;
         }
@@ -695,6 +703,11 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        // Known issue: this benchmark can take extremely long on some systems (driver/clock/power
+        // state interactions). Keep it opt-in so the full CUDA bench suite remains usable.
+        if std::env::var("CUDA_BENCH_ENABLE_GATOROSC").ok().as_deref() != Some("1") {
+            return Vec::new();
+        }
         vec![CudaBenchScenario::new(
             "gatorosc",
             "one_series_many_params",

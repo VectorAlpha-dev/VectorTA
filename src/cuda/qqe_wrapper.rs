@@ -612,37 +612,118 @@ pub mod benches {
         v
     }
 
-    
     struct BatchState {
         cuda: CudaQqe,
-        prices: Vec<f32>,
-        sweep: QqeBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_rsi: DeviceBuffer<i32>,
+        d_ema: DeviceBuffer<i32>,
+        d_fast: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        rows: usize,
+        first_valid: usize,
+        block_x: u32,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.qqe_batch_dev(&self.prices, &self.sweep).unwrap();
+            let func = self
+                .cuda
+                .module
+                .get_function("qqe_batch_f32")
+                .expect("qqe_batch_f32");
+            const MAX_Y: usize = 65_535;
+            let mut base = 0usize;
+            while base < self.rows {
+                let take = (self.rows - base).min(MAX_Y);
+                unsafe {
+                    let mut f_prices = self.d_prices.as_device_ptr().as_raw();
+                    let mut f_rsi = self.d_rsi.as_device_ptr().add(base).as_raw();
+                    let mut f_ema = self.d_ema.as_device_ptr().add(base).as_raw();
+                    let mut f_fast = self.d_fast.as_device_ptr().add(base).as_raw();
+                    let mut series_len_i = self.len as i32;
+                    let mut n_combos_i = take as i32;
+                    let mut first_i = self.first_valid as i32;
+                    let row_offset_elems = 2 * base * self.len;
+                    let mut f_out = self.d_out.as_device_ptr().add(row_offset_elems).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut f_prices as *mut _ as *mut c_void,
+                        &mut f_rsi as *mut _ as *mut c_void,
+                        &mut f_ema as *mut _ as *mut c_void,
+                        &mut f_fast as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut f_out as *mut _ as *mut c_void,
+                    ];
+                    let grid_dims = (1u32, take as u32, 1u32);
+                    let block_dims = (self.block_x, 1u32, 1u32);
+                    self.cuda
+                        .validate_launch(grid_dims, block_dims)
+                        .expect("launch dims");
+                    let grid: GridSize = grid_dims.into();
+                    let block: BlockSize = block_dims.into();
+                    self.cuda
+                        .stream
+                        .launch(&func, grid, block, 0, args)
+                        .expect("launch qqe_batch_f32");
+                }
+                base += take;
+            }
+            let _ = self.cuda.stream.synchronize();
         }
     }
 
-    
     struct ManyState {
         cuda: CudaQqe,
-        prices_tm: Vec<f32>,
+        d_prices: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: QqeParams,
+        rsi_p: usize,
+        ema_p: usize,
+        fast_k: f32,
+        block_x: u32,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .qqe_many_series_one_param_time_major_dev(
-                    &self.prices_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .unwrap();
+                .module
+                .get_function("qqe_many_series_one_param_time_major_f32")
+                .expect("qqe_many_series_one_param_time_major_f32");
+            unsafe {
+                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                let mut rsi_i = self.rsi_p as i32;
+                let mut ema_i = self.ema_p as i32;
+                let mut fast_k_f = self.fast_k;
+                let mut num_series_i = self.cols as i32;
+                let mut series_len_i = self.rows as i32;
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut rsi_i as *mut _ as *mut c_void,
+                    &mut ema_i as *mut _ as *mut c_void,
+                    &mut fast_k_f as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let grid_dims = (1u32, self.cols as u32, 1u32);
+                let block_dims = (self.block_x, 1u32, 1u32);
+                self.cuda
+                    .validate_launch(grid_dims, block_dims)
+                    .expect("launch dims");
+                let grid: GridSize = grid_dims.into();
+                let block: BlockSize = block_dims.into();
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("launch qqe_many_series_one_param_time_major_f32");
+            }
+            let _ = self.cuda.stream.synchronize();
         }
     }
 
@@ -654,10 +735,35 @@ pub mod benches {
             smoothing_factor: (5, 5, 0),
             fast_factor: (4.236, 4.236, 0.0),
         };
+        let first_valid = CudaQqe::first_valid_f32(&prices).expect("first_valid_f32");
+        let combos = CudaQqe::expand_grid(&sweep);
+        let rsi_i32: Vec<i32> = combos.iter().map(|c| c.rsi_period.unwrap() as i32).collect();
+        let ema_i32: Vec<i32> = combos.iter().map(|c| c.smoothing_factor.unwrap() as i32).collect();
+        let fast_f32: Vec<f32> = combos.iter().map(|c| c.fast_factor.unwrap() as f32).collect();
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_rsi = DeviceBuffer::from_slice(&rsi_i32).expect("d_rsi");
+        let d_ema = DeviceBuffer::from_slice(&ema_i32).expect("d_ema");
+        let d_fast = DeviceBuffer::from_slice(&fast_f32).expect("d_fast");
+        let rows = combos.len();
+        let out_elems = 2 * rows * ONE_SERIES_LEN;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let mut block_x = match cuda.policy_batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => 256,
+        };
+        block_x = CudaQqe::warp_align(block_x);
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(BatchState {
             cuda,
-            prices,
-            sweep,
+            d_prices,
+            d_rsi,
+            d_ema,
+            d_fast,
+            d_out,
+            len: ONE_SERIES_LEN,
+            rows,
+            first_valid,
+            block_x,
         })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -676,12 +782,50 @@ pub mod benches {
             smoothing_factor: Some(5),
             fast_factor: Some(4.236),
         };
+        let (rsi_p, ema_p, fast_k) = (
+            params.rsi_period.unwrap(),
+            params.smoothing_factor.unwrap(),
+            params.fast_factor.unwrap() as f32,
+        );
+        let first_valids: Vec<i32> = (0..cols).map(|s| s as i32).collect();
+        let d_prices = DeviceBuffer::from_slice(&tm).expect("d_prices");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let out_elems = rows * 2 * cols;
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let warm_max = (0..cols)
+            .map(|s| {
+                (first_valids[s] as usize)
+                    .saturating_add(rsi_p + ema_p)
+                    .saturating_sub(2)
+            })
+            .max()
+            .unwrap_or(0);
+        let mut block_x = match cuda.policy_many {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            ManySeriesKernelPolicy::Auto => {
+                if warm_max < 128 {
+                    128
+                } else if warm_max < 512 {
+                    256
+                } else {
+                    512
+                }
+            }
+        };
+        block_x = CudaQqe::warp_align(block_x);
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(ManyState {
             cuda,
-            prices_tm: tm,
+            d_prices,
+            d_first,
+            d_out,
             cols,
             rows,
-            params,
+            rsi_p,
+            ema_p,
+            fast_k,
+            block_x,
         })
     }
 

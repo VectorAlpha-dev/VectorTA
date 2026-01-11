@@ -311,7 +311,7 @@ pub fn keltner_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -448,7 +448,7 @@ pub fn keltner_into_slice(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1130,7 +1130,7 @@ pub struct KeltnerBatchRange {
 impl Default for KeltnerBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 60, 10),
+            period: (20, 269, 1),
             multiplier: (2.0, 2.0, 0.0),
         }
     }

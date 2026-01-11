@@ -4,6 +4,7 @@
 #endif
 
 #include <cuda_runtime.h>
+#include <cub/cub.cuh>
 #include <limits.h>
 
 // ---------- helpers ----------
@@ -37,6 +38,23 @@ __device__ __forceinline__ void prefetch_l2(const void* ptr) {
 #endif
 
 // ---------- Kernel 1: many-params × one time series (column-major output) ----------
+struct VwapSeg2 {
+    float vol;
+    float pv;
+    int head;
+};
+
+struct VwapSegOp {
+    __device__ __forceinline__ VwapSeg2 operator()(const VwapSeg2& a, const VwapSeg2& b) const {
+        if (b.head) return b;
+        VwapSeg2 out;
+        out.vol = a.vol + b.vol;
+        out.pv = a.pv + b.pv;
+        out.head = a.head;
+        return out;
+    }
+};
+
 extern "C" __global__
 void vwap_batch_f32(const long long* __restrict__ timestamps,
                     const float* __restrict__ volumes,
@@ -50,11 +68,14 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
                     int n_combos,
                     float* __restrict__ out)
 {
-    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    constexpr int BLOCK_THREADS = 256;
+    if (blockDim.x != BLOCK_THREADS) return;
+
+    const int combo = blockIdx.x;
     if (combo >= n_combos) return;
 
     const int count = counts[combo];
-    const int unit  = unit_codes[combo];         // 0=m,1=h,2=d,3=M
+    const int unit = unit_codes[combo]; // 0=m,1=h,2=d,3=M
     long long divisor = divisors[combo];
     int warm = first_valids[combo];
 
@@ -62,7 +83,9 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
     const float nan = __int_as_float(0x7fffffff); // canonical qNaN
 
     if (count <= 0 || series_len <= 0) {
-        for (int t = 0; t < series_len; ++t) out[base + t] = nan;
+        for (int t = threadIdx.x; t < series_len; t += BLOCK_THREADS) {
+            out[base + t] = nan;
+        }
         return;
     }
     if (unit != 3 && divisor <= 0) divisor = 1;
@@ -70,96 +93,89 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
     if (warm < 0) warm = 0;
     if (warm > series_len) warm = series_len;
 
-    // Warm-up region as NaN
-    for (int t = 0; t < warm; ++t) out[base + t] = nan;
+    for (int t = threadIdx.x; t < warm; t += BLOCK_THREADS) {
+        out[base + t] = nan;
+    }
+    if (warm >= series_len) return;
 
-    float volume_sum    = 0.0f;
-    float vol_price_sum = 0.0f;
+    using BlockScan = cub::BlockScan<VwapSeg2, BLOCK_THREADS>;
+    __shared__ typename BlockScan::TempStorage scan_tmp;
+    __shared__ long long sh_gid[BLOCK_THREADS];
+    __shared__ float carry_vol;
+    __shared__ float carry_pv;
+    __shared__ long long carry_gid;
 
-    // Group tracking state
-    long long current_gid = LLONG_MIN;
-    long long next_boundary_ll = LLONG_MIN;  // for unit!=3
-    int       next_boundary_i  = INT_MIN;    // for unit==3
+    if (threadIdx.x == 0) {
+        carry_vol = 0.0f;
+        carry_pv = 0.0f;
+        carry_gid = LLONG_MIN;
+    }
+    __syncthreads();
 
     const int month_div = (unit == 3 && divisor > 0) ? static_cast<int>(divisor) : 1;
-
-    // For the monotonic fast-path on timestamps
-    long long last_ts = LLONG_MIN;
-    bool monotonic_ts = true;
+    const long long div = (unit != 3 && divisor > 0) ? divisor : 1;
 
 #pragma unroll 1
-    for (int t = warm; t < series_len; ++t) {
+    for (int chunk = warm; chunk < series_len; chunk += BLOCK_THREADS) {
+        const int t = chunk + threadIdx.x;
+        const bool active = (t < series_len);
 
-#if (VWAP_PREFETCH_DISTANCE > 0)
-        const int tp = t + VWAP_PREFETCH_DISTANCE;
-        if (tp < series_len) {
-            prefetch_l2(&volumes[tp]);
-            prefetch_l2(&prices[tp]);
-            prefetch_l2(&timestamps[tp]);
-            if (unit == 3 && month_ids) prefetch_l2(&month_ids[tp]);
-        }
-#endif
+        float vol = 0.0f;
+        float pv = 0.0f;
+        long long gid = 0;
 
-        // Detect or advance group without doing a divide most of the time
-        if (unit == 3) {
-            const int mid = month_ids ? ld_ro(&month_ids[t]) : 0;
-            if (t == warm) {
+        if (active) {
+            vol = ld_ro(&volumes[t]);
+            const float price = ld_ro(&prices[t]);
+            pv = fmaf(vol, price, 0.0f);
+
+            if (unit == 3) {
+                const int mid = month_ids ? ld_ro(&month_ids[t]) : 0;
                 const int md = (month_div > 0 ? month_div : 1);
-                current_gid = static_cast<long long>(mid / md);
-                next_boundary_i = (static_cast<int>(current_gid) + 1) * md;
-                volume_sum = 0.0f; vol_price_sum = 0.0f;
+                gid = static_cast<long long>(mid / md);
             } else {
-                if (mid >= next_boundary_i) {
-                    const int md = (month_div > 0 ? month_div : 1);
-                    // may skip multiple groups if there are gaps
-                    const int adv = ((mid - next_boundary_i) / md) + 1;
-                    current_gid  += adv;
-                    next_boundary_i += adv * md;
-                    volume_sum = 0.0f; vol_price_sum = 0.0f;
-                }
-            }
-        } else {
-            const long long ts = ld_ro(&timestamps[t]);
-            const long long div = (divisor > 0 ? divisor : 1);
-
-            if (t == warm) {
-                current_gid = ts / div; // one divide at start
-                // Avoid overflow: compute (gid+1)*div as ts - (ts % div) + div
-                const long long rem = ts - (current_gid * div);
-                next_boundary_ll = ts - rem + div;
-                last_ts = ts;
-                volume_sum = 0.0f; vol_price_sum = 0.0f;
-            } else {
-                if (monotonic_ts && ts >= last_ts) {
-                    if (ts >= next_boundary_ll) {
-                        const long long adv = ((ts - next_boundary_ll) / div) + 1;
-                        current_gid     += adv;
-                        next_boundary_ll += adv * div;
-                        volume_sum = 0.0f; vol_price_sum = 0.0f;
-                    }
-                } else {
-                    // Fallback if timestamps go backward: compute gid directly
-                    const long long gid = ts / div;
-                    if (gid != current_gid) {
-                        current_gid = gid;
-                        const long long rem = ts - (gid * div);
-                        next_boundary_ll = ts - rem + div;
-                        volume_sum = 0.0f; vol_price_sum = 0.0f;
-                    }
-                    if (ts < last_ts) monotonic_ts = false;
-                }
-                last_ts = ts;
+                const long long ts = ld_ro(&timestamps[t]);
+                gid = ts / div;
             }
         }
 
-        // Accumulate and write
-        const float vol   = ld_ro(&volumes[t]);
-        const float price = ld_ro(&prices[t]);
+        sh_gid[threadIdx.x] = gid;
+        __syncthreads();
 
-        volume_sum    += vol;
-        vol_price_sum  = fmaf(vol, price, vol_price_sum);  // fused multiply-add
+        int head = 1;
+        if (active) {
+            if (t == warm) {
+                head = 1;
+            } else {
+                const long long prev_gid = (threadIdx.x == 0) ? carry_gid : sh_gid[threadIdx.x - 1];
+                head = (gid != prev_gid) ? 1 : 0;
+            }
+        }
 
-        out[base + t] = (volume_sum > 0.0f) ? (vol_price_sum / volume_sum) : nan;
+        VwapSeg2 in{active ? vol : 0.0f, active ? pv : 0.0f, head};
+        VwapSeg2 scanned;
+        BlockScan(scan_tmp).InclusiveScan(in, scanned, VwapSegOp{});
+
+        float vol_sum = scanned.vol;
+        float pv_sum = scanned.pv;
+        if (active && scanned.head == 0) {
+            vol_sum += carry_vol;
+            pv_sum += carry_pv;
+        }
+
+        if (active) {
+            out[base + t] = (vol_sum > 0.0f) ? (pv_sum / vol_sum) : nan;
+        }
+
+        int valid = series_len - chunk;
+        if (valid > BLOCK_THREADS) valid = BLOCK_THREADS;
+        const int last = valid - 1;
+        if (threadIdx.x == last) {
+            carry_vol = vol_sum;
+            carry_pv = pv_sum;
+            carry_gid = gid;
+        }
+        __syncthreads();
     }
 }
 

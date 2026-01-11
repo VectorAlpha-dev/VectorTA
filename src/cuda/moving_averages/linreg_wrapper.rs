@@ -35,6 +35,10 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
+    /// Prefix path: compute FP64 prefixes once, then a 2D launch (grid.y = combos)
+    Prefix {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +68,7 @@ impl Default for CudaLinregPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    Prefix { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -360,7 +365,12 @@ impl CudaLinreg {
         // Kernel policy selection (only Plain supported for LINREG currently)
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
+            BatchKernelPolicy::Prefix { .. } => {
+                return Err(CudaLinregError::InvalidPolicy(
+                    "Prefix policy requires launch_batch_from_prefix_kernel",
+                ));
+            }
         };
         let grid: GridSize = self.grid_1d_for(combos_len, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
@@ -384,6 +394,145 @@ impl CudaLinreg {
 
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut x_sums_ptr as *mut _ as *mut c_void,
+                &mut denom_ptr as *mut _ as *mut c_void,
+                &mut inv_periods_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_prefix_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_prefix_y: &mut DeviceBuffer<f64>,
+        d_prefix_yi: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaLinregError> {
+        let func = self
+            .module
+            .get_function("linreg_exclusive_prefix_y_yi_f64")
+            .map_err(|_| {
+                CudaLinregError::MissingKernelSymbol { name: "linreg_exclusive_prefix_y_yi_f64" }
+            })?;
+
+        // Single-thread prefix kernel.
+        let grid: GridSize = (1u32, 1u32, 1u32).into();
+        let block: BlockSize = (1u32, 1u32, 1u32).into();
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if 1u32 > max_threads {
+            return Err(CudaLinregError::LaunchConfigTooLarge { gx: 1, gy: 1, gz: 1, bx: 1, by: 1, bz: 1 });
+        }
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut prefix_y_ptr = d_prefix_y.as_device_ptr().as_raw();
+            let mut prefix_yi_ptr = d_prefix_yi.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut prefix_y_ptr as *mut _ as *mut c_void,
+                &mut prefix_yi_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_batch_from_prefix_kernel(
+        &self,
+        d_prefix_y: &DeviceBuffer<f64>,
+        d_prefix_yi: &DeviceBuffer<f64>,
+        d_periods: &DeviceBuffer<i32>,
+        d_x_sums: &DeviceBuffer<f32>,
+        d_denom_invs: &DeviceBuffer<f32>,
+        d_inv_periods: &DeviceBuffer<f32>,
+        series_len: usize,
+        combos_len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaLinregError> {
+        let func = self
+            .module
+            .get_function("linreg_batch_from_prefix_f64")
+            .map_err(|_| CudaLinregError::MissingKernelSymbol { name: "linreg_batch_from_prefix_f64" })?;
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => match env::var("LINREG_PREFIX_BLOCK_X").ok().as_deref() {
+                Some(s) => s
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&v| v > 0)
+                    .unwrap_or(256)
+                    .max(32)
+                    .min(256),
+                None => 256,
+            },
+            BatchKernelPolicy::Prefix { block_x } => block_x.max(32).min(256),
+            BatchKernelPolicy::Plain { .. } => {
+                return Err(CudaLinregError::InvalidPolicy(
+                    "Plain policy requires launch_batch_kernel",
+                ));
+            }
+        };
+
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid_y = combos_len as u32;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            (*(self as *const _ as *mut CudaLinreg)).last_batch =
+                Some(BatchKernelSelected::Prefix { block_x });
+        }
+        self.maybe_log_batch_debug();
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads {
+            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if grid_x > max_grid_x {
+            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+        let max_grid_y = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        if grid_y > max_grid_y {
+            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+        }
+
+        unsafe {
+            let mut prefix_y_ptr = d_prefix_y.as_device_ptr().as_raw();
+            let mut prefix_yi_ptr = d_prefix_yi.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut x_sums_ptr = d_x_sums.as_device_ptr().as_raw();
+            let mut denom_ptr = d_denom_invs.as_device_ptr().as_raw();
+            let mut inv_periods_ptr = d_inv_periods.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = combos_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prefix_y_ptr as *mut _ as *mut c_void,
+                &mut prefix_yi_ptr as *mut _ as *mut c_void,
                 &mut periods_ptr as *mut _ as *mut c_void,
                 &mut x_sums_ptr as *mut _ as *mut c_void,
                 &mut denom_ptr as *mut _ as *mut c_void,
@@ -427,10 +576,26 @@ impl CudaLinreg {
         let out_bytes = out_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or(CudaLinregError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
-        let required = prices_bytes
-            .checked_add(params_bytes)
-            .and_then(|x| x.checked_add(out_bytes))
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?;
+
+        let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
+            prices_bytes
+                .checked_add(params_bytes)
+                .and_then(|x| x.checked_add(out_bytes))
+                .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?
+        } else {
+            let prefix_elems = len
+                .checked_add(1)
+                .ok_or(CudaLinregError::ArithmeticOverflow { what: "len + 1" })?;
+            let prefix_bytes = prefix_elems
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|x| x.checked_mul(2)) // prefix_y + prefix_yi
+                .ok_or(CudaLinregError::ArithmeticOverflow { what: "(len+1) * sizeof(f64) * 2" })?;
+            prices_bytes
+                .checked_add(params_bytes)
+                .and_then(|x| x.checked_add(prefix_bytes))
+                .and_then(|x| x.checked_add(out_bytes))
+                .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?
+        };
         let headroom = 64 * 1024 * 1024; // 64MB safety margin
         Self::will_fit_checked(required, headroom)?;
 
@@ -445,17 +610,44 @@ impl CudaLinreg {
             .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * len" })?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_periods,
-            &d_x_sums,
-            &d_denom_invs,
-            &d_inv_periods,
-            len,
-            combos_len,
-            first_valid,
-            &mut d_out,
-        )?;
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => {
+                self.launch_batch_kernel(
+                    &d_prices,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denom_invs,
+                    &d_inv_periods,
+                    len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
+                let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
+                self.launch_prefix_kernel(
+                    &d_prices,
+                    len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
+                self.launch_batch_from_prefix_kernel(
+                    &d_prefix_y,
+                    &d_prefix_yi,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denom_invs,
+                    &d_inv_periods,
+                    len,
+                    combos_len,
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+        }
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -609,7 +801,7 @@ impl CudaLinreg {
             .map_err(|_| CudaLinregError::MissingKernelSymbol { name: "linreg_many_series_one_param_f32" })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(256),
         };
         let grid: GridSize = self.grid_1d_for(cols, block_x);
         let block: BlockSize = (block_x, 1, 1).into();
@@ -855,21 +1047,181 @@ impl CudaLinreg {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::linreg::LinRegParams;
 
-    define_ma_period_benches!(
-        linreg_benches,
-        CudaLinreg,
-        crate::indicators::moving_averages::linreg::LinRegBatchRange,
-        crate::indicators::moving_averages::linreg::LinRegParams,
-        linreg_batch_dev,
-        linreg_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::linreg::LinRegBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::linreg::LinRegParams { period: Some(64) },
-        "linreg",
-        "linreg"
-    );
-    pub use linreg_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDevState {
+        cuda: CudaLinreg,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_x_sums: DeviceBuffer<f32>,
+        d_denom_invs: DeviceBuffer<f32>,
+        d_inv_periods: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for BatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_x_sums,
+                    &self.d_denom_invs,
+                    &self.d_inv_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("linreg batch kernel");
+            self.cuda.stream.synchronize().expect("linreg sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaLinreg::new(0).expect("cuda linreg");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = crate::indicators::moving_averages::linreg::LinRegBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (
+            _combos,
+            first_valid,
+            series_len,
+            periods_i32,
+            x_sums,
+            denom_invs,
+            inv_periods,
+        ) = CudaLinreg::prepare_batch_inputs(&price, &sweep).expect("linreg prepare batch");
+        let n_combos = periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_x_sums = DeviceBuffer::from_slice(&x_sums).expect("d_x_sums");
+        let d_denom_invs = DeviceBuffer::from_slice(&denom_invs).expect("d_denom_invs");
+        let d_inv_periods = DeviceBuffer::from_slice(&inv_periods).expect("d_inv_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size")) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_x_sums,
+            d_denom_invs,
+            d_inv_periods,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
+        })
+    }
+
+    struct ManyDevState {
+        cuda: CudaLinreg,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        x_sum: f32,
+        denom_inv: f32,
+        inv_period: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.x_sum,
+                    self.denom_inv,
+                    self.inv_period,
+                    &mut self.d_out_tm,
+                )
+                .expect("linreg many-series kernel");
+            self.cuda.stream.synchronize().expect("linreg sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaLinreg::new(0).expect("cuda linreg");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = LinRegParams { period: Some(64) };
+        let (first_valids, period, x_sum, denom_inv, inv_period) =
+            CudaLinreg::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("linreg prepare many");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            x_sum,
+            denom_inv,
+            inv_period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "linreg",
+                "one_series_many_params",
+                "linreg_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "linreg",
+                "many_series_one_param",
+                "linreg_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

@@ -176,9 +176,13 @@ impl CudaAcosc {
             .get_function("acosc_batch_f32")
             .map_err(|_| CudaAcoscError::MissingKernelSymbol { name: "acosc_batch_f32" })?;
 
-        // Single-threaded kernel: launch 1x1x1 and sync before dropping device temps.
-        let grid: GridSize = (1, 1, 1).into();
-        let block: BlockSize = (1, 1, 1).into();
+        let block_x: u32 = 256;
+        let mut grid_x = (series_len as u32 + block_x - 1) / block_x;
+        if grid_x == 0 {
+            grid_x = 1;
+        }
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
@@ -424,39 +428,77 @@ pub mod benches {
         (high, low)
     }
 
-    struct OneSeriesState {
+    struct OneSeriesDeviceState {
         cuda: CudaAcosc,
-        high: Vec<f32>,
-        low: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_osc: DeviceBuffer<f32>,
+        d_change: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
     }
-    impl CudaBenchState for OneSeriesState {
+    impl CudaBenchState for OneSeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self.cuda.acosc_batch_dev(&self.high, &self.low).unwrap();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    self.len as i32,
+                    self.first_valid as i32,
+                    &mut self.d_osc,
+                    &mut self.d_change,
+                )
+                .expect("acosc launch");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaAcosc::new(0).unwrap();
         let base = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_base(&base);
-        Box::new(OneSeriesState { cuda, high, low })
+        let len = high.len();
+        let first_valid = (0..len)
+            .find(|&i| high[i].is_finite() && low[i].is_finite())
+            .unwrap_or(len);
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("acosc d_high H2D");
+        let d_low = DeviceBuffer::from_slice(&low).expect("acosc d_low H2D");
+        let d_osc: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.expect("acosc d_osc alloc");
+        let d_change: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.expect("acosc d_change alloc");
+
+        Box::new(OneSeriesDeviceState {
+            cuda,
+            d_high,
+            d_low,
+            d_osc,
+            d_change,
+            len,
+            first_valid,
+        })
     }
 
-    struct ManySeriesState {
+    struct ManySeriesDeviceState {
         cuda: CudaAcosc,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_osc_tm: DeviceBuffer<f32>,
+        d_change_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for ManySeriesState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .acosc_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    NUM_SERIES,
-                    SERIES_LEN,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_first_valids,
+                    NUM_SERIES as i32,
+                    SERIES_LEN as i32,
+                    &mut self.d_osc_tm,
+                    &mut self.d_change_tm,
                 )
-                .unwrap();
+                .expect("acosc many-series launch");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
@@ -473,7 +515,36 @@ pub mod benches {
                 low_tm[idx] = l[t];
             }
         }
-        Box::new(ManySeriesState { cuda, high_tm, low_tm })
+
+        let mut first_valids = vec![SERIES_LEN as i32; NUM_SERIES];
+        for s in 0..NUM_SERIES {
+            for t in 0..SERIES_LEN {
+                let idx = t * NUM_SERIES + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("acosc d_high_tm H2D");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("acosc d_low_tm H2D");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).expect("acosc d_first_valids H2D");
+        let elems = NUM_SERIES * SERIES_LEN;
+        let d_osc_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("acosc d_osc_tm alloc");
+        let d_change_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("acosc d_change_tm alloc");
+
+        Box::new(ManySeriesDeviceState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_first_valids,
+            d_osc_tm,
+            d_change_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

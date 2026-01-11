@@ -647,40 +647,63 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaPivot,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        o: Vec<f32>,
-        sweep: PivotBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_open: DeviceBuffer<f32>,
+        d_modes: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        n: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .pivot_batch_dev(&self.h, &self.l, &self.c, &self.o, &self.sweep)
+            self.cuda
+                .launch_pivot_batch(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_open,
+                    self.n,
+                    self.first_valid,
+                    &self.d_modes,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
                 .unwrap();
-            let _ = self
-                .cuda
-                .pivot_batch_dev(&self.h, &self.l, &self.c, &self.o, &self.sweep)
-                .unwrap();
+            self.cuda.stream.synchronize().unwrap();
         }
     }
 
     struct ManyState {
         cuda: CudaPivot,
-        h_tm: Vec<f32>,
-        l_tm: Vec<f32>,
-        c_tm: Vec<f32>,
-        o_tm: Vec<f32>,
+        d_h_tm: DeviceBuffer<f32>,
+        d_l_tm: DeviceBuffer<f32>,
+        d_c_tm: DeviceBuffer<f32>,
+        d_o_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        mode: usize,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .pivot_many_series_one_param_time_major_dev(
-                    &self.h_tm, &self.l_tm, &self.c_tm, &self.o_tm, MANY_COLS, MANY_ROWS, 3,
+            self.cuda
+                .launch_pivot_many_series_tm(
+                    &self.d_h_tm,
+                    &self.d_l_tm,
+                    &self.d_c_tm,
+                    &self.d_o_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.mode,
+                    &mut self.d_out_tm,
                 )
                 .unwrap();
+            self.cuda.stream.synchronize().unwrap();
         }
     }
 
@@ -699,14 +722,28 @@ pub mod benches {
             l[i] = base - range;
             h[i] = base + range;
         }
-        let sweep = PivotBatchRange { mode: (0, 4, 1) };
+        let first_valid = h.iter().position(|v| !v.is_nan()).unwrap_or(0);
+        let modes: Vec<i32> = (0..=4).map(|m| m as i32).collect();
+        let n_combos = modes.len();
+
+        let d_high = DeviceBuffer::from_slice(&h).unwrap();
+        let d_low = DeviceBuffer::from_slice(&l).unwrap();
+        let d_close = DeviceBuffer::from_slice(&c).unwrap();
+        let d_open = DeviceBuffer::from_slice(&o).unwrap();
+        let d_modes = DeviceBuffer::from_slice(&modes).unwrap();
+        let out_elems = 9usize * n_combos * ONE_LEN;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.unwrap();
         Box::new(BatchState {
             cuda,
-            h,
-            l,
-            c,
-            o,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            d_open,
+            d_modes,
+            d_out,
+            n: ONE_LEN,
+            first_valid,
+            n_combos,
         })
     }
 
@@ -729,12 +766,29 @@ pub mod benches {
                 h_tm[idx] = base + rng;
             }
         }
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
+        let mode = 3usize;
+        let first_valids = vec![0i32; cols];
+        let d_h_tm = DeviceBuffer::from_slice(&h_tm).unwrap();
+        let d_l_tm = DeviceBuffer::from_slice(&l_tm).unwrap();
+        let d_c_tm = DeviceBuffer::from_slice(&c_tm).unwrap();
+        let d_o_tm = DeviceBuffer::from_slice(&o_tm).unwrap();
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).unwrap();
+        let out_elems = 9usize * cols * rows;
+        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.unwrap();
+        cuda.stream.synchronize().unwrap();
         Box::new(ManyState {
             cuda,
-            h_tm,
-            l_tm,
-            c_tm,
-            o_tm,
+            d_h_tm,
+            d_l_tm,
+            d_c_tm,
+            d_o_tm,
+            d_first_valids,
+            cols,
+            rows,
+            mode,
+            d_out_tm,
         })
     }
 

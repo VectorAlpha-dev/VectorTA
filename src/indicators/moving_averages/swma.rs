@@ -253,7 +253,7 @@ fn swma_prepare<'a>(
 
     let weights = build_symmetric_triangle_avec(period);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -708,7 +708,7 @@ pub struct SwmaBatchRange {
 impl Default for SwmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (5, 240, 1),
+            period: (5, 254, 1),
         }
     }
 }

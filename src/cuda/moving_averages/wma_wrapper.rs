@@ -562,10 +562,16 @@ impl CudaWma {
             Some("rolling") if has_rolling => Path::Rolling,
             Some("plain") => Path::Plain,
             _ => {
+                let out_elems = n_combos.saturating_mul(series_len);
+                // Prefix is a good default for large batch sweeps (one series x many periods),
+                // especially when `min_period` is small so the rolling heuristic won't trigger.
+                let auto_prefix = has_prefix && out_elems >= 8_000_000;
                 if prefer_prefix_env && has_prefix {
                     Path::Prefix
                 } else if may_use_rolling {
                     Path::Rolling
+                } else if auto_prefix {
+                    Path::Prefix
                 } else {
                     Path::Plain
                 }
@@ -1152,21 +1158,148 @@ impl DeviceArrayF32Py {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::wma::WmaParams;
 
-    define_ma_period_benches!(
-        wma_benches,
-        CudaWma,
-        crate::indicators::moving_averages::wma::WmaBatchRange,
-        crate::indicators::moving_averages::wma::WmaParams,
-        wma_batch_dev,
-        wma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::wma::WmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::wma::WmaParams { period: Some(64) },
-        "wma",
-        "wma"
-    );
-    pub use wma_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct WmaBatchDevState {
+        cuda: CudaWma,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_period: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for WmaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_period,
+                    &mut self.d_out,
+                )
+                .expect("wma batch kernel");
+            self.cuda.stream.synchronize().expect("wma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWma::new(0).expect("cuda wma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let periods_i32: Vec<i32> = (10..(10 + PARAM_SWEEP)).map(|p| p as i32).collect();
+        let max_period = (10 + PARAM_SWEEP - 1) as usize;
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN * PARAM_SWEEP) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(WmaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_combos: PARAM_SWEEP,
+            max_period,
+            d_out,
+        })
+    }
+
+    struct WmaManyDevState {
+        cuda: CudaWma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for WmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("wma many-series kernel");
+            self.cuda.stream.synchronize().expect("wma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWma::new(0).expect("cuda wma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = WmaParams { period: Some(64) };
+        let period = params.period.unwrap() as usize;
+        let mut first_valids: Vec<i32> = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let v = data_tm[t * cols + s];
+                if v.is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(WmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new("wma", "one_series_many_params", "wma_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new("wma", "many_series_one_param", "wma_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
+                .with_sample_size(5)
+                .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

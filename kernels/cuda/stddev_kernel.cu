@@ -71,6 +71,12 @@ __device__ __forceinline__ ds ds_square(ds a) { return ds_mul(a, a); }
 // ----------------- One-series × many-params (prefix-sum based) -----------------
 // Uses prefix sums for x and x^2, and a prefix of NaN counts. Each block-y is
 // a parameter row. Threads in x sweep time indices.
+//
+// Combo-tiling improves utilization by reusing the "end" prefix loads across
+// multiple combos whose only difference is the window start index.
+#ifndef STDDEV_COMBO_TILE
+#define STDDEV_COMBO_TILE 4
+#endif
 extern "C" __global__ void stddev_batch_f32(
     const float2* __restrict__ ps_x,    // [len+1] (DS prefix sums of x)
     const float2* __restrict__ ps_x2,   // [len+1] (DS prefix sums of x^2)
@@ -82,50 +88,75 @@ extern "C" __global__ void stddev_batch_f32(
     int n_combos,
     float* __restrict__ out             // [n_combos * len]
 ) {
-    const int combo = blockIdx.y;
-    if (combo >= n_combos) return;
+    const int group = blockIdx.y;
+    const int co_base = group * STDDEV_COMBO_TILE;
 
-    const int period = periods[combo];
-    if (period <= 0) return;
-    const float nb = nbdevs[combo];
+    __shared__ int s_period[STDDEV_COMBO_TILE];
+    __shared__ int s_warm[STDDEV_COMBO_TILE];
+    __shared__ float s_nb[STDDEV_COMBO_TILE];
+    __shared__ double s_inv_n[STDDEV_COMBO_TILE];
 
-    const int warm = first_valid + period - 1;
-    const int row_off = combo * len;
-    const float nan_f = __int_as_float(0x7fffffff);
+    if (threadIdx.x < STDDEV_COMBO_TILE) {
+        const int c = co_base + threadIdx.x;
+        if (c < n_combos) {
+            const int p = periods[c];
+            s_period[threadIdx.x] = p;
+            s_warm[threadIdx.x] = first_valid + p - 1;
+            s_nb[threadIdx.x] = nbdevs[c];
+            s_inv_n[threadIdx.x] = (p > 0) ? (1.0 / (double)p) : 0.0;
+        } else {
+            s_period[threadIdx.x] = 0;
+            s_warm[threadIdx.x] = INT_MAX;
+            s_nb[threadIdx.x] = 0.0f;
+            s_inv_n[threadIdx.x] = 0.0;
+        }
+    }
+    __syncthreads();
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
-
-    const double inv_n = 1.0 / (double)period;
-
-    // Fast fill when nbdev==0: keep NaN until warm, then 0
-    if (nb == 0.0f) {
-        while (t < len) {
-            out[row_off + t] = (t >= warm) ? 0.0f : nan_f;
-            t += stride;
-        }
-        return;
-    }
+    const float nan_f = __int_as_float(0x7fffffff);
 
     while (t < len) {
-        float outv = nan_f;
-        if (t >= warm) {
-            const int end = t + 1;
-            int start = end - period;
-            if (start < 0) start = 0;
-            const int nan_count = ps_nan[end] - ps_nan[start];
-            if (nan_count == 0) {
-                // Reconstruct double from DS prefixes: (hi + lo) as f64
-                float2 ex = ps_x[end];    float2 sx = ps_x[start];
-                float2 ex2 = ps_x2[end];  float2 sx2 = ps_x2[start];
-                const double s1 = ((double)ex.x + (double)ex.y) - ((double)sx.x + (double)sx.y);
-                const double s2 = ((double)ex2.x + (double)ex2.y) - ((double)sx2.x + (double)sx2.y);
-                const double mean = s1 * inv_n;
-                const double var  = (s2 * inv_n) - (mean * mean);
-                outv = (var > 0.0) ? (float)(sqrt(var) * (double)nb) : 0.0f;
+        const int end = t + 1;
+        const float2 ex = ps_x[end];
+        const float2 ex2 = ps_x2[end];
+        const int end_bad = ps_nan[end];
+
+#pragma unroll
+        for (int k = 0; k < STDDEV_COMBO_TILE; ++k) {
+            const int combo = co_base + k;
+            if (combo >= n_combos) break;
+
+            const int period = s_period[k];
+            float outv = nan_f;
+            if (period > 0) {
+                const int warm = s_warm[k];
+                const float nb = s_nb[k];
+                const double inv_n = s_inv_n[k];
+
+                if (nb == 0.0f) {
+                    outv = (t >= warm) ? 0.0f : nan_f;
+                } else if (t >= warm) {
+                    int start = end - period;
+                    if (start < 0) start = 0;
+                    const int nan_count = end_bad - ps_nan[start];
+                    if (nan_count == 0) {
+                        float2 sx = ps_x[start];
+                        float2 sx2 = ps_x2[start];
+                        const double s1 =
+                            ((double)ex.x + (double)ex.y) - ((double)sx.x + (double)sx.y);
+                        const double s2 =
+                            ((double)ex2.x + (double)ex2.y) - ((double)sx2.x + (double)sx2.y);
+                        const double mean = s1 * inv_n;
+                        const double var = (s2 * inv_n) - (mean * mean);
+                        outv = (var > 0.0) ? (float)(sqrt(var) * (double)nb) : 0.0f;
+                    }
+                }
             }
+            out[combo * len + t] = outv;
         }
-        out[row_off + t] = outv;
+
         t += stride;
     }
 }

@@ -1,15 +1,14 @@
-// CUDA kernels for Mesa Sine Wave (MSW) — optimized
+﻿// CUDA kernels for Mesa Sine Wave (MSW)
 //
 // Two entry points (signatures unchanged):
-//  - msw_batch_f32: one series × many params (periods array)
-//  - msw_many_series_one_param_time_major_f32: many series (time‑major) × one param
+//  - msw_batch_f32: one series x many params (periods array)
+//  - msw_many_series_one_param_time_major_f32: many series (time-major) x one param
 //
-// Key improvements:
-//   • Weight build uses stride-rotation: O(blockDim.x) sincosf calls per block.
-//   • Each thread emits a small contiguous chunk via sliding-DFT update:
-//       z_{t+1} = q*z_t + (x[t+1] - x[t+1-P]) with q = e^{j*2π/P}, q^P = 1.
-//   • Final sin/cos via __sincosf.
-//   • No FP64; FP32 FMAs throughout.
+// Implementation notes:
+// - Both kernels use a sliding-DFT update inside each thread chunk:
+//     z_{t+1} = q*z_t + (x[t+1] - x[t+1-P]) with q = e^{j*2pi/P}, q^P = 1.
+// - We precompute sin/cos weights for the first dot product using a cooperative LUT.
+// - Outputs compute phase via the scalar-parity logic + __sincosf.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -24,7 +23,7 @@
 #endif
 
 // Number of outputs per thread per tile step.
-// Heuristic: 8 works well broadly (keeps parallelism and amortizes the first O(P) dot).
+// Must match the Rust wrapper's MSW_CHUNK_PER_THREAD constant.
 #ifndef MSW_CHUNK_PER_THREAD
 #define MSW_CHUNK_PER_THREAD 8
 #endif
@@ -37,7 +36,6 @@ static __device__ __constant__ float MSW_SQRT_HALF_F = 0.70710678118654752440f;
 
 // Same phase logic as original scalar path: keep exact behavior.
 static __device__ __forceinline__ float msw_phase_from_rp_ip_eps(float rp, float ip, float eps) {
-    // Match scalar path structure to minimize branch divergence vs CPU
     float phase;
     if (fabsf(rp) > eps) {
         phase = atanf(ip / rp);
@@ -104,7 +102,7 @@ msw_dot_weighted_window(const float* __restrict__ tile,
     }
 }
 
-// FP64-accumulating variant (used in batch kernel at low P to match CPU scalar exactly)
+// FP64-accumulating variant (used for closer parity vs scalar without per-tap trig).
 static __device__ __forceinline__ void
 msw_dot_weighted_window_f64(const float* __restrict__ tile,
                             const float* __restrict__ cosw,
@@ -124,7 +122,7 @@ msw_dot_weighted_window_f64(const float* __restrict__ tile,
     ip = (float)di;
 }
 
-// Variant that returns double accumulators directly (for strict phase epsilon decisions)
+// Variant that returns double accumulators directly (for strict phase epsilon decisions).
 static __device__ __forceinline__ void
 msw_dot_weighted_window_f64_drdi(const float* __restrict__ tile,
                                  const float* __restrict__ cosw,
@@ -142,7 +140,7 @@ msw_dot_weighted_window_f64_drdi(const float* __restrict__ tile,
     }
 }
 
-// CPU-parity phase for batch path: compare against |dr| using 1e-3 threshold in FP64
+// CPU-parity phase for batch path: compare against |dr| using 1e-3 threshold in FP64.
 static __device__ __forceinline__ float msw_phase_batch_from_dr_di(double dr, double di)
 {
     float phase;
@@ -215,18 +213,13 @@ msw_rotate(float c_step, float s_step, float &rp, float &ip)
     rp = rp_rot; ip = ip_rot;
 }
 
-// Simple per-tap weight build used by the original batch kernel
-static __device__ __forceinline__ void msw_build_weights(float* __restrict__ cosw,
-                                                         float* __restrict__ sinw,
-                                                         int period) {
-    const float step = CUDART_PI_F * 2.0f / (float)period;
-    for (int i = threadIdx.x; i < period; i += blockDim.x) {
-        float ang = step * (float)i;
-        float s = __sinf(ang);
-        float c = __cosf(ang);
-        sinw[i] = s;
-        cosw[i] = c;
-    }
+static __device__ __forceinline__ void
+msw_rotate_f64(double c_step, double s_step, double &rp, double &ip)
+{
+    double rp_old = rp, ip_old = ip;
+    double rp_rot = rp_old * c_step - ip_old * s_step;
+    double ip_rot = rp_old * s_step + ip_old * c_step;
+    rp = rp_rot; ip = ip_rot;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,14 +255,20 @@ void msw_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    // Shared memory layout
-    extern __shared__ float shmem[];
-    float* __restrict__ cosw = shmem;
-    float* __restrict__ sinw = cosw + period;
-    float* __restrict__ tile = sinw + period; // capacity: blockDim.x + period - 1
+    // Shared memory layout:
+    //   cosw_d[P] + sinw_d[P] (FP64) + tile[blockDim.x + P - 1] (FP32)
+    extern __shared__ unsigned char shmem_raw[];
+    double* __restrict__ cosw_d = reinterpret_cast<double*>(shmem_raw);
+    double* __restrict__ sinw_d = cosw_d + period;
+    float* __restrict__ tile = reinterpret_cast<float*>(sinw_d + period); // capacity: blockDim.x + period - 1
 
-    // Use simple per-tap build for batch path (parity-first)
-    msw_build_weights(cosw, sinw, period);
+    // CPU-parity weights in FP64 (TULIP_TPI constant)
+    const double step_d = 6.2831852 / (double)period;
+    for (int j = threadIdx.x; j < period; j += blockDim.x) {
+        const double ang = step_d * (double)j;
+        sinw_d[j] = sin(ang);
+        cosw_d[j] = cos(ang);
+    }
     __syncthreads();
 
     // Tiled compute for t in [warm, series_len)
@@ -277,43 +276,38 @@ void msw_batch_f32(const float* __restrict__ prices,
     for (int base_t = blockIdx.x * blockDim.x; base_t < series_len; base_t += stride2) {
         const int t_begin = max(base_t, warm);
         const int t_end = min(base_t + blockDim.x - 1, series_len - 1);
-        if (t_begin <= t_end) {
-            const int tile_in_start = t_begin - (period - 1);
-            const int tile_len = (t_end - t_begin + 1) + (period - 1);
+        if (t_begin > t_end) continue;
 
-            // Cooperative load of contiguous input segment
-            for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
-                tile[i] = prices[tile_in_start + i];
-            }
-            __syncthreads();
+        const int tile_in_start = t_begin - (period - 1);
+        const int tile_len = (t_end - t_begin + 1) + (period - 1);
 
-            const int t = base_t + threadIdx.x;
-            if (t >= t_begin && t <= t_end) {
-                const int start = t - t_begin; // offset in tile
-            // CPU-parity dot and phase (FP64 weights + sum, TULIP_TPI constant)
-            const double step_d = 6.2831852 / (double)period;
+        // Cooperative load of contiguous input segment
+        for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
+            tile[i] = prices[tile_in_start + i];
+        }
+        __syncthreads();
+
+        const int t = base_t + threadIdx.x;
+        if (t >= t_begin && t <= t_end) {
+            const int start = t - t_begin; // offset in tile
             double dr = 0.0, di = 0.0;
             #pragma unroll 1
             for (int j = 0; j < period; ++j) {
-                const double ang = step_d * (double)j;
-                const double s = sin(ang);
-                const double c = cos(ang);
                 const double w = (double)tile[start + (period - 1 - j)];
-                dr += c * w;
-                di += s * w;
+                dr += cosw_d[j] * w;
+                di += sinw_d[j] * w;
             }
             const float phase = msw_phase_batch_from_dr_di(dr, di);
             float s, c;
             __sincosf(phase, &s, &c);
             out[base_sine + t] = s;
-            out[base_lead + t] = (s + c) * MSW_SQRT_HALF_F; // √½
-            }
-            __syncthreads();
+            out[base_lead + t] = (s + c) * MSW_SQRT_HALF_F;
         }
+        __syncthreads();
     }
 }
 
-// --- Time-major, many series × one param -----------------------------------
+// --- Time-major, many series x one param -----------------------------------
 
 extern "C" __global__
 void msw_many_series_one_param_time_major_f32(
@@ -413,4 +407,3 @@ void msw_many_series_one_param_time_major_f32(
         __syncthreads();
     }
 }
-

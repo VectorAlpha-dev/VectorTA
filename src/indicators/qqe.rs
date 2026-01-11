@@ -965,7 +965,7 @@ pub struct QqeBatchRange {
 impl Default for QqeBatchRange {
     fn default() -> Self {
         Self {
-            rsi_period: (14, 14, 0),
+            rsi_period: (14, 263, 1),
             smoothing_factor: (5, 5, 0),
             fast_factor: (4.236, 4.236, 0.0),
         }

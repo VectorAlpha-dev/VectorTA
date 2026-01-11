@@ -415,20 +415,22 @@ impl CudaCoppock {
     ) -> Result<(), CudaCoppockError> {
         let func = self
             .module
-            .get_function("coppock_batch_f32")
-            .map_err(|_| CudaCoppockError::MissingKernelSymbol { name: "coppock_batch_f32" })?;
+            .get_function("coppock_batch_time_parallel_f32")
+            .map_err(|_| CudaCoppockError::MissingKernelSymbol {
+                name: "coppock_batch_time_parallel_f32",
+            })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
-        // 1D over combos; each thread scans time on-device
+        // 2D: grid.x over time, grid.y over combos (row-major output)
         if block_x == 0 {
             return Err(CudaCoppockError::InvalidPolicy("block_x must be > 0"));
         }
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
         let gx = grid_x.max(1);
-        self.validate_launch(gx, 1, 1, block_x, 1, 1)?;
-        let grid: GridSize = (gx, 1, 1).into();
+        self.validate_launch(gx, n_combos as u32, 1, block_x, 1, 1)?;
+        let grid: GridSize = (gx, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut price_ptr = d_price.as_device_ptr().as_raw();
@@ -724,17 +726,34 @@ pub mod benches {
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct CoppockBatchState {
+    struct CoppockBatchDeviceState {
         cuda: CudaCoppock,
-        price: Vec<f32>,
-        sweep: CoppockBatchRange,
+        d_price: DeviceBuffer<f32>,
+        d_inv: DeviceBuffer<f32>,
+        d_short: DeviceBuffer<i32>,
+        d_long: DeviceBuffer<i32>,
+        d_ma: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_rows: usize,
     }
-    impl CudaBenchState for CoppockBatchState {
+    impl CudaBenchState for CoppockBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .coppock_batch_dev(&self.price, &self.sweep)
-                .expect("coppock batch");
+            self.cuda
+                .launch_batch(
+                    &self.d_price,
+                    &self.d_inv,
+                    self.len,
+                    self.first_valid,
+                    &self.d_short,
+                    &self.d_long,
+                    &self.d_ma,
+                    self.n_rows,
+                    &mut self.d_out,
+                    0,
+                )
+                .expect("coppock launch_batch");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -746,7 +765,34 @@ pub mod benches {
             long: (20, 30, 2),
             ma: (8, 16, 2),
         };
-        Box::new(CoppockBatchState { cuda, price, sweep })
+        let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let (shorts, longs, ma_periods) = expand_grid(&sweep).expect("expand_grid");
+        let n_rows = ma_periods.len();
+
+        let mut inv = vec![0f32; ONE_SERIES_LEN];
+        for i in 0..ONE_SERIES_LEN {
+            inv[i] = 1.0f32 / price[i];
+        }
+
+        let d_price = DeviceBuffer::from_slice(&price).expect("d_price");
+        let d_inv = DeviceBuffer::from_slice(&inv).expect("d_inv");
+        let d_short = DeviceBuffer::from_slice(&shorts).expect("d_short");
+        let d_long = DeviceBuffer::from_slice(&longs).expect("d_long");
+        let d_ma = DeviceBuffer::from_slice(&ma_periods).expect("d_ma");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_rows * ONE_SERIES_LEN) }.expect("d_out");
+        Box::new(CoppockBatchDeviceState {
+            cuda,
+            d_price,
+            d_inv,
+            d_short,
+            d_long,
+            d_ma,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

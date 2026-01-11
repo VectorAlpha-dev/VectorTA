@@ -654,21 +654,46 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    struct AlligatorBatchState {
+    struct AlligatorBatchDevState {
         cuda: CudaAlligator,
-        data: Vec<f32>,
-        sweep: AlligatorBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_jp: DeviceBuffer<i32>,
+        d_jo: DeviceBuffer<i32>,
+        d_tp: DeviceBuffer<i32>,
+        d_to: DeviceBuffer<i32>,
+        d_lp: DeviceBuffer<i32>,
+        d_lo: DeviceBuffer<i32>,
+        first_valid: usize,
+        len: usize,
+        n_combos: usize,
+        d_jaw: DeviceBuffer<f32>,
+        d_teeth: DeviceBuffer<f32>,
+        d_lips: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for AlligatorBatchState {
+    impl CudaBenchState for AlligatorBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .alligator_batch_dev(&self.data, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_jp,
+                    &self.d_jo,
+                    &self.d_tp,
+                    &self.d_to,
+                    &self.d_lp,
+                    &self.d_lo,
+                    self.first_valid,
+                    self.len,
+                    self.n_combos,
+                    &mut self.d_jaw,
+                    &mut self.d_teeth,
+                    &mut self.d_lips,
+                )
+                .expect("alligator batch kernel");
+            self.cuda.stream.synchronize().expect("alligator sync");
         }
     }
 
-    fn prep_alligator_batch() -> AlligatorBatchState {
+    fn prep_alligator_batch() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlligator::new(0).expect("cuda alligator");
         cuda.set_policy(CudaAlligatorPolicy {
             batch: BatchKernelPolicy::Auto,
@@ -688,31 +713,107 @@ pub mod benches {
             lips_period: (3, 13, 5),
             lips_offset: (1, 4, 1),
         };
-        AlligatorBatchState { cuda, data, sweep }
+        let (combos, first_valid, len) =
+            CudaAlligator::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
+        let n = combos.len();
+
+        let jaw_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_period.unwrap() as i32)
+            .collect();
+        let jaw_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.jaw_offset.unwrap() as i32)
+            .collect();
+        let tee_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_period.unwrap() as i32)
+            .collect();
+        let tee_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.teeth_offset.unwrap() as i32)
+            .collect();
+        let lip_p: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_period.unwrap() as i32)
+            .collect();
+        let lip_o: Vec<i32> = combos
+            .iter()
+            .map(|c| c.lips_offset.unwrap() as i32)
+            .collect();
+
+        let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
+        let d_jp = DeviceBuffer::from_slice(&jaw_p).expect("d_jp");
+        let d_jo = DeviceBuffer::from_slice(&jaw_o).expect("d_jo");
+        let d_tp = DeviceBuffer::from_slice(&tee_p).expect("d_tp");
+        let d_to = DeviceBuffer::from_slice(&tee_o).expect("d_to");
+        let d_lp = DeviceBuffer::from_slice(&lip_p).expect("d_lp");
+        let d_lo = DeviceBuffer::from_slice(&lip_o).expect("d_lo");
+
+        let out_elems = n.checked_mul(len).expect("out elems overflow");
+        let d_jaw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_jaw");
+        let d_teeth: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_teeth");
+        let d_lips: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_lips");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(AlligatorBatchDevState {
+            cuda,
+            d_prices,
+            d_jp,
+            d_jo,
+            d_tp,
+            d_to,
+            d_lp,
+            d_lo,
+            first_valid,
+            len,
+            n_combos: n,
+            d_jaw,
+            d_teeth,
+            d_lips,
+        })
     }
 
-    struct AlligatorManySeriesState {
+    struct AlligatorManySeriesDevState {
         cuda: CudaAlligator,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: AlligatorParams,
+        jp: usize,
+        jo: usize,
+        tp: usize,
+        to: usize,
+        lp: usize,
+        lo: usize,
+        d_jaw_tm: DeviceBuffer<f32>,
+        d_teeth_tm: DeviceBuffer<f32>,
+        d_lips_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for AlligatorManySeriesState {
+    impl CudaBenchState for AlligatorManySeriesDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .alligator_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    self.jp,
+                    self.jo,
+                    self.tp,
+                    self.to,
+                    self.lp,
+                    self.lo,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    &self.d_first_valids,
+                    &mut self.d_jaw_tm,
+                    &mut self.d_teeth_tm,
+                    &mut self.d_lips_tm,
                 )
-                .unwrap();
+                .expect("alligator many-series kernel");
+            self.cuda.stream.synchronize().expect("alligator sync");
         }
     }
 
-    fn prep_alligator_many_series() -> AlligatorManySeriesState {
+    fn prep_alligator_many_series() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaAlligator::new(0).expect("cuda alligator");
         cuda.set_policy(CudaAlligatorPolicy {
             batch: BatchKernelPolicy::Auto,
@@ -729,13 +830,34 @@ pub mod benches {
             }
         }
         let params = AlligatorParams::default();
-        AlligatorManySeriesState {
+        let (first_valids, jp, jo, tp, to, lp, lo) =
+            CudaAlligator::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = cols * rows;
+        let d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_jaw_tm");
+        let d_teeth_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_teeth_tm");
+        let d_lips_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_lips_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(AlligatorManySeriesDevState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
-        }
+            jp,
+            jo,
+            tp,
+            to,
+            lp,
+            lo,
+            d_jaw_tm,
+            d_teeth_tm,
+            d_lips_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -746,7 +868,7 @@ pub mod benches {
                 "batch_dev",
                 "alligator_cuda_batch_dev",
                 "60k_x_many",
-                || Box::new(prep_alligator_batch()),
+                prep_alligator_batch,
             )
             .with_inner_iters(6),
             CudaBenchScenario::new(
@@ -754,7 +876,7 @@ pub mod benches {
                 "many_series_one_param",
                 "alligator_cuda_many_series_one_param",
                 "256x1m",
-                || Box::new(prep_alligator_many_series()),
+                prep_alligator_many_series,
             )
             .with_inner_iters(3),
         ]

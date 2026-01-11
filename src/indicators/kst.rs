@@ -868,7 +868,7 @@ impl Default for KstBatchRange {
             roc_period2: (15, 15, 0),
             roc_period3: (20, 20, 0),
             roc_period4: (30, 30, 0),
-            signal_period: (9, 9, 0),
+            signal_period: (9, 258, 1),
         }
     }
 }

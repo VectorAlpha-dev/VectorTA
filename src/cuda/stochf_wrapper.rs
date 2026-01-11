@@ -622,19 +622,81 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct StochfBatchState {
+    struct StochfBatchDeviceState {
         cuda: CudaStochf,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: StochfBatchRange,
+        func: Function<'static>,
+        d_close: DeviceBuffer<f32>,
+        d_log2: DeviceBuffer<i32>,
+        d_offs: DeviceBuffer<i32>,
+        d_st_max: DeviceBuffer<f32>,
+        d_st_min: DeviceBuffer<f32>,
+        d_nan_ps: DeviceBuffer<i32>,
+        d_fk_all: DeviceBuffer<i32>,
+        d_fd_all: DeviceBuffer<i32>,
+        d_mt_all: DeviceBuffer<i32>,
+        d_k: DeviceBuffer<f32>,
+        d_d: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        levels: i32,
+        rows: usize,
+        block_x: u32,
     }
-    impl CudaBenchState for StochfBatchState {
+    impl CudaBenchState for StochfBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .stochf_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("stochf batch");
+            let combos_per_launch = 65_535usize;
+            let mut row0 = 0usize;
+            while row0 < self.rows {
+                let n = (self.rows - row0).min(combos_per_launch);
+                let gx = n as u32;
+                let grid: GridSize = (gx, 1, 1).into();
+                let block: BlockSize = (self.block_x, 1, 1).into();
+                unsafe {
+                    // Kernel ignores high/low; pass null device pointers
+                    let mut high_ptr: u64 = 0;
+                    let mut low_ptr: u64 = 0;
+                    let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                    let mut log2_ptr = self.d_log2.as_device_ptr().as_raw();
+                    let mut offs_ptr = self.d_offs.as_device_ptr().as_raw();
+                    let mut stmax_ptr = self.d_st_max.as_device_ptr().as_raw();
+                    let mut stmin_ptr = self.d_st_min.as_device_ptr().as_raw();
+                    let mut npsum_ptr = self.d_nan_ps.as_device_ptr().as_raw();
+                    let mut fk_ptr = self.d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
+                    let mut fd_ptr = self.d_fd_all.as_device_ptr().offset(row0 as isize).as_raw();
+                    let mut mt_ptr = self.d_mt_all.as_device_ptr().offset(row0 as isize).as_raw();
+                    let mut len_i = self.len as i32;
+                    let mut first_i = self.first_valid as i32;
+                    let mut levels_i = self.levels;
+                    let mut n_i = n as i32;
+                    let mut k_out_ptr = self.d_k.as_device_ptr().offset((row0 * self.len) as isize).as_raw();
+                    let mut d_out_ptr = self.d_d.as_device_ptr().offset((row0 * self.len) as isize).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut high_ptr as *mut _ as *mut c_void,
+                        &mut low_ptr as *mut _ as *mut c_void,
+                        &mut close_ptr as *mut _ as *mut c_void,
+                        &mut log2_ptr as *mut _ as *mut c_void,
+                        &mut offs_ptr as *mut _ as *mut c_void,
+                        &mut stmax_ptr as *mut _ as *mut c_void,
+                        &mut stmin_ptr as *mut _ as *mut c_void,
+                        &mut npsum_ptr as *mut _ as *mut c_void,
+                        &mut fk_ptr as *mut _ as *mut c_void,
+                        &mut fd_ptr as *mut _ as *mut c_void,
+                        &mut mt_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut levels_i as *mut _ as *mut c_void,
+                        &mut n_i as *mut _ as *mut c_void,
+                        &mut k_out_ptr as *mut _ as *mut c_void,
+                        &mut d_out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&self.func, grid, block, 0, args)
+                        .expect("stochf launch");
+                }
+                row0 += n;
+            }
+            self.cuda.stream.synchronize().expect("stochf sync");
         }
     }
 
@@ -647,12 +709,71 @@ pub mod benches {
             fastk_period: (5, 5 + PARAM_SWEEP - 1, 1),
             fastd_period: (3, 3, 0),
         };
-        Box::new(StochfBatchState {
+        // Build WILLR sparse tables once on host
+        let tables = build_willr_gpu_tables(&high, &low);
+        let levels = tables.level_offsets.len() as i32;
+        let first_valid = (0..ONE_SERIES_LEN)
+            .find(|&i| close[i].is_finite())
+            .unwrap_or(0);
+
+        // Precompute parameter arrays (same semantics as wrapper)
+        let mut fk_host = Vec::with_capacity(PARAM_SWEEP);
+        let mut fd_host = Vec::with_capacity(PARAM_SWEEP);
+        let mut mt_host = Vec::with_capacity(PARAM_SWEEP);
+        for k in sweep.fastk_period.0..=sweep.fastk_period.1 {
+            fk_host.push(k as i32);
+            fd_host.push(sweep.fastd_period.0 as i32);
+            mt_host.push(0i32);
+        }
+        let rows = fk_host.len();
+
+        // Upload buffers once
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_log2 = DeviceBuffer::from_slice(&tables.log2).expect("d_log2");
+        let d_offs = DeviceBuffer::from_slice(&tables.level_offsets).expect("d_offs");
+        let d_st_max = DeviceBuffer::from_slice(&tables.st_max).expect("d_st_max");
+        let d_st_min = DeviceBuffer::from_slice(&tables.st_min).expect("d_st_min");
+        let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum).expect("d_nan_ps");
+        let d_fk_all = DeviceBuffer::from_slice(&fk_host).expect("d_fk_all");
+        let d_fd_all = DeviceBuffer::from_slice(&fd_host).expect("d_fd_all");
+        let d_mt_all = DeviceBuffer::from_slice(&mt_host).expect("d_mt_all");
+        let out_len = rows * ONE_SERIES_LEN;
+        let d_k: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_k");
+        let d_d: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_d");
+
+        let func = cuda
+            .module
+            .get_function("stochf_batch_f32")
+            .expect("stochf_batch_f32");
+        let mut func: Function<'static> = unsafe { std::mem::transmute(func) };
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let block_x = match cuda.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => 256,
+        };
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(StochfBatchDeviceState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            func,
+            d_close,
+            d_log2,
+            d_offs,
+            d_st_max,
+            d_st_min,
+            d_nan_ps,
+            d_fk_all,
+            d_fd_all,
+            d_mt_all,
+            d_k,
+            d_d,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            levels,
+            rows,
+            block_x,
         })
     }
 

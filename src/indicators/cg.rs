@@ -252,15 +252,7 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     let mut out = alloc_with_nan_prefix(len, first + period);
 
     let chosen = match kernel {
-        Kernel::Auto => {
-            // For common small windows (<= 65), the scalar kernel uses precomputed weights
-            // and an unrolled dot-product which consistently outperforms the current AVX paths.
-            if period <= 65 {
-                Kernel::Scalar
-            } else {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -615,7 +607,7 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -913,7 +905,7 @@ pub struct CgBatchRange {
 impl Default for CgBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 10, 0),
+            period: (10, 259, 1),
         }
     }
 }

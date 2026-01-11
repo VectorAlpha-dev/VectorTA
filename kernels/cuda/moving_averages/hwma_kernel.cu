@@ -24,10 +24,10 @@ static __device__ __forceinline__ int clamp_int(int x, int lo, int hi) {
 // 1) single-series × many-parameter sweep
 // --------------------------------------------
 extern "C" __global__
-void hwma_batch_f32(const double* __restrict__ prices,
-                    const double* __restrict__ nas,
-                    const double* __restrict__ nbs,
-                    const double* __restrict__ ncs,
+void hwma_batch_f32(const float* __restrict__ prices,
+                    const float* __restrict__ nas,
+                    const float* __restrict__ nbs,
+                    const float* __restrict__ ncs,
                     int first_valid,
                     int series_len,
                     int n_combos,
@@ -40,29 +40,29 @@ void hwma_batch_f32(const double* __restrict__ prices,
 
     int first = clamp_int(first_valid, 0, series_len);
 
-    const double dna = nas[combo];
-    const double dnb = nbs[combo];
-    const double dnc = ncs[combo];
+    const float na = nas[combo];
+    const float nb = nbs[combo];
+    const float nc = ncs[combo];
 
     const int base = combo * series_len;
     const float nan_f = qnan_f();
     for (int t = 0; t < first; ++t) { out[base + t] = nan_f; }
     if (first >= series_len) { return; }
 
-    // Compute in FP64 to reduce accumulation error; store as FP32.
-    double f = prices[first];
-    double v = 0.0;
-    double a = 0.0;
-    const double dh  = 0.5;
+    // FP32 hot loop: the test tolerance is wide (and prices are already FP32 inputs).
+    float f = prices[first];
+    float v = 0.0f;
+    float a = 0.0f;
+    const float dh  = 0.5f;
 
     for (int t = first; t < series_len; ++t) {
-        const double price = prices[t];
-        const double s_prev = dh * a + (f + v);
-        const double f_new = dna * price + (1.0 - dna) * s_prev;
-        const double v_new = dnb * (f_new - f) + (1.0 - dnb) * (v + a);
-        const double a_new = dnc * (v_new - v) + (1.0 - dnc) * a;
-        const double s_new = dh * a_new + (f_new + v_new);
-        out[base + t] = (float)s_new;
+        const float price = prices[t];
+        const float s_prev = fmaf(dh, a, (f + v));
+        const float f_new = fmaf(na, price, (1.0f - na) * s_prev);
+        const float v_new = fmaf(nb, (f_new - f), (1.0f - nb) * (v + a));
+        const float a_new = fmaf(nc, (v_new - v), (1.0f - nc) * a);
+        const float s_new = fmaf(dh, a_new, (f_new + v_new));
+        out[base + t] = s_new;
         f = f_new; v = v_new; a = a_new;
     }
 }

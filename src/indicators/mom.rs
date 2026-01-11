@@ -283,8 +283,37 @@ pub fn mom_into(input: &MomInput, out: &mut [f64]) -> Result<(), MomError> {
 
 #[inline(always)]
 pub fn mom_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    for i in (first_valid + period)..data.len() {
-        out[i] = data[i] - data[i - period];
+    let n = data.len();
+    let start = first_valid + period;
+    if start >= n {
+        return;
+    }
+
+    unsafe {
+        let mut cur = data.as_ptr().add(start);
+        let mut prev = data.as_ptr().add(start - period);
+        let mut dst = out.as_mut_ptr().add(start);
+
+        let mut m = n - start;
+        while m >= 4 {
+            *dst = *cur - *prev;
+            *dst.add(1) = *cur.add(1) - *prev.add(1);
+            *dst.add(2) = *cur.add(2) - *prev.add(2);
+            *dst.add(3) = *cur.add(3) - *prev.add(3);
+
+            cur = cur.add(4);
+            prev = prev.add(4);
+            dst = dst.add(4);
+            m -= 4;
+        }
+
+        while m != 0 {
+            *dst = *cur - *prev;
+            cur = cur.add(1);
+            prev = prev.add(1);
+            dst = dst.add(1);
+            m -= 1;
+        }
     }
 }
 
@@ -473,7 +502,7 @@ pub struct MomBatchRange {
 impl Default for MomBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 10, 0),
+            period: (10, 259, 1),
         }
     }
 }

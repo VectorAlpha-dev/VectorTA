@@ -1159,7 +1159,7 @@ pub struct EmdBatchRange {
 impl Default for EmdBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 20, 0),
+            period: (20, 269, 1),
             delta: (0.5, 0.5, 0.0),
             fraction: (0.1, 0.1, 0.0),
         }

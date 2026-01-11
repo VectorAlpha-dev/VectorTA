@@ -1581,10 +1581,10 @@ pub struct WavetrendBatchRange {
 impl Default for WavetrendBatchRange {
     fn default() -> Self {
         Self {
-            channel_length: (6, 12, 3),
-            average_length: (9, 15, 3),
-            ma_length: (2, 4, 1),
-            factor: (0.010, 0.020, 0.005),
+            channel_length: (9, 9, 0),
+            average_length: (12, 261, 1),
+            ma_length: (3, 3, 0),
+            factor: (0.015, 0.015, 0.0),
         }
     }
 }

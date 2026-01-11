@@ -577,17 +577,28 @@ pub mod benches {
         in_bytes + out_bytes + (64 << 20)
     }
 
-    struct MediumAdBatchState {
+    struct MediumAdBatchDeviceState {
         cuda: CudaMediumAd,
-        price: Vec<f32>,
-        sweep: MediumAdBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for MediumAdBatchState {
+    impl CudaBenchState for MediumAdBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .medium_ad_batch_dev(&self.price, &self.sweep)
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    self.len,
+                    self.first_valid,
+                    &self.d_periods,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
                 .expect("medium_ad batch");
+            self.cuda.stream.synchronize().expect("sync");
         }
     }
 
@@ -599,7 +610,23 @@ pub mod benches {
         let sweep = MediumAdBatchRange {
             period: (start, end, 1),
         };
-        Box::new(MediumAdBatchState { cuda, price, sweep })
+        let (combos, first_valid) =
+            CudaMediumAd::prepare_batch_inputs(&price, &sweep).expect("prep medium_ad");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN * combos.len()) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(MediumAdBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_combos: combos.len(),
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

@@ -83,36 +83,82 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
 {
     if (series_len <= 0) return;
 
-    const int tid          = blockIdx.x * blockDim.x + threadIdx.x;
-    const int totalThreads = gridDim.x * blockDim.x;
+    // One warp per combo. Each lane advances 1 timestep; warp scan emits 32 outputs per iteration.
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    const unsigned warps_per_block = blockDim.x >> 5;
+    const int combo = (int)(blockIdx.x * warps_per_block + warp);
+    if (combo >= n_combos) return;
 
-    // Grid-stride over parameter rows
-    for (int combo = tid; combo < n_combos; combo += totalThreads) {
-        const int sp = short_periods[combo];
-        const int lp = long_periods[combo];
-        if (sp <= 0 || lp <= 0 || sp >= lp) {
-            // Semantics: leave row as-is (typically pre-zeroed by caller)
-            continue;
+    const int sp = short_periods[combo];
+    const int lp = long_periods[combo];
+    if (sp <= 0 || lp <= 0 || sp >= lp) {
+        // Semantics: leave row as-is (caller validates in practice)
+        return;
+    }
+
+    const float a_s = 2.0f / (float)(sp + 1);
+    const float a_l = 2.0f / (float)(lp + 1);
+    const float oms = 1.0f - a_s;
+    const float oml = 1.0f - a_l;
+
+    float* out_row = out + (size_t)combo * (size_t)series_len;
+
+    // t=0: both EMAs are seeded with ADL[0], so ADOSC = 0
+    if (lane == 0) out_row[0] = 0.0f;
+    float s_ema = adl[0];
+    float l_ema = adl[0];
+
+    const unsigned mask = 0xffffffffu;
+
+    // Rolling update: process 32 timesteps per iteration, starting at t=1
+    for (int t0 = 1; t0 < series_len; t0 += 32) {
+        const int t = t0 + (int)lane;
+
+        // EMA recurrence: y = (1-a)*y + a*x => y = A*y + B
+        float As = 1.0f;
+        float Bs = 0.0f;
+        float Al = 1.0f;
+        float Bl = 0.0f;
+        if (t < series_len) {
+            const float x = adl[t];
+            As = oms;
+            Bs = a_s * x;
+            Al = oml;
+            Bl = a_l * x;
         }
 
-        const float a_s = 2.0f / (float)(sp + 1);
-        const float a_l = 2.0f / (float)(lp + 1);
-        const float oms = 1.0f - a_s;
-        const float oml = 1.0f - a_l;
-
-        const int   base  = combo * series_len;
-        float s_ema = adl[0];
-        float l_ema = adl[0];
-        out[base + 0] = 0.0f;                 // short==long at t=0
-
-        // time loop (broadcasted loads within a warp are a single transaction on cc>=2.0)
-        // Using fmaf improves accuracy and throughput.
-        for (int i = 1; i < series_len; ++i) {
-            const float x = adl[i];
-            s_ema = fmaf(a_s, x, oms * s_ema);
-            l_ema = fmaf(a_l, x, oml * l_ema);
-            out[base + i] = s_ema - l_ema;
+        // Inclusive warp scan composing (A,B) left-to-right.
+        // Composition: (A1,B1) o (A2,B2) = (A1*A2, A1*B2 + B1).
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float As_prev = __shfl_up_sync(mask, As, offset);
+            const float Bs_prev = __shfl_up_sync(mask, Bs, offset);
+            const float Al_prev = __shfl_up_sync(mask, Al, offset);
+            const float Bl_prev = __shfl_up_sync(mask, Bl, offset);
+            if (lane >= (unsigned)offset) {
+                const float As_cur = As;
+                const float Bs_cur = Bs;
+                const float Al_cur = Al;
+                const float Bl_cur = Bl;
+                As = As_cur * As_prev;
+                Bs = __fmaf_rn(As_cur, Bs_prev, Bs_cur);
+                Al = Al_cur * Al_prev;
+                Bl = __fmaf_rn(Al_cur, Bl_prev, Bl_cur);
+            }
         }
+
+        const float ys = __fmaf_rn(As, s_ema, Bs);
+        const float yl = __fmaf_rn(Al, l_ema, Bl);
+
+        if (t < series_len) {
+            out_row[t] = ys - yl;
+        }
+
+        // Advance to next tile using the last valid lane.
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        s_ema = __shfl_sync(mask, ys, last_lane);
+        l_ema = __shfl_sync(mask, yl, last_lane);
     }
 }
 

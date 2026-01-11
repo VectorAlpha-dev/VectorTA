@@ -813,18 +813,32 @@ pub mod benches {
         (high, low)
     }
 
-    struct SarBatchState {
+    struct SarBatchDeviceState {
         cuda: CudaSar,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: SarBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_accs: DeviceBuffer<f32>,
+        d_maxs: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len_i32: i32,
+        first_i32: i32,
+        rows_i32: i32,
     }
-    impl CudaBenchState for SarBatchState {
+    impl CudaBenchState for SarBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .sar_batch_dev(&self.high, &self.low, &self.sweep)
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    self.len_i32,
+                    self.first_i32,
+                    &self.d_accs,
+                    &self.d_maxs,
+                    self.rows_i32,
+                    &mut self.d_out,
+                )
                 .expect("sar batch");
+            self.cuda.stream.synchronize().expect("sar batch sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -835,34 +849,66 @@ pub mod benches {
             acceleration: (0.01, 0.1, 0.01),
             maximum: (0.1, 0.3, 0.05),
         };
-        Box::new(SarBatchState {
+        let first = high
+            .iter()
+            .zip(low.iter())
+            .position(|(&h, &l)| h.is_finite() && l.is_finite())
+            .unwrap_or(0);
+        let combos = expand_grid(&sweep).expect("expand_grid");
+        let mut accs: Vec<f32> = Vec::with_capacity(combos.len());
+        let mut maxs: Vec<f32> = Vec::with_capacity(combos.len());
+        for p in &combos {
+            accs.push(p.acceleration.unwrap_or(0.02) as f32);
+            maxs.push(p.maximum.unwrap_or(0.2) as f32);
+        }
+        let len = ONE_SERIES_LEN;
+        let rows = combos.len();
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_accs = DeviceBuffer::from_slice(&accs).expect("d_accs");
+        let d_maxs = DeviceBuffer::from_slice(&maxs).expect("d_maxs");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SarBatchDeviceState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_high,
+            d_low,
+            d_accs,
+            d_maxs,
+            d_out,
+            len_i32: len as i32,
+            first_i32: first as i32,
+            rows_i32: rows as i32,
         })
     }
 
-    struct SarManyState {
+    struct SarManyDeviceState {
         cuda: CudaSar,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        params: SarParams,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_fv: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        cols: i32,
+        rows: i32,
+        acceleration: f32,
+        maximum: f32,
     }
-    impl CudaBenchState for SarManyState {
+    impl CudaBenchState for SarManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .sar_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_fv,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.acceleration,
+                    self.maximum,
+                    &mut self.d_out,
                 )
                 .expect("sar many-series");
+            self.cuda.stream.synchronize().expect("sar many sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -885,13 +931,32 @@ pub mod benches {
             acceleration: Some(0.02),
             maximum: Some(0.2),
         };
-        Box::new(SarManyState {
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_fv");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SarManyDeviceState {
             cuda,
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            params,
+            d_high_tm,
+            d_low_tm,
+            d_fv,
+            d_out,
+            cols: cols as i32,
+            rows: rows as i32,
+            acceleration: params.acceleration.unwrap_or(0.02) as f32,
+            maximum: params.maximum.unwrap_or(0.2) as f32,
         })
     }
 

@@ -340,7 +340,7 @@ fn ema_prepare<'a>(
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
     let chosen = if matches!(kernel, Kernel::Auto) {
-        detect_best_kernel()
+        Kernel::Scalar
     } else {
         kernel
     };
@@ -645,7 +645,7 @@ pub struct EmaBatchRange {
 impl Default for EmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 240, 1),
+            period: (9, 258, 1),
         }
     }
 }

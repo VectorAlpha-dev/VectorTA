@@ -453,22 +453,67 @@ pub mod benches {
 
     struct VossBatchState {
         cuda: CudaVoss,
-        data: Vec<f32>,
-        sweep: VossBatchRange,
+        d_prices: DeviceBuffer<f64>,
+        d_p: DeviceBuffer<i32>,
+        d_q: DeviceBuffer<i32>,
+        d_bw: DeviceBuffer<f64>,
+        len: usize,
+        first: usize,
+        rows: usize,
+        block_x: u32,
+        d_voss: DeviceBuffer<f32>,
+        d_filt: DeviceBuffer<f32>,
     }
     impl CudaBenchState for VossBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .voss_batch_dev(&self.data, &self.sweep)
-                .expect("voss batch");
+                .module
+                .get_function("voss_batch_f32")
+                .expect("voss_batch_f32");
+
+            const MAX_GRID_Y: usize = 65_535;
+            let mut start_row = 0usize;
+            while start_row < self.rows {
+                let count = (self.rows - start_row).min(MAX_GRID_Y);
+                let grid: GridSize = (1u32, count as u32, 1u32).into();
+                let block: BlockSize = (self.block_x, 1, 1).into();
+                unsafe {
+                    let mut p_prices = self.d_prices.as_device_ptr().as_raw();
+                    let mut p_len = self.len as i32;
+                    let mut p_first = self.first as i32;
+                    let mut p_per = self.d_p.as_device_ptr().add(start_row).as_raw();
+                    let mut p_pre = self.d_q.as_device_ptr().add(start_row).as_raw();
+                    let mut p_bw = self.d_bw.as_device_ptr().add(start_row).as_raw();
+                    let mut p_nrows = count as i32;
+                    let base = start_row * self.len;
+                    let mut p_voss = self.d_voss.as_device_ptr().add(base).as_raw();
+                    let mut p_filt = self.d_filt.as_device_ptr().add(base).as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut p_prices as *mut _ as *mut c_void,
+                        &mut p_len as *mut _ as *mut c_void,
+                        &mut p_first as *mut _ as *mut c_void,
+                        &mut p_per as *mut _ as *mut c_void,
+                        &mut p_pre as *mut _ as *mut c_void,
+                        &mut p_bw as *mut _ as *mut c_void,
+                        &mut p_nrows as *mut _ as *mut c_void,
+                        &mut p_voss as *mut _ as *mut c_void,
+                        &mut p_filt as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&func, grid, block, 0, args)
+                        .expect("voss batch launch");
+                }
+                start_row += count;
+            }
+            self.cuda.stream.synchronize().expect("voss batch sync");
         }
     }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaVoss::new(0).expect("cuda voss");
         let mut data = gen_series(ONE_SERIES_LEN);
-        // data first few NaNs and sweep already set above
         for i in 0..4 {
             data[i] = f32::NAN;
         }
@@ -477,32 +522,104 @@ pub mod benches {
             predict: (1, 4, 1),
             bandwidth: (0.1, 0.4, 0.05),
         };
-        Box::new(VossBatchState { cuda, data, sweep })
+
+        let len = data.len();
+        let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let combos = expand_grid_voss(&sweep).expect("expand_grid_voss");
+        let rows = combos.len();
+
+        // Upload prices as f64 once.
+        let mut prices_f64 = vec![0f64; len];
+        for (dst, &src) in prices_f64.iter_mut().zip(data.iter()) {
+            *dst = src as f64;
+        }
+        let d_prices = DeviceBuffer::from_slice(&prices_f64).expect("d_prices");
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(20) as i32).collect();
+        let predicts: Vec<i32> = combos.iter().map(|c| c.predict.unwrap_or(3) as i32).collect();
+        let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
+        let d_p = DeviceBuffer::from_slice(&periods).expect("d_p");
+        let d_q = DeviceBuffer::from_slice(&predicts).expect("d_q");
+        let d_bw = DeviceBuffer::from_slice(&bws).expect("d_bw");
+
+        let elems = rows.checked_mul(len).expect("rows*len overflow");
+        let d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss");
+        let d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt");
+
+        let block_x = match cuda.policy.batch {
+            BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 1,
+        };
+        cuda.stream.synchronize().expect("voss prep sync");
+
+        Box::new(VossBatchState {
+            cuda,
+            d_prices,
+            d_p,
+            d_q,
+            d_bw,
+            len,
+            first,
+            rows,
+            block_x,
+            d_voss,
+            d_filt,
+        })
     }
 
     struct VossManyState {
         cuda: CudaVoss,
-        data_tm: Vec<f32>,
+        d_data: DeviceBuffer<f64>,
+        d_fv: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: VossParams,
+        p: i32,
+        q: i32,
+        bw: f64,
+        grid: GridSize,
+        block: BlockSize,
+        d_voss: DeviceBuffer<f32>,
+        d_filt: DeviceBuffer<f32>,
     }
     impl CudaBenchState for VossManyState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .voss_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .expect("voss many-series");
+                .module
+                .get_function("voss_many_series_one_param_time_major_f32")
+                .expect("voss_many_series_one_param_time_major_f32");
+            unsafe {
+                let mut p_data = self.d_data.as_device_ptr().as_raw();
+                let mut p_fv = self.d_fv.as_device_ptr().as_raw();
+                let mut p_cols = self.cols as i32;
+                let mut p_rows = self.rows as i32;
+                let mut p_p = self.p;
+                let mut p_q = self.q;
+                let mut p_bw = self.bw;
+                let mut p_voss = self.d_voss.as_device_ptr().as_raw();
+                let mut p_filt = self.d_filt.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_data as *mut _ as *mut c_void,
+                    &mut p_fv as *mut _ as *mut c_void,
+                    &mut p_cols as *mut _ as *mut c_void,
+                    &mut p_rows as *mut _ as *mut c_void,
+                    &mut p_p as *mut _ as *mut c_void,
+                    &mut p_q as *mut _ as *mut c_void,
+                    &mut p_bw as *mut _ as *mut c_void,
+                    &mut p_voss as *mut _ as *mut c_void,
+                    &mut p_filt as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("voss many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("voss many-series sync");
         }
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaVoss::new(0).expect("cuda voss");
-        let mut tm = gen_time_major_prices(MANY_SERIES_ROWS, MANY_SERIES_COLS);
+        let mut tm = gen_time_major_prices(MANY_SERIES_COLS, MANY_SERIES_ROWS);
         // ensure a few NaNs at start of each series
         // data tm NaNs and params set above
         for s in 0..MANY_SERIES_COLS {
@@ -514,12 +631,61 @@ pub mod benches {
             predict: Some(3),
             bandwidth: Some(0.25),
         };
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_ROWS;
+        let elems = cols.checked_mul(rows).expect("cols*rows overflow");
+
+        // Per-series first_valid indices (time-major)
+        let mut first_valids = vec![-1i32; cols];
+        for s in 0..cols {
+            let mut idx = s;
+            for t in 0..rows {
+                let v = tm[idx];
+                if !v.is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+                idx += cols;
+            }
+        }
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_fv");
+
+        // Upload as f64 once.
+        let mut data_f64 = vec![0f64; elems];
+        for (dst, &src) in data_f64.iter_mut().zip(tm.iter()) {
+            *dst = src as f64;
+        }
+        let d_data = DeviceBuffer::from_slice(&data_f64).expect("d_data");
+
+        let d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss_tm");
+        let d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt_tm");
+
+        let p = params.period.unwrap_or(20) as i32;
+        let q = params.predict.unwrap_or(3) as i32;
+        let bw = params.bandwidth.unwrap_or(0.25);
+        let (block_x, block_y) = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x, block_y } if block_x > 0 && block_y > 0 => {
+                (block_x, block_y)
+            }
+            _ => (1, u32::min(64, cols as u32)),
+        };
+        let grid: GridSize = (1, ((cols as u32) + block_y - 1) / block_y, 1).into();
+        let block: BlockSize = (block_x, block_y, 1).into();
+
+        cuda.stream.synchronize().expect("voss prep sync");
         Box::new(VossManyState {
             cuda,
-            data_tm: tm,
-            cols: MANY_SERIES_COLS,
-            rows: MANY_SERIES_ROWS,
-            params,
+            d_data,
+            d_fv,
+            cols,
+            rows,
+            p,
+            q,
+            bw,
+            grid,
+            block,
+            d_voss,
+            d_filt,
         })
     }
 
@@ -532,7 +698,15 @@ pub mod benches {
                 "voss_batch/one_series_many_params",
                 prep_batch,
             )
-            .with_mem_required(bytes_batch(300))
+            .with_mem_required({
+                let sweep = VossBatchRange {
+                    period: (10, 34, 2),
+                    predict: (1, 4, 1),
+                    bandwidth: (0.1, 0.4, 0.05),
+                };
+                let rows = expand_grid_voss(&sweep).map(|v| v.len()).unwrap_or(300);
+                bytes_batch(rows)
+            })
             .with_inner_iters(1),
             CudaBenchScenario::new(
                 "voss",

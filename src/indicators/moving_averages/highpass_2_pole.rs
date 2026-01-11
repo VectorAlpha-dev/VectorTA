@@ -335,7 +335,7 @@ fn highpass2_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     Ok((data, period, k, first, chosen))
@@ -862,7 +862,7 @@ pub struct HighPass2BatchRange {
 impl Default for HighPass2BatchRange {
     fn default() -> Self {
         Self {
-            period: (48, 120, 0),
+            period: (48, 297, 1),
             k: (0.707, 0.707, 0.0),
         }
     }

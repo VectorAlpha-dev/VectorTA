@@ -371,7 +371,7 @@ impl CudaKama {
         combos: &[KamaParams],
         first_valid: usize,
         series_len: usize,
-        max_period: usize,
+        _max_period: usize,
     ) -> Result<DeviceArrayF32Kama, CudaKamaError> {
         let n_combos = combos.len();
         let prices_bytes = series_len
@@ -387,9 +387,9 @@ impl CudaKama {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaKamaError::InvalidInput("out byte size overflow".into()))?;
 
+        // The prefix kernel is the optimized path (warp-scan). Prefer it whenever available.
         let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
-        let use_prefix =
-            have_prefix_kernel && Self::should_use_prefix(n_combos, series_len, max_period);
+        let use_prefix = have_prefix_kernel;
 
         // Only budget prefix memory when we actually use the prefix path.
         let prefix_bytes = if use_prefix {
@@ -462,13 +462,6 @@ impl CudaKama {
             ctx: self._context.clone(),
             device_id: self.device_id,
         })
-    }
-
-    #[inline]
-    fn should_use_prefix(n_combos: usize, series_len: usize, max_period: usize) -> bool {
-        // Heuristic: choose prefix when aggregate warmup work is relatively large.
-        // Rule-of-thumb from guide: n_combos * max_period >= 8 * (series_len + 1)
-        n_combos.saturating_mul(max_period) >= 8usize.saturating_mul(series_len + 1)
     }
 
     pub fn kama_batch_dev(
@@ -733,23 +726,155 @@ impl CudaKama {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::kama::KamaParams;
 
-    define_ma_period_benches!(
-        kama_benches,
-        CudaKama,
-        crate::indicators::moving_averages::kama::KamaBatchRange,
-        crate::indicators::moving_averages::kama::KamaParams,
-        kama_batch_dev,
-        kama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::kama::KamaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::kama::KamaParams { period: Some(64) },
-        "kama",
-        "kama"
-    );
-    pub use kama_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct KamaBatchDevState {
+        cuda: CudaKama,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for KamaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.rows,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("kama batch kernel");
+            self.cuda.stream.synchronize().expect("kama sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaKama::new(0).expect("cuda kama");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = KamaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len, _max_period) =
+            CudaKama::prepare_batch_inputs(&price, &sweep).expect("kama prepare batch inputs");
+        let rows = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * rows) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(KamaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            len: series_len,
+            first_valid,
+            rows,
+            d_out,
+        })
+    }
+
+    struct KamaManyDevState {
+        cuda: CudaKama,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for KamaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("kama many-series kernel");
+            self.cuda.stream.synchronize().expect("kama sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaKama::new(0).expect("cuda kama");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = KamaParams { period: Some(64) };
+        let (first_valids, period) =
+            CudaKama::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("kama prepare many-series inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(KamaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "kama",
+                "one_series_many_params",
+                "kama_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "kama",
+                "many_series_one_param",
+                "kama_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 // ---------- Minimal policy + introspection to mirror ALMA API ----------

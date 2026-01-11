@@ -509,7 +509,7 @@ fn cci_cycle_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1312,7 +1312,7 @@ pub struct CciCycleBatchRange {
 impl Default for CciCycleBatchRange {
     fn default() -> Self {
         Self {
-            length: (10, 100, 10),
+            length: (10, 259, 1),
             factor: (0.5, 0.5, 0.0),
         }
     }
@@ -1732,7 +1732,7 @@ pub fn cci_cycle_js(data: &[f64], length: usize, factor: f64) -> Result<Vec<f64>
     let input = CciCycleInput::from_slice(data, params);
 
     let mut output = alloc_with_nan_prefix(data.len(), 0); // no full zeroing
-    cci_cycle_into_slice(&mut output, &input, detect_best_kernel())
+    cci_cycle_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
@@ -1778,13 +1778,13 @@ pub fn cci_cycle_into(
 
         if in_ptr == out_ptr {
             let mut temp = alloc_with_nan_prefix(len, 0);
-            cci_cycle_into_slice(&mut temp, &input, detect_best_kernel())
+            cci_cycle_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            cci_cycle_into_slice(out, &input, detect_best_kernel())
+            cci_cycle_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 

@@ -80,88 +80,174 @@ struct Kahan {
 };
 
 // ------------------- Batch: one series × many params -----------------------
+//
+// Performance note:
+// The original batch kernel executed a single-thread scan per combo (one active
+// lane per warp), which is catastrophically slow at large `series_len` even for
+// small (14,3,3) windows. We split batch into 3 fully-parallel passes:
+//   1) Stoch over RSI -> FK (written into out_d as scratch)
+//   2) SMA(FK, k_period) -> Slow K (written into out_k)
+//   3) SMA(SlowK, d_period) -> Slow D (written into out_d final)
+//
+// This keeps memory overhead at 0 additional buffers (reuses outputs) and
+// matches the f32 reference math used in `tests/srsi_cuda.rs`.
+
 extern "C" __global__
-void srsi_batch_f32(const float* __restrict__ rsi,
-                    const int*   __restrict__ stoch_periods,
-                    const int*   __restrict__ k_periods,
-                    const int*   __restrict__ d_periods,
-                    int series_len,
-                    int first_valid,
-                    int rsi_period,
-                    int n_combos,
-                    float* __restrict__ out_k,
-                    float* __restrict__ out_d) {
-    const int combo = blockIdx.x;
+void srsi_fk_batch_f32(const float* __restrict__ rsi,
+                       const int*   __restrict__ stoch_periods,
+                       const int*   __restrict__ k_periods, // unused
+                       const int*   __restrict__ d_periods, // unused
+                       int series_len,
+                       int first_valid,
+                       int rsi_period,
+                       int n_combos,
+                       float* __restrict__ out_k, // unused
+                       float* __restrict__ out_d) // scratch: FK
+{
+    const int combo = (int)blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int sp = stoch_periods[combo];
+
+    const int row_off = combo * series_len;
+    int t = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int stride = (int)gridDim.x * (int)blockDim.x;
+
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len ||
+        rsi_period <= 0 || sp <= 0) {
+        while (t < series_len) { out_d[row_off + t] = NAN; t += stride; }
+        return;
+    }
+
+    const int rsi_warmup   = first_valid + rsi_period;
+    const int stoch_warmup = rsi_warmup + sp - 1;
+    if (rsi_warmup >= series_len || stoch_warmup >= series_len) {
+        while (t < series_len) { out_d[row_off + t] = NAN; t += stride; }
+        return;
+    }
+
+    while (t < series_len) {
+        float fk = NAN;
+        if (t >= stoch_warmup) {
+            const float rv = ftz_f32(LDG(&rsi[t]));
+            const int start = t + 1 - sp;
+            float hi = -1e30f;
+            float lo =  1e30f;
+            for (int i = start; i <= t; ++i) {
+                const float v = ftz_f32(LDG(&rsi[i]));
+                hi = fmaxf(hi, v);
+                lo = fminf(lo, v);
+            }
+            const float denom = hi - lo;
+            fk = (denom >= FLT_MIN) ? ((rv - lo) * 100.0f) / denom : 50.0f;
+        }
+        out_d[row_off + t] = fk;
+        t += stride;
+    }
+}
+
+extern "C" __global__
+void srsi_sma_k_batch_f32(const float* __restrict__ rsi, // unused
+                          const int*   __restrict__ stoch_periods,
+                          const int*   __restrict__ k_periods,
+                          const int*   __restrict__ d_periods, // unused
+                          int series_len,
+                          int first_valid,
+                          int rsi_period,
+                          int n_combos,
+                          float* __restrict__ out_k, // Slow K
+                          float* __restrict__ out_d) // FK input
+{
+    const int combo = (int)blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int sp = stoch_periods[combo];
+    const int kp = k_periods[combo];
+
+    const int row_off = combo * series_len;
+    int t = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int stride = (int)gridDim.x * (int)blockDim.x;
+
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len ||
+        rsi_period <= 0 || sp <= 0 || kp <= 0) {
+        while (t < series_len) { out_k[row_off + t] = NAN; t += stride; }
+        return;
+    }
+
+    const int rsi_warmup   = first_valid + rsi_period;
+    const int stoch_warmup = rsi_warmup + sp - 1;
+    const int k_warmup     = stoch_warmup + kp - 1;
+    if (rsi_warmup >= series_len || stoch_warmup >= series_len || k_warmup >= series_len) {
+        while (t < series_len) { out_k[row_off + t] = NAN; t += stride; }
+        return;
+    }
+
+    while (t < series_len) {
+        float slow_k = NAN;
+        if (t >= k_warmup) {
+            const int start = t + 1 - kp;
+            float sum = 0.0f;
+            for (int i = start; i <= t; ++i) {
+                sum += out_d[row_off + i];
+            }
+            slow_k = sum * (1.0f / (float)kp);
+        }
+        out_k[row_off + t] = slow_k;
+        t += stride;
+    }
+}
+
+extern "C" __global__
+void srsi_sma_d_batch_f32(const float* __restrict__ rsi, // unused
+                          const int*   __restrict__ stoch_periods,
+                          const int*   __restrict__ k_periods,
+                          const int*   __restrict__ d_periods,
+                          int series_len,
+                          int first_valid,
+                          int rsi_period,
+                          int n_combos,
+                          float* __restrict__ out_k, // Slow K input
+                          float* __restrict__ out_d) // Slow D output
+{
+    const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
 
     const int sp = stoch_periods[combo];
     const int kp = k_periods[combo];
     const int dp = d_periods[combo];
-    if (sp <= 0 || kp <= 0 || dp <= 0) return;
+
+    const int row_off = combo * series_len;
+    int t = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int stride = (int)gridDim.x * (int)blockDim.x;
+
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len ||
+        rsi_period <= 0 || sp <= 0 || kp <= 0 || dp <= 0) {
+        while (t < series_len) { out_d[row_off + t] = NAN; t += stride; }
+        return;
+    }
 
     const int rsi_warmup   = first_valid + rsi_period;
     const int stoch_warmup = rsi_warmup + sp - 1;
     const int k_warmup     = stoch_warmup + kp - 1;
     const int d_warmup     = k_warmup + dp - 1;
-    if (rsi_warmup >= series_len) return;
+    if (rsi_warmup >= series_len || stoch_warmup >= series_len ||
+        k_warmup >= series_len || d_warmup >= series_len) {
+        while (t < series_len) { out_d[row_off + t] = NAN; t += stride; }
+        return;
+    }
 
-    float* row_k = out_k + combo * series_len;
-    float* row_d = out_d + combo * series_len;
-
-    // Initialize rows to NaN (warmup semantics)
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) { row_k[i] = NAN; row_d[i] = NAN; }
-    __syncthreads();
-
-    // Sequential scan in a single thread to minimize control overhead
-    if (threadIdx.x != 0) return;
-
-    extern __shared__ unsigned char smem[];
-    // Layout: [max_idx sp]*int | [max_val sp]*float | [min_idx sp]*int | [min_val sp]*float |
-    //         [ring_k kp]*float | [ring_d dp]*float
-    int*   max_idx = (int*)smem;
-    float* max_val = (float*)(max_idx + sp);
-    int*   min_idx = (int*)(max_val + sp);
-    float* min_val = (float*)(min_idx + sp);
-    float* ring_k  = (float*)(min_val + sp);
-    float* ring_d  = (float*)(ring_k + kp);
-
-    Deque dq_max, dq_min;
-    dq_init(&dq_max, max_idx, max_val, sp);
-    dq_init(&dq_min, min_idx, min_val, sp);
-
-    // Rolling sums for SMA of Fast %K (slow K) and Slow %D
-    float sum_k = 0.0f, sum_d = 0.0f;
-    int head_k = 0, head_d = 0, cnt_k = 0, cnt_d = 0;
-    const float inv_kp = 1.0f / (float)kp;
-    const float inv_dp = 1.0f / (float)dp;
-
-    // No deque priming; compute hi/lo by scanning rsi over the window
-    for (int i = stoch_warmup; i < series_len; ++i) {
-        const float rv = ftz_f32(LDG(&rsi[i]));
-        float hi = -1e30f;
-        float lo =  1e30f;
-        const int start = i - sp + 1;
-        for (int t = start; t <= i; ++t) {
-            const float v = ftz_f32(LDG(&rsi[t]));
-            hi = fmaxf(hi, v);
-            lo = fminf(lo, v);
+    while (t < series_len) {
+        float slow_d = NAN;
+        if (t >= d_warmup) {
+            const int start = t + 1 - dp;
+            float sum = 0.0f;
+            for (int i = start; i <= t; ++i) {
+                sum += out_k[row_off + i];
+            }
+            slow_d = sum * (1.0f / (float)dp);
         }
-        const float denom = hi - lo;
-        // Guard against FTZ: if denom underflows to 0/subnormal, treat as no-range.
-        float fk = (denom >= FLT_MIN) ? ((rv - lo) * 100.0f) / denom : 50.0f;
-
-        // ring update (increment-wrap; no modulo)
-        if (cnt_k < kp) { sum_k += fk; ring_k[head_k] = fk; ++cnt_k; if (++head_k == kp) head_k = 0; }
-        else             { sum_k += fk - ring_k[head_k]; ring_k[head_k] = fk; if (++head_k == kp) head_k = 0; }
-
-        if (i >= k_warmup) {
-            const float slow_k = sum_k * inv_kp;
-            row_k[i] = slow_k;
-
-            if (cnt_d < dp) { sum_d += slow_k; ring_d[head_d] = slow_k; ++cnt_d; if (++head_d == dp) head_d = 0; }
-            else             { sum_d += slow_k - ring_d[head_d]; ring_d[head_d] = slow_k; if (++head_d == dp) head_d = 0; }
-            if (i >= d_warmup) { row_d[i] = sum_d * inv_dp; }
-        }
+        out_d[row_off + t] = slow_d;
+        t += stride;
     }
 }
 

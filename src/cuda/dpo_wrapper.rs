@@ -642,17 +642,30 @@ pub mod benches {
         in_bytes + out_bytes + prefix_bytes + fv_bytes + 64 * 1024 * 1024
     }
 
-    struct DpoBatchState {
+    struct DpoBatchDeviceState {
         cuda: CudaDpo,
-        price: Vec<f32>,
-        sweep: DpoBatchRange,
+        d_data: DeviceBuffer<f32>,
+        d_ps: DeviceBuffer<Float2>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for DpoBatchState {
+    impl CudaBenchState for DpoBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dpo_batch_dev(&self.price, &self.sweep)
-                .expect("dpo batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_data,
+                    &self.d_ps,
+                    self.len as i32,
+                    self.first_valid as i32,
+                    &self.d_periods,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                )
+                .expect("dpo launch");
+            self.cuda.stream.synchronize().expect("dpo sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -661,27 +674,58 @@ pub mod benches {
         let sweep = DpoBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(DpoBatchState { cuda, price, sweep })
+
+        let (periods, first_valid) =
+            CudaDpo::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let len = price.len();
+        let n_combos = periods.len();
+        let ps = build_prefixes_from_first(&price, first_valid);
+
+        let d_data = cuda.upload_slice(&price).expect("d_data H2D");
+        let d_ps = cuda.upload_slice(&ps).expect("d_ps H2D");
+        let d_periods = cuda.upload_slice(&periods).expect("d_periods H2D");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(len * n_combos, &cuda.stream)
+        }
+        .expect("d_out alloc");
+        cuda.stream.synchronize().expect("dpo prep sync");
+
+        Box::new(DpoBatchDeviceState {
+            cuda,
+            d_data,
+            d_ps,
+            d_periods,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
-    struct DpoManyState {
+    struct DpoManyDeviceState {
         cuda: CudaDpo,
-        data_tm: Vec<f32>,
+        d_data_tm: DeviceBuffer<f32>,
+        d_ps_tm: DeviceBuffer<Float2>,
+        d_fv: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: DpoParams,
+        period: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for DpoManyState {
+    impl CudaBenchState for DpoManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dpo_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_data_tm,
+                    &self.d_ps_tm,
+                    &self.d_fv,
+                    self.cols as i32,
+                    self.rows as i32,
+                    self.period as i32,
+                    &mut self.d_out,
                 )
-                .expect("dpo many-series");
+                .expect("dpo many-series launch");
+            self.cuda.stream.synchronize().expect("dpo many sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -690,7 +734,31 @@ pub mod benches {
         let rows = MANY_SERIES_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
         let params = DpoParams { period: Some(20) };
-        Box::new(DpoManyState { cuda, data_tm, cols, rows, params })
+
+        let (first_valids, period) =
+            CudaDpo::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
+        let ps_tm = build_prefixes_time_major(&data_tm, cols, rows, &first_valids);
+
+        let d_data_tm = cuda.upload_slice(&data_tm).expect("d_data_tm H2D");
+        let d_ps_tm = cuda.upload_slice(&ps_tm).expect("d_ps_tm H2D");
+        let d_fv = cuda.upload_slice(&first_valids).expect("d_fv H2D");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(cols * rows, &cuda.stream)
+        }
+        .expect("d_out alloc");
+        cuda.stream.synchronize().expect("dpo many prep sync");
+
+        Box::new(DpoManyDeviceState {
+            cuda,
+            d_data_tm,
+            d_ps_tm,
+            d_fv,
+            cols,
+            rows,
+            period,
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

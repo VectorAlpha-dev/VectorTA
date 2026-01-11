@@ -5,6 +5,8 @@
 //   to avoid one-off custom wrappers.
 // - Until that macro exists, avoid adding per-indicator custom bench code.
 
+extern crate vector_ta as my_project;
+
 use anyhow::anyhow;
 use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion, Throughput,
@@ -12,7 +14,39 @@ use criterion::{
 use my_project::utilities::enums::Kernel;
 use once_cell::sync::Lazy;
 use paste::paste;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use std::arch::is_x86_feature_detected;
 use std::time::Duration;
+
+// Work around broken-pipe panics when piping `-- --list` output into tools like
+// `Select-Object -First ...` (downstream closes stdout early).
+#[cfg(not(target_arch = "wasm32"))]
+#[ctor::ctor]
+fn __install_broken_pipe_panic_hook() {
+    use std::panic;
+
+    let default = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("");
+
+        let is_stdout_broken_pipe = msg.contains("failed printing to stdout")
+            && (msg.contains("The pipe is being closed")
+                || msg.contains("Broken pipe")
+                || msg.contains("os error 232")
+                || msg.contains("os error 32"));
+
+        if is_stdout_broken_pipe {
+            std::process::exit(0);
+        }
+
+        default(info);
+    }));
+}
 
 // Import moving averages separately
 use my_project::indicators::moving_averages::{
@@ -516,6 +550,93 @@ fn pretty_len(len: usize) -> &'static str {
 
 const SIZES: [usize; 3] = [10_000, 100_000, 1_000_000];
 
+#[inline(always)]
+fn label_kernel_supported(label: &str) -> bool {
+    // Some indicators assume the caller never requests AVX kernels unless they are compiled-in and
+    // supported by the current CPU. The bench suite runs explicit kernel variants, so skip any
+    // AVX2/AVX512 benchmarks when unsupported to avoid panics/illegal instructions.
+    if label.contains("avx512") {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        {
+            return is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("fma");
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        {
+            return false;
+        }
+    }
+
+    if label.contains("avx2") {
+        #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+        {
+            return is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        }
+        #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[derive(Clone, Copy)]
+struct BenchConfig {
+    batch_all_sizes: bool,
+    measurement_ms: u64,
+    warmup_ms: u64,
+    sample_size: usize,
+    only_batch: bool,
+    batch_sizes_mask: u8,
+}
+
+fn env_bool(name: &str) -> bool {
+    let Ok(v) = std::env::var(name) else { return false };
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "y" | "on" => true,
+        _ => false,
+    }
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    let v = std::env::var(name).ok()?;
+    v.trim().replace('_', "").parse::<u64>().ok()
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    let v = std::env::var(name).ok()?;
+    v.trim().replace('_', "").parse::<usize>().ok()
+}
+
+fn env_batch_sizes_mask() -> u8 {
+    let Ok(v) = std::env::var("INDICATOR_BENCH_BATCH_SIZES") else { return 0 };
+    let mut mask = 0u8;
+    for tok in v
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+    {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "10k" | "10000" => mask |= 1 << 0,
+            "100k" | "100000" => mask |= 1 << 1,
+            "1m" | "1000000" => mask |= 1 << 2,
+            _ => {}
+        }
+    }
+    mask
+}
+
+fn bench_config() -> BenchConfig {
+    static CFG: std::sync::OnceLock<BenchConfig> = std::sync::OnceLock::new();
+    *CFG.get_or_init(|| BenchConfig {
+        batch_all_sizes: env_bool("INDICATOR_BENCH_BATCH_ALL_SIZES"),
+        measurement_ms: env_u64("INDICATOR_BENCH_MEASUREMENT_MS").unwrap_or(900),
+        warmup_ms: env_u64("INDICATOR_BENCH_WARMUP_MS").unwrap_or(150),
+        sample_size: env_usize("INDICATOR_BENCH_SAMPLE_SIZE").unwrap_or(10),
+        only_batch: env_bool("INDICATOR_BENCH_ONLY_BATCH"),
+        batch_sizes_mask: env_batch_sizes_mask(),
+    })
+}
+
 fn bench_one<F, In>(
     group: &mut BenchmarkGroup<'_, criterion::measurement::WallTime>,
     label: &str,
@@ -526,6 +647,34 @@ fn bench_one<F, In>(
     F: Fn(&In) -> anyhow::Result<()> + Copy + 'static,
     In: InputLen + 'static,
 {
+    if !label_kernel_supported(label) {
+        return;
+    }
+
+    // Batch benchmarks are typically much heavier (e.g. 250-row grids). By default,
+    // keep the full suite tractable by only running the smallest size for batch
+    // variants. For comprehensive runs, set `INDICATOR_BENCH_BATCH_ALL_SIZES=1`.
+    let cfg = bench_config();
+    let is_batch = label.contains("batch");
+    if cfg.only_batch && !is_batch {
+        return;
+    }
+    if is_batch {
+        if cfg.batch_sizes_mask != 0 {
+            let bit = match len {
+                10_000 => 1 << 0,
+                100_000 => 1 << 1,
+                1_000_000 => 1 << 2,
+                _ => 0,
+            };
+            if bit == 0 || (cfg.batch_sizes_mask & bit) == 0 {
+                return;
+            }
+        } else if !cfg.batch_all_sizes && len != SIZES[0] {
+            return;
+        }
+    }
+    
     //------------------------------------------------------------------
     // 1️⃣  Tell Criterion how many **bytes** one iteration really moves
     //     • window == None   ➜ simple streaming pass:        len × 8
@@ -541,9 +690,9 @@ fn bench_one<F, In>(
     //------------------------------------------------------------------
     // 2️⃣  Configure the group *before* registering the benchmark
     //------------------------------------------------------------------
-    group.measurement_time(Duration::from_millis(900));
-    group.warm_up_time(Duration::from_millis(150));
-    group.sample_size(10);
+    group.measurement_time(Duration::from_millis(cfg.measurement_ms));
+    group.warm_up_time(Duration::from_millis(cfg.warmup_ms));
+    group.sample_size(cfg.sample_size);
 
     //------------------------------------------------------------------
     // 3️⃣  Register the benchmark
@@ -2338,6 +2487,26 @@ make_triple_with_builder_wrappers!(
     |b: AdxBatchBuilder| b.period_range(10, 30, 5)
 );
 
+// ADX batch "dev" sweep matching CUDA's 1m_x_250: 250 periods (8..2000 step 8).
+make_triple_with_builder_wrappers!(
+    adx_batch_dev_250,
+    AdxBatchBuilder,
+    AdxInputS,
+    |input: &AdxInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        use my_project::indicators::adx::AdxData;
+        let (h, l, c) = match &input.data {
+            AdxData::Candles { candles } => (
+                source_type(candles, "high"),
+                source_type(candles, "low"),
+                source_type(candles, "close"),
+            ),
+            AdxData::Slices { high, low, close } => (*high, *low, *close),
+        };
+        Ok((h, l, c))
+    },
+    |b: AdxBatchBuilder| b.period_range(8, 2000, 8)
+);
+
 make_triple_with_builder_and_method_wrappers!(
     dx_batch,
     DxBatchBuilder,
@@ -2981,7 +3150,7 @@ make_batch_wrappers!(
 make_batch_wrappers!(kst_batch, KstBatchBuilder, KstInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 bench_variants!(
-    alma_batch => AlmaInputS; Some(232);
+    alma_batch => AlmaInputS; Some(250);
     alma_batch_scalarbatch,
     alma_batch_avx2batch,
     alma_batch_avx512batch
@@ -3066,6 +3235,13 @@ bench_variants!(
     adx_batch_scalarbatch,
     adx_batch_avx2batch,
     adx_batch_avx512batch,
+);
+
+bench_variants!(
+    adx_batch_dev_250 => AdxInputS; None;
+    adx_batch_dev_250_scalarbatch,
+    adx_batch_dev_250_avx2batch,
+    adx_batch_dev_250_avx512batch,
 );
 
 bench_variants!(
@@ -3348,21 +3524,21 @@ bench_variants!(
 );
 
 bench_variants!(
-    cwma_batch => CwmaInputS; Some(227);
+    cwma_batch => CwmaInputS; Some(250);
     cwma_batch_scalarbatch,
     cwma_batch_avx2batch,
     cwma_batch_avx512batch,
 );
 
 bench_variants!(
-   dema_batch => DemaInputS; Some(227);
+   dema_batch => DemaInputS; Some(250);
    dema_batch_scalarbatch,
    dema_batch_avx2batch,
    dema_batch_avx512batch,
 );
 
 bench_variants!(
-   edcf_batch => EdcfInputS; Some(227);
+   edcf_batch => EdcfInputS; Some(250);
    edcf_batch_scalarbatch,
    edcf_batch_avx2batch,
    edcf_batch_avx512batch,
@@ -3390,21 +3566,21 @@ bench_variants!(
 );
 
 bench_variants!(
-    ehlers_ecema_batch => EhlersEcemaInputS; Some(227);
+    ehlers_ecema_batch => EhlersEcemaInputS; Some(250);
     ehlers_ecema_batch_scalarbatch,
     ehlers_ecema_batch_avx2batch,
     ehlers_ecema_batch_avx512batch,
 );
 
 bench_variants!(
-    ehlers_itrend_batch => EhlersITrendInputS; Some(227);
+    ehlers_itrend_batch => EhlersITrendInputS; Some(250);
     ehlers_itrend_batch_scalarbatch,
     ehlers_itrend_batch_avx2batch,
     ehlers_itrend_batch_avx512batch,
 );
 
 bench_variants!(
-    ehlers_pma_batch => EhlersPmaInputS; Some(227);
+    ehlers_pma_batch => EhlersPmaInputS; Some(250);
     ehlers_pma_batch_scalarbatch,
     ehlers_pma_batch_avx2batch,
     ehlers_pma_batch_avx512batch,
@@ -3418,7 +3594,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    ema_batch => EmaInputS; Some(227);
+    ema_batch => EmaInputS; Some(250);
     ema_batch_scalarbatch,
     ema_batch_avx2batch,
     ema_batch_avx512batch,
@@ -3432,7 +3608,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    epma_batch => EpmaInputS; Some(227);
+    epma_batch => EpmaInputS; Some(250);
     epma_batch_scalarbatch,
     epma_batch_avx2batch,
     epma_batch_avx512batch,
@@ -3446,28 +3622,28 @@ bench_variants!(
 );
 
 bench_variants!(
-    frama_batch => FramaInputS; Some(227);
+    frama_batch => FramaInputS; Some(250);
     frama_batch_scalarbatch,
     frama_batch_avx2batch,
     frama_batch_avx512batch,
 );
 
 bench_variants!(
-    fwma_batch => FwmaInputS; Some(227);
+    fwma_batch => FwmaInputS; Some(250);
     fwma_batch_scalarbatch,
     fwma_batch_avx2batch,
     fwma_batch_avx512batch,
 );
 
 bench_variants!(
-    gaussian_batch => GaussianInputS; Some(227);
+    gaussian_batch => GaussianInputS; Some(250);
     gaussian_batch_scalarbatch,
     gaussian_batch_avx2batch,
     gaussian_batch_avx512batch,
 );
 
 bench_variants!(
-    highpass_2_pole_batch => HighPass2InputS; Some(227);
+    highpass_2_pole_batch => HighPass2InputS; Some(250);
     highpass_2_pole_batch_scalarbatch,
     highpass_2_pole_batch_avx2batch,
     highpass_2_pole_batch_avx512batch,
@@ -3481,14 +3657,14 @@ bench_variants!(
 );
 
 bench_variants!(
-    highpass_batch => HighPassInputS; Some(227);
+    highpass_batch => HighPassInputS; Some(250);
     highpass_batch_scalarbatch,
     highpass_batch_avx2batch,
     highpass_batch_avx512batch,
 );
 
 bench_variants!(
-    hma_batch => HmaInputS; Some(227);
+    hma_batch => HmaInputS; Some(250);
     hma_batch_scalarbatch,
     hma_batch_avx2batch,
     hma_batch_avx512batch,
@@ -3511,35 +3687,35 @@ bench_variants!(
 );
 
 bench_variants!(
-    hwma_batch => HwmaInputS; Some(227);
+    hwma_batch => HwmaInputS; Some(250);
     hwma_batch_scalarbatch,
     hwma_batch_avx2batch,
     hwma_batch_avx512batch,
 );
 
 bench_variants!(
-    jma_batch => JmaInputS; Some(227);
+    jma_batch => JmaInputS; Some(250);
     jma_batch_scalarbatch,
     jma_batch_avx2batch,
     jma_batch_avx512batch,
 );
 
 bench_variants!(
-    jsa_batch => JsaInputS; Some(227);
+    jsa_batch => JsaInputS; Some(250);
     jsa_batch_scalarbatch,
     jsa_batch_avx2batch,
     jsa_batch_avx512batch,
 );
 
 bench_variants!(
-    kama_batch => KamaInputS; Some(227);
+    kama_batch => KamaInputS; Some(250);
     kama_batch_scalarbatch,
     kama_batch_avx2batch,
     kama_batch_avx512batch,
 );
 
 bench_variants!(
-    linreg_batch => LinRegInputS; Some(227);
+    linreg_batch => LinRegInputS; Some(250);
     linreg_batch_scalarbatch,
     linreg_batch_avx2batch,
     linreg_batch_avx512batch,
@@ -3560,133 +3736,133 @@ bench_variants!(
 );
 
 bench_variants!(
-    maaq_batch => MaaqInputS; Some(227);
+    maaq_batch => MaaqInputS; Some(250);
     maaq_batch_scalarbatch,
     maaq_batch_avx2batch,
     maaq_batch_avx512batch,
 );
 
 bench_variants!(
-    mama_batch => MamaInputS; Some(227);
+    mama_batch => MamaInputS; Some(250);
     mama_batch_scalarbatch,
     mama_batch_avx2batch,
     mama_batch_avx512batch,
 );
 
 bench_variants!(
-    mwdx_batch => MwdxInputS; Some(227);
+    mwdx_batch => MwdxInputS; Some(250);
     mwdx_batch_scalarbatch,
     mwdx_batch_avx2batch,
     mwdx_batch_avx512batch,
 );
 
 bench_variants!(
-    nma_batch => NmaInputS; Some(227);
+    nma_batch => NmaInputS; Some(250);
     nma_batch_scalarbatch,
     nma_batch_avx2batch,
     nma_batch_avx512batch,
 );
 
 bench_variants!(
-    pwma_batch => PwmaInputS; Some(227);
+    pwma_batch => PwmaInputS; Some(250);
     pwma_batch_scalarbatch,
     pwma_batch_avx2batch,
     pwma_batch_avx512batch,
 );
 
 bench_variants!(
-    reflex_batch => ReflexInputS; Some(227);
+    reflex_batch => ReflexInputS; Some(250);
     reflex_batch_scalarbatch,
     reflex_batch_avx2batch,
     reflex_batch_avx512batch,
 );
 
 bench_variants!(
-    sinwma_batch => SinWmaInputS; Some(227);
+    sinwma_batch => SinWmaInputS; Some(250);
     sinwma_batch_scalarbatch,
     sinwma_batch_avx2batch,
     sinwma_batch_avx512batch,
 );
 
 bench_variants!(
-    sma_batch => SmaInputS; Some(227);
+    sma_batch => SmaInputS; Some(250);
     sma_batch_scalarbatch,
     sma_batch_avx2batch,
     sma_batch_avx512batch,
 );
 
 bench_variants!(
-    smma_batch => SmmaInputS; Some(227);
+    smma_batch => SmmaInputS; Some(250);
     smma_batch_scalarbatch,
     smma_batch_avx2batch,
     smma_batch_avx512batch,
 );
 
 bench_variants!(
-    sqwma_batch => SqwmaInputS; Some(227);
+    sqwma_batch => SqwmaInputS; Some(250);
     sqwma_batch_scalarbatch,
     sqwma_batch_avx2batch,
     sqwma_batch_avx512batch,
 );
 
 bench_variants!(
-    srwma_batch => SrwmaInputS; Some(227);
+    srwma_batch => SrwmaInputS; Some(250);
     srwma_batch_scalarbatch,
     srwma_batch_avx2batch,
     srwma_batch_avx512batch,
 );
 
 bench_variants!(
-    supersmoother_batch => SuperSmootherInputS; Some(227);
+    supersmoother_batch => SuperSmootherInputS; Some(250);
     supersmoother_batch_scalarbatch,
     supersmoother_batch_avx2batch,
     supersmoother_batch_avx512batch,
 );
 
 bench_variants!(
-    supersmoother_3_pole_batch => SuperSmoother3PoleInputS; Some(227);
+    supersmoother_3_pole_batch => SuperSmoother3PoleInputS; Some(250);
     supersmoother_3_pole_batch_scalarbatch,
     supersmoother_3_pole_batch_avx2batch,
     supersmoother_3_pole_batch_avx512batch,
 );
 
 bench_variants!(
-    swma_batch => SwmaInputS; Some(227);
+    swma_batch => SwmaInputS; Some(250);
     swma_batch_scalarbatch,
     swma_batch_avx2batch,
     swma_batch_avx512batch,
 );
 
 bench_variants!(
-    tema_batch => TemaInputS; Some(227);
+    tema_batch => TemaInputS; Some(250);
     tema_batch_scalarbatch,
     tema_batch_avx2batch,
     tema_batch_avx512batch,
 );
 
 bench_variants!(
-    tilson_batch => TilsonInputS; Some(227);
+    tilson_batch => TilsonInputS; Some(250);
     tilson_batch_scalarbatch,
     tilson_batch_avx2batch,
     tilson_batch_avx512batch,
 );
 
 bench_variants!(
-    tradjema_batch => TradjemaInputS; Some(227);
+    tradjema_batch => TradjemaInputS; Some(250);
     tradjema_batch_scalarbatch,
     tradjema_batch_avx2batch,
     tradjema_batch_avx512batch,
 );
 
 bench_variants!(
-    trendflex_batch => TrendFlexInputS; Some(227);
+    trendflex_batch => TrendFlexInputS; Some(250);
     trendflex_batch_scalarbatch,
     trendflex_batch_avx2batch,
     trendflex_batch_avx512batch,
 );
 
 bench_variants!(
-    trima_batch => TrimaInputS; Some(227);
+    trima_batch => TrimaInputS; Some(250);
     trima_batch_scalarbatch,
     trima_batch_avx2batch,
     trima_batch_avx512batch,
@@ -3712,7 +3888,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    uma_batch => UmaInputS; Some(227);
+    uma_batch => UmaInputS; Some(250);
     uma_batch_scalarbatch,
     uma_batch_avx2batch,
     uma_batch_avx512batch,
@@ -3740,7 +3916,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    vpwma_batch => VpwmaInputS; Some(227);
+    vpwma_batch => VpwmaInputS; Some(250);
     vpwma_batch_scalarbatch,
     vpwma_batch_avx2batch,
     vpwma_batch_avx512batch,
@@ -3761,14 +3937,14 @@ bench_variants!(
 );
 
 bench_variants!(
-    wilders_batch => WildersInputS; Some(227);
+    wilders_batch => WildersInputS; Some(250);
     wilders_batch_scalarbatch,
     wilders_batch_avx2batch,
     wilders_batch_avx512batch,
 );
 
 bench_variants!(
-    wma_batch => WmaInputS; Some(227);
+    wma_batch => WmaInputS; Some(250);
     wma_batch_scalarbatch,
     wma_batch_avx2batch,
     wma_batch_avx512batch,
@@ -3782,7 +3958,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    zlema_batch => ZlemaInputS; Some(227);
+    zlema_batch => ZlemaInputS; Some(250);
     zlema_batch_scalarbatch,
     zlema_batch_avx2batch,
     zlema_batch_avx512batch,
@@ -4687,7 +4863,7 @@ bench_variants!(
 );
 
 bench_variants!(
-    vama_batch => VamaInputS; Some(232);
+    vama_batch => VamaInputS; Some(250);
     vama_batch_scalarbatch,
     vama_batch_avx2batch,
     vama_batch_avx512batch
@@ -5147,6 +5323,7 @@ bench_variants!(
     benches_dx_batch,
     benches_adx,
     benches_adx_batch,
+    benches_adx_batch_dev_250,
     benches_ultosc_batch,
     benches_qstick_batch,
     benches_tsi_batch,

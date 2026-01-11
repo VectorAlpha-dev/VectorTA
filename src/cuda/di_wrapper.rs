@@ -754,10 +754,43 @@ pub mod benches {
         cols: usize,
         rows: usize,
         period: usize,
+        grid: GridSize,
+        block: BlockSize,
     }
     impl CudaBenchState for DiManyState {
         fn launch(&mut self) {
-            let _ = self.cuda.synchronize();
+            let func = self
+                .cuda
+                .module
+                .get_function("di_many_series_one_param_f32")
+                .expect("di_many_series_one_param_f32");
+            unsafe {
+                let mut h_ptr = self.d_high.as_device_ptr().as_raw();
+                let mut l_ptr = self.d_low.as_device_ptr().as_raw();
+                let mut c_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut fv_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut per_i = self.period as i32;
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut plus_ptr = self.d_plus_tm.as_device_ptr().as_raw();
+                let mut minus_ptr = self.d_minus_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut h_ptr as *mut _ as *mut c_void,
+                    &mut l_ptr as *mut _ as *mut c_void,
+                    &mut c_ptr as *mut _ as *mut c_void,
+                    &mut fv_ptr as *mut _ as *mut c_void,
+                    &mut per_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut plus_ptr as *mut _ as *mut c_void,
+                    &mut minus_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("di many-series launch");
+            }
+            self.cuda.synchronize().expect("di many-series sync");
         }
     }
 
@@ -800,7 +833,18 @@ pub mod benches {
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("po");
         let d_minus_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("mo");
-        DiManyState { cuda, d_high, d_low, d_close, d_first, d_plus_tm, d_minus_tm, cols, rows, period }
+
+        let block_x = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+            _ => 128,
+        };
+        let warps_per_block = (block_x / 32).max(1);
+        let grid_x = ((cols as u32) + warps_per_block as u32 - 1) / warps_per_block as u32;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.synchronize().expect("di many prep sync");
+
+        DiManyState { cuda, d_high, d_low, d_close, d_first, d_plus_tm, d_minus_tm, cols, rows, period, grid, block }
     }
     fn prep_di_many_series_box() -> Box<dyn CudaBenchState> { Box::new(prep_di_many_series()) }
 }

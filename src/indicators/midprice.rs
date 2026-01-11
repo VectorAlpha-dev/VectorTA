@@ -585,7 +585,7 @@ pub struct MidpriceBatchRange {
 impl Default for MidpriceBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

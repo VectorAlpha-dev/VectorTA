@@ -239,20 +239,7 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
     }
 
     let chosen = match kernel {
-        Kernel::Auto => {
-            // AVX-512 single-series currently routes to scalar; prefer AVX2 when AVX-512 is available.
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            {
-                match detect_best_kernel() {
-                    Kernel::Avx512 => Kernel::Avx2,
-                    other => other,
-                }
-            }
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -301,20 +288,7 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
     }
 
     let chosen = match kern {
-        Kernel::Auto => {
-            // AVX-512 single-series currently routes to scalar; prefer AVX2 when AVX-512 is available.
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            {
-                match detect_best_kernel() {
-                    Kernel::Avx512 => Kernel::Avx2,
-                    other => other,
-                }
-            }
-            #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            {
-                detect_best_kernel()
-            }
-        }
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -673,7 +647,7 @@ pub struct ErBatchRange {
 
 impl Default for ErBatchRange {
     fn default() -> Self {
-        Self { period: (5, 60, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

@@ -457,7 +457,7 @@ fn avsl_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -1718,7 +1718,7 @@ impl Default for AvslBatchRange {
     fn default() -> Self {
         Self {
             fast_period: (12, 12, 0),    // Static at default value
-            slow_period: (26, 26, 0),    // Static at default value
+            slow_period: (26, 275, 1),    // 250 combos (includes default 26)
             multiplier: (2.0, 2.0, 0.0), // Static at default value
         }
     }
@@ -2774,7 +2774,7 @@ impl AvslContext {
             fast_period,
             slow_period,
             multiplier,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Auto,
         })
     }
 
@@ -3260,7 +3260,7 @@ mod tests {
             Kernel::Auto,
         )?;
         assert_eq!(default_output.cols, candles.close.len());
-        assert_eq!(default_output.rows, 1); // Default parameters should give 1 row
+        assert_eq!(default_output.rows, 250); // Default batch range yields 250 parameter combos
 
         Ok(())
     }

@@ -163,14 +163,18 @@ impl CudaSafeZoneStop {
     }
 
     #[inline]
-    fn upload_pinned_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaSafeZoneStopError> {
-        // Stage in pinned (page-locked) host memory so async H2D truly overlaps compute.
+    fn upload_pinned_f32(
+        &self,
+        src: &[f32],
+    ) -> Result<(DeviceBuffer<f32>, LockedBuffer<f32>), CudaSafeZoneStopError> {
+        // NOTE: For async copies, the pinned host buffer must stay alive until the stream
+        // completes. Callers are responsible for keeping the returned LockedBuffer alive.
         let h_pin = LockedBuffer::from_slice(src)?;
         let mut d = unsafe { DeviceBuffer::<f32>::uninitialized_async(src.len(), &self.stream) }?;
         unsafe {
             d.async_copy_from(&h_pin, &self.stream)?;
         }
-        Ok(d)
+        Ok((d, h_pin))
     }
 
     #[inline]
@@ -420,9 +424,9 @@ impl CudaSafeZoneStop {
         }
 
         // Uploads: pinned for big arrays for true async H2D
-        let d_high = self.upload_pinned_f32(high_f32)?;
-        let d_low  = self.upload_pinned_f32(low_f32)?;
-        let d_dm   = self.upload_pinned_f32(&dm_raw)?;
+        let (d_high, h_high_pin) = self.upload_pinned_f32(high_f32)?;
+        let (d_low, h_low_pin) = self.upload_pinned_f32(low_f32)?;
+        let (d_dm, h_dm_pin) = self.upload_pinned_f32(&dm_raw)?;
 
         // Small arrays sync-upload is fine
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
@@ -510,6 +514,11 @@ impl CudaSafeZoneStop {
         drop(opt_q_val);
 
         self.stream.synchronize()?;
+
+        // Keep pinned host staging buffers alive until all async copies are complete.
+        drop(h_high_pin);
+        drop(h_low_pin);
+        drop(h_dm_pin);
 
         Ok((
             DeviceArrayF32 {
@@ -630,8 +639,8 @@ impl CudaSafeZoneStop {
         }
 
         // Uploads (pinned for big matrices)
-        let d_high = self.upload_pinned_f32(high_tm_f32)?;
-        let d_low  = self.upload_pinned_f32(low_tm_f32)?;
+        let (d_high, h_high_pin) = self.upload_pinned_f32(high_tm_f32)?;
+        let (d_low, h_low_pin) = self.upload_pinned_f32(low_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
@@ -711,6 +720,10 @@ impl CudaSafeZoneStop {
 
         self.stream.synchronize()?;
 
+        // Keep pinned host staging buffers alive until all async copies are complete.
+        drop(h_high_pin);
+        drop(h_low_pin);
+
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows,
@@ -744,21 +757,58 @@ pub mod benches {
         ]
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaSafeZoneStop,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: SafeZoneStopBatchRange,
-        dir: &'static str,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_dm: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_mults: DeviceBuffer<f32>,
+        d_looks: DeviceBuffer<i32>,
+        d_q_idx: DeviceBuffer<i32>,
+        d_q_val: DeviceBuffer<f32>,
+        lb_cap_i32: i32,
+        d_out: DeviceBuffer<f32>,
+        n: usize,
+        first: usize,
+        combos: usize,
+        dir_i32: i32,
+        grid: GridSize,
+        block: BlockSize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .safezonestop_batch_dev(&self.high, &self.low, self.dir, &self.sweep);
+                .module
+                .get_function("safezonestop_batch_f32")
+                .expect("safezonestop_batch_f32");
+            let stream = &self.cuda.stream;
+            unsafe {
+                launch!(
+                    func<<<self.grid, self.block, 0, stream>>>(
+                        self.d_high.as_device_ptr().as_raw(),
+                        self.d_low.as_device_ptr().as_raw(),
+                        self.d_dm.as_device_ptr().as_raw(),
+                        self.n as i32,
+                        self.first as i32,
+                        self.d_periods.as_device_ptr().as_raw(),
+                        self.d_mults.as_device_ptr().as_raw(),
+                        self.d_looks.as_device_ptr().as_raw(),
+                        self.combos as i32,
+                        self.dir_i32,
+                        self.d_q_idx.as_device_ptr().as_raw(),
+                        self.d_q_val.as_device_ptr().as_raw(),
+                        self.lb_cap_i32,
+                        self.d_out.as_device_ptr().as_raw()
+                    )
+                )
+                .expect("safezonestop batch launch");
+            }
+            self.cuda.stream.synchronize().expect("safezonestop batch sync");
         }
     }
-    fn prep_batch() -> BatchState {
+    fn prep_batch() -> BatchDeviceState {
         let cuda = CudaSafeZoneStop::new(0).expect("cuda szz");
         let len = 60_000usize;
         let mut high = vec![f32::NAN; len];
@@ -774,43 +824,123 @@ pub mod benches {
             mult: (1.5, 3.0, 0.75),
             max_lookback: (3, 5, 1),
         };
-        BatchState {
+        let dir_long = true;
+        let dir_i32 = 1i32;
+        let first = (0..len)
+            .find(|&i| high[i].is_finite() && low[i].is_finite())
+            .unwrap_or(0);
+        let combos = CudaSafeZoneStop::expand_grid(&sweep).expect("expand_grid");
+        let n_combos = combos.len();
+        let mut periods_i32 = Vec::with_capacity(n_combos);
+        let mut mults_f32 = Vec::with_capacity(n_combos);
+        let mut looks_i32 = Vec::with_capacity(n_combos);
+        let mut max_look = 0usize;
+        for prm in &combos {
+            let p = prm.period.unwrap_or(14);
+            let m = prm.mult.unwrap_or(2.0) as f32;
+            let lb = prm.max_lookback.unwrap_or(3);
+            periods_i32.push(p as i32);
+            mults_f32.push(m);
+            looks_i32.push(lb as i32);
+            max_look = max_look.max(lb);
+        }
+        let dm_raw = CudaSafeZoneStop::compute_dm_raw_f32(&high, &low, first, dir_long);
+        let lb_cap = (max_look + 1).max(2);
+        let out_elems = n_combos * len;
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_dm = DeviceBuffer::from_slice(&dm_raw).expect("d_dm");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_mults = DeviceBuffer::from_slice(&mults_f32).expect("d_mults");
+        let d_looks = DeviceBuffer::from_slice(&looks_i32).expect("d_looks");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let d_q_idx: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * lb_cap) }.expect("d_q_idx");
+        let d_q_val: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * lb_cap) }.expect("d_q_val");
+
+        const TB: u32 = 256;
+        let block: BlockSize = (TB, 1, 1).into();
+        let grid_x = ((n_combos as u32) + TB - 1) / TB;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        cuda.validate_launch(grid_x, 1, 1, TB, 1, 1)
+            .expect("validate launch");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        BatchDeviceState {
             cuda,
-            high,
-            low,
-            sweep,
-            dir: "long",
+            d_high,
+            d_low,
+            d_dm,
+            d_periods,
+            d_mults,
+            d_looks,
+            d_q_idx,
+            d_q_val,
+            lb_cap_i32: lb_cap as i32,
+            d_out,
+            n: len,
+            first,
+            combos: n_combos,
+            dir_i32,
+            grid,
+            block,
         }
     }
     fn prep_batch_box() -> Box<dyn CudaBenchState> {
         Box::new(prep_batch())
     }
 
-    struct ManySeriesState {
+    struct ManySeriesDeviceState {
         cuda: CudaSafeZoneStop,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
         period: usize,
         mult: f32,
         lb: usize,
     }
-    impl CudaBenchState for ManySeriesState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self.cuda.safezonestop_many_series_one_param_time_major_dev(
-                &self.high_tm,
-                &self.low_tm,
-                self.cols,
-                self.rows,
-                self.period,
-                self.mult,
-                self.lb,
-                "long",
-            );
+            let func = self
+                .cuda
+                .module
+                .get_function("safezonestop_many_series_one_param_time_major_f32")
+                .expect("safezonestop_many_series_one_param_time_major_f32");
+            const TB: u32 = 256;
+            let block: BlockSize = (TB, 1, 1).into();
+            let grid_x = ((self.cols as u32) + TB - 1) / TB;
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let stream = &self.cuda.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        self.d_high_tm.as_device_ptr().as_raw(),
+                        self.d_low_tm.as_device_ptr().as_raw(),
+                        self.cols as i32,
+                        self.rows as i32,
+                        self.period as i32,
+                        self.mult,
+                        self.lb as i32,
+                        self.d_first.as_device_ptr().as_raw(),
+                        1i32,
+                        0u64,
+                        0u64,
+                        0i32,
+                        self.d_out.as_device_ptr().as_raw()
+                    )
+                )
+                .expect("safezonestop many launch");
+            }
+            self.cuda.stream.synchronize().expect("safezonestop many sync");
         }
     }
-    fn prep_many_series() -> ManySeriesState {
+    fn prep_many_series() -> ManySeriesDeviceState {
         let cuda = CudaSafeZoneStop::new(0).expect("cuda szz");
         let cols = 250usize;
         let rows = 1_000_000usize;
@@ -824,10 +954,28 @@ pub mod benches {
                 low_tm[t * cols + s] = base - 0.5;
             }
         }
-        ManySeriesState {
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+        ManySeriesDeviceState {
             cuda,
-            high_tm,
-            low_tm,
+            d_high_tm,
+            d_low_tm,
+            d_first,
+            d_out,
             cols,
             rows,
             period: 22,

@@ -251,7 +251,7 @@ fn mwdx_prepare<'a>(
     let warm = data.iter().position(|x| !x.is_nan()).unwrap_or(len);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -480,7 +480,7 @@ pub struct MwdxBatchRange {
 impl Default for MwdxBatchRange {
     fn default() -> Self {
         Self {
-            factor: (0.2, 0.2, 0.0),
+            factor: (0.2, 0.449, 0.001),
         }
     }
 }

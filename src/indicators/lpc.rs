@@ -336,10 +336,10 @@ pub struct LpcBatchRange {
 impl Default for LpcBatchRange {
     fn default() -> Self {
         Self {
-            fixed_period: (20, 60, 1),
+            fixed_period: (20, 269, 1),
             cycle_mult: (1.0, 1.0, 0.0),
             tr_mult: (1.0, 1.0, 0.0),
-            cutoff_type: "fixed".to_string(),
+            cutoff_type: "adaptive".to_string(),
             max_cycle_limit: 60,
         }
     }
@@ -846,11 +846,7 @@ fn lpc_compute_into(
     out_low: &mut [f64],
 ) {
     let actual_kernel = match kernel {
-        // AVX-512 is often slower here due to sequential IIR + potential downclock; prefer AVX2.
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 => Kernel::Avx2,
-            other => other,
-        },
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1315,11 +1311,7 @@ fn lpc_prepare<'a>(
         return Err(LpcError::NotEnoughValidData { needed: 2, valid });
     }
 
-    let chosen = if kernel == Kernel::Auto {
-        detect_best_kernel()
-    } else {
-        kernel
-    };
+    let chosen = if kernel == Kernel::Auto { Kernel::Scalar } else { kernel };
 
     Ok((
         high,
@@ -2130,7 +2122,7 @@ pub fn lpc_into(
             let mut f = vec![0.0; len];
             let mut hb = vec![0.0; len];
             let mut lb = vec![0.0; len];
-            lpc_into_slices(&mut f, &mut hb, &mut lb, &input, detect_best_kernel())
+            lpc_into_slices(&mut f, &mut hb, &mut lb, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(filter_out_ptr, len).copy_from_slice(&f);
             std::slice::from_raw_parts_mut(high_out_ptr, len).copy_from_slice(&hb);
@@ -2139,7 +2131,7 @@ pub fn lpc_into(
             let f = std::slice::from_raw_parts_mut(filter_out_ptr, len);
             let hb = std::slice::from_raw_parts_mut(high_out_ptr, len);
             let lb = std::slice::from_raw_parts_mut(low_out_ptr, len);
-            lpc_into_slices(f, hb, lb, &input, detect_best_kernel())
+            lpc_into_slices(f, hb, lb, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())

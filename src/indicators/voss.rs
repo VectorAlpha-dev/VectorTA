@@ -721,7 +721,7 @@ pub struct VossBatchRange {
 impl Default for VossBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 100, 1),
+            period: (20, 269, 1),
             predict: (3, 3, 0),
             bandwidth: (0.25, 0.25, 0.0),
         }

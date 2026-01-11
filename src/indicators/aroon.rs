@@ -13,7 +13,7 @@
 //! - **`Err(AroonError)`** otherwise.
 //!
 //! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 enabled and selected at runtime when supported; >30% faster at 100k vs scalar on x86_64.
+//! - SIMD status: AVX2/AVX512 implementations exist but are **disabled by default** (Auto selects scalar) because the current SIMD kernels rescan each window and are slower than the Tulip-style scalar rolling-extrema path. Revisit SIMD only with a true O(1) rolling extrema SIMD strategy.
 //! - Scalar path: single-pass per window (combined finiteness + argmin/argmax), safe and allocation-free.
 //! - Batch row-specific: not implemented; little cross-row reuse for Aroon windows. Current batch dispatches per-row to best kernel.
 //! - Memory: zero-copy helpers for outputs; warmup masked to preserve leading-NaN semantics.
@@ -239,16 +239,10 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         });
     }
 
-    let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+    let chosen = match kernel {
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    // Prefer AVX2 over AVX512 in Auto for Aroon: on many CPUs this kernel is consistently faster
-    // than AVX512 for this workload. Explicit Avx512 selection remains available via the API.
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
-        chosen = Kernel::Avx2;
-    }
 
     // Calculate warmup period with proper handling of leading NaNs
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
@@ -325,71 +319,216 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
     }
 
     #[inline(always)]
-    fn aroon_percent(dist: usize, length: usize, scale_100: f64) -> f64 {
-        if dist == 0 {
-            100.0
-        } else if dist >= length {
-            0.0
-        } else {
-            (-(dist as f64)).mul_add(scale_100, 100.0)
+    fn aroon_percent(dist: usize, scale_100: f64) -> f64 {
+        // Clamp to [0, 100] to avoid tiny negative values from FP rounding when `dist == length`.
+        let v = 100.0 - (dist as f64) * scale_100;
+        v.max(0.0)
+    }
+
+    // Fast path: if all inputs are finite, avoid per-step invalid window bookkeeping
+    // (which otherwise forces extra "leave" loads and bit checks each iteration).
+    //
+    // This preserves outputs exactly for the all-finite case and falls back to the
+    // NaN-aware implementation when needed.
+    let mut all_finite = true;
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let mut i = 0usize;
+        while i < len {
+            if !pair_is_finite(*hp.add(i), *lp.add(i)) {
+                all_finite = false;
+                break;
+            }
+            i += 1;
         }
     }
 
-    // For each bar i from `length` up to `len - 1`, scan a window of size `length + 1`.
-    // Single-pass per window: finiteness check + argmax/argmin together to reduce memory traffic.
-    for i in length..len {
+    if all_finite {
+        unsafe {
+            let hp = high.as_ptr();
+            let lp = low.as_ptr();
+            let up_ptr = up.as_mut_ptr();
+            let dn_ptr = down.as_mut_ptr();
+
+            // No outputs when `length >= len` (matches the original control flow).
+            if length < len {
+                // Initialize at i = length, window [0..=length].
+                let i0 = length;
+                let mut maxi = 0usize;
+                let mut mini = 0usize;
+                let mut max = *hp;
+                let mut min = *lp;
+
+                let mut j = 1usize;
+                while j <= i0 {
+                    let hv = *hp.add(j);
+                    if hv > max {
+                        max = hv;
+                        maxi = j;
+                    }
+                    let lv = *lp.add(j);
+                    if lv < min {
+                        min = lv;
+                        mini = j;
+                    }
+                    j += 1;
+                }
+
+                *up_ptr.add(i0) = aroon_percent(i0 - maxi, scale_100);
+                *dn_ptr.add(i0) = aroon_percent(i0 - mini, scale_100);
+
+                // Main loop.
+                let mut i = i0 + 1;
+                while i < len {
+                    let start = i - length;
+                    let h = *hp.add(i);
+                    let l = *lp.add(i);
+
+                    // Highest high
+                    if maxi < start {
+                        maxi = start;
+                        max = *hp.add(maxi);
+                        let mut j = start + 1;
+                        while j <= i {
+                            let hv = *hp.add(j);
+                            if hv > max {
+                                max = hv;
+                                maxi = j;
+                            }
+                            j += 1;
+                        }
+                    } else if h > max {
+                        maxi = i;
+                        max = h;
+                    }
+
+                    // Lowest low
+                    if mini < start {
+                        mini = start;
+                        min = *lp.add(mini);
+                        let mut j = start + 1;
+                        while j <= i {
+                            let lv = *lp.add(j);
+                            if lv < min {
+                                min = lv;
+                                mini = j;
+                            }
+                            j += 1;
+                        }
+                    } else if l < min {
+                        mini = i;
+                        min = l;
+                    }
+
+                    *up_ptr.add(i) = aroon_percent(i - maxi, scale_100);
+                    *dn_ptr.add(i) = aroon_percent(i - mini, scale_100);
+
+                    i += 1;
+                }
+            }
+        }
+
+        return;
+    }
+
+    // Match Tulip-style O(1) amortized max/min maintenance without allocating.
+    //
+    // Window is `[i-length..=i]` (length+1 samples). Tie rules preserve the earliest
+    // extreme (strict comparisons), matching the historical scalar scan behavior.
+    //
+    // If any (high, low) pair in the window is non-finite, output NaN for both.
+    let window = length + 1;
+    let mut invalid_count: usize = 0;
+
+    let mut have_extremes = false;
+    let mut maxi: usize = 0;
+    let mut mini: usize = 0;
+    let mut max = 0.0f64;
+    let mut min = 0.0f64;
+
+    for i in 0..len {
+        let h = high[i];
+        let l = low[i];
+        if !pair_is_finite(h, l) {
+            invalid_count += 1;
+        }
+        if i >= window {
+            let leave = i - window;
+            if !pair_is_finite(high[leave], low[leave]) {
+                invalid_count -= 1;
+            }
+        }
+
+        if i < length {
+            continue;
+        }
+
+        if invalid_count != 0 {
+            up[i] = f64::NAN;
+            down[i] = f64::NAN;
+            have_extremes = false;
+            continue;
+        }
+
         let start = i - length;
 
-        // Initialize with the first element in the window [start..=i]
-        let h0 = high[start];
-        let l0 = low[start];
-        if !pair_is_finite(h0, l0) {
-            up[i] = f64::NAN;
-            down[i] = f64::NAN;
-            continue;
-        }
-        let mut max_val = h0;
-        let mut min_val = l0;
-        let mut max_off = 0usize;
-        let mut min_off = 0usize;
-
-        // Walk the remainder of the window and update in one pass.
-        // Tie rules preserved by using strict comparisons (> for highs, < for lows).
-        let mut off = 1usize;
-        let window = length + 1; // number of items in [start..=i]
-        let mut valid = true;
-
-        while off < window {
-            let h = high[start + off];
-            let l = low[start + off];
-            if !pair_is_finite(h, l) {
-                valid = false;
-                break;
+        if !have_extremes {
+            maxi = start;
+            mini = start;
+            max = high[start];
+            min = low[start];
+            for j in (start + 1)..=i {
+                let hv = high[j];
+                if hv > max {
+                    max = hv;
+                    maxi = j;
+                }
+                let lv = low[j];
+                if lv < min {
+                    min = lv;
+                    mini = j;
+                }
             }
-            if h > max_val {
-                max_val = h;
-                max_off = off;
+            have_extremes = true;
+        } else {
+            // Highest high
+            if maxi < start {
+                maxi = start;
+                max = high[maxi];
+                for j in (start + 1)..=i {
+                    let hv = high[j];
+                    if hv > max {
+                        max = hv;
+                        maxi = j;
+                    }
+                }
+            } else if h > max {
+                maxi = i;
+                max = h;
             }
-            if l < min_val {
-                min_val = l;
-                min_off = off;
+
+            // Lowest low
+            if mini < start {
+                mini = start;
+                min = low[mini];
+                for j in (start + 1)..=i {
+                    let lv = low[j];
+                    if lv < min {
+                        min = lv;
+                        mini = j;
+                    }
+                }
+            } else if l < min {
+                mini = i;
+                min = l;
             }
-            off += 1;
         }
 
-        if !valid {
-            up[i] = f64::NAN;
-            down[i] = f64::NAN;
-            continue;
-        }
-
-        if off >= window {
-            // Valid window: compute from distances using FMA
-            let dist_hi = length - max_off;
-            let dist_lo = length - min_off;
-            up[i] = aroon_percent(dist_hi, length, scale_100);
-            down[i] = aroon_percent(dist_lo, length, scale_100);
-        }
+        let dist_hi = i - maxi;
+        let dist_lo = i - mini;
+        up[i] = aroon_percent(dist_hi, scale_100);
+        down[i] = aroon_percent(dist_lo, scale_100);
     }
 }
 
@@ -909,7 +1048,7 @@ pub struct AroonBatchRange {
 impl Default for AroonBatchRange {
     fn default() -> Self {
         Self {
-            length: (14, 50, 1),
+            length: (14, 263, 1),
         }
     }
 }
@@ -1045,7 +1184,7 @@ pub fn aroon_batch_with_kernel(
     k: Kernel,
 ) -> Result<AroonBatchOutput, AroonError> {
     let kernel = match k {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(AroonError::InvalidKernelForBatch(other)),
     };
@@ -2716,7 +2855,7 @@ pub fn aroon_into_slice(
     let warm = first + length;
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     unsafe {
@@ -2896,7 +3035,7 @@ pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsV
     let mut up = vec![0.0; high.len()];
     let mut down = vec![0.0; high.len()];
 
-    aroon_into_slice(&mut up, &mut down, &input, detect_best_kernel())
+    aroon_into_slice(&mut up, &mut down, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Return as object with up and down arrays
@@ -3132,7 +3271,7 @@ pub fn aroon_into(
         let input = AroonInput::from_slices_hl(high, low, params);
 
         let (up, down) = out.split_at_mut(len);
-        aroon_into_slice(up, down, &input, detect_best_kernel())
+        aroon_into_slice(up, down, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }

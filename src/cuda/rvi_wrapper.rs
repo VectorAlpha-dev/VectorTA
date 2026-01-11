@@ -819,185 +819,181 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        // Batch: 100k samples, modest combo grid
-        v.push(
-            CudaBenchScenario::new(
-                "rvi",
-                "one_series_many_params",
-                "rvi/batch",
-                "100k x 128",
-                || {
-                    struct State {
-                        cuda: CudaRvi,
-                        data: Vec<f32>,
-                        sweep: RviBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rvi_batch_dev(&self.data, &self.sweep);
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut data = vec![f32::NAN; n];
-                    for i in 500..n {
-                        let x = i as f32;
-                        data[i] = (x * 0.00123).sin() + 0.0002 * x;
-                    }
-                    let sweep = RviBatchRange {
-                        period: (10, 25, 1),
-                        ma_len: (14, 14, 0),
-                        matype: (1, 1, 0),
-                        devtype: (0, 0, 0),
-                    };
-                    Box::new(State {
-                        cuda: CudaRvi::new(0).unwrap(),
-                        data,
-                        sweep,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-        v.push(
-            CudaBenchScenario::new(
-                "rvi",
-                "one_series_many_params",
-                "rvi/batch",
-                "100k x 128",
-                || {
-                    struct State {
-                        cuda: CudaRvi,
-                        data: Vec<f32>,
-                        sweep: RviBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rvi_batch_dev(&self.data, &self.sweep);
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut data = vec![f32::NAN; n];
-                    for i in 500..n {
-                        let x = i as f32;
-                        data[i] = (x * 0.00123).sin() + 0.0002 * x;
-                    }
-                    let sweep = RviBatchRange {
-                        period: (10, 25, 1),
-                        ma_len: (14, 14, 0),
-                        matype: (1, 1, 0),
-                        devtype: (0, 0, 0),
-                    };
-                    Box::new(State {
-                        cuda: CudaRvi::new(0).unwrap(),
-                        data,
-                        sweep,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
+        // Device-resident batch: 100k samples, 128 combos
+        v.push(CudaBenchScenario::new(
+            "rvi",
+            "one_series_many_params",
+            "rvi_cuda_batch_dev",
+            "100k_x_128",
+            || {
+                const N: usize = 100_000;
+                let mut data = vec![f32::NAN; N];
+                for i in 500..N {
+                    let x = i as f32;
+                    data[i] = (x * 0.00123).sin() + 0.0002 * x;
+                }
+                let sweep = RviBatchRange {
+                    period: (10, 25, 1),   // 16
+                    ma_len: (14, 21, 1),   // 8  -> 128 combos
+                    matype: (1, 1, 0),     // EMA
+                    devtype: (0, 0, 0),    // StdDev
+                };
 
-        // Many-series: 512 series x 2048 rows
-        v.push(
-            CudaBenchScenario::new(
-                "rvi",
-                "many_series_one_param",
-                "rvi/many_series",
-                "2048r x 512c",
-                || {
-                    struct State {
-                        cuda: CudaRvi,
-                        data_tm: Vec<f32>,
-                        cols: usize,
-                        rows: usize,
-                        params: RviParams,
+                let combos = CudaRvi::expand_grid(&sweep).expect("expand_grid");
+                let rows = combos.len();
+                let first_valid = data.iter().position(|v| v.is_finite()).unwrap_or(0);
+                let max_period = combos.iter().map(|c| c.period.unwrap_or(0)).max().unwrap_or(0);
+                let max_ma_len = combos.iter().map(|c| c.ma_len.unwrap_or(0)).max().unwrap_or(0);
+                let shmem_bytes = (2 * max_ma_len + max_period) * std::mem::size_of::<f32>()
+                    + (max_period * std::mem::size_of::<u8>());
+
+                let mut periods_all: Vec<i32> = Vec::with_capacity(rows);
+                let mut ma_all: Vec<i32> = Vec::with_capacity(rows);
+                let mut mt_all: Vec<i32> = Vec::with_capacity(rows);
+                let mut dt_all: Vec<i32> = Vec::with_capacity(rows);
+                for c in &combos {
+                    periods_all.push(c.period.unwrap() as i32);
+                    ma_all.push(c.ma_len.unwrap() as i32);
+                    mt_all.push(c.matype.unwrap() as i32);
+                    dt_all.push(c.devtype.unwrap() as i32);
+                }
+
+                let cuda = CudaRvi::new(0).unwrap();
+                let d_data = DeviceBuffer::from_slice(&data).expect("d_data");
+                let mut d_out: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(rows * N) }.expect("d_out");
+                let mut d_p = DeviceBuffer::from_slice(&periods_all).expect("d_p");
+                let mut d_m = DeviceBuffer::from_slice(&ma_all).expect("d_m");
+                let mut d_t = DeviceBuffer::from_slice(&mt_all).expect("d_t");
+                let mut d_dv = DeviceBuffer::from_slice(&dt_all).expect("d_dv");
+
+                struct State {
+                    cuda: CudaRvi,
+                    d_data: DeviceBuffer<f32>,
+                    d_out: DeviceBuffer<f32>,
+                    d_p: DeviceBuffer<i32>,
+                    d_m: DeviceBuffer<i32>,
+                    d_t: DeviceBuffer<i32>,
+                    d_dv: DeviceBuffer<i32>,
+                    len: usize,
+                    first_valid: usize,
+                    rows: usize,
+                    max_period: usize,
+                    max_ma_len: usize,
+                    shmem_bytes: usize,
+                }
+                impl CudaBenchState for State {
+                    fn launch(&mut self) {
+                        self.cuda
+                            .launch_batch_mad(
+                                &self.d_data,
+                                &mut self.d_out,
+                                &mut self.d_p,
+                                &mut self.d_m,
+                                &mut self.d_t,
+                                &mut self.d_dv,
+                                self.len,
+                                self.first_valid,
+                                self.rows,
+                                self.max_period,
+                                self.max_ma_len,
+                                0,
+                                self.shmem_bytes,
+                            )
+                            .expect("rvi launch_batch_mad");
+                        self.cuda.synchronize().expect("rvi sync");
                     }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rvi_many_series_one_param_time_major_dev(
-                                &self.data_tm,
+                }
+
+                Box::new(State {
+                    cuda,
+                    d_data,
+                    d_out,
+                    d_p,
+                    d_m,
+                    d_t,
+                    d_dv,
+                    len: N,
+                    first_valid,
+                    rows,
+                    max_period,
+                    max_ma_len,
+                    shmem_bytes,
+                })
+            },
+        )
+        .with_sample_size(20));
+
+        // Device-resident many-series: 512 series x 2048 rows
+        v.push(CudaBenchScenario::new(
+            "rvi",
+            "many_series_one_param",
+            "rvi_cuda_many_series_one_param_dev",
+            "512x2048",
+            || {
+                let cols = 512usize;
+                let rows = 2048usize;
+                let mut tm = vec![f32::NAN; cols * rows];
+                for s in 0..cols {
+                    for t in s..rows {
+                        let x = t as f32 + (s as f32) * 0.1;
+                        tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                    }
+                }
+                let firsts: Vec<i32> = (0..cols).map(|i| i as i32).collect();
+                let (period, ma_len, matype, devtype) = (10usize, 14usize, 1usize, 0usize);
+
+                let cuda = CudaRvi::new(0).unwrap();
+                let d_data = DeviceBuffer::from_slice(&tm).expect("d_data");
+                let d_first = DeviceBuffer::from_slice(&firsts).expect("d_first");
+                let mut d_out: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+
+                struct State {
+                    cuda: CudaRvi,
+                    d_data: DeviceBuffer<f32>,
+                    d_first: DeviceBuffer<i32>,
+                    d_out: DeviceBuffer<f32>,
+                    cols: usize,
+                    rows: usize,
+                    period: usize,
+                    ma_len: usize,
+                    matype: usize,
+                    devtype: usize,
+                }
+                impl CudaBenchState for State {
+                    fn launch(&mut self) {
+                        self.cuda
+                            .launch_many_series(
+                                &self.d_data,
+                                &self.d_first,
                                 self.cols,
                                 self.rows,
-                                &self.params,
-                            );
-                        }
+                                self.period,
+                                self.ma_len,
+                                self.matype,
+                                self.devtype,
+                                &mut self.d_out,
+                            )
+                            .expect("rvi launch_many_series");
+                        self.cuda.synchronize().expect("rvi sync");
                     }
-                    let cols = 512usize;
-                    let rows = 2048usize;
-                    let mut tm = vec![f32::NAN; cols * rows];
-                    for s in 0..cols {
-                        for t in s..rows {
-                            let x = t as f32 + (s as f32) * 0.1;
-                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                        }
-                    }
-                    let params = RviParams {
-                        period: Some(10),
-                        ma_len: Some(14),
-                        matype: Some(1),
-                        devtype: Some(0),
-                    };
-                    Box::new(State {
-                        cuda: CudaRvi::new(0).unwrap(),
-                        data_tm: tm,
-                        cols,
-                        rows,
-                        params,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-        v.push(
-            CudaBenchScenario::new(
-                "rvi",
-                "many_series_one_param",
-                "rvi/many_series",
-                "2048r x 512c",
-                || {
-                    struct State {
-                        cuda: CudaRvi,
-                        data_tm: Vec<f32>,
-                        cols: usize,
-                        rows: usize,
-                        params: RviParams,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rvi_many_series_one_param_time_major_dev(
-                                &self.data_tm,
-                                self.cols,
-                                self.rows,
-                                &self.params,
-                            );
-                        }
-                    }
-                    let cols = 512usize;
-                    let rows = 2048usize;
-                    let mut tm = vec![f32::NAN; cols * rows];
-                    for s in 0..cols {
-                        for t in s..rows {
-                            let x = t as f32 + (s as f32) * 0.1;
-                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                        }
-                    }
-                    let params = RviParams {
-                        period: Some(10),
-                        ma_len: Some(14),
-                        matype: Some(1),
-                        devtype: Some(0),
-                    };
-                    Box::new(State {
-                        cuda: CudaRvi::new(0).unwrap(),
-                        data_tm: tm,
-                        cols,
-                        rows,
-                        params,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
+                }
+                Box::new(State {
+                    cuda,
+                    d_data,
+                    d_first,
+                    d_out,
+                    cols,
+                    rows,
+                    period,
+                    ma_len,
+                    matype,
+                    devtype,
+                })
+            },
+        )
+        .with_sample_size(20));
 
         v
     }

@@ -7,7 +7,7 @@
 //! - VRAM checks + headroom and basic chunking guards
 //! - Device entry points returning VRAM-resident `DeviceArrayF32`
 //!
-//! Category: Recurrence/IIR (triple EMA chains). For the batch path (one series × many params),
+//! Category: Recurrence/IIR (triple EMA chains). For the batch path (one series Ã— many params),
 //! we precompute the base series x and |x| once on host and reuse across rows, mirroring the
 //! scalar batch optimization in `indicators::dti`.
 
@@ -257,7 +257,7 @@ impl CudaDti {
     #[inline]
     // removed duplicate helpers (consolidated below)
 
-    // -------------------- Batch: one series × many params --------------------
+    // -------------------- Batch: one series Ã— many params --------------------
     fn expand_grid(range: &DtiBatchRange) -> Vec<DtiParams> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = t;
@@ -498,7 +498,7 @@ impl CudaDti {
         Ok((DeviceArrayF32Dti { buf: d_out, rows, cols: len, ctx: Arc::clone(&self.context), device_id: self.device_id }, combos))
     }
 
-    // -------------------- Many series × one param (time-major) --------------------
+    // -------------------- Many series Ã— one param (time-major) --------------------
     fn launch_many_series_kernel(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -658,7 +658,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 180; // r×s×u combos typical order
+    const PARAM_SWEEP: usize = 180; // rÃ—sÃ—u combos typical order
     const MANY_SERIES_COLS: usize = 192;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
@@ -677,26 +677,37 @@ pub mod benches {
             + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaDti,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: DtiBatchRange,
+        d_x: DeviceBuffer<f32>,
+        d_ax: DeviceBuffer<f32>,
+        d_r: DeviceBuffer<i32>,
+        d_s: DeviceBuffer<i32>,
+        d_u: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        rows: usize,
+        start: usize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dti_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("dti_batch_dev");
-            let _ = self
-                .cuda
-                .dti_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("dti_batch_dev");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_x,
+                    &self.d_ax,
+                    &self.d_r,
+                    &self.d_s,
+                    &self.d_u,
+                    self.len,
+                    self.rows,
+                    self.start,
+                    &mut self.d_out,
+                )
+                .expect("dti launch_batch_kernel");
+            self.cuda.synchronize().expect("dti sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaDti::new(0).expect("cuda");
         let base = crate::cuda::bench::helpers::gen_series(ONE_SERIES_LEN);
         let mut high = vec![f32::NAN; ONE_SERIES_LEN];
         let mut low = vec![f32::NAN; ONE_SERIES_LEN];
@@ -706,49 +717,87 @@ pub mod benches {
             high[i] = x.max(prev) + 0.7;
             low[i] = x.min(prev) - 0.7;
         }
-        // modest sweep (cartesian product of 6×5×6 ~= 180)
+        // modest sweep (cartesian product of 6Ã—5Ã—6 ~= 180)
         let sweep = DtiBatchRange {
             r: (8, 18, 2),
             s: (6, 14, 2),
             u: (3, 13, 2),
         };
-        Box::new(BatchState { cuda, high, low, sweep })
+        let combos = CudaDti::expand_grid(&sweep);
+        let rows = combos.len();
+        let len = ONE_SERIES_LEN;
+        let first_valid = (0..len)
+            .find(|&i| high[i].is_finite() && low[i].is_finite())
+            .unwrap_or(0);
+        let start = first_valid + 1;
+
+        let mut x = vec![0f32; len];
+        let mut ax = vec![0f32; len];
+        CudaDti::precompute_x_ax_into_locked(&high, &low, start, x.as_mut_slice(), ax.as_mut_slice());
+
+        let mut r_vec = Vec::with_capacity(rows);
+        let mut s_vec = Vec::with_capacity(rows);
+        let mut u_vec = Vec::with_capacity(rows);
+        for c in &combos {
+            r_vec.push(c.r.unwrap() as i32);
+            s_vec.push(c.s.unwrap() as i32);
+            u_vec.push(c.u.unwrap() as i32);
+        }
+
+        let cuda = CudaDti::new(0).expect("cuda");
+        let d_x = unsafe { DeviceBuffer::from_slice_async(&x, &cuda.stream) }.expect("d_x");
+        let d_ax = unsafe { DeviceBuffer::from_slice_async(&ax, &cuda.stream) }.expect("d_ax");
+        let d_r = DeviceBuffer::from_slice(&r_vec).expect("d_r");
+        let d_s = DeviceBuffer::from_slice(&s_vec).expect("d_s");
+        let d_u = DeviceBuffer::from_slice(&u_vec).expect("d_u");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(BatchDeviceState {
+            cuda,
+            d_x,
+            d_ax,
+            d_r,
+            d_s,
+            d_u,
+            d_out,
+            len,
+            rows,
+            start,
+        })
     }
 
-    struct ManyState {
+    struct ManySeriesDeviceState {
         cuda: CudaDti,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: DtiParams,
+        r: usize,
+        s: usize,
+        u: usize,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dti_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_first,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.r,
+                    self.s,
+                    self.u,
+                    &mut self.d_out_tm,
                 )
-                .expect("dti_many_series_one_param_time_major_dev");
-            let _ = self
-                .cuda
-                .dti_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .expect("dti_many_series_one_param_time_major_dev");
+                .expect("dti launch_many_series_kernel");
+            self.cuda.synchronize().expect("dti sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
-        let cuda = CudaDti::new(0).expect("cuda");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let mid = gen_time_major_prices(cols, rows);
@@ -765,12 +814,30 @@ pub mod benches {
                 low_tm[t * cols + s] = m - 0.6;
             }
         }
-        let params = DtiParams {
-            r: Some(14),
-            s: Some(10),
-            u: Some(5),
-        };
-        Box::new(ManyState { cuda, high_tm, low_tm, cols, rows, params })
+        let (r, s, u) = (14usize, 10usize, 5usize);
+        let first_valids: Vec<i32> = (0..cols).map(|i| i as i32).collect();
+
+        let cuda = CudaDti::new(0).expect("cuda");
+        let d_high_tm =
+            unsafe { DeviceBuffer::from_slice_async(&high_tm, &cuda.stream) }.expect("d_high_tm");
+        let d_low_tm =
+            unsafe { DeviceBuffer::from_slice_async(&low_tm, &cuda.stream) }.expect("d_low_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(ManySeriesDeviceState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+            r,
+            s,
+            u,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

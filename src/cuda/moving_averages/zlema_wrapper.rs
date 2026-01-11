@@ -345,6 +345,70 @@ impl CudaZlema {
         Ok(())
     }
 
+    fn launch_batch_kernel_warp_scan(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaZlemaError> {
+        let mut func = self
+            .module
+            .get_function("zlema_batch_warp_scan_f32")
+            .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_batch_warp_scan_f32" })?;
+
+        if Self::env_flag("ZLEMA_PREFER_L1", true) {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+        }
+
+        // Optional manual override; rounded up to a multiple of 32 (one warp per combo).
+        let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|&v| v > 0);
+
+        let mut block_x: u32 = block_x_override.unwrap_or(128);
+        if block_x < 32 {
+            block_x = 32;
+        }
+        // Round up to a multiple of 32.
+        block_x = ((block_x + 31) / 32) * 32;
+        if block_x > 1024 {
+            block_x = 1024;
+        }
+
+        let warps_per_block = (block_x / 32).max(1);
+        let grid_x = (((n_combos as u32) + warps_per_block - 1) / warps_per_block).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        self.validate_launch(grid, block)?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -362,16 +426,24 @@ impl CudaZlema {
         let periods_b = rows
             .checked_mul(sz_i32)
             .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
-        let lags_b = rows
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
-        let alphas_b = rows
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
         let out_b = rows
             .checked_mul(len)
             .and_then(|v| v.checked_mul(sz_f32))
             .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
+
+        // Prefer the warp-scan kernel for batch when available; it has far better occupancy than the
+        // per-combo serial kernels and avoids extra per-combo parameter buffers.
+        let n_combos = combos.len();
+        let has_warp_scan = self.module.get_function("zlema_batch_warp_scan_f32").is_ok();
+        let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
+
+        let lags_b = if use_warp_scan { 0 } else { rows
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))? };
+        let alphas_b = if use_warp_scan { 0 } else { rows
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))? };
+
         let bytes_required = prices_b
             .checked_add(periods_b)
             .and_then(|v| v.checked_add(lags_b))
@@ -386,18 +458,7 @@ impl CudaZlema {
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let lags: Vec<i32> = combos
-            .iter()
-            .map(|c| ((c.period.unwrap() - 1) / 2) as i32)
-            .collect();
-        let alphas: Vec<f32> = combos
-            .iter()
-            .map(|c| 2.0f32 / (c.period.unwrap() as f32 + 1.0f32))
-            .collect();
-
         let d_periods = DeviceBuffer::from_slice(&periods)?;
-        let d_lags = DeviceBuffer::from_slice(&lags)?;
-        let d_alphas = DeviceBuffer::from_slice(&alphas)?;
 
         let elems = combos
             .len()
@@ -405,38 +466,56 @@ impl CudaZlema {
             .ok_or_else(|| CudaZlemaError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-        // Heuristic: use tiled kernel when sweeping many combos or long series.
-        // Default thresholds chosen conservatively; refine with benches if needed.
-        let n_combos = combos.len();
-        let max_lag = *lags.iter().max().unwrap_or(&0);
-        // Prefer tiled only when both the series is reasonably long and there
-        // are many parameter rows to amortize the shared-memory stage.
-        // This avoids overhead on small sweeps and keeps unit-test defaults intact.
-        let use_tiled = (n_combos >= 64) && (len >= 4096);
-
-        if use_tiled {
-            self.launch_batch_kernel_tiled(
+        if use_warp_scan {
+            self.launch_batch_kernel_warp_scan(
                 &d_prices,
                 &d_periods,
-                &d_lags,
-                &d_alphas,
                 len,
                 first_valid,
                 n_combos,
-                max_lag,
                 &mut d_out,
             )?;
         } else {
-            self.launch_batch_kernel(
-                &d_prices,
-                &d_periods,
-                &d_lags,
-                &d_alphas,
-                len,
-                first_valid,
-                n_combos,
-                &mut d_out,
-            )?;
+            let lags: Vec<i32> = combos
+                .iter()
+                .map(|c| ((c.period.unwrap() - 1) / 2) as i32)
+                .collect();
+            let alphas: Vec<f32> = combos
+                .iter()
+                .map(|c| 2.0f32 / (c.period.unwrap() as f32 + 1.0f32))
+                .collect();
+            let d_lags = DeviceBuffer::from_slice(&lags)?;
+            let d_alphas = DeviceBuffer::from_slice(&alphas)?;
+
+            // Heuristic: use tiled kernel when sweeping many combos or long series.
+            // Default thresholds chosen conservatively; refine with benches if needed.
+            let max_lag = *lags.iter().max().unwrap_or(&0);
+            let use_tiled = (n_combos >= 64) && (len >= 4096);
+
+            if use_tiled {
+                self.launch_batch_kernel_tiled(
+                    &d_prices,
+                    &d_periods,
+                    &d_lags,
+                    &d_alphas,
+                    len,
+                    first_valid,
+                    n_combos,
+                    max_lag,
+                    &mut d_out,
+                )?;
+            } else {
+                self.launch_batch_kernel(
+                    &d_prices,
+                    &d_periods,
+                    &d_lags,
+                    &d_alphas,
+                    len,
+                    first_valid,
+                    n_combos,
+                    &mut d_out,
+                )?;
+            }
         }
 
         Ok(DeviceArrayF32 {
@@ -714,21 +793,205 @@ impl CudaZlema {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::zlema::ZlemaParams;
 
-    define_ma_period_benches!(
-        zlema_benches,
-        CudaZlema,
-        crate::indicators::moving_averages::zlema::ZlemaBatchRange,
-        crate::indicators::moving_averages::zlema::ZlemaParams,
-        zlema_batch_dev,
-        zlema_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::zlema::ZlemaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::zlema::ZlemaParams { period: Some(64) },
-        "zlema",
-        "zlema"
-    );
-    pub use zlema_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let param_bytes = PARAM_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + param_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct ZlemaBatchDevState {
+        cuda: CudaZlema,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_lags: Option<DeviceBuffer<i32>>,
+        d_alphas: Option<DeviceBuffer<f32>>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_lag: i32,
+        use_warp_scan: bool,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ZlemaBatchDevState {
+        fn launch(&mut self) {
+            if self.use_warp_scan {
+                self.cuda
+                    .launch_batch_kernel_warp_scan(
+                        &self.d_prices,
+                        &self.d_periods,
+                        self.len,
+                        self.first_valid,
+                        self.n_combos,
+                        &mut self.d_out,
+                    )
+                    .expect("zlema batch warp-scan kernel");
+            } else {
+                let d_lags = self.d_lags.as_ref().expect("d_lags");
+                let d_alphas = self.d_alphas.as_ref().expect("d_alphas");
+                self.cuda
+                    .launch_batch_kernel_tiled(
+                        &self.d_prices,
+                        &self.d_periods,
+                        d_lags,
+                        d_alphas,
+                        self.len,
+                        self.first_valid,
+                        self.n_combos,
+                        self.max_lag,
+                        &mut self.d_out,
+                    )
+                    .expect("zlema batch tiled kernel");
+            }
+            self.cuda.stream.synchronize().expect("zlema sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaZlema::new(0).expect("cuda zlema");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = ZlemaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, len) =
+            CudaZlema::prepare_batch_inputs(&price, &sweep).expect("zlema prepare batch inputs");
+        let n_combos = combos.len();
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+
+        let has_warp_scan = cuda.module.get_function("zlema_batch_warp_scan_f32").is_ok();
+        let use_warp_scan = has_warp_scan && CudaZlema::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
+
+        let (d_lags, d_alphas, max_lag) = if use_warp_scan {
+            (None, None, 0)
+        } else {
+            let lags: Vec<i32> = combos
+                .iter()
+                .map(|c| ((c.period.unwrap() - 1) / 2) as i32)
+                .collect();
+            let alphas: Vec<f32> = combos
+                .iter()
+                .map(|c| 2.0f32 / (c.period.unwrap() as f32 + 1.0f32))
+                .collect();
+            let max_lag = *lags.iter().max().unwrap_or(&0);
+            (
+                Some(DeviceBuffer::from_slice(&lags).expect("d_lags")),
+                Some(DeviceBuffer::from_slice(&alphas).expect("d_alphas")),
+                max_lag,
+            )
+        };
+
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ZlemaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_lags,
+            d_alphas,
+            len,
+            first_valid,
+            n_combos,
+            max_lag,
+            use_warp_scan,
+            d_out,
+        })
+    }
+
+    struct ZlemaManyDevState {
+        cuda: CudaZlema,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        alpha: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ZlemaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.alpha,
+                    &mut self.d_out_tm,
+                )
+                .expect("zlema many-series kernel");
+            self.cuda.stream.synchronize().expect("zlema sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaZlema::new(0).expect("cuda zlema");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = ZlemaParams { period: Some(64) };
+        let (first_valids, period, alpha) =
+            CudaZlema::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("zlema prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ZlemaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            alpha,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "zlema",
+                "one_series_many_params",
+                "zlema_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "zlema",
+                "many_series_one_param",
+                "zlema_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

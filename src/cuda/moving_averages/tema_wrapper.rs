@@ -22,7 +22,6 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use cust::error::CudaError;
 use std::env;
 use std::ffi::c_void;
@@ -38,10 +37,6 @@ fn env_warps_per_block() -> u32 {
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&v| (1..=32).contains(&v))
         .unwrap_or(4)
-}
-#[inline]
-const fn qnan_u32() -> u32 {
-    0x7fc0_0000
 }
 
 // ---------------- Kernel policy & selection (mirrors ALMA structure) ----------------
@@ -298,12 +293,21 @@ impl CudaTema {
 
     #[inline]
     fn chunk_items_by_grid_x(&self, items: usize) -> impl Iterator<Item = (usize, usize)> {
-        let per_block = (self.warps_per_block as usize) * (WARP as usize);
-        let max_items_per_launch = (self.max_grid_x as usize).saturating_mul(per_block);
+        // Batch kernel maps 1 combo per warp, so each block covers `warps_per_block` combos.
+        let per_block = self.warps_per_block as usize;
+        let max_items_per_launch = (self.max_grid_x as usize).saturating_mul(per_block).max(1);
         (0..items).step_by(max_items_per_launch).map(move |start| {
             let len = (items - start).min(max_items_per_launch);
             (start, len)
         })
+    }
+
+    #[inline]
+    fn batch_launch_dims(&self, n_combos: usize) -> (GridSize, BlockSize, u32) {
+        let wpb = self.warps_per_block.max(1);
+        let block_x = wpb * WARP;
+        let blocks_x = (((n_combos as u32) + wpb - 1) / wpb).max(1);
+        ((blocks_x, 1, 1).into(), (block_x, 1, 1).into(), block_x)
     }
 
     #[inline]
@@ -488,14 +492,10 @@ impl CudaTema {
             unsafe { DeviceBuffer::uninitialized(total_elems) }
                 .map_err(CudaTemaError::Cuda)?;
 
-        // Prefill output with canonical quiet-NaN so the kernel only writes the warm region
-        memset_f32_qnan_async(&self.stream, &mut d_out)
-            .map_err(|e| CudaTemaError::InvalidInput(format!("prefill qNaN failed: {}", e)))?;
-
         // Hint the driver to persist prices[] in L2 across blocks (best effort)
         self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), prices_bytes);
 
-        // Chunk by real grid.x capacity under warp mapping when needed
+        // Chunk by grid.x capacity when needed
         for (start, len) in self.chunk_items_by_grid_x(n_combos) {
             let periods_ptr_raw =
                 d_periods.as_device_ptr().as_raw() + (start * core::mem::size_of::<i32>()) as u64;
@@ -565,10 +565,6 @@ impl CudaTema {
             unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
                 .map_err(CudaTemaError::Cuda)?;
 
-        // Prefill output with quiet-NaN so the kernel only writes the warm region
-        memset_f32_qnan_async(&self.stream, &mut d_out_tm)
-            .map_err(|e| CudaTemaError::InvalidInput(format!("prefill qNaN failed: {}", e)))?;
-
         self.launch_many_series_kernel(
             &d_prices_tm,
             period,
@@ -623,7 +619,7 @@ impl CudaTema {
             .get_function("tema_batch_f32")
             .map_err(|_| CudaTemaError::MissingKernelSymbol { name: "tema_batch_f32" })?;
 
-        let (grid, block, block_x) = self.warp_launch_dims(n_combos);
+        let (grid, block, block_x) = self.batch_launch_dims(n_combos);
         unsafe {
             (*(self as *const _ as *mut CudaTema)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -811,20 +807,82 @@ impl CudaTema {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches_batch_only;
+    use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::tema::TemaBatchRange;
 
-    define_ma_period_benches_batch_only!(
-        tema_benches,
-        CudaTema,
-        crate::indicators::moving_averages::tema::TemaBatchRange,
-        tema_batch_dev,
-        crate::indicators::moving_averages::tema::TemaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        "tema",
-        "tema"
-    );
-    pub use tema_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct TemaBatchDevState {
+        cuda: CudaTema,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TemaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .tema_batch_device(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("tema batch kernel");
+            self.cuda.stream.synchronize().expect("tema sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTema::new(0).expect("cuda tema");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = TemaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+
+        let inputs = CudaTema::prepare_batch_inputs(&price, &sweep).expect("tema prepare batch");
+        let n_combos = inputs.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(inputs.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(TemaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            d_out,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![CudaBenchScenario::new(
+            "tema",
+            "one_series_many_params",
+            "tema_cuda_batch_dev",
+            "1m_x_250",
+            prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series_many_params())]
+    }
 }
 
 // --- L2 persistence hint (enabled by default) ---
@@ -871,21 +929,6 @@ impl CudaTema {
                 StreamAttrId::CU_STREAM_ATTRIBUTE_ACCESS_POLICY_WINDOW,
                 &mut val as *mut _,
             );
-        }
-    }
-}
-
-// --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
-#[inline]
-fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result<(), String> {
-    const QNAN_BITS: u32 = 0x7FC0_0000;
-    unsafe {
-        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
-        let n: usize = buf.len();
-        let st: cu::CUstream = stream.as_inner();
-        match cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st) {
-            cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(format!("cuMemsetD32Async failed: {:?}", e)),
         }
     }
 }

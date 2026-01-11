@@ -5,13 +5,10 @@ use ta_strategies::double_ma::{expand_grid, DoubleMaBatchRange};
 use crate::state::AppState;
 
 #[cfg(feature = "cuda")]
-use my_project::cuda::{cuda_available, moving_averages::CudaAlma, moving_averages::CudaEma, moving_averages::CudaSma};
-#[cfg(feature = "cuda")]
-use my_project::indicators::moving_averages::alma::AlmaBatchRange;
-#[cfg(feature = "cuda")]
-use my_project::indicators::moving_averages::ema::EmaBatchRange;
-#[cfg(feature = "cuda")]
-use my_project::indicators::moving_averages::sma::SmaBatchRange;
+use my_project::cuda::{
+    cuda_available,
+    moving_averages::{CudaMaData, CudaMaSelector},
+};
 #[cfg(feature = "cuda")]
 use rayon::prelude::*;
 #[cfg(feature = "cuda")]
@@ -30,12 +27,18 @@ pub struct DoubleMaRequest {
     pub data_id: String,
     pub fast_range: (u32, u32, u32),
     pub slow_range: (u32, u32, u32),
-    pub fast_ma_ids: Vec<u16>,
-    pub slow_ma_ids: Vec<u16>,
+    pub fast_ma_types: Vec<String>,
+    pub slow_ma_types: Vec<String>,
+    #[serde(default = "default_ma_source")]
+    pub ma_source: String,
     pub objective: ObjectiveKind,
     pub mode: OptimizationMode,
     pub top_k: Option<usize>,
     pub include_all: Option<bool>,
+}
+
+fn default_ma_source() -> String {
+    "close".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -51,17 +54,25 @@ pub enum BackendUsed {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DoubleMaParamsResolved {
+    pub fast_len: u16,
+    pub slow_len: u16,
+    pub fast_ma_type: String,
+    pub slow_ma_type: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct BackendOptimizationResult {
-    pub best_params: ta_strategies::double_ma::DoubleMaParams,
+    pub best_params: DoubleMaParamsResolved,
     pub best_metrics: ta_strategies::double_ma::Metrics,
     pub mode_used: OptimizationModeResolved,
     pub backend_used: BackendUsed,
     pub num_combos: usize,
     pub num_candles: usize,
     pub runtime_ms: u64,
-    pub top: Vec<(ta_strategies::double_ma::DoubleMaParams, ta_strategies::double_ma::Metrics)>,
+    pub top: Vec<(DoubleMaParamsResolved, ta_strategies::double_ma::Metrics)>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub all: Option<Vec<(ta_strategies::double_ma::DoubleMaParams, ta_strategies::double_ma::Metrics)>>,
+    pub all: Option<Vec<(DoubleMaParamsResolved, ta_strategies::double_ma::Metrics)>>,
 }
 
 #[tauri::command]
@@ -80,11 +91,15 @@ pub async fn run_double_ma_optimization(
     let fast = req.fast_range;
     let slow = req.slow_range;
 
+    let fast_ma_types = req.fast_ma_types.clone();
+    let slow_ma_types = req.slow_ma_types.clone();
+    let ma_source = req.ma_source.clone();
+
     let range = DoubleMaBatchRange {
         fast_len: (fast.0 as u16, fast.1 as u16, fast.2 as u16),
         slow_len: (slow.0 as u16, slow.1 as u16, slow.2 as u16),
-        fast_ma_ids: req.fast_ma_ids.clone(),
-        slow_ma_ids: req.slow_ma_ids.clone(),
+        fast_ma_types: fast_ma_types.clone(),
+        slow_ma_types: slow_ma_types.clone(),
     };
 
     let combos = expand_grid(&range);
@@ -96,12 +111,46 @@ pub async fn run_double_ma_optimization(
     let objective = req.objective;
     let top_k = req.top_k.unwrap_or(0);
     let include_all = req.include_all.unwrap_or(false);
+    let mode_used = match req.mode {
+        OptimizationMode::Grid => OptimizationModeResolved::Grid,
+        OptimizationMode::Auto => OptimizationModeResolved::Grid,
+    };
+
+    fn resolve_params(
+        p: &ta_strategies::double_ma::DoubleMaParams,
+        fast_ma_types: &[String],
+        slow_ma_types: &[String],
+    ) -> DoubleMaParamsResolved {
+        let fast_ma_type = fast_ma_types
+            .get(p.fast_ma_id as usize)
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let slow_ma_type = slow_ma_types
+            .get(p.slow_ma_id as usize)
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        DoubleMaParamsResolved {
+            fast_len: p.fast_len,
+            slow_len: p.slow_len,
+            fast_ma_type,
+            slow_ma_type,
+        }
+    }
 
     let backend = req.backend;
     let (result, backend_used): (OptimizationResult, BackendUsed) = match backend {
         Backend::CpuOnly => {
+            let fast_ma_types = fast_ma_types.clone();
+            let slow_ma_types = slow_ma_types.clone();
+            let ma_source = ma_source.clone();
             let result: OptimizationResult = tauri::async_runtime::spawn_blocking(move || {
-                let engine = CpuEngine { candles: &candles };
+                let engine = CpuEngine {
+                    candles: &candles,
+                    fast_ma_types: &fast_ma_types,
+                    slow_ma_types: &slow_ma_types,
+                    ma_source: &ma_source,
+                };
                 grid::grid_search(&engine, &combos, objective, num_candles, top_k, include_all)
             })
             .await
@@ -110,8 +159,22 @@ pub async fn run_double_ma_optimization(
             (result, BackendUsed::Cpu)
         }
         Backend::GpuOnly { device_id } => {
+            let fast_ma_types = fast_ma_types.clone();
+            let slow_ma_types = slow_ma_types.clone();
+            let ma_source = ma_source.clone();
             let result: OptimizationResult = tauri::async_runtime::spawn_blocking(move || {
-                grid_search_double_ma_gpu(&candles, &combos, objective, num_candles, top_k, include_all, device_id)
+                grid_search_double_ma_gpu(
+                    &candles,
+                    &combos,
+                    &fast_ma_types,
+                    &slow_ma_types,
+                    objective,
+                    num_candles,
+                    top_k,
+                    include_all,
+                    device_id,
+                    &ma_source,
+                )
             })
             .await
             .map_err(|e| e.to_string())??;
@@ -120,16 +183,28 @@ pub async fn run_double_ma_optimization(
     };
     let runtime_ms = start.elapsed().as_millis() as u64;
 
+    let best_params = resolve_params(&result.best_params, &fast_ma_types, &slow_ma_types);
+    let top = result
+        .top
+        .into_iter()
+        .map(|(p, m)| (resolve_params(&p, &fast_ma_types, &slow_ma_types), m))
+        .collect();
+    let all = result.all.map(|rows| {
+        rows.into_iter()
+            .map(|(p, m)| (resolve_params(&p, &fast_ma_types, &slow_ma_types), m))
+            .collect()
+    });
+
     Ok(BackendOptimizationResult {
-        best_params: result.best_params,
+        best_params,
         best_metrics: result.best_metrics,
-        mode_used: OptimizationModeResolved::Grid,
+        mode_used,
         backend_used,
         num_combos: result.num_combos,
         num_candles: result.num_candles,
         runtime_ms,
-        top: result.top,
-        all: result.all,
+        top,
+        all,
     })
 }
 
@@ -137,11 +212,14 @@ pub async fn run_double_ma_optimization(
 fn grid_search_double_ma_gpu(
     _candles: &my_project::utilities::data_loader::Candles,
     _combos: &[ta_strategies::double_ma::DoubleMaParams],
+    _fast_ma_types: &[String],
+    _slow_ma_types: &[String],
     _objective: ObjectiveKind,
     _num_candles: usize,
     _top_k: usize,
     _include_all: bool,
     _device_id: u32,
+    _ma_source: &str,
 ) -> Result<OptimizationResult, String> {
     Err("GPU backend requires building `ta_desktop_demo_app` with `--features cuda`".to_string())
 }
@@ -150,11 +228,14 @@ fn grid_search_double_ma_gpu(
 fn grid_search_double_ma_gpu(
     candles: &my_project::utilities::data_loader::Candles,
     combos: &[ta_strategies::double_ma::DoubleMaParams],
+    fast_ma_types: &[String],
+    slow_ma_types: &[String],
     objective: ObjectiveKind,
     num_candles: usize,
     top_k: usize,
     include_all: bool,
     device_id: u32,
+    ma_source: &str,
 ) -> Result<OptimizationResult, String> {
     if !cuda_available() {
         return Err("CUDA device not available (cuda_available() == false)".to_string());
@@ -169,16 +250,20 @@ fn grid_search_double_ma_gpu(
         return Err("not enough candles (need at least 2)".to_string());
     }
 
-    let prices_f32: Vec<f32> = prices.iter().map(|&x| x as f32).collect();
+    let ma_prices = my_project::utilities::data_loader::source_type(candles, ma_source);
+    let prices_f32: Vec<f32> = ma_prices.iter().map(|&x| x as f32).collect();
     let nan_row: Vec<f32> = vec![f32::NAN; n];
 
-    let matrices = build_ma_matrices_cuda(&prices_f32, combos, device_id, n)?;
+    let matrices =
+        build_ma_matrices_cuda(candles, &prices_f32, combos, fast_ma_types, slow_ma_types, device_id, ma_source)?;
 
     struct CachedEngine<'a> {
         prices: &'a [f64],
         n: usize,
         nan_row: &'a [f32],
-        matrices: &'a HashMap<u16, PeriodMatrix>,
+        matrices: &'a HashMap<String, PeriodMatrix>,
+        fast_ma_types: &'a [String],
+        slow_ma_types: &'a [String],
     }
 
     impl<'a> ta_optimizer::BacktestEngine for CachedEngine<'a> {
@@ -186,14 +271,21 @@ fn grid_search_double_ma_gpu(
             combos
                 .par_iter()
                 .map(|p| {
-                    let fast = self
-                        .matrices
-                        .get(&p.fast_ma_id)
+                    let fast_type = self
+                        .fast_ma_types
+                        .get(p.fast_ma_id as usize)
+                        .map(|s| s.as_str());
+                    let slow_type = self
+                        .slow_ma_types
+                        .get(p.slow_ma_id as usize)
+                        .map(|s| s.as_str());
+
+                    let fast = fast_type
+                        .and_then(|t| self.matrices.get(t))
                         .and_then(|m| m.row(p.fast_len, self.n))
                         .unwrap_or(self.nan_row);
-                    let slow = self
-                        .matrices
-                        .get(&p.slow_ma_id)
+                    let slow = slow_type
+                        .and_then(|t| self.matrices.get(t))
                         .and_then(|m| m.row(p.slow_len, self.n))
                         .unwrap_or(self.nan_row);
                     eval_double_ma_metrics(self.prices, fast, slow)
@@ -207,6 +299,8 @@ fn grid_search_double_ma_gpu(
         n,
         nan_row: &nan_row,
         matrices: &matrices,
+        fast_ma_types,
+        slow_ma_types,
     };
 
     grid::grid_search(&engine, combos, objective, num_candles, top_k, include_all)
@@ -235,31 +329,42 @@ impl PeriodMatrix {
 
 #[cfg(feature = "cuda")]
 fn build_ma_matrices_cuda(
+    candles: &my_project::utilities::data_loader::Candles,
     prices_f32: &[f32],
     combos: &[ta_strategies::double_ma::DoubleMaParams],
+    fast_ma_types: &[String],
+    slow_ma_types: &[String],
     device_id: u32,
-    series_len: usize,
-) -> Result<HashMap<u16, PeriodMatrix>, String> {
-    let mut minmax: HashMap<u16, (u16, u16)> = HashMap::new();
+    ma_source: &str,
 
-    for p in combos {
-        if p.fast_len > 0 {
-            update_minmax(&mut minmax, p.fast_ma_id, p.fast_len);
-        }
-        if p.slow_len > 0 {
-            update_minmax(&mut minmax, p.slow_ma_id, p.slow_len);
-        }
-    }
-
+) -> Result<HashMap<String, PeriodMatrix>, String> {
+    let series_len = prices_f32.len();
     let max_period_supported: u16 = if series_len >= u16::MAX as usize {
         u16::MAX
     } else {
         series_len as u16
     };
 
-    let mut out: HashMap<u16, PeriodMatrix> = HashMap::new();
+    let mut minmax: HashMap<&str, (u16, u16)> = HashMap::new();
+    for p in combos {
+        if p.fast_len > 0 {
+            let t = fast_ma_types
+                .get(p.fast_ma_id as usize)
+                .ok_or_else(|| format!("fast_ma_id out of range: {}", p.fast_ma_id))?;
+            update_minmax(&mut minmax, t.as_str(), p.fast_len);
+        }
+        if p.slow_len > 0 {
+            let t = slow_ma_types
+                .get(p.slow_ma_id as usize)
+                .ok_or_else(|| format!("slow_ma_id out of range: {}", p.slow_ma_id))?;
+            update_minmax(&mut minmax, t.as_str(), p.slow_len);
+        }
+    }
 
-    for (&ma_id, &(min_p, max_p)) in &minmax {
+    let selector = CudaMaSelector::new(device_id as usize);
+
+    let mut out: HashMap<String, PeriodMatrix> = HashMap::new();
+    for (&ma_type, &(min_p, max_p)) in &minmax {
         if min_p == 0 || max_p == 0 {
             continue;
         }
@@ -277,73 +382,85 @@ fn build_ma_matrices_cuda(
             .checked_mul(series_len)
             .ok_or_else(|| "output length overflow".to_string())?;
 
-        match ma_id {
-            0 => {
-                let cuda = CudaSma::new(device_id as usize).map_err(|e| e.to_string())?;
-                let sweep = SmaBatchRange {
-                    period: (start as usize, end as usize, 1),
-                };
-                let mut host = vec![0.0_f32; expected_len];
-                cuda.sma_batch_into_host_f32(prices_f32, &sweep, &mut host)
-                    .map_err(|e| e.to_string())?;
-                out.insert(
-                    ma_id,
-                    PeriodMatrix {
-                        period_start: start,
-                        period_end: end,
-                        values: host,
-                    },
-                );
+        let requires_candles = ma_type.eq_ignore_ascii_case("vwap")
+            || ma_type.eq_ignore_ascii_case("vwma")
+            || ma_type.eq_ignore_ascii_case("vpwma");
+
+        let data = if requires_candles {
+            CudaMaData::Candles {
+                candles,
+                source: ma_source,
             }
-            1 => {
-                let cuda = CudaEma::new(device_id as usize).map_err(|e| e.to_string())?;
-                let sweep = EmaBatchRange {
-                    period: (start as usize, end as usize, 1),
-                };
-                let mut host = vec![0.0_f32; expected_len];
-                cuda.ema_batch_into_host_f32(prices_f32, &sweep, &mut host)
-                    .map_err(|e| e.to_string())?;
-                out.insert(
-                    ma_id,
-                    PeriodMatrix {
-                        period_start: start,
-                        period_end: end,
-                        values: host,
-                    },
-                );
+        } else {
+            CudaMaData::SliceF32(prices_f32)
+        };
+
+        let host = match selector.ma_sweep_to_host_f32(ma_type, data, start as usize, end as usize, 1) {
+            Ok((values, rows, cols)) => {
+                if rows != n_periods || cols != series_len {
+                    return Err(format!(
+                        "cuda ma sweep '{ma_type}' returned shape ({rows},{cols}) (expected ({n_periods},{series_len}))"
+                    ));
+                }
+                if values.len() != expected_len {
+                    return Err(format!(
+                        "cuda ma sweep '{ma_type}' returned len {} (expected {expected_len})",
+                        values.len()
+                    ));
+                }
+                values
             }
-            2 => {
-                let cuda = CudaAlma::new(device_id as usize).map_err(|e| e.to_string())?;
-                let sweep = AlmaBatchRange {
-                    period: (start as usize, end as usize, 1),
-                    offset: (0.85, 0.85, 0.0),
-                    sigma: (6.0, 6.0, 0.0),
-                };
-                let mut host = vec![0.0_f32; expected_len];
-                cuda.alma_batch_into_host_f32(prices_f32, &sweep, &mut host)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())?;
-                out.insert(
-                    ma_id,
-                    PeriodMatrix {
-                        period_start: start,
-                        period_end: end,
-                        values: host,
-                    },
-                );
+            Err(sweep_err) => {
+                // Fallback: compute each period independently (works for non-period-based MAs like VWAP/HWMA).
+                let mut host = vec![f32::NAN; expected_len];
+                for (row, period) in (start..=end).enumerate() {
+                    let data = if requires_candles {
+                        CudaMaData::Candles {
+                            candles,
+                            source: "close",
+                        }
+                    } else {
+                        CudaMaData::SliceF32(prices_f32)
+                    };
+                    let series = selector.ma_to_host_f32(ma_type, data, period as usize).map_err(|e| {
+                        format!(
+                            "cuda ma sweep '{ma_type}' failed: {sweep_err}; fallback period {period} failed: {e}"
+                        )
+                    })?;
+                    if series.len() != series_len {
+                        return Err(format!(
+                            "cuda ma '{ma_type}' period {period} returned len {} (expected {series_len})",
+                            series.len()
+                        ));
+                    }
+                    let offset = row
+                        .checked_mul(series_len)
+                        .ok_or_else(|| "output offset overflow".to_string())?;
+                    let end = offset
+                        .checked_add(series_len)
+                        .ok_or_else(|| "output end overflow".to_string())?;
+                    host[offset..end].copy_from_slice(&series);
+                }
+                host
             }
-            _ => {
-                return Err(format!("unsupported ma_id for GPU backend: {ma_id}"));
-            }
-        }
+        };
+
+        out.insert(
+            ma_type.to_string(),
+            PeriodMatrix {
+                period_start: start,
+                period_end: end,
+                values: host,
+            },
+        );
     }
 
     Ok(out)
 }
 
 #[cfg(feature = "cuda")]
-fn update_minmax(map: &mut HashMap<u16, (u16, u16)>, ma_id: u16, period: u16) {
-    let entry = map.entry(ma_id).or_insert((period, period));
+fn update_minmax<'a>(map: &mut HashMap<&'a str, (u16, u16)>, ma_type: &'a str, period: u16) {
+    let entry = map.entry(ma_type).or_insert((period, period));
     if period < entry.0 {
         entry.0 = period;
     }

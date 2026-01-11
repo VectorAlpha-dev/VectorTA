@@ -179,43 +179,63 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
         out[base + i] = nan_f;
     }
 
-    if (threadIdx.x != 0) return;
+    if (threadIdx.x == 0) {
+        out[base + initial_idx] = prices[initial_idx];
+    }
 
-    // Seed Σ|Δp| via prefix (O(1)).
-    double sum_roc1 = static_cast<double>(
-        prefix_roc1[initial_idx] - prefix_roc1[first_valid]
-    );
+    // Warp-cooperative scan over affine transforms:
+    //   x[t] = (1 - sc[t]) * x[t-1] + sc[t] * price[t]
+    // where sc[t] is derived from ER using prefix_roc1 in O(1).
+    const int lane = threadIdx.x;
+    if (lane >= WARP) return;
 
-    // Seed first output.
-    double prev_price = static_cast<double>(prices[initial_idx]);
-    double prev_kama  = prev_price;
-    out[base + initial_idx] = static_cast<float>(prev_kama);
+    float prev_kama = prices[initial_idx];
+    const float cmax = 2.0f / 31.0f;
+    const float cdiff = (2.0f / 3.0f) - cmax;
 
-    int    trailing_idx   = first_valid;
-    double trailing_value = static_cast<double>(prices[trailing_idx]);
+    int chunk_start = initial_idx + 1;
+    for (; (chunk_start + (WARP - 1)) < series_len; chunk_start += WARP) {
+        const int t = chunk_start + lane;
+        const float price = prices[t];
+        const float sum_roc1 = prefix_roc1[t] - prefix_roc1[t - period];
+        const float direction = fabsf(price - prices[t - period]);
+        const float er = (sum_roc1 == 0.0f) ? 0.0f : (direction / sum_roc1);
+        const float tmp = fmaf(er, cdiff, cmax);
+        const float sc = tmp * tmp;
 
-    const double cmax  = kama_const_max();
-    const double cdiff = kama_const_diff();
+        float a = 1.0f - sc;
+        float b = sc * price;
 
-    for (int i = initial_idx + 1; i < series_len; ++i) {
-        const double price         = static_cast<double>(prices[i]);
-        const double next_trailing = static_cast<double>(prices[trailing_idx + 1]);
+        const unsigned m = 0xFFFFFFFFu;
+        #pragma unroll
+        for (int off = 1; off < WARP; off <<= 1) {
+            const float a_up = __shfl_up_sync(m, a, off);
+            const float b_up = __shfl_up_sync(m, b, off);
+            if (lane >= off) {
+                b = fmaf(a, b_up, b);
+                a = a * a_up;
+            }
+        }
 
-        sum_roc1 += fabs(price - prev_price) - fabs(next_trailing - trailing_value);
+        const float x = fmaf(a, prev_kama, b);
+        out[base + t] = x;
 
-        trailing_value = next_trailing;
-        trailing_idx  += 1;
+        prev_kama = __shfl_sync(m, x, WARP - 1);
+    }
 
-        const double direction = fabs(price - trailing_value);
-        const double er = (sum_roc1 == 0.0) ? 0.0 : (direction / sum_roc1);
-
-        double sc = er * cdiff + cmax;
-        sc *= sc;
-
-        prev_kama = fma(price - prev_kama, sc, prev_kama);
-        out[base + i] = static_cast<float>(prev_kama);
-
-        prev_price = price;
+    // Tail (< 32) is cheap; finish sequentially in lane 0.
+    if (lane == 0) {
+        float kama = prev_kama;
+        for (int t = chunk_start; t < series_len; ++t) {
+            const float price = prices[t];
+            const float sum_roc1 = prefix_roc1[t] - prefix_roc1[t - period];
+            const float direction = fabsf(price - prices[t - period]);
+            const float er = (sum_roc1 == 0.0f) ? 0.0f : (direction / sum_roc1);
+            const float tmp = fmaf(er, cdiff, cmax);
+            const float sc = tmp * tmp;
+            kama = fmaf(price - kama, sc, kama);
+            out[base + t] = kama;
+        }
     }
 }
 

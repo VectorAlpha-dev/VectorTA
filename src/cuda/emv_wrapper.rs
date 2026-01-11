@@ -626,48 +626,81 @@ pub mod benches {
         v
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaEmv,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        vol: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_vol: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .emv_batch_dev(&self.high, &self.low, &self.vol)
-                .expect("emv_batch_dev");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_vol,
+                    self.len,
+                    1,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("emv launch_batch_kernel");
+            self.cuda.synchronize().expect("emv sync");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let price = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_price(&price);
         let vol = synth_volume(ONE_SERIES_LEN);
+        let (first_valid, len) =
+            CudaEmv::validate_batch_inputs(&high, &low, &vol).expect("emv validate_batch_inputs");
+
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(BatchState { cuda, high, low, vol })
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+        let d_vol = unsafe { DeviceBuffer::from_slice_async(&vol, &cuda.stream) }.expect("d_vol");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }
+            .expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(BatchDeviceState {
+            cuda,
+            d_high,
+            d_low,
+            d_vol,
+            d_out,
+            len,
+            first_valid,
+        })
     }
 
-    struct ManyState {
+    struct ManySeriesDeviceState {
         cuda: CudaEmv,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        vol_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_vol_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .emv_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.vol_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_vol_tm,
+                    &self.d_first,
                     self.cols,
                     self.rows,
+                    &mut self.d_out_tm,
                 )
-                .expect("emv_many_series_one_param_time_major_dev");
+                .expect("emv launch_many_series_kernel");
+            self.cuda.synchronize().expect("emv sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -676,8 +709,30 @@ pub mod benches {
         let price_tm = gen_time_major_prices(cols, rows);
         let (high_tm, low_tm) = synth_hl_from_price(&price_tm);
         let vol_tm = gen_time_major_volumes(cols, rows);
+
+        let first_valids: Vec<i32> = (0..cols).map(|i| i as i32).collect();
+
         let cuda = CudaEmv::new(0).expect("cuda");
-        Box::new(ManyState { cuda, high_tm, low_tm, vol_tm, cols, rows })
+        let d_high_tm =
+            unsafe { DeviceBuffer::from_slice_async(&high_tm, &cuda.stream) }.expect("d_high_tm");
+        let d_low_tm =
+            unsafe { DeviceBuffer::from_slice_async(&low_tm, &cuda.stream) }.expect("d_low_tm");
+        let d_vol_tm =
+            unsafe { DeviceBuffer::from_slice_async(&vol_tm, &cuda.stream) }.expect("d_vol_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(ManySeriesDeviceState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_vol_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

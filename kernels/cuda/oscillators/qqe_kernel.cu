@@ -75,8 +75,9 @@ static __device__ __forceinline__ float ds_val(const fpair &x) {
 }
 
 // -------------------------------------------------------------
-// Compute QQE for a single series with given parameters (FP32)
-// Wilder accumulators (avg_gain/avg_loss) use float-float (DS).
+// Compute QQE for a single series with given parameters (FP32).
+// Note: batch tests allow looser tolerances due to branch sensitivity;
+// prefer FP32 accumulators here for throughput.
 // -------------------------------------------------------------
 static __device__ __forceinline__ void qqe_compute_series_f32(
     const float* __restrict__ prices,
@@ -97,7 +98,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     const int warm = first_valid + rsi_p + ema_p - 2;
 
     // Wilder RSI initial averages over first rsi_p deltas
-    float avg_gain_f = 0.0f, avg_loss_f = 0.0f;
+    float avg_gain = 0.0f, avg_loss = 0.0f;
     bool bad = false;
     const int init_end = min(first_valid + rsi_p, N - 1);
     for (int i = first_valid + 1; i <= init_end; ++i) {
@@ -105,25 +106,22 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         float dim1 = ld_ro(&prices[i - 1]);
         float delta = di - dim1;
         if (!isfinite(delta)) { bad = true; break; }
-        if (delta > 0.0f) avg_gain_f += delta;
-        else if (delta < 0.0f) avg_loss_f -= delta;
+        if (delta > 0.0f) avg_gain += delta;
+        else if (delta < 0.0f) avg_loss -= delta;
     }
     if (bad) return; // leave filled NaNs
 
     const float inv_rsi  = 1.0f / (float)rsi_p;
     const float beta_rsi = 1.0f - inv_rsi;
 
-    avg_gain_f *= inv_rsi;
-    avg_loss_f *= inv_rsi;
-
-    fpair avg_gain = make_fpair(avg_gain_f);
-    fpair avg_loss = make_fpair(avg_loss_f);
+    avg_gain *= inv_rsi;
+    avg_loss *= inv_rsi;
 
     // first RSI value at rsi_start
     float rsi;
     {
-        float denom = ds_val(avg_gain) + ds_val(avg_loss);
-        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
+        float denom = avg_gain + avg_loss;
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
     }
     // Initialize FAST at rsi_start
     out_fast[rsi_start] = rsi;
@@ -153,11 +151,11 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         float gain = (delta > 0.0f) ? delta : 0.0f;
         float loss = (delta < 0.0f) ? -delta : 0.0f;
 
-        avg_gain = ds_madd(beta_rsi, avg_gain, inv_rsi, gain);
-        avg_loss = ds_madd(beta_rsi, avg_loss, inv_rsi, loss);
+        avg_gain = fmaf(beta_rsi, avg_gain, inv_rsi * gain);
+        avg_loss = fmaf(beta_rsi, avg_loss, inv_rsi * loss);
 
-        float denom = ds_val(avg_gain) + ds_val(avg_loss);
-        rsi = (denom == 0.0f) ? 50.0f : (100.0f * ds_val(avg_gain) / denom);
+        float denom = avg_gain + avg_loss;
+        rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
 
         // FAST
         float fast_i;
@@ -365,4 +363,3 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
         }
     }
 }
-

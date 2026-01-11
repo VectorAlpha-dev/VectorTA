@@ -107,13 +107,7 @@ extern "C" __global__ void chandelier_exit_batch_f32(
                 } else {
                     // Wilder smoothing: atr += (tr - atr)/period
                     if (!isnan(tr) && !isnan(atr)) {
-                        const float delta = (tr - atr) * invP;
-                        // Kahan update for ATR in FP32
-                        float corr = 0.0f; // tiny, but keep a local comp term
-                        float y = delta - corr;
-                        float t = atr + y;
-                        corr = (t - atr) - y;
-                        atr = t;
+                        atr += (tr - atr) * invP;
                     }
                 }
             }

@@ -12,12 +12,8 @@
 #include <math.h>
 #include <stdint.h>
 
-// Tunables (safe defaults; launch may override via block/grid sizing)
-#ifndef RSI_BLOCK_THREADS
-#define RSI_BLOCK_THREADS 256
-#endif
-#ifndef RSI_TILE
-#define RSI_TILE 1024
+#ifndef RSI_NAN
+#define RSI_NAN (__int_as_float(0x7fffffff))
 #endif
 
 static __device__ __forceinline__ float clamp_rsi(float x) {
@@ -40,135 +36,152 @@ void rsi_batch_f32(const float* __restrict__ prices,
                    int n_combos,
                    float* __restrict__ out)
 {
-    // Early exit for blocks entirely out of range (compat with existing launcher)
-    if (blockIdx.x * blockDim.x >= (unsigned)n_combos) {
+    // One warp per combo. Each lane advances 1 timestep; warp scan emits 32 outputs per iteration.
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    const unsigned warps_per_block = blockDim.x >> 5;
+    const int combo = (int)(blockIdx.x * warps_per_block + warp);
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    float* out_row = out + (size_t)combo * (size_t)series_len;
+
+    // Basic validation mirroring wrapper guards
+    if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
+        for (int i = (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
+        return;
+    }
+    const int fv = first_valid;
+    const int tail = series_len - fv;
+    if (tail <= period) {
+        for (int i = (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
         return;
     }
 
-    // Map one thread -> one parameter row
-    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
-    const bool active = (combo < n_combos);
+    const int warm = fv + period; // first index with a defined output
 
-    // Shared tiles: prices (T+1), gains, losses, finiteness mask
-    __shared__ float   s_pr[RSI_TILE + 1];
-    __shared__ float   s_g [RSI_TILE];
-    __shared__ float   s_l [RSI_TILE];
-    __shared__ uint8_t s_ok[RSI_TILE];
+    // Prefill NaN up to (warm-1) only (avoid full-row writes)
+    for (int i = (int)lane; i < warm; i += 32) out_row[i] = RSI_NAN;
 
-    // Per-row registers
-    int   period = 0, warm = 0, fv = first_valid;
-    float inv_p = 0.0f, beta = 0.0f;
-    float sum_g = 0.0f, sum_l = 0.0f;   // warmup sums
-    float avg_g = 0.0f, avg_l = 0.0f;   // Wilder state after warm
-    bool  dead  = false;                // non-finite encountered → row remains NaN
+    // Precompute alpha & beta for Wilder smoothing (FP32)
+    const float inv_p = 1.0f / (float)period;
+    const float beta  = inv_p;
+    const float alpha = 1.0f - inv_p; // (period - 1) / period
 
-    if (active) {
-        period = periods[combo];
-        if (period <= 0) {
-            const int base = combo * series_len;
-            for (int t = 0; t < series_len; ++t) out[base + t] = NAN;
+    // ----- Initial averages over (fv+1 ..= warm) computed by lane 0 -----
+    float avg_g = 0.0f;
+    float avg_l = 0.0f;
+    int dead_i = 0;
+    if (lane == 0) {
+        float prev = prices[fv];
+        float sum_g = 0.0f;
+        float sum_l = 0.0f;
+        for (int i = fv + 1; i <= warm; ++i) {
+            const float curr = prices[i];
+            const float d = curr - prev;
+            prev = curr;
+            if (!isfinite(d)) {
+                dead_i = 1;
+                break;
+            }
+            if (d > 0.0f) sum_g += d;
+            else if (d < 0.0f) sum_l -= d;
         }
-        if (period > 0) {
-            warm  = fv + period;
-            inv_p = 1.0f / (float)period;
-            beta  = 1.0f - inv_p;
+        if (!dead_i) {
+            avg_g = sum_g * beta;
+            avg_l = sum_l * beta;
+            const float denom = avg_g + avg_l;
+            float rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_g / denom);
+            out_row[warm] = clamp_rsi(rsi);
         }
     }
 
-    // Tile over timeline t = 0..series_len-1
-    for (int t0 = 0; t0 < series_len; t0 += RSI_TILE) {
-        const int tile_len = min(RSI_TILE, series_len - t0);
+    const unsigned mask = 0xffffffffu;
+    avg_g = __shfl_sync(mask, avg_g, 0);
+    avg_l = __shfl_sync(mask, avg_l, 0);
+    dead_i = __shfl_sync(mask, dead_i, 0);
 
-        // ---- Stage prices into shared memory (cooperative, coalesced) ----
-        // Need prices[t0-1 .. t0+tile_len]; for t0==0 reuse prices[0] at s_pr[0]
-        for (int i = threadIdx.x; i < tile_len + 1; i += blockDim.x) {
-            int gi = t0 + i - 1;
-            gi = (gi < 0) ? 0 : gi;
-            s_pr[i] = prices[gi];
+    if (dead_i) {
+        for (int i = (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
+        return;
+    }
+
+    // Rolling update: process 32 timesteps per iteration, starting at warm+1
+    for (int t0 = warm + 1; t0 < series_len; t0 += 32) {
+        const int t = t0 + (int)lane;
+
+        float A  = 1.0f;
+        float Bg = 0.0f;
+        float Bl = 0.0f;
+        bool ok = true;
+        if (t < series_len) {
+            const float p1 = prices[t];
+            const float p0 = prices[t - 1];
+            const float d = p1 - p0;
+            ok = isfinite(d);
+            if (ok) {
+                const float g = fmaxf(d, 0.0f);
+                const float l = fmaxf(-d, 0.0f);
+                A  = alpha;
+                Bg = beta * g;
+                Bl = beta * l;
+            }
         }
-        __syncthreads();
 
-        // Compute per-step delta → gain/loss + finiteness mask once per block
-        for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
-            const int t = t0 + i;
-            if (t == 0) {
-                s_g[i]  = 0.0f;
-                s_l[i]  = 0.0f;
-                s_ok[i] = 1;
+        const unsigned invalid_mask = __ballot_sync(mask, (t < series_len) && (!ok));
+
+        // Inclusive warp scan composing (A,B) left-to-right.
+        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev  = __shfl_up_sync(mask, A, offset);
+            const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
+            const float Bl_prev = __shfl_up_sync(mask, Bl, offset);
+            if (lane >= (unsigned)offset) {
+                const float A_cur  = A;
+                const float Bg_cur = Bg;
+                const float Bl_cur = Bl;
+                A  = A_cur * A_prev;
+                Bg = __fmaf_rn(A_cur, Bg_prev, Bg_cur);
+                Bl = __fmaf_rn(A_cur, Bl_prev, Bl_cur);
+            }
+        }
+
+        const float yg = __fmaf_rn(A, avg_g, Bg);
+        const float yl = __fmaf_rn(A, avg_l, Bl);
+
+        if (t < series_len) {
+            if (invalid_mask) {
+                const int first_bad = __ffs(invalid_mask) - 1;
+                if ((int)lane >= first_bad) {
+                    out_row[t] = RSI_NAN;
+                } else {
+                    const float denom = yg + yl;
+                    float rsi = (denom == 0.0f) ? 50.0f : (100.0f * yg / denom);
+                    out_row[t] = clamp_rsi(rsi);
+                }
             } else {
-                const float d = s_pr[i + 1] - s_pr[i];
-                const uint8_t ok = isfinite(d) ? 1u : 0u;
-                s_ok[i] = ok;
-                const float g = ok ? ((d > 0.0f) ? d : 0.0f) : 0.0f;
-                const float l = ok ? ((d < 0.0f) ? -d : 0.0f) : 0.0f;
-                s_g[i] = g;
-                s_l[i] = l;
-            }
-        }
-        __syncthreads();
-
-        // ---- Per-row sequential use of the staged tile ----
-        if (active && period > 0) {
-            const int base = combo * series_len;
-
-            for (int i = 0; i < tile_len; ++i) {
-                const int t = t0 + i;
-
-                // Pre-warm region always NaN
-                if (t < series_len && t < warm) {
-                    out[base + t] = NAN;
-                }
-
-                // Accumulate warmup sums over deltas in [fv+1 .. warm]
-                if (!dead && (t >= (fv + 1)) && (t < warm) && (t > 0)) {
-                    if (!s_ok[i]) { dead = true; }
-                    else { sum_g += s_g[i]; sum_l += s_l[i]; }
-                }
-
-                // Emit first RSI at t == warm (includes delta at warm)
-                if (t == warm && t < series_len) {
-                    if (!dead) {
-                        if (!s_ok[i]) { // non-finite at warm
-                            dead = true;
-                            avg_g = avg_l = NAN;
-                            out[base + t] = NAN;
-                        } else {
-                            sum_g += s_g[i]; sum_l += s_l[i];
-                            avg_g = sum_g * inv_p;
-                            avg_l = sum_l * inv_p;
-                            const float denom = avg_g + avg_l;
-                            float rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_g / denom);
-                            out[base + t] = clamp_rsi(rsi);
-                        }
-                    } else {
-                        out[base + t] = NAN;
-                    }
-                }
-
-                // Recursive updates after warm
-                if (t > warm && t < series_len) {
-                    if (dead) {
-                        out[base + t] = NAN;
-                    } else if (!s_ok[i]) {
-                        dead = true;
-                        out[base + t] = NAN;
-                    } else {
-                        avg_g = fmaf(beta, avg_g, inv_p * s_g[i]);
-                        avg_l = fmaf(beta, avg_l, inv_p * s_l[i]);
-                        const float denom = avg_g + avg_l;
-                        float rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_g / denom);
-                        out[base + t] = clamp_rsi(rsi);
-                    }
-                }
-
-                // If warm is beyond end, we still must paint all outputs NaN
-                if (warm >= series_len && t < series_len) {
-                    out[base + t] = NAN;
-                }
+                const float denom = yg + yl;
+                float rsi = (denom == 0.0f) ? 50.0f : (100.0f * yg / denom);
+                out_row[t] = clamp_rsi(rsi);
             }
         }
 
-        __syncthreads();
+        // If a non-finite delta occurred in this window, the row becomes "dead" (all future NaN).
+        if (invalid_mask) {
+            const int remaining = series_len - t0;
+            const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+            const int first_bad = __ffs(invalid_mask) - 1;
+            if (first_bad <= last_lane) {
+                for (int i = t0 + 32 + (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
+                return;
+            }
+        }
+
+        // Advance to next window using the last valid lane.
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        avg_g = __shfl_sync(mask, yg, last_lane);
+        avg_l = __shfl_sync(mask, yl, last_lane);
     }
 }
 
@@ -232,7 +245,7 @@ void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     // Recursive updates; semantics: treat NaN deltas after warmup as zero change
     for (int t = warm + 1; t < rows; ++t) {
         const float d = prices_tm[t * cols + s] - prices_tm[(t - 1) * cols + s];
-        const float g = (d > 0.0f) ? d : 0.0f; // comparisons false for NaN → 0
+        const float g = (d > 0.0f) ? d : 0.0f; // comparisons false for NaN -> 0
         const float l = (d < 0.0f) ? -d : 0.0f;
         avg_g = fmaf(beta, avg_g, inv_p * g);
         avg_l = fmaf(beta, avg_l, inv_p * l);

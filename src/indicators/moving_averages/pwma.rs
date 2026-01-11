@@ -845,7 +845,7 @@ pub struct PwmaBatchRange {
 
 impl Default for PwmaBatchRange {
     fn default() -> Self {
-        Self { period: (5, 30, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

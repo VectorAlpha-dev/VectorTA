@@ -547,22 +547,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 200;
-
-    struct DevStopBatchState {
-        cuda: CudaDevStop,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: DevStopBatchRange,
-    }
-    impl CudaBenchState for DevStopBatchState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .devstop_batch_dev(&self.high, &self.low, &self.sweep, true)
-                .unwrap();
-        }
-    }
+    const BATCH_PERIOD: usize = 20;
+    const MULT_SWEEP: usize = 200;
 
     fn synth_hl_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -580,46 +566,169 @@ pub mod benches {
         (high, low)
     }
 
-    fn prep_batch() -> Box<dyn CudaBenchState> {
+    struct DevStopBatchDevInplaceState {
+        cuda: CudaDevStop,
+        len: usize,
+        first_valid: usize,
+        period: usize,
+        is_long: bool,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_p1: DeviceBuffer<Float2>,
+        d_p2: DeviceBuffer<Float2>,
+        d_pc: DeviceBuffer<i32>,
+        d_mults: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DevStopBatchDevInplaceState {
+        fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("devstop_batch_grouped_f32")
+                .expect("devstop_batch_grouped_f32");
+            let n_combos = self.d_mults.len() as i32;
+            let grid: GridSize = ((n_combos as u32).max(1), 1, 1).into();
+            let block: BlockSize = (64u32, 1, 1).into();
+            CudaDevStop::validate_launch(grid, block).expect("devstop validate launch");
+            let per_block = std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
+            let shmem_bytes = (self.period * per_block) as u32;
+            unsafe {
+                let mut high_ptr = self.d_high.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low.as_device_ptr().as_raw();
+                let mut p1_ptr = self.d_p1.as_device_ptr().as_raw();
+                let mut p2_ptr = self.d_p2.as_device_ptr().as_raw();
+                let mut pc_ptr = self.d_pc.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut period_i = self.period as i32;
+                let mut mults_ptr = self.d_mults.as_device_ptr().as_raw();
+                let mut n_i = n_combos;
+                let mut is_long_i = if self.is_long { 1i32 } else { 0i32 };
+                let mut out_row_base_i = 0i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut p1_ptr as *mut _ as *mut c_void,
+                    &mut p2_ptr as *mut _ as *mut c_void,
+                    &mut pc_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut mults_ptr as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut is_long_i as *mut _ as *mut c_void,
+                    &mut out_row_base_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, shmem_bytes, args)
+                    .expect("devstop launch");
+            }
+            self.cuda.stream.synchronize().expect("devstop sync");
+        }
+    }
+
+    fn prep_batch_dev_inplace() -> Box<dyn CudaBenchState> {
         let cuda = CudaDevStop::new(0).expect("cuda devstop");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_close(&close);
-        let sweep = DevStopBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-            mult: (0.0, 2.0, 0.01),
-            devtype: (0, 0, 0),
-        };
-        Box::new(DevStopBatchState {
+        let len = high.len().min(low.len());
+        let (p1, p2, pc, first_valid) = CudaDevStop::build_range_prefixes(&high, &low);
+
+        let mult_end = 0.01f64 * ((MULT_SWEEP - 1) as f64);
+        let mut mults = Vec::with_capacity(MULT_SWEEP);
+        let mut x = 0.0f64;
+        while x <= mult_end + 1e-12 {
+            mults.push(x as f32);
+            x += 0.01;
+        }
+        if mults.is_empty() {
+            mults.push(0.0);
+        }
+
+        let rows = mults.len();
+        let elems_out = rows
+            .checked_mul(len)
+            .expect("devstop bench size overflow");
+
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &cuda.stream) }.expect("d_low");
+        let d_p1 = unsafe { DeviceBuffer::from_slice_async(&p1, &cuda.stream) }.expect("d_p1");
+        let d_p2 = unsafe { DeviceBuffer::from_slice_async(&p2, &cuda.stream) }.expect("d_p2");
+        let d_pc = unsafe { DeviceBuffer::from_slice_async(&pc, &cuda.stream) }.expect("d_pc");
+        let d_mults = unsafe { DeviceBuffer::from_slice_async(&mults, &cuda.stream) }.expect("d_mults");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems_out, &cuda.stream) }.expect("d_out");
+        cuda.stream.synchronize().expect("devstop sync");
+
+        Box::new(DevStopBatchDevInplaceState {
             cuda,
-            high,
-            low,
-            sweep,
+            len,
+            first_valid,
+            period: BATCH_PERIOD,
+            is_long: true,
+            d_high,
+            d_low,
+            d_p1,
+            d_p2,
+            d_pc,
+            d_mults,
+            d_out,
         })
     }
 
     struct DevStopManySeriesState {
         cuda: CudaDevStop,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
         mult: f32,
+        is_long: bool,
+        shmem_bytes: u32,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for DevStopManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .devstop_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.mult,
-                    true,
-                )
-                .unwrap();
+                .module
+                .get_function("devstop_many_series_one_param_f32")
+                .expect("devstop_many_series_one_param_f32");
+            let grid: GridSize = ((self.cols as u32).max(1), 1, 1).into();
+            let block: BlockSize = (64, 1, 1).into();
+            unsafe {
+                let mut high_ptr = self.d_high_tm.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low_tm.as_device_ptr().as_raw();
+                let mut firsts_ptr = self.d_first_valids.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut period_i = self.period as i32;
+                let mut mult_f = self.mult as f32;
+                let mut is_long_i = if self.is_long { 1i32 } else { 0i32 };
+                let mut out_ptr = self.d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut firsts_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut mult_f as *mut _ as *mut c_void,
+                    &mut is_long_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, self.shmem_bytes, args)
+                    .expect("devstop many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("devstop sync");
         }
     }
 
@@ -644,14 +753,41 @@ pub mod benches {
                 low_tm[idx] = v - off;
             }
         }
+        // Compute first_valid per series (high/low finite)
+        let mut first_valids: Vec<i32> = vec![0; cols];
+        for s in 0..cols {
+            let mut fv = 0i32;
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv;
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        let period = 20usize;
+        let per_block = 2 * std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
+        let shmem_bytes = (period * per_block) as u32;
+        let is_long = true;
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(DevStopManySeriesState {
             cuda,
-            high_tm,
-            low_tm,
+            d_high_tm,
+            d_low_tm,
+            d_first_valids,
             cols,
             rows,
-            period: 20,
+            period,
             mult: 1.5,
+            is_long,
+            shmem_bytes,
+            d_out_tm,
         })
     }
 
@@ -660,11 +796,11 @@ pub mod benches {
             CudaBenchScenario::new(
                 "devstop",
                 "batch_dev",
-                "devstop_cuda_batch_dev",
-                "1m_x_200",
-                prep_batch,
+                "devstop_cuda_batch_dev_inplace",
+                "1m_p20_x_200",
+                prep_batch_dev_inplace,
             )
-            .with_inner_iters(3),
+            .with_sample_size(10),
             CudaBenchScenario::new(
                 "devstop",
                 "many_series_one_param",
@@ -672,6 +808,7 @@ pub mod benches {
                 "128x8k",
                 prep_many_series,
             )
+            .with_sample_size(10)
             .with_inner_iters(3),
         ]
     }

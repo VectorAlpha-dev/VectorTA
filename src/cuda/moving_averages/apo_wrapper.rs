@@ -19,6 +19,7 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
@@ -295,10 +296,17 @@ impl CudaApo {
             .map_err(|_| CudaApoError::MissingKernelSymbol { name: "apo_batch_f32" })?;
 
         // Default launch config
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128u32,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        let mut block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => env::var("APO_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(32),
         };
+        if block_x == 0 {
+            block_x = 32;
+        }
+        block_x = block_x.max(32);
         let gx = u32::try_from(n_combos).map_err(|_| CudaApoError::LaunchConfigTooLarge {
             gx: u32::MAX,
             gy: 1,
@@ -555,25 +563,175 @@ fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, CudaApoError> {
 // -------------------- Benches --------------------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::apo::ApoParams;
 
-    define_ma_period_benches!(
-        apo_benches,
-        CudaApo,
-        crate::indicators::apo::ApoBatchRange,
-        crate::indicators::apo::ApoParams,
-        apo_batch_dev,
-        apo_many_series_one_param_time_major_dev,
-        crate::indicators::apo::ApoBatchRange {
-            short: (5, 5 + PARAM_SWEEP - 1, 1),
-            long: (20, 20 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::apo::ApoParams {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct ApoBatchDevState {
+        cuda: CudaApo,
+        d_prices: DeviceBuffer<f32>,
+        d_sp: DeviceBuffer<i32>,
+        d_sa: DeviceBuffer<f32>,
+        d_lp: DeviceBuffer<i32>,
+        d_la: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ApoBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_sp,
+                    &self.d_sa,
+                    &self.d_lp,
+                    &self.d_la,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("apo batch kernel");
+            self.cuda.synchronize().expect("apo sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaApo::new(0).expect("cuda apo");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = ApoBatchRange {
+            short: (10, 10, 1),
+            long: (20, 20 + PARAM_SWEEP - 1, 1),
+        };
+        let prep = CudaApo::prepare_batch_inputs(&price, &sweep).expect("apo prepare batch inputs");
+        let n_combos = prep.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_sp = DeviceBuffer::from_slice(&prep.short_periods).expect("d_sp");
+        let d_sa = DeviceBuffer::from_slice(&prep.short_alphas).expect("d_sa");
+        let d_lp = DeviceBuffer::from_slice(&prep.long_periods).expect("d_lp");
+        let d_la = DeviceBuffer::from_slice(&prep.long_alphas).expect("d_la");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prep.series_len * n_combos) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(ApoBatchDevState {
+            cuda,
+            d_prices,
+            d_sp,
+            d_sa,
+            d_lp,
+            d_la,
+            series_len: prep.series_len,
+            first_valid: prep.first_valid,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct ApoManyDevState {
+        cuda: CudaApo,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        short_period: i32,
+        short_alpha: f32,
+        long_period: i32,
+        long_alpha: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ApoManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.short_period,
+                    self.short_alpha,
+                    self.long_period,
+                    self.long_alpha,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("apo many-series kernel");
+            self.cuda.synchronize().expect("apo sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaApo::new(0).expect("cuda apo");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = ApoParams {
             short_period: Some(10),
-            long_period: Some(20)
-        },
-        "apo",
-        "apo"
-    );
-    pub use apo_benches::bench_profiles;
+            long_period: Some(20),
+        };
+        let (first_valids, sp, lp, a_s, a_l) =
+            CudaApo::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("apo prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(ApoManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            short_period: sp,
+            short_alpha: a_s,
+            long_period: lp,
+            long_alpha: a_l,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "apo",
+                "one_series_many_params",
+                "apo_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "apo",
+                "many_series_one_param",
+                "apo_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

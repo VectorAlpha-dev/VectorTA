@@ -406,28 +406,53 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
     //   mean = sum / den; var = (sum_sqr / den) - (mean * mean)
     // Using division by a constant `den` matches the streaming update logic.
     let den = period as f64;
+    let inv_den = 1.0 / den;
+
+    let len = data.len();
 
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
-    for &val in &data[first..first + period] {
-        sum += val;
-        sum_sqr += val * val;
+
+    // Pointer-based loops to reduce bounds checks and iterator overhead (Tulip-style),
+    // while preserving the same operation order for numerical parity.
+    unsafe {
+        let mut ptr = data.as_ptr().add(first);
+        let end = ptr.add(period);
+        while ptr < end {
+            let val = *ptr;
+            sum += val;
+            sum_sqr += val * val;
+            ptr = ptr.add(1);
+        }
     }
 
     // First output at warmup index
-    let mut mean = sum / den;
-    let mut var = (sum_sqr / den) - (mean * mean);
-    out[first + period - 1] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+    let idx0 = first + period - 1;
+    let mean0 = sum * inv_den;
+    let var0 = (sum_sqr * inv_den) - (mean0 * mean0);
+    out[idx0] = if var0 <= 0.0 { 0.0 } else { var0.sqrt() * nbdev };
 
     // Subsequent outputs
-    for i in (first + period)..data.len() {
-        let old = data[i - period];
-        let new = data[i];
-        sum += new - old;
-        sum_sqr += new * new - old * old;
-        mean = sum / den;
-        var = (sum_sqr / den) - (mean * mean);
-        out[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+    unsafe {
+        let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
+        let mut in_new = data.as_ptr().add(first + period);
+        let mut in_old = data.as_ptr().add(first);
+        let end = data.as_ptr().add(len);
+
+        while in_new < end {
+            let old = *in_old;
+            let new = *in_new;
+            sum += new - old;
+            sum_sqr += new * new - old * old;
+
+            let mean = sum * inv_den;
+            let var = (sum_sqr * inv_den) - (mean * mean);
+            *out_ptr = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
+
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
+        }
     }
 }
 
@@ -475,6 +500,7 @@ unsafe fn stddev_avx512_long(
 pub struct StdDevStream {
     period: usize,
     nbdev: f64,
+    inv_den: f64,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
@@ -499,6 +525,7 @@ impl StdDevStream {
         Ok(Self {
             period,
             nbdev,
+            inv_den: 1.0 / period as f64,
             buffer: vec![f64::NAN; period],
             head: 0,
             filled: false,
@@ -536,9 +563,8 @@ impl StdDevStream {
                 if self.nan_count > 0 {
                     return Some(f64::NAN);
                 }
-                let den = self.period as f64;
-                let mean = self.sum / den;
-                let var = (self.sum_sqr / den) - (mean * mean);
+                let mean = self.sum * self.inv_den;
+                let var = (self.sum_sqr * self.inv_den) - (mean * mean);
                 return Some(if var <= 0.0 {
                     0.0
                 } else {
@@ -602,9 +628,8 @@ impl StdDevStream {
             return Some(f64::NAN);
         }
 
-        let den = self.period as f64;
-        let mean = self.sum / den;
-        let var = (self.sum_sqr / den) - (mean * mean);
+        let mean = self.sum * self.inv_den;
+        let var = (self.sum_sqr * self.inv_den) - (mean * mean);
         Some(if var <= 0.0 {
             0.0
         } else {
@@ -622,7 +647,7 @@ pub struct StdDevBatchRange {
 impl Default for StdDevBatchRange {
     fn default() -> Self {
         Self {
-            period: (5, 50, 1),
+            period: (5, 254, 1),
             nbdev: (1.0, 1.0, 0.0),
         }
     }

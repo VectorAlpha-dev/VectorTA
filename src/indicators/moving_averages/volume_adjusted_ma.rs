@@ -400,7 +400,7 @@ fn VolumeAdjustedMa_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -1074,8 +1074,8 @@ pub struct VolumeAdjustedMaBatchRange {
 impl Default for VolumeAdjustedMaBatchRange {
     fn default() -> Self {
         Self {
-            length: (13, 55, 1),
-            vi_factor: (0.67, 0.67, 0.0),
+            length: (13, 13, 0),
+            vi_factor: (0.67, 0.919, 0.001),
             sample_period: (0, 0, 0),
             strict: Some(true),
         }
@@ -2184,12 +2184,12 @@ pub fn volume_adjusted_ma_into(
         let aliased = out_ptr as *const f64 == price_ptr || out_ptr as *const f64 == vol_ptr;
         if aliased {
             let mut tmp = vec![0.0; len];
-            VolumeAdjustedMa_into_slice(&mut tmp, &input, detect_best_kernel())
+            VolumeAdjustedMa_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            VolumeAdjustedMa_into_slice(out, &input, detect_best_kernel())
+            VolumeAdjustedMa_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }
@@ -2601,7 +2601,7 @@ mod tests {
         #[cfg(feature = "wasm")]
         {
             // On wasm builds, fall back to the slice variant used by the wasm export
-            VolumeAdjustedMa_into_slice(&mut out, &input, detect_best_kernel())?;
+            VolumeAdjustedMa_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(out.len(), expected.len());

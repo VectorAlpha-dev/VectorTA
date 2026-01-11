@@ -206,7 +206,7 @@ fn wclprice_prepare<'a>(
         .ok_or(WclpriceError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::ScalarBatch => Kernel::Scalar,

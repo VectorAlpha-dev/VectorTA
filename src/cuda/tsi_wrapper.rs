@@ -645,9 +645,11 @@ impl CudaTsi {
                 &mut mom_ptr as *mut _ as *mut c_void,
                 &mut amom_ptr as *mut _ as *mut c_void,
             ];
-            let grid: GridSize = (1u32, 1u32, 1u32).into();
-            let block: BlockSize = (1u32, 1u32, 1u32).into();
-            self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+            let block_x: u32 = 256;
+            let grid_x = ((len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();
+            let block: BlockSize = (block_x, 1u32, 1u32).into();
+            self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
             self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
@@ -802,29 +804,116 @@ pub mod benches {
     const LEN: usize = 1_000_000; // 1M samples
     const ROWS: usize = 128; // number of parameter pairs
 
-    struct TsiBatchState {
-        cuda: CudaTsi,
-        price: Vec<f32>,
-        sweep: TsiBatchRange,
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = LEN * std::mem::size_of::<f32>();
+        let params_bytes = ROWS * 2 * std::mem::size_of::<i32>();
+        let scratch_bytes = 2 * LEN * std::mem::size_of::<f32>(); // mom + amom
+        let tm_bytes = ROWS * LEN * std::mem::size_of::<f32>(); // out_tm
+        let out_bytes = ROWS * LEN * std::mem::size_of::<f32>(); // out_rm
+        in_bytes + params_bytes + scratch_bytes + tm_bytes + out_bytes + 64 * 1024 * 1024
     }
-    impl CudaBenchState for TsiBatchState {
+
+    struct TsiBatchDeviceState {
+        cuda: CudaTsi,
+        d_prices: DeviceBuffer<f32>,
+        d_longs: DeviceBuffer<i32>,
+        d_shorts: DeviceBuffer<i32>,
+        d_mom: DeviceBuffer<f32>,
+        d_amom: DeviceBuffer<f32>,
+        d_out_tm: DeviceBuffer<f32>,
+        d_out_rm: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        block_x: u32,
+    }
+    impl CudaBenchState for TsiBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self.cuda.tsi_batch_dev(&self.price, &self.sweep).unwrap();
+            self.cuda
+                .launch_prepare_momentum(
+                    &self.d_prices,
+                    self.len,
+                    self.first_valid,
+                    &mut self.d_mom,
+                    &mut self.d_amom,
+                )
+                .expect("tsi launch_prepare_momentum");
+            self.cuda
+                .launch_param_parallel_tm(
+                    &self.d_mom,
+                    &self.d_amom,
+                    &self.d_longs,
+                    &self.d_shorts,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out_tm,
+                    self.block_x,
+                )
+                .expect("tsi launch_param_parallel_tm");
+            self.cuda
+                .launch_transpose_tm_to_rm(
+                    &self.d_out_tm,
+                    self.len,
+                    self.n_combos,
+                    &mut self.d_out_rm,
+                )
+                .expect("tsi launch_transpose_tm_to_rm");
+            self.cuda.synchronize().expect("tsi sync");
         }
     }
+
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let mut cuda = CudaTsi::new(0).expect("cuda tsi");
         cuda.set_policy(CudaTsiPolicy {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         });
+
         let price = gen_series(LEN);
-        // Build a reasonable sweep of (long, short)
+        let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
+
+        // Keep combos == ROWS to control the output surface (ROWS x LEN).
         let sweep = TsiBatchRange {
-            long_period: (10, 100, (100 - 10).max(1) / ROWS.max(1)),
-            short_period: (5, 30, (30 - 5).max(1) / (ROWS / 2).max(1)),
+            long_period: (25, 25 + ROWS - 1, 1),
+            short_period: (13, 13, 0),
         };
-        Box::new(TsiBatchState { cuda, price, sweep })
+        let combos = expand_grid(&sweep).expect("expand_grid");
+        let n_combos = combos.len();
+
+        let mut longs_i32 = Vec::<i32>::with_capacity(n_combos);
+        let mut shorts_i32 = Vec::<i32>::with_capacity(n_combos);
+        for p in &combos {
+            longs_i32.push(p.long_period.unwrap_or(25) as i32);
+            shorts_i32.push(p.short_period.unwrap_or(13) as i32);
+        }
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_longs = DeviceBuffer::from_slice(&longs_i32).expect("d_longs");
+        let d_shorts = DeviceBuffer::from_slice(&shorts_i32).expect("d_shorts");
+        let d_mom: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(LEN) }.expect("d_mom");
+        let d_amom: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(LEN) }.expect("d_amom");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(LEN * n_combos) }.expect("d_out_tm");
+        let d_out_rm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(LEN * n_combos) }.expect("d_out_rm");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(TsiBatchDeviceState {
+            cuda,
+            d_prices,
+            d_longs,
+            d_shorts,
+            d_mom,
+            d_amom,
+            d_out_tm,
+            d_out_rm,
+            len: LEN,
+            first_valid,
+            n_combos,
+            block_x: 256,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -835,6 +924,7 @@ pub mod benches {
             "1m_x_128",
             prep_batch,
         )
-        .with_inner_iters(4)]
+        .with_inner_iters(4)
+        .with_mem_required(bytes_one_series_many_params())]
     }
 }

@@ -1868,7 +1868,7 @@ pub struct TtmSqueezeBatchRange {
 impl Default for TtmSqueezeBatchRange {
     fn default() -> Self {
         Self {
-            length: (20, 60, 1),
+            length: (20, 269, 1),
             bb_mult: (2.0, 2.0, 0.0),
             kc_high: (1.0, 1.0, 0.0),
             kc_mid: (1.5, 1.5, 0.0),

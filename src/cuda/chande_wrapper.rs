@@ -755,53 +755,73 @@ pub mod benches {
         (high, low)
     }
 
-    struct ChandeBatchState {
+    struct ChandeBatchDeviceState {
         cuda: CudaChande,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: ChandeBatchRange,
-        dir: String,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_mults: DeviceBuffer<f32>,
+        d_dirs: DeviceBuffer<i32>,
+        d_alphas: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        queue_cap: usize,
+        grid: GridSize,
+        block: BlockSize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for ChandeBatchState {
+    impl CudaBenchState for ChandeBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .chande_batch_dev(&self.high, &self.low, &self.close, &self.sweep, &self.dir)
-                .unwrap();
-        }
-    }
-    
+                .module
+                .get_function("chande_one_series_many_params_f32")
+                .expect("chande_one_series_many_params_f32");
 
-    struct ChandeManyState {
-        cuda: CudaChande,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        period: usize,
-        mult: f32,
-        dir: String,
-    }
-    impl CudaBenchState for ChandeManyState {
-        fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chande_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.mult,
-                    &self.dir,
-                )
-                .unwrap();
+            unsafe {
+                let mut high_ptr = self.d_high.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low.as_device_ptr().as_raw();
+                let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut mults_ptr = self.d_mults.as_device_ptr().as_raw();
+                let mut dirs_ptr = self.d_dirs.as_device_ptr().as_raw();
+                let mut alphas_ptr = self.d_alphas.as_device_ptr().as_raw();
+                let mut first_i = self.first_valid as i32;
+                let mut len_i = self.len as i32;
+                let mut combos_i = self.n_combos as i32;
+                let mut qcap_i = self.queue_cap as i32;
+                let dq_idx_ref = self.cuda.dq_idx.as_ref().expect("dq_idx");
+                let dq_val_ref = self.cuda.dq_val.as_ref().expect("dq_val");
+                let mut dq_idx_ptr = dq_idx_ref.as_device_ptr().as_raw();
+                let mut dq_val_ptr = dq_val_ref.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut mults_ptr as *mut _ as *mut c_void,
+                    &mut dirs_ptr as *mut _ as *mut c_void,
+                    &mut alphas_ptr as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut qcap_i as *mut _ as *mut c_void,
+                    &mut dq_idx_ptr as *mut _ as *mut c_void,
+                    &mut dq_val_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("chande oneseries launch");
+            }
+            self.cuda.stream.synchronize().expect("chande sync");
         }
     }
-    
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let len = ONE_SERIES_LEN;
@@ -811,14 +831,130 @@ pub mod benches {
             period: (10, 40, 5),
             mult: (2.0, 4.0, 1.0),
         };
-        Box::new(ChandeBatchState {
-            cuda: CudaChande::new(0).unwrap(),
-            high,
-            low,
-            close,
-            sweep,
-            dir: "long".into(),
+
+        let mut cuda = CudaChande::new(0).expect("cuda chande");
+
+        let first_valid = CudaChande::first_valid_hlc(&high, &low, &close).expect("first_valid");
+        let dir_flag = 1i32; // long
+
+        let periods = CudaChande::axis_usize_range(sweep.period).expect("period axis");
+        let mults_host = CudaChande::axis_f64_range(sweep.mult).expect("mult axis");
+
+        let mut h_periods = Vec::<i32>::new();
+        let mut h_alphas = Vec::<f32>::new();
+        let mut h_mults = Vec::<f32>::new();
+        let mut h_dirs = Vec::<i32>::new();
+        let mut max_p = 0usize;
+        for &p in &periods {
+            max_p = max_p.max(p);
+            for &m in &mults_host {
+                h_periods.push(p as i32);
+                h_alphas.push(1.0f32 / (p as f32));
+                h_mults.push(m as f32);
+                h_dirs.push(dir_flag);
+            }
+        }
+        let n_combos = h_periods.len();
+        let queue_cap = CudaChande::next_pow2_usize(max_p + 1);
+        cuda.ensure_workspace(n_combos, queue_cap).expect("workspace");
+
+        // Upload once
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_periods = DeviceBuffer::from_slice(&h_periods).expect("d_periods");
+        let d_mults = DeviceBuffer::from_slice(&h_mults).expect("d_mults");
+        let d_dirs = DeviceBuffer::from_slice(&h_dirs).expect("d_dirs");
+        let d_alphas = DeviceBuffer::from_slice(&h_alphas).expect("d_alphas");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+
+        // Launch config (same as chande_batch_dev oneseries path)
+        let warps_needed = ((n_combos + 31) / 32) as u32;
+        let warps_per_block = match cuda.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => (block_x.max(32) / 32),
+            BatchKernelPolicy::Auto => 4,
+        }
+        .max(1);
+        let block_x = warps_per_block * 32;
+        let grid_x = ((warps_needed + warps_per_block - 1) / warps_per_block).max(1);
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        Box::new(ChandeBatchDeviceState {
+            cuda,
+            d_high,
+            d_low,
+            d_close,
+            d_periods,
+            d_mults,
+            d_dirs,
+            d_alphas,
+            len,
+            first_valid,
+            n_combos,
+            queue_cap,
+            grid,
+            block,
+            d_out,
         })
+    }
+
+    struct ChandeManyDeviceState {
+        cuda: CudaChande,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        mult: f32,
+        dir_flag: i32,
+        alpha: f32,
+        grid: GridSize,
+        block: BlockSize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ChandeManyDeviceState {
+        fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("chande_many_series_one_param_f32")
+                .expect("chande_many_series_one_param_f32");
+            unsafe {
+                let mut high_ptr = self.d_high_tm.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low_tm.as_device_ptr().as_raw();
+                let mut close_ptr = self.d_close_tm.as_device_ptr().as_raw();
+                let mut fv_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut period_i = self.period as i32;
+                let mut mult_f = self.mult;
+                let mut dir_i = self.dir_flag;
+                let mut alpha_f = self.alpha;
+                let mut num_series_i = self.cols as i32;
+                let mut series_len_i = self.rows as i32;
+                let mut out_ptr = self.d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut fv_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut mult_f as *mut _ as *mut c_void,
+                    &mut dir_i as *mut _ as *mut c_void,
+                    &mut alpha_f as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("chande many launch");
+            }
+            self.cuda.stream.synchronize().expect("chande many sync");
+        }
     }
 
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -843,16 +979,42 @@ pub mod benches {
                 low_tm[t * cols + s] = v - off;
             }
         }
-        Box::new(ChandeManyState {
-            cuda: CudaChande::new(0).unwrap(),
-            high_tm,
-            low_tm,
-            close_tm,
+
+        let cuda = CudaChande::new(0).expect("cuda chande");
+        let first_valids = CudaChande::first_valids_time_major(&high_tm, &low_tm, &close_tm, cols, rows)
+            .expect("first_valids");
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        let dir_flag: i32 = 1;
+        let alpha = 1.0f32 / (period as f32);
+        let block_x = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            ManySeriesKernelPolicy::Auto => 256,
+        };
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        Box::new(ChandeManyDeviceState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first,
             cols,
             rows,
             period,
             mult,
-            dir: "long".into(),
+            dir_flag,
+            alpha,
+            grid,
+            block,
+            d_out_tm,
         })
     }
 
@@ -863,14 +1025,16 @@ pub mod benches {
             "chande_cuda_batch_dev",
             "512k_x_params",
             prep_one_series_many_params,
-        );
+        )
+        .with_sample_size(10);
         let scen_many = CudaBenchScenario::new(
             "chande",
             "many_series_one_param",
             "chande_cuda_many_series_one_param_dev",
             "128x262k",
             prep_many_series_one_param,
-        );
+        )
+        .with_sample_size(10);
         vec![scen_batch, scen_many]
     }
 }

@@ -1,9 +1,10 @@
-// CUDA kernels for Smoothed Moving Average (SMMA) — optimized.
+// CUDA kernels for Smoothed Moving Average (SMMA) - optimized.
 //
 // Key changes:
 //  - Warp-broadcast of input prices to eliminate redundant loads across combos
 //  - FMA form of the recurrence for speed and numerical stability
 //  - Fewer integer ops inside hot loops; pointer/index math hoisted
+//  - (Batch) Warp-scan kernel to increase parallelism over time
 //  - Same external signatures for drop-in compatibility
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -110,6 +111,89 @@ void smma_batch_f32(const float* __restrict__ prices,
             }
         }
         // Threads with invalid period participate in shuffles but do not write — matches original semantics.
+    }
+}
+
+// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
+// per iteration via an inclusive scan over the affine SMMA/EMA transform:
+//   y_t = (1-alpha) * y_{t-1} + alpha * x_t, where alpha = 1/period
+//
+// - blockDim.x must be exactly 32
+// - output is written once: warmup prefix is NaN, then all t>=warm are computed
+extern "C" __global__
+void smma_batch_warp_scan_f32(const float* __restrict__ prices,
+                              const int*   __restrict__ periods,
+                              const int*   __restrict__ warm_indices,
+                              int first_valid,
+                              int series_len,
+                              int n_combos,
+                              float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len) return;
+    if (threadIdx.x >= 32) return;
+
+    const int period = periods[combo];
+    const int warm   = warm_indices[combo];
+    if (period <= 0) return;
+
+    const int lane = threadIdx.x & 31;
+    const unsigned mask = 0xffffffffu;
+    const size_t base = (size_t)combo * (size_t)series_len;
+    const float nan_f = __int_as_float(0x7fffffff);
+
+    const int warm_clamped = (warm < series_len) ? warm : series_len;
+    for (int t = lane; t < warm_clamped; t += 32) {
+        out[base + (size_t)t] = nan_f;
+    }
+    if (warm < 0 || warm >= series_len) return;
+
+    float y_prev = 0.0f;
+    if (lane == 0) {
+        float sum = 0.0f;
+        // warm == first_valid + period - 1 in the wrapper; if warm >= series_len, we returned above.
+        for (int i = 0; i < period; ++i) {
+            sum += prices[first_valid + i];
+        }
+        y_prev = sum / (float)period;
+        out[base + (size_t)warm] = y_prev;
+    }
+    y_prev = __shfl_sync(mask, y_prev, 0);
+
+    int t0 = warm + 1;
+    if (t0 >= series_len) return;
+
+    const float alpha = 1.0f / (float)period;
+    const float one_m_alpha = 1.0f - alpha;
+
+    for (int tile = t0; tile < series_len; tile += 32) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        float A = valid ? one_m_alpha : 1.0f;
+        float B = valid ? (alpha * prices[t]) : 0.0f;
+
+        // Inclusive scan of composed affine transforms (A, B)
+        #pragma unroll
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+
+        const float y = fmaf(A, y_prev, B);
+        if (valid) {
+            out[base + (size_t)t] = y;
+        }
+
+        const int remaining = series_len - tile;
+        const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
+        y_prev = __shfl_sync(mask, y, last_lane);
     }
 }
 

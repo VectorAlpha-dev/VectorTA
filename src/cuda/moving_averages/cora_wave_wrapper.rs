@@ -715,29 +715,392 @@ impl CudaCoraWave {
 // ---------------------------- Benches --------------------------------------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::cora_wave::{CoraWaveBatchRange, CoraWaveParams};
 
-    // Single-series batch: sweep periods and r_multi (keep r_multi fixed in the macro – we expose
-    // a minimal sweep via the wrapper-owned profiles to keep runtime reasonable).
-    define_ma_period_benches!(
-        cora_wave_benches,
-        CudaCoraWave,
-        crate::indicators::cora_wave::CoraWaveBatchRange,
-        crate::indicators::cora_wave::CoraWaveParams,
-        cora_wave_batch_dev,
-        cora_wave_multi_series_one_param_time_major_dev,
-        crate::indicators::cora_wave::CoraWaveBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct CoraWaveBatchDevState {
+        cuda: CudaCoraWave,
+        d_prices: DeviceBuffer<f32>,
+        d_weights: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_inv: DeviceBuffer<f32>,
+        d_smooth: DeviceBuffer<i32>,
+        d_warm0s: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        max_period: usize,
+        first_valid: usize,
+        grid_x: u32,
+        block_x: u32,
+        shared_bytes: u32,
+        grid_x2: u32,
+        block_x2: u32,
+        d_tmp: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for CoraWaveBatchDevState {
+        fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("cora_wave_batch_f32")
+                .expect("cora_wave_batch_f32");
+            let block: BlockSize = (self.block_x, 1, 1).into();
+
+            for (start, len) in CudaCoraWave::grid_y_chunks(self.n_combos) {
+                unsafe {
+                    let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                    let mut weights_ptr = self
+                        .d_weights
+                        .as_device_ptr()
+                        .add(start * self.max_period)
+                        .as_raw();
+                    let mut periods_ptr = self.d_periods.as_device_ptr().add(start).as_raw();
+                    let mut inv_ptr = self.d_inv.as_device_ptr().add(start).as_raw();
+                    let mut max_p_i = self.max_period as i32;
+                    let mut series_i = self.series_len as i32;
+                    let mut n_i = len as i32;
+                    let mut first_i = self.first_valid as i32;
+                    let mut out_ptr = self
+                        .d_tmp
+                        .as_device_ptr()
+                        .add(start * self.series_len)
+                        .as_raw();
+                    let grid: GridSize = (self.grid_x, len as u32, 1).into();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut weights_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut inv_ptr as *mut _ as *mut c_void,
+                        &mut max_p_i as *mut _ as *mut c_void,
+                        &mut series_i as *mut _ as *mut c_void,
+                        &mut n_i as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&func, grid, block, self.shared_bytes, args)
+                        .expect("cora batch launch");
+                }
+            }
+
+            let func_wma = self
+                .cuda
+                .module
+                .get_function("cora_wave_batch_wma_from_y_f32")
+                .expect("cora_wave_batch_wma_from_y_f32");
+            let block2: BlockSize = (self.block_x2, 1, 1).into();
+            for (start, len) in CudaCoraWave::grid_y_chunks(self.n_combos) {
+                unsafe {
+                    let mut y_ptr = self
+                        .d_tmp
+                        .as_device_ptr()
+                        .add(start * self.series_len)
+                        .as_raw();
+                    let mut sm_ptr = self.d_smooth.as_device_ptr().add(start).as_raw();
+                    let mut w0_ptr = self.d_warm0s.as_device_ptr().add(start).as_raw();
+                    let mut series_i = self.series_len as i32;
+                    let mut n_i = len as i32;
+                    let mut out_ptr = self
+                        .d_out
+                        .as_device_ptr()
+                        .add(start * self.series_len)
+                        .as_raw();
+                    let grid: GridSize = (self.grid_x2, len as u32, 1).into();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut y_ptr as *mut _ as *mut c_void,
+                        &mut sm_ptr as *mut _ as *mut c_void,
+                        &mut w0_ptr as *mut _ as *mut c_void,
+                        &mut series_i as *mut _ as *mut c_void,
+                        &mut n_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&func_wma, grid, block2, 0, args)
+                        .expect("cora smooth launch");
+                }
+            }
+
+            self.cuda.stream.synchronize().expect("cora sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaCoraWave::new(0).expect("cuda cora_wave");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = CoraWaveBatchRange {
             period: (16, 16 + PARAM_SWEEP - 1, 1),
             r_multi: (2.0, 2.0, 0.0),
             smooth: true,
-        },
-        crate::indicators::cora_wave::CoraWaveParams {
+        };
+
+        let (
+            _combos,
+            first_valid,
+            series_len,
+            max_period,
+            periods_i32,
+            inv_norms,
+            weights_flat,
+            smooth_periods,
+            warm0s,
+        ) = CudaCoraWave::prepare_batch_inputs(&price, &sweep).expect("cora prep batch inputs");
+        let n_combos = periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_inv = DeviceBuffer::from_slice(&inv_norms).expect("d_inv");
+        let d_smooth = DeviceBuffer::from_slice(&smooth_periods).expect("d_smooth");
+        let d_warm0s = DeviceBuffer::from_slice(&warm0s).expect("d_warm0s");
+        let n_tmp = n_combos * series_len;
+        let d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out");
+
+        let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+        let func = cuda
+            .module
+            .get_function("cora_wave_batch_f32")
+            .expect("cora_wave_batch_f32");
+        let block_x = cuda.pick_block_x(&func, shared_bytes as usize, 256);
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+
+        let func_wma = cuda
+            .module
+            .get_function("cora_wave_batch_wma_from_y_f32")
+            .expect("cora_wave_batch_wma_from_y_f32");
+        let block_x2 = cuda.pick_block_x(&func_wma, 0, 256);
+        let grid_x2 = ((series_len as u32) + block_x2 - 1) / block_x2;
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(CoraWaveBatchDevState {
+            cuda,
+            d_prices,
+            d_weights,
+            d_periods,
+            d_inv,
+            d_smooth,
+            d_warm0s,
+            series_len,
+            n_combos,
+            max_period,
+            first_valid,
+            grid_x: grid_x.max(1),
+            block_x,
+            shared_bytes,
+            grid_x2: grid_x2.max(1),
+            block_x2,
+            d_tmp,
+            d_out,
+        })
+    }
+
+    struct CoraWaveManyDevState {
+        cuda: CudaCoraWave,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_weights: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        inv_norm: f32,
+        grid_x: u32,
+        block_x: u32,
+        wma_m: i32,
+        d_warm0s: DeviceBuffer<i32>,
+        grid_x2: u32,
+        block_x2: u32,
+        d_tmp: DeviceBuffer<f32>,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for CoraWaveManyDevState {
+        fn launch(&mut self) {
+            let func = self
+                .cuda
+                .module
+                .get_function("cora_wave_multi_series_one_param_time_major_f32")
+                .expect("cora_wave_ms1p");
+            let grid: GridSize = (self.grid_x, self.cols as u32, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut prices_ptr = self.d_prices_tm.as_device_ptr().as_raw();
+                let mut w_ptr = self.d_weights.as_device_ptr().as_raw();
+                let mut period_i = self.period as i32;
+                let mut inv = self.inv_norm as f32;
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut first_ptr = self.d_first_valids.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_tmp.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut w_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut inv as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("cora ms1p launch");
+            }
+
+            let func_wma = self
+                .cuda
+                .module
+                .get_function("cora_wave_ms1p_wma_time_major_f32")
+                .expect("cora ms1p wma");
+            let grid2: GridSize = (self.grid_x2, self.cols as u32, 1).into();
+            let block2: BlockSize = (self.block_x2, 1, 1).into();
+            unsafe {
+                let mut y_ptr = self.d_tmp.as_device_ptr().as_raw();
+                let mut m_i = self.wma_m as i32;
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut w0_ptr = self.d_warm0s.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut y_ptr as *mut _ as *mut c_void,
+                    &mut m_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut w0_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func_wma, grid2, block2, 0, args)
+                    .expect("cora ms1p smooth launch");
+            }
+
+            self.cuda.stream.synchronize().expect("cora sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaCoraWave::new(0).expect("cuda cora_wave");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = CoraWaveParams {
             period: Some(64),
             r_multi: Some(2.0),
-            smooth: Some(true)
-        },
-        "cora_wave",
-        "cora_wave"
-    );
-    pub use cora_wave_benches::bench_profiles;
+            smooth: Some(true),
+        };
+        let (first_valids, period, weights, inv_norm, _rows) =
+            CudaCoraWave::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("cora prep many-series");
+
+        let wma_m = ((period as f64).sqrt().round() as i32).max(1);
+        let mut warm0s = vec![0i32; cols];
+        for s in 0..cols {
+            warm0s[s] = first_valids[s] + (period as i32) - 1;
+        }
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_weights = DeviceBuffer::from_slice(&weights).expect("d_weights");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_warm0s = DeviceBuffer::from_slice(&warm0s).expect("d_warm0s");
+        let n_tmp = cols * rows;
+        let d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out_tm");
+
+        // Kernel 1: CoRa
+        let func = cuda
+            .module
+            .get_function("cora_wave_multi_series_one_param_time_major_f32")
+            .expect("cora_wave_multi_series_one_param_time_major_f32");
+        let block_x = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => func
+                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                .map(|(_, bx)| bx)
+                .unwrap_or(256)
+                .max(64)
+                .min(1024),
+        };
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
+
+        // Kernel 2: smoothing WMA
+        let func_wma = cuda
+            .module
+            .get_function("cora_wave_ms1p_wma_time_major_f32")
+            .expect("cora_wave_ms1p_wma_time_major_f32");
+        let block_x2 = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => func_wma
+                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                .map(|(_, bx)| bx)
+                .unwrap_or(256)
+                .max(64)
+                .min(1024),
+        };
+        let grid_x2 = ((rows as u32) + block_x2 - 1) / block_x2;
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(CoraWaveManyDevState {
+            cuda,
+            d_prices_tm,
+            d_weights,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            inv_norm,
+            grid_x: grid_x.max(1),
+            block_x,
+            wma_m,
+            d_warm0s,
+            grid_x2: grid_x2.max(1),
+            block_x2,
+            d_tmp,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "cora_wave",
+                "one_series_many_params",
+                "cora_wave_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "cora_wave",
+                "many_series_one_param",
+                "cora_wave_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

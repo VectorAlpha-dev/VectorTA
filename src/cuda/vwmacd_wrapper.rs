@@ -749,18 +749,38 @@ pub mod benches {
         3 * elems * 4 + 2 * elems * 4 + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct BatchDevState {
         cuda: CudaVwmacd,
-        price: Vec<f32>,
-        vol: Vec<f32>,
-        sweep: VwmacdBatchRange,
+        d_pv: DeviceBuffer<f64>,
+        d_vol: DeviceBuffer<f64>,
+        d_fasts: DeviceBuffer<i32>,
+        d_slows: DeviceBuffer<i32>,
+        d_sigs: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        d_macd: DeviceBuffer<f32>,
+        d_signal: DeviceBuffer<f32>,
+        d_hist: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .vwmacd_batch_dev(&self.price, &self.vol, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch(
+                    &self.d_pv,
+                    &self.d_vol,
+                    &self.d_fasts,
+                    &self.d_slows,
+                    &self.d_sigs,
+                    self.len,
+                    self.first_valid,
+                    self.rows,
+                    &mut self.d_macd,
+                    &mut self.d_signal,
+                    &mut self.d_hist,
+                )
+                .expect("vwmacd batch kernel");
+            self.cuda.synchronize().expect("vwmacd sync");
         }
     }
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -788,11 +808,48 @@ pub mod benches {
                         slow_ma_type: "sma".into(),
                         signal_ma_type: "ema".into(),
                     };
-                    Box::new(BatchState {
+                    let combos = expand_grid(&sweep).expect("vwmacd expand grid");
+                    let rows = combos.len();
+                    let first_valid =
+                        first_valid_pair_f32(&price, &vol).expect("vwmacd first_valid");
+                    let (pv_prefix, vol_prefix) =
+                        compute_prefix_sums(&price, &vol, first_valid, price.len());
+                    let fasts: Vec<i32> =
+                        combos.iter().map(|c| c.fast_period.unwrap_or(0) as i32).collect();
+                    let slows: Vec<i32> =
+                        combos.iter().map(|c| c.slow_period.unwrap_or(0) as i32).collect();
+                    let sigs: Vec<i32> =
+                        combos.iter().map(|c| c.signal_period.unwrap_or(0) as i32).collect();
+
+                    let d_pv = DeviceBuffer::from_slice(&pv_prefix).expect("d_pv");
+                    let d_vol = DeviceBuffer::from_slice(&vol_prefix).expect("d_vol");
+                    let d_fasts = DeviceBuffer::from_slice(&fasts).expect("d_fasts");
+                    let d_slows = DeviceBuffer::from_slice(&slows).expect("d_slows");
+                    let d_sigs = DeviceBuffer::from_slice(&sigs).expect("d_sigs");
+                    let elems = rows
+                        .checked_mul(price.len())
+                        .expect("rows*len");
+                    let d_macd: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_macd");
+                    let d_signal: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_signal");
+                    let d_hist: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_hist");
+                    cuda.synchronize().expect("sync after prep");
+
+                    Box::new(BatchDevState {
                         cuda,
-                        price,
-                        vol,
-                        sweep,
+                        d_pv,
+                        d_vol,
+                        d_fasts,
+                        d_slows,
+                        d_sigs,
+                        len: price.len(),
+                        first_valid,
+                        rows,
+                        d_macd,
+                        d_signal,
+                        d_hist,
                     })
                 },
             )
@@ -822,31 +879,78 @@ pub mod benches {
                         slow_ma_type: Some("sma".into()),
                         signal_ma_type: Some("ema".into()),
                     };
+
                     struct S {
                         cuda: CudaVwmacd,
-                        p: Vec<f32>,
-                        v: Vec<f32>,
+                        d_pv_tm: DeviceBuffer<f64>,
+                        d_vol_tm: DeviceBuffer<f64>,
+                        d_first: DeviceBuffer<i32>,
+                        fast: usize,
+                        slow: usize,
+                        signal: usize,
                         cols: usize,
                         rows: usize,
-                        prm: VwmacdParams,
+                        d_macd: DeviceBuffer<f32>,
+                        d_signal: DeviceBuffer<f32>,
+                        d_hist: DeviceBuffer<f32>,
                     }
                     impl CudaBenchState for S {
                         fn launch(&mut self) {
-                            let _ = self
-                                .cuda
-                                .vwmacd_many_series_one_param_time_major_dev(
-                                    &self.p, &self.v, self.cols, self.rows, &self.prm,
+                            self.cuda
+                                .launch_many_series(
+                                    &self.d_pv_tm,
+                                    &self.d_vol_tm,
+                                    &self.d_first,
+                                    self.fast,
+                                    self.slow,
+                                    self.signal,
+                                    self.cols,
+                                    self.rows,
+                                    &mut self.d_macd,
+                                    &mut self.d_signal,
+                                    &mut self.d_hist,
                                 )
-                                .unwrap();
+                                .expect("vwmacd many-series kernel");
+                            self.cuda.synchronize().expect("vwmacd sync");
                         }
                     }
+
+                    let first_valids =
+                        first_valids_time_major_f32(&price, &vol, MANY_SERIES_COLS, MANY_SERIES_LEN);
+                    let (pv_prefix_tm, vol_prefix_tm) = compute_prefix_sums_time_major(
+                        &price,
+                        &vol,
+                        MANY_SERIES_COLS,
+                        MANY_SERIES_LEN,
+                        &first_valids,
+                    );
+                    let d_pv_tm = DeviceBuffer::from_slice(&pv_prefix_tm).expect("d_pv_tm");
+                    let d_vol_tm = DeviceBuffer::from_slice(&vol_prefix_tm).expect("d_vol_tm");
+                    let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+                    let elems = MANY_SERIES_COLS
+                        .checked_mul(MANY_SERIES_LEN)
+                        .expect("elems");
+                    let d_macd: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_macd");
+                    let d_signal: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_signal");
+                    let d_hist: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_hist");
+                    cuda.synchronize().expect("sync after prep");
+
                     Box::new(S {
                         cuda,
-                        p: price,
-                        v: vol,
+                        d_pv_tm,
+                        d_vol_tm,
+                        d_first,
+                        fast: params.fast_period.unwrap_or(12),
+                        slow: params.slow_period.unwrap_or(26),
+                        signal: params.signal_period.unwrap_or(9),
                         cols: MANY_SERIES_COLS,
                         rows: MANY_SERIES_LEN,
-                        prm: params,
+                        d_macd,
+                        d_signal,
+                        d_hist,
                     })
                 },
             )

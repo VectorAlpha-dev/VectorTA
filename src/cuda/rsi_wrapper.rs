@@ -215,13 +215,16 @@ impl CudaRsi {
             .module
             .get_function("rsi_batch_f32")
             .map_err(|_| CudaRsiError::MissingKernelSymbol { name: "rsi_batch_f32" })?;
-        let block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
+        let mut block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
+        block_x = block_x.max(32);
+        block_x -= block_x % 32;
+        let warps_per_block = (block_x / 32).max(1);
         let max_grid_x: u32 = self.max_grid_x.max(1);
-        let combos_per_launch: usize = (block_x as usize) * (max_grid_x as usize);
+        let combos_per_launch: usize = (warps_per_block as usize) * (max_grid_x as usize);
         let mut launched = 0usize;
         while launched < n_combos {
             let this_chunk = (n_combos - launched).min(combos_per_launch);
-            let grid_x = ((this_chunk as u32) + block_x - 1) / block_x;
+            let grid_x = ((this_chunk as u32) + warps_per_block - 1) / warps_per_block;
             let grid = (grid_x.max(1), 1, 1);
             let block = (block_x, 1, 1);
             self.validate_launch(grid, block)?;
@@ -448,21 +451,28 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct RsiBatchState {
+    struct RsiBatchDeviceState {
         cuda: CudaRsi,
-        prices: Vec<f32>,
-        sweep: RsiBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RsiBatchState {
+    impl CudaBenchState for RsiBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .rsi_batch_dev(&self.prices, &self.sweep)
-                .expect("rsi batch");
-            let _ = self
-                .cuda
-                .rsi_batch_dev(&self.prices, &self.sweep)
-                .expect("rsi batch");
+            self.cuda
+                .launch_batch(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("rsi launch");
+            self.cuda.stream.synchronize().expect("rsi sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -479,19 +489,59 @@ pub mod benches {
         let sweep = RsiBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
-        Box::new(RsiBatchState { cuda, prices, sweep })
+
+        let (combos, first_valid, len) =
+            CudaRsi::prepare_batch_inputs(&prices, &sweep).expect("prepare_batch_inputs");
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+        let n_combos = periods_i32.len();
+
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
+        }
+        .expect("d_prices H2D");
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream)
+        }
+        .expect("d_periods H2D");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(len * n_combos, &cuda.stream)
+        }
+        .expect("d_out alloc");
+        cuda.stream.synchronize().expect("rsi prep sync");
+
+        Box::new(RsiBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
-    struct RsiManyState {
+    struct RsiManyDeviceState {
         cuda: CudaRsi,
-        prices_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RsiManyState {
+    impl CudaBenchState for RsiManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .rsi_many_series_one_param_time_major_dev(&self.prices_tm, MANY_COLS, MANY_ROWS, 14)
-                .expect("rsi many");
+            self.cuda
+                .launch_many_series(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    MANY_COLS,
+                    MANY_ROWS,
+                    14,
+                    &mut self.d_out_tm,
+                )
+                .expect("rsi many launch");
+            self.cuda.stream.synchronize().expect("rsi many sync");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
@@ -506,7 +556,40 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RsiManyState { cuda, prices_tm: prices })
+
+        let mut first_valids = vec![0i32; MANY_COLS];
+        for s in 0..MANY_COLS {
+            let mut fv = -1i32;
+            for t in 0..MANY_ROWS {
+                let v = prices[t * MANY_COLS + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv.max(0);
+        }
+
+        let d_prices_tm = unsafe {
+            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
+        }
+        .expect("d_prices_tm H2D");
+        let d_first_valids = unsafe {
+            DeviceBuffer::from_slice_async(&first_valids, &cuda.stream)
+        }
+        .expect("d_first_valids H2D");
+        let d_out_tm: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n, &cuda.stream)
+        }
+        .expect("d_out_tm alloc");
+        cuda.stream.synchronize().expect("rsi many prep sync");
+
+        Box::new(RsiManyDeviceState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            d_out_tm,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

@@ -1342,7 +1342,7 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
 // Older ROC CUDA shim functions have been superseded by the
 // indicator-local `roc_cuda_*` pyfunctions.
 #[pymodule]
-fn my_project(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register AD functions with their user-facing names
     m.add_function(wrap_pyfunction!(ad_py, m)?)?;
     m.add_function(wrap_pyfunction!(ad_batch_py, m)?)?;

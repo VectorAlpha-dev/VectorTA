@@ -113,30 +113,36 @@ extern "C" __global__ void kurtosis_batch_f32(
 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
-                // Window raw sums via DS prefix differences
-                const dsf s1 = ds_sub(ld_ds(ps_x,  end), ld_ds(ps_x,  start));
-                const dsf s2 = ds_sub(ld_ds(ps_x2, end), ld_ds(ps_x2, start));
-                const dsf s3 = ds_sub(ld_ds(ps_x3, end), ld_ds(ps_x3, start));
-                const dsf s4 = ds_sub(ld_ds(ps_x4, end), ld_ds(ps_x4, start));
+                // Window raw sums via DS prefix differences (fast path: hi/lo diffs -> float)
+                const float2 px_e  = ps_x[end];
+                const float2 px_s  = ps_x[start];
+                const float2 px2_e = ps_x2[end];
+                const float2 px2_s = ps_x2[start];
+                const float2 px3_e = ps_x3[end];
+                const float2 px3_s = ps_x3[start];
+                const float2 px4_e = ps_x4[end];
+                const float2 px4_s = ps_x4[start];
 
-                // Means of powers (DS)
-                const dsf mean = ds_scale(s1, inv_n);
-                const dsf Ex2  = ds_scale(s2, inv_n);
-                const dsf Ex3  = ds_scale(s3, inv_n);
-                const dsf Ex4  = ds_scale(s4, inv_n);
+                const float sum1 = (px_e.x  - px_s.x)  + (px_e.y  - px_s.y);
+                const float sum2 = (px2_e.x - px2_s.x) + (px2_e.y - px2_s.y);
+                const float sum3 = (px3_e.x - px3_s.x) + (px3_e.y - px3_s.y);
+                const float sum4 = (px4_e.x - px4_s.x) + (px4_e.y - px4_s.y);
 
-                // m2 = E[x^2] - mean^2
-                const dsf mean2 = ds_square(mean);
-                const dsf m2_ds = ds_sub(Ex2, mean2);
-                const float m2  = ds_to_f32(m2_ds);
+                const float mean = sum1 * inv_n;
+                const float Ex2  = sum2 * inv_n;
+                const float Ex3  = sum3 * inv_n;
+                const float Ex4  = sum4 * inv_n;
+
+                const float mean2 = mean * mean;
+                const float m2 = Ex2 - mean2;
 
                 if (m2 > 0.0f) {
                     // m4 = E[x^4] - 4*mean*E[x^3] + 6*mean^2*E[x^2] - 3*mean^4
-                    const dsf term1 = ds_sub(Ex4, ds_scale(ds_mul(mean, Ex3), 4.0f));
-                    const dsf term2 = ds_add(term1, ds_scale(ds_mul(mean2, Ex2), 6.0f));
-                    const dsf m4_ds = ds_sub(term2, ds_scale(ds_square(mean2), 3.0f));
+                    const float term1 = fmaf(-4.0f * mean, Ex3, Ex4);
+                    const float term2 = fmaf(6.0f * mean2, Ex2, term1);
+                    const float mean4 = mean2 * mean2;
+                    const float m4 = fmaf(-3.0f, mean4, term2);
 
-                    const float m4 = ds_to_f32(m4_ds);
                     const float denom = m2 * m2;
                     if (denom > 0.0f && !isnan(denom)) {
                         out_val = (m4 / denom) - 3.0f;

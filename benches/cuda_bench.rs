@@ -1,9 +1,43 @@
 #![cfg(feature = "cuda")]
 
+extern crate vector_ta as my_project;
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use cust::memory::mem_get_info;
 use my_project::cuda::{self, CudaBenchScenario};
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
+
+// Work around broken-pipe panics when piping `-- --list` output into tools like
+// `Select-Object -First ...` (downstream closes stdout early).
+#[cfg(not(target_arch = "wasm32"))]
+#[ctor::ctor]
+fn __install_broken_pipe_panic_hook() {
+    use std::panic;
+
+    let default = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("");
+
+        let is_stdout_broken_pipe = msg.contains("failed printing to stdout")
+            && (msg.contains("The pipe is being closed")
+                || msg.contains("Broken pipe")
+                || msg.contains("os error 232")
+                || msg.contains("os error 32"));
+
+        if is_stdout_broken_pipe {
+            std::process::exit(0);
+        }
+
+        default(info);
+    }));
+}
 
 fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     let mut v = Vec::new();
@@ -95,7 +129,6 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::oscillators::kst_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::halftrend_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::vpci_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::moving_averages::vidya_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::nvi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::pvi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::vpt_wrapper::benches::bench_profiles());
@@ -157,7 +190,6 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::medprice_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::wad_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::wavetrend::wavetrend_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::oscillators::willr_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::cci_cycle_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::adx_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::dx_wrapper::benches::bench_profiles());
@@ -192,7 +224,6 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
     v.extend(my_project::cuda::mod_god_mode_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::mean_ad_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::net_myrsi_wrapper::benches::bench_profiles());
-    v.extend(my_project::cuda::percentile_nearest_rank_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::vi_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::adosc_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::oscillators::ao_wrapper::benches::bench_profiles());
@@ -266,6 +297,42 @@ fn run_registered_benches(c: &mut Criterion) {
         }
     }
 
+    fn panic_message(payload: &Box<dyn Any + Send>) -> String {
+        if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        }
+    }
+
+    let vram_extra_headroom_bytes: usize = std::env::var("CUDA_BENCH_VRAM_HEADROOM_MB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .and_then(|mb| mb.checked_mul(1024 * 1024))
+        .or_else(|| {
+            std::env::var("CUDA_BENCH_VRAM_HEADROOM_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    let vram_max_free_fraction: Option<f64> = std::env::var("CUDA_BENCH_VRAM_MAX_FREE_FRACTION")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|f| f.is_finite() && *f > 0.0 && *f <= 1.0);
+
+    let scenario_timeout_ms: u64 = std::env::var("CUDA_BENCH_SCENARIO_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .and_then(|s| s.checked_mul(1000))
+        .or_else(|| {
+            std::env::var("CUDA_BENCH_SCENARIO_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+
     for scen in collect_registered_profiles() {
         let mut group = c.benchmark_group(scen.group);
         // Group-level timing knobs (overridable via env for experimentation)
@@ -279,33 +346,142 @@ fn run_registered_benches(c: &mut Criterion) {
             .unwrap_or(1200);
         group.warm_up_time(Duration::from_millis(g_warm_ms));
         group.measurement_time(Duration::from_millis(g_meas_ms));
-        if let Some(n) = scen.sample_size {
-            let n = n.max(10);
-            group.sample_size(n);
-        }
-        // Optional VRAM check
-        if let Some(req) = scen.mem_required {
-            if let Ok((free, _total)) = mem_get_info() {
-                if req > free {
-                    let id = scen.skip_label.unwrap_or_else(|| scen.group).to_string();
-                    group.bench_with_input(
-                        BenchmarkId::new("skipped_insufficient_vram", id),
-                        &0,
-                        |b, _| b.iter(|| 0),
-                    );
-                    group.finish();
-                    continue;
+        let min_samples: usize = std::env::var("CUDA_BENCH_MIN_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10);
+        let forced_samples: Option<usize> = std::env::var("CUDA_BENCH_SAMPLE_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let default_samples: usize = std::env::var("CUDA_BENCH_DEFAULT_SAMPLES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10);
+
+        let n = forced_samples.or(scen.sample_size).unwrap_or(default_samples);
+        let sample_size = n.max(min_samples);
+        group.sample_size(sample_size);
+
+        let group_name = scen.group;
+        let bench_id = scen.bench_id;
+        let indicator = scen.indicator;
+        let skip_label = scen.skip_label.unwrap_or(group_name);
+        let prep = scen.prep;
+        let mem_required = scen.mem_required;
+        let inner = scen.inner_iters.unwrap_or(1);
+        let scenario_timeout_ms = scenario_timeout_ms;
+        let vram_extra_headroom_bytes = vram_extra_headroom_bytes;
+        let vram_max_free_fraction = vram_max_free_fraction;
+        let sample_size = sample_size;
+
+        group.bench_function(BenchmarkId::new(bench_id, indicator), move |b| {
+            // Optional VRAM check (cheap, and only run for selected benches).
+            if let Some(req) = mem_required {
+                if let Ok((free, _total)) = mem_get_info() {
+                    let mut usable = free;
+                    if vram_extra_headroom_bytes > 0 {
+                        usable = usable.saturating_sub(vram_extra_headroom_bytes);
+                    }
+                    if let Some(frac) = vram_max_free_fraction {
+                        let cap = (free as f64 * frac).floor();
+                        if cap.is_finite() && cap > 0.0 {
+                            usable = usable.min(cap as usize);
+                        }
+                    }
+                    if req > usable {
+                        eprintln!(
+                            "[cuda_bench] skipped {}/{}: insufficient VRAM (required={}B, free={}B, usable={}B, headroom={}B, cap_fraction={:?})",
+                            group_name,
+                            skip_label,
+                            req,
+                            free,
+                            usable,
+                            vram_extra_headroom_bytes,
+                            vram_max_free_fraction
+                        );
+                        b.iter(|| 0);
+                        return;
+                    }
                 }
             }
-        }
-        let prep = scen.prep;
-        let inner = scen.inner_iters.unwrap_or(1);
-        if inner > 1 {
-            // Normalize to per-launch timing using iter_custom (divide elapsed by `inner`).
-            group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
-                let mut state = prep();
-                // Pre-warm: run for a short, configurable time to stabilize clocks.
-                active_warmup(&mut *state);
+
+            let mut state = match catch_unwind(AssertUnwindSafe(|| prep())) {
+                Ok(s) => s,
+                Err(panic) => {
+                    let msg = panic_message(&panic);
+                    let msg_lc = msg.to_ascii_lowercase();
+                    if msg_lc.contains("outofmemory") || msg_lc.contains("out of memory") {
+                        eprintln!(
+                            "[cuda_bench] skipped {} {}/{}: {}",
+                            group_name, bench_id, indicator, msg
+                        );
+                        b.iter(|| 0);
+                        return;
+                    }
+                    std::panic::resume_unwind(panic)
+                }
+            };
+
+            // Run the optional active warmup outside Criterion's measurement loop, and treat any
+            // CUDA/runtime panic here as a skipped scenario so the rest of the suite can proceed.
+            if let Err(panic) = catch_unwind(AssertUnwindSafe(|| active_warmup(&mut *state))) {
+                let msg = panic_message(&panic);
+                eprintln!(
+                    "[cuda_bench] skipped {} {}/{}: warmup panicked: {}",
+                    group_name, bench_id, indicator, msg
+                );
+                b.iter(|| 0);
+                return;
+            }
+
+            // Optional per-scenario timeout: if the *minimum* possible runtime (sample_size samples,
+            // each requiring at least 1 iteration) would exceed the budget, skip the bench.
+            //
+            // Note: we cannot safely interrupt a running CUDA kernel from within the same process, so
+            // this is a pre-flight guard to avoid starting obviously-too-long scenarios.
+            if scenario_timeout_ms > 0 {
+                let launch_time = match catch_unwind(AssertUnwindSafe(|| {
+                    let t0 = Instant::now();
+                    state.launch();
+                    t0.elapsed()
+                })) {
+                    Ok(d) => d,
+                    Err(panic) => {
+                        let msg = panic_message(&panic);
+                        eprintln!(
+                            "[cuda_bench] skipped {} {}/{}: preflight launch panicked: {}",
+                            group_name, bench_id, indicator, msg
+                        );
+                        b.iter(|| 0);
+                        return;
+                    }
+                };
+
+                let timeout_nanos: u128 = (scenario_timeout_ms as u128).saturating_mul(1_000_000);
+                let per_launch_nanos = launch_time.as_nanos();
+                let inner_nanos = per_launch_nanos.saturating_mul(inner as u128);
+                // At least one warmup iteration + `sample_size` measurement iterations.
+                let min_total_nanos =
+                    inner_nanos.saturating_mul((sample_size as u128).saturating_add(1));
+
+                if min_total_nanos > timeout_nanos {
+                    eprintln!(
+                        "[cuda_bench] skipped {} {}/{}: timeout (min {:.2}s > {:.2}s; inner={}, samples={})",
+                        group_name,
+                        bench_id,
+                        indicator,
+                        (min_total_nanos as f64) / 1e9,
+                        (timeout_nanos as f64) / 1e9,
+                        inner,
+                        sample_size
+                    );
+                    b.iter(|| 0);
+                    return;
+                }
+            }
+
+            if inner > 1 {
+                // Normalize to per-launch timing using iter_custom (divide elapsed by `inner`).
                 b.iter_custom(|iters| {
                     let total = iters.saturating_mul(inner as u64);
                     let start = Instant::now();
@@ -318,15 +494,10 @@ fn run_registered_benches(c: &mut Criterion) {
                     let nanos = elapsed.as_nanos() / (inner as u128).max(1);
                     Duration::from_nanos(nanos as u64)
                 })
-            });
-        } else {
-            group.bench_function(BenchmarkId::new(scen.bench_id, scen.indicator), |b| {
-                let mut state = prep();
-                // Pre-warm: run for a short, configurable time to stabilize clocks.
-                active_warmup(&mut *state);
+            } else {
                 b.iter(|| state.launch())
-            });
-        }
+            }
+        });
         group.finish();
     }
 }

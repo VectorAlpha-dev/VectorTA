@@ -818,35 +818,42 @@ impl CudaMaSelector {
         end: usize,
         step: usize,
     ) -> Result<DeviceArrayF32, CudaMaSelectorError> {
-        // Hardened expansion semantics:
-        // - step == 0 => treat as static (single value = start)
-        // - support reversed bounds (start > end) by walking backwards
+        // Hardened expansion semantics (aligned with CPU batch helpers):
+        // - step == 0 or start == end => singleton
+        // - allow reversed bounds by walking backwards (with saturating_sub)
         // - error on empty expansion
-        let periods: Vec<usize> = {
-            if step == 0 || start == end {
-                vec![start]
-            } else if start < end {
-                let s = step.max(1);
-                (start..=end).step_by(s).collect()
-            } else {
-                // reversed
-                let s = step.max(1);
-                let mut v = Vec::new();
-                let mut cur = start;
-                while cur >= end {
-                    v.push(cur);
-                    if cur < s { break; }
-                    cur = cur.saturating_sub(s);
-                    if cur == usize::MAX { break; }
-                }
-                v
+        let periods: Vec<usize> = if step == 0 || start == end {
+            vec![start]
+        } else if start < end {
+            let s = step.max(1);
+            (start..=end).step_by(s).collect()
+        } else {
+            let s = step.max(1);
+            let mut v = Vec::new();
+            let mut cur = start;
+            while cur >= end {
+                v.push(cur);
+                if cur == 0 { break; }
+                let next = cur.saturating_sub(s);
+                if next == cur { break; }
+                cur = next;
+                if cur < end { break; }
             }
+            v
         };
         if periods.is_empty() {
             return Err(CudaMaSelectorError::InvalidRange { start, end, step });
         }
-        let is = |s: &str| ma_type.eq_ignore_ascii_case(s);
+
+        let ma_lc = ma_type.to_ascii_lowercase();
+
+        // Eager conversion (keeps selector thin). If callers want to avoid the clone, pass SliceF32.
         let prices = data.to_prices_f32();
+        if prices.is_empty() {
+            return Err(CudaMaSelectorError::InvalidInput("empty price input".into()));
+        }
+        let period_range = (start, end, step);
+
         // Optional VRAM preflight similar to other wrappers
         let rows = periods.len();
         let cols = prices.len();
@@ -858,32 +865,476 @@ impl CudaMaSelector {
             .ok_or_else(|| CudaMaSelectorError::InvalidInput("byte size overflow".into()))?;
         let headroom = std::env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
         will_fit(bytes_out, headroom)?;
-        if is("ema") {
-            let sweep = crate::indicators::moving_averages::ema::EmaBatchRange {
-                // pass through original triple; per-indicator expansion is consistent
-                period: (start, end, step),
-            };
-            let cuda = CudaEma::new(self.device_id)
-                .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
-            return cuda
-                .ema_batch_dev(&prices, &sweep)
-                .map_err(|e| CudaMaSelectorError::Backend(e.to_string()));
+
+        match ma_lc.as_str() {
+            // ---- Requires candles/volume ----
+            "vwma" => {
+                let candles = match data {
+                    CudaMaData::Candles { candles, .. } => candles,
+                    _ => {
+                        return Err(CudaMaSelectorError::Unsupported(
+                            "vwma requires candles with volume; pass CudaMaData::Candles".into(),
+                        ));
+                    }
+                };
+                let volumes_f32: Vec<f32> = candles.volume.iter().map(|&v| v as f32).collect();
+                let sweep = crate::indicators::moving_averages::vwma::VwmaBatchRange { period: period_range };
+                let cuda = CudaVwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.vwma_batch_dev(&prices, &volumes_f32, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "vpwma" => {
+                // Keep parity with CPU ma_with_kernel, which currently requires Candles for VPWMA.
+                match data {
+                    CudaMaData::Candles { .. } => {}
+                    _ => {
+                        return Err(CudaMaSelectorError::Unsupported(
+                            "vpwma requires candles; pass CudaMaData::Candles".into(),
+                        ));
+                    }
+                }
+                let sweep = crate::indicators::moving_averages::vpwma::VpwmaBatchRange {
+                    period: period_range,
+                    power: (0.382, 0.382, 0.0), // match CPU default
+                };
+                let cuda = CudaVpwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .vpwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(DeviceArrayF32 { buf: dev.buf, rows: dev.rows, cols: dev.cols })
+            }
+
+            // ---- Period-sweep (price-only) ----
+            "sma" => {
+                let sweep = crate::indicators::moving_averages::sma::SmaBatchRange { period: period_range };
+                let cuda = CudaSma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .sma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "ema" => {
+                let sweep = crate::indicators::moving_averages::ema::EmaBatchRange { period: period_range };
+                let cuda = CudaEma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.ema_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "dema" => {
+                let sweep = crate::indicators::moving_averages::dema::DemaBatchRange { period: period_range };
+                let cuda = CudaDema::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.dema_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "wma" => {
+                let sweep = crate::indicators::moving_averages::wma::WmaBatchRange { period: period_range };
+                let cuda = CudaWma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.wma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "zlema" => {
+                let sweep = crate::indicators::moving_averages::zlema::ZlemaBatchRange { period: period_range };
+                let cuda = CudaZlema::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .zlema_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "smma" => {
+                let sweep = crate::indicators::moving_averages::smma::SmmaBatchRange { period: period_range };
+                let cuda = CudaSmma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.smma_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "trima" => {
+                let sweep = crate::indicators::moving_averages::trima::TrimaBatchRange { period: period_range };
+                let cuda = CudaTrima::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.trima_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "tema" => {
+                let sweep = crate::indicators::moving_averages::tema::TemaBatchRange { period: period_range };
+                let cuda = CudaTema::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.tema_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "tilson" => {
+                let sweep = crate::indicators::moving_averages::tilson::TilsonBatchRange {
+                    period: period_range,
+                    volume_factor: (0.0, 0.0, 0.0),
+                };
+                let cuda = CudaTilson::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.tilson_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "wilders" => {
+                let sweep = crate::indicators::moving_averages::wilders::WildersBatchRange { period: period_range };
+                let cuda = CudaWilders::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.wilders_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "cwma" => {
+                let sweep = crate::indicators::moving_averages::cwma::CwmaBatchRange { period: period_range };
+                let cuda = CudaCwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.cwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "jsa" => {
+                let sweep = crate::indicators::moving_averages::jsa::JsaBatchRange { period: period_range };
+                let cuda = CudaJsa::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.jsa_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "fwma" => {
+                let sweep = crate::indicators::moving_averages::fwma::FwmaBatchRange { period: period_range };
+                let cuda = CudaFwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.fwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "hma" => {
+                let sweep = crate::indicators::moving_averages::hma::HmaBatchRange { period: period_range };
+                let cuda = CudaHma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .hma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "srwma" => {
+                let sweep = crate::indicators::moving_averages::srwma::SrwmaBatchRange { period: period_range };
+                let cuda = CudaSrwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.srwma_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "sinwma" => {
+                let sweep = crate::indicators::moving_averages::sinwma::SinWmaBatchRange { period: period_range };
+                let cuda = CudaSinwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.sinwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "sqwma" => {
+                let sweep = crate::indicators::moving_averages::sqwma::SqwmaBatchRange { period: period_range };
+                let cuda = CudaSqwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.sqwma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "swma" => {
+                let sweep = crate::indicators::moving_averages::swma::SwmaBatchRange { period: period_range };
+                let cuda = CudaSwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.swma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "linreg" => {
+                let sweep = crate::indicators::moving_averages::linreg::LinRegBatchRange { period: period_range };
+                let cuda = CudaLinreg::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .linreg_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "edcf" => {
+                let sweep = crate::indicators::moving_averages::edcf::EdcfBatchRange { period: period_range };
+                let cuda = CudaEdcf::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.edcf_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "dma" => {
+                let sweep = crate::indicators::moving_averages::dma::DmaBatchRange {
+                    hull_length: period_range,
+                    ema_length: (20, 20, 0),
+                    ema_gain_limit: (50, 50, 0),
+                    hull_ma_type: "WMA".to_string(),
+                };
+                let cuda = CudaDma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.dma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "highpass" => {
+                let sweep = crate::indicators::moving_averages::highpass::HighPassBatchRange { period: period_range };
+                let cuda = CudaHighpass::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.highpass_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "highpass2" | "highpass_2_pole" => {
+                let sweep = crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange {
+                    period: period_range,
+                    k: (0.707, 0.707, 0.0),
+                };
+                let cuda = CudaHighPass2::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.highpass2_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "alma" => {
+                let sweep = crate::indicators::moving_averages::alma::AlmaBatchRange {
+                    period: period_range,
+                    offset: (0.85, 0.85, 0.0),
+                    sigma: (6.0, 6.0, 0.0),
+                };
+                let cuda = CudaAlma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.alma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "epma" => {
+                let sweep = crate::indicators::moving_averages::epma::EpmaBatchRange {
+                    period: period_range,
+                    offset: (4, 4, 0),
+                };
+                let cuda = CudaEpma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.epma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "gaussian" => {
+                let sweep = crate::indicators::moving_averages::gaussian::GaussianBatchRange {
+                    period: period_range,
+                    poles: (4, 4, 0),
+                };
+                let cuda = CudaGaussian::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.gaussian_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "jma" => {
+                let sweep = crate::indicators::moving_averages::jma::JmaBatchRange {
+                    period: period_range,
+                    phase: (50.0, 50.0, 0.0),
+                    power: (2, 2, 0),
+                };
+                let cuda = CudaJma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.jma_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "ehma" => {
+                let sweep = crate::indicators::moving_averages::ehma::EhmaBatchRange { period: period_range };
+                let cuda = CudaEhma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.ehma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "supersmoother" => {
+                let sweep = crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange { period: period_range };
+                let cuda = CudaSuperSmoother::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .supersmoother_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "supersmoother_3_pole" => {
+                let sweep = crate::indicators::moving_averages::supersmoother_3_pole::SuperSmoother3PoleBatchRange { period: period_range };
+                let cuda = CudaSupersmoother3Pole::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.supersmoother_3_pole_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "kama" => {
+                let sweep = crate::indicators::moving_averages::kama::KamaBatchRange { period: period_range };
+                let cuda = CudaKama::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.kama_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "sama" => {
+                let sweep = crate::indicators::moving_averages::sama::SamaBatchRange {
+                    length: period_range,
+                    ..Default::default()
+                };
+                let cuda = CudaSama::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.sama_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "ehlers_kama" => {
+                let sweep = crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange { period: period_range };
+                let cuda = CudaEhlersKama::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.ehlers_kama_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "ehlers_itrend" => {
+                let sweep = crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
+                    warmup_bars: (20, 20, 0),
+                    max_dc_period: period_range,
+                };
+                let cuda = CudaEhlersITrend::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.ehlers_itrend_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "ehlers_ecema" => {
+                let sweep = crate::indicators::moving_averages::ehlers_ecema::EhlersEcemaBatchRange {
+                    length: period_range,
+                    gain_limit: (50, 50, 0),
+                };
+                let params = crate::indicators::moving_averages::ehlers_ecema::EhlersEcemaParams::default();
+                let cuda = CudaEhlersEcema::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.ehlers_ecema_batch_dev(&prices, &sweep, &params)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "nama" => {
+                let sweep = crate::indicators::moving_averages::nama::NamaBatchRange { period: period_range };
+                let cuda = CudaNama::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.nama_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "nma" => {
+                let sweep = crate::indicators::moving_averages::nma::NmaBatchRange { period: period_range };
+                let cuda = CudaNma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .nma_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+            "pwma" => {
+                let sweep = crate::indicators::moving_averages::pwma::PwmaBatchRange { period: period_range };
+                let cuda = CudaPwma::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.pwma_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "maaq" => {
+                let sweep = crate::indicators::moving_averages::maaq::MaaqBatchRange {
+                    period: period_range,
+                    fast_period: (2, 2, 0),
+                    slow_period: (30, 30, 0),
+                };
+                let cuda = CudaMaaq::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.maaq_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "reflex" => {
+                let sweep = crate::indicators::moving_averages::reflex::ReflexBatchRange { period: period_range };
+                let cuda = CudaReflex::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.reflex_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "volatility_adjusted_ma" | "vama" => {
+                let sweep = crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
+                    base_period: period_range,
+                    vol_period: (51, 51, 0),
+                };
+                let cuda = CudaVama::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.vama_batch_dev(&prices, &sweep)
+                    .map(|h| DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "trendflex" => {
+                let sweep = crate::indicators::moving_averages::trendflex::TrendFlexBatchRange { period: period_range };
+                let cuda = CudaTrendflex::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                let (dev, _combos) = cuda
+                    .trendflex_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(dev)
+            }
+
+            // ---- Not period-based (period-sweep not meaningful) ----
+            "vwap" | "hwma" | "mwdx" | "mama" => Err(CudaMaSelectorError::Unsupported(
+                format!("{ma_type} does not support period-sweep batching"),
+            )),
+
+            // ---- Not supported by thin selector ----
+            "frama" => Err(CudaMaSelectorError::Unsupported(
+                "frama requires high/low/close; use CudaFrama directly".into(),
+            )),
+            "volume_adjusted_ma" => Err(CudaMaSelectorError::Unsupported(
+                "volume_adjusted_ma requires volume; use CudaVolumeAdjustedMa".into(),
+            )),
+            "tradjema" => Err(CudaMaSelectorError::Unsupported(
+                "tradjema requires high/low/close; use CudaTradjema directly".into(),
+            )),
+            "uma" => Err(CudaMaSelectorError::Unsupported(
+                "uma requires volume; use CudaUma directly".into(),
+            )),
+            "ehlers_pma" => Err(CudaMaSelectorError::Unsupported(
+                "ehlers_pma returns dual outputs; use CudaEhlersPma".into(),
+            )),
+
+            other => Err(CudaMaSelectorError::InvalidInput(format!(
+                "ma_sweep_to_device unsupported for {}",
+                other
+            ))),
         }
-        if is("sma") {
-            let sweep = crate::indicators::moving_averages::sma::SmaBatchRange {
-                period: (start, end, step),
-            };
-            let cuda = CudaSma::new(self.device_id)
-                .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
-            let (dev, _c) = cuda
-                .sma_batch_dev(&prices, &sweep)
-                .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
-            return Ok(dev);
+    }
+
+    /// Copy back a full sweep matrix (row-major) as f32 using pinned host memory + async copy on the selector's stream.
+    pub fn ma_sweep_to_host_f32(
+        &self,
+        ma_type: &str,
+        data: CudaMaData,
+        start: usize,
+        end: usize,
+        step: usize,
+    ) -> Result<(Vec<f32>, usize, usize), CudaMaSelectorError> {
+        let dev = self.ma_sweep_to_device(ma_type, data, start, end, step)?;
+        let total = dev
+            .rows
+            .checked_mul(dev.cols)
+            .ok_or_else(|| CudaMaSelectorError::InvalidInput("rows*cols overflow".into()))?;
+        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(total) }?;
+        unsafe {
+            dev.buf
+                .async_copy_to(pinned.as_mut_slice(), &self.stream)
+                .map_err(CudaMaSelectorError::Cuda)?;
         }
-        Err(CudaMaSelectorError::InvalidInput(format!(
-            "ma_sweep_to_device unsupported for {}",
-            ma_type
-        )))
+        self.stream
+            .synchronize()
+            .map_err(CudaMaSelectorError::Cuda)?;
+        Ok((pinned.to_vec(), dev.rows, dev.cols))
+    }
+
+    /// Copy back a full sweep matrix (row-major) as f64.
+    pub fn ma_sweep_to_host_f64(
+        &self,
+        ma_type: &str,
+        data: CudaMaData,
+        start: usize,
+        end: usize,
+        step: usize,
+    ) -> Result<(Vec<f64>, usize, usize), CudaMaSelectorError> {
+        let (out32, rows, cols) = self.ma_sweep_to_host_f32(ma_type, data, start, end, step)?;
+        Ok((out32.into_iter().map(|v| v as f64).collect(), rows, cols))
     }
 }
 

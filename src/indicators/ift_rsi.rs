@@ -483,8 +483,8 @@ pub struct IftRsiBatchRange {
 impl Default for IftRsiBatchRange {
     fn default() -> Self {
         Self {
-            rsi_period: (5, 21, 1),
-            wma_period: (9, 21, 1),
+            rsi_period: (5, 5, 0),
+            wma_period: (9, 258, 1),
         }
     }
 }
@@ -2020,6 +2020,12 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "proptest"))]
+    fn check_ift_rsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
+    }
+
     macro_rules! generate_all_ift_rsi_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2389,9 +2395,6 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
 
     let mut output = vec![0.0; data.len()]; // Single allocation
 
-    #[cfg(target_arch = "wasm32")]
-    let kernel = detect_best_kernel();
-    #[cfg(not(target_arch = "wasm32"))]
     let kernel = Kernel::Scalar;
 
     ift_rsi_into_slice(&mut output, &input, kernel)
@@ -2421,9 +2424,6 @@ pub fn ift_rsi_into(
         };
         let input = IftRsiInput::from_slice(data, params);
 
-        #[cfg(target_arch = "wasm32")]
-        let kernel = detect_best_kernel();
-        #[cfg(not(target_arch = "wasm32"))]
         let kernel = Kernel::Scalar;
 
         if in_ptr == out_ptr as *const f64 {

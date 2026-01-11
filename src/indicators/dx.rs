@@ -650,7 +650,7 @@ pub struct DxBatchRange {
 impl Default for DxBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

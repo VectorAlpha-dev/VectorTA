@@ -445,7 +445,8 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_000;
+    // 1m x 250 can take minutes for this recurrence-heavy kernel; keep the bench practical.
+    const ONE_SERIES_LEN: usize = 100_000;
     const PARAM_SWEEP: usize = 250;
 
     fn mem_bytes() -> usize {
@@ -454,17 +455,30 @@ pub mod benches {
         in_b + out_b + 64 * 1024 * 1024
     }
 
-    struct CciCycleBatchState {
+    struct CciCycleBatchDeviceState {
         cuda: CudaCciCycle,
-        data: Vec<f32>,
-        sweep: CciCycleBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_factors: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for CciCycleBatchState {
+    impl CudaBenchState for CciCycleBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cci_cycle_batch_dev(&self.data, &self.sweep)
-                .expect("cci_cycle batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    &self.d_lengths,
+                    &self.d_factors,
+                    &mut self.d_out,
+                )
+                .expect("cci_cycle launch_batch_kernel");
+            let _ = self.cuda.stream.synchronize();
         }
     }
 
@@ -476,10 +490,33 @@ pub mod benches {
             data[i] = (x * 0.0013).sin() * 0.8 + (x * 0.00077).cos();
         }
         let sweep = CciCycleBatchRange {
+            // Sweep length only (250 combos). Factor held constant.
             length: (10, 10 + PARAM_SWEEP as usize - 1, 1),
-            factor: (0.3, 0.7, 0.0016),
+            factor: (0.5, 0.5, 0.0),
         };
-        Box::new(CciCycleBatchState { cuda, data, sweep })
+        let (combos, first_valid, series_len) =
+            CudaCciCycle::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
+        let mut lengths: Vec<i32> = Vec::with_capacity(combos.len());
+        let mut factors: Vec<f32> = Vec::with_capacity(combos.len());
+        for c in &combos {
+            lengths.push(c.length.unwrap() as i32);
+            factors.push(c.factor.unwrap() as f32);
+        }
+        let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
+        let d_lengths = DeviceBuffer::from_slice(&lengths).expect("d_lengths");
+        let d_factors = DeviceBuffer::from_slice(&factors).expect("d_factors");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * series_len) }.expect("d_out");
+        Box::new(CciCycleBatchDeviceState {
+            cuda,
+            d_prices,
+            d_lengths,
+            d_factors,
+            d_out,
+            series_len,
+            first_valid,
+            n_combos: combos.len(),
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -487,7 +524,7 @@ pub mod benches {
             "cci_cycle",
             "one_series_many_params",
             "cci_cycle_cuda_batch_dev",
-            "1m_x_250",
+            "100k_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

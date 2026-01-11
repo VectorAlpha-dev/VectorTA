@@ -555,22 +555,10 @@ impl CudaLinearregAngle {
                 "invalid period".into(),
             ));
         }
-        if period < 2 || period > rows {
-            return Err(CudaLinearregAngleError::InvalidInput(
-                "invalid period".into(),
-            ));
-        }
         // first_valid per column
         let mut first = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
-            for r in 0..rows {
-                let v = data_tm_f32[r * cols + s];
-                if !v.is_nan() {
-                    fv = r as i32;
-                    break;
-                }
-            }
             for r in 0..rows {
                 let v = data_tm_f32[r * cols + s];
                 if !v.is_nan() {
@@ -589,11 +577,6 @@ impl CudaLinearregAngle {
                 }
             }
         }
-        let p = period;
-        let sx = (p * (p - 1)) as f64 * 0.5;
-        let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
-        let denom = sx * sx - (p as f64) * sx2;
-        let invd = 1.0 / denom;
         let p = period;
         let sx = (p * (p - 1)) as f64 * 0.5;
         let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
@@ -712,21 +695,176 @@ impl CudaLinearregAngle {
 // ---------------- Benches ----------------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::linearreg_angle::{Linearreg_angleBatchRange, Linearreg_angleParams};
 
-    define_ma_period_benches!(
-        linearreg_angle_benches,
-        CudaLinearregAngle,
-        crate::indicators::linearreg_angle::Linearreg_angleBatchRange,
-        crate::indicators::linearreg_angle::Linearreg_angleParams,
-        linearreg_angle_batch_dev,
-        linearreg_angle_many_series_one_param_time_major_dev,
-        crate::indicators::linearreg_angle::Linearreg_angleBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::linearreg_angle::Linearreg_angleParams { period: Some(32) },
-        "linearreg_angle",
-        "linearreg_angle"
-    );
-    pub use linearreg_angle_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let len_p1 = ONE_SERIES_LEN + 1;
+        let prefix_stride = std::mem::size_of::<Float2>() * 2 + std::mem::size_of::<i32>();
+        let prefix_bytes = len_p1 * prefix_stride;
+        let params_stride = std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * params_stride;
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        prefix_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDevState {
+        cuda: CudaLinearregAngle,
+        d_ps2: DeviceBuffer<Float2>,
+        d_pk2: DeviceBuffer<Float2>,
+        d_pn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_sumx: DeviceBuffer<f32>,
+        d_invd: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for BatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_ps2,
+                    &self.d_pk2,
+                    &self.d_pn,
+                    &self.d_periods,
+                    &self.d_sumx,
+                    &self.d_invd,
+                    self.len,
+                    self.first_valid,
+                    self.rows,
+                    &mut self.d_out,
+                )
+                .expect("linearreg_angle batch kernel");
+            self.cuda.stream.synchronize().expect("linearreg_angle sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaLinearregAngle::new(0).expect("cuda linearreg_angle");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = Linearreg_angleBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (_combos, first_valid, len, periods_i32, sum_x, inv_div, ps2, pk2, pn) =
+            CudaLinearregAngle::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let rows = periods_i32.len();
+
+        let d_ps2 = DeviceBuffer::from_slice(&ps2).expect("d_ps2");
+        let d_pk2 = DeviceBuffer::from_slice(&pk2).expect("d_pk2");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("d_pn");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_sumx = DeviceBuffer::from_slice(&sum_x).expect("d_sumx");
+        let d_invd = DeviceBuffer::from_slice(&inv_div).expect("d_invd");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_ps2,
+            d_pk2,
+            d_pn,
+            d_periods,
+            d_sumx,
+            d_invd,
+            len,
+            first_valid,
+            rows,
+            d_out,
+        })
+    }
+
+    struct ManySeriesDevState {
+        cuda: CudaLinearregAngle,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        sum_x: f32,
+        inv_div: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ManySeriesDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.sum_x,
+                    self.inv_div,
+                    &mut self.d_out_tm,
+                )
+                .expect("linearreg_angle many-series kernel");
+            self.cuda.stream.synchronize().expect("linearreg_angle sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaLinearregAngle::new(0).expect("cuda linearreg_angle");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = Linearreg_angleParams { period: Some(32) };
+        let (first_valids, period, sum_x, inv_div) =
+            CudaLinearregAngle::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(ManySeriesDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            sum_x,
+            inv_div,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "linearreg_angle",
+                "one_series_many_params",
+                "linearreg_angle_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "linearreg_angle",
+                "many_series_one_param",
+                "linearreg_angle_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

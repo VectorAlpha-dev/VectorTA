@@ -690,12 +690,34 @@ pub mod benches {
 
     struct VlmaBatchState {
         cuda: CudaVlma,
-        price: Vec<f32>,
-        sweep: VlmaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_ps: DeviceBuffer<f64>,
+        d_pss: DeviceBuffer<f64>,
+        d_pn: DeviceBuffer<i32>,
+        d_min: DeviceBuffer<i32>,
+        d_max: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for VlmaBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.vlma_batch_dev(&self.price, &self.sweep);
+            self.cuda
+                .launch_batch(
+                    &self.d_prices,
+                    &self.d_ps,
+                    &self.d_pss,
+                    &self.d_pn,
+                    &self.d_min,
+                    &self.d_max,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("vlma batch kernel");
+            self.cuda.synchronize().expect("vlma sync");
         }
     }
 
@@ -708,7 +730,41 @@ pub mod benches {
             matype: ("sma".to_string(), "sma".to_string(), "".to_string()),
             devtype: (0, 0, 0),
         };
-        Box::new(VlmaBatchState { cuda, price, sweep })
+        let first_valid = price
+            .iter()
+            .position(|v| !v.is_nan())
+            .unwrap_or(0);
+        let combos = CudaVlma::expand_supported_combos(&sweep).expect("vlma expand combos");
+        let n_combos = combos.len();
+        let (ps, pss, pn) = CudaVlma::build_prefixes(&price);
+        let min_periods: Vec<i32> = combos.iter().map(|c| c.min_period.unwrap_or(1) as i32).collect();
+        let max_periods: Vec<i32> = combos.iter().map(|c| c.max_period.unwrap_or(1) as i32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_ps = DeviceBuffer::from_slice(&ps).expect("d_ps");
+        let d_pss = DeviceBuffer::from_slice(&pss).expect("d_pss");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("d_pn");
+        let d_min = DeviceBuffer::from_slice(&min_periods).expect("d_min");
+        let d_max = DeviceBuffer::from_slice(&max_periods).expect("d_max");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(ONE_SERIES_LEN.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(VlmaBatchState {
+            cuda,
+            d_prices,
+            d_ps,
+            d_pss,
+            d_pn,
+            d_min,
+            d_max,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

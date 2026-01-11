@@ -485,17 +485,28 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct RocBatchState {
+    struct RocBatchDeviceState {
         cuda: CudaRoc,
-        prices: Vec<f32>,
-        sweep: RocBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RocBatchState {
+    impl CudaBenchState for RocBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .roc_batch_dev(&self.prices, &self.sweep)
-                .expect("roc batch");
+            self.cuda
+                .launch_batch(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("roc launch");
+            self.cuda.stream.synchronize().expect("roc sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -511,23 +522,59 @@ pub mod benches {
         let sweep = RocBatchRange {
             period: (2, 1 + PARAM_SWEEP, 1),
         };
-        Box::new(RocBatchState {
+
+        let (combos, first_valid, len) =
+            CudaRoc::prepare_batch_inputs(&prices, &sweep).expect("prepare_batch_inputs");
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+        let n_combos = periods_i32.len();
+
+        let d_prices = unsafe {
+            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
+        }
+        .expect("d_prices H2D");
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream)
+        }
+        .expect("d_periods H2D");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(len * n_combos, &cuda.stream)
+        }
+        .expect("d_out alloc");
+        cuda.stream.synchronize().expect("roc prep sync");
+
+        Box::new(RocBatchDeviceState {
             cuda,
-            prices,
-            sweep,
+            d_prices,
+            d_periods,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
         })
     }
 
-    struct RocManyState {
+    struct RocManyDeviceState {
         cuda: CudaRoc,
-        prices_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RocManyState {
+    impl CudaBenchState for RocManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .roc_many_series_one_param_time_major_dev(&self.prices_tm, MANY_COLS, MANY_ROWS, 14)
-                .expect("roc many");
+            self.cuda
+                .launch_many_series(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    MANY_COLS,
+                    MANY_ROWS,
+                    14,
+                    &mut self.d_out_tm,
+                )
+                .expect("roc many launch");
+            self.cuda.stream.synchronize().expect("roc many sync");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
@@ -542,9 +589,39 @@ pub mod benches {
                 prices[idx] = base[idx] + 0.05 * x.sin();
             }
         }
-        Box::new(RocManyState {
+
+        let mut first_valids = vec![0i32; MANY_COLS];
+        for s in 0..MANY_COLS {
+            let mut fv = -1i32;
+            for t in 0..MANY_ROWS {
+                let v = prices[t * MANY_COLS + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv.max(0);
+        }
+
+        let d_prices_tm = unsafe {
+            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
+        }
+        .expect("d_prices_tm H2D");
+        let d_first_valids = unsafe {
+            DeviceBuffer::from_slice_async(&first_valids, &cuda.stream)
+        }
+        .expect("d_first_valids H2D");
+        let d_out_tm: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n, &cuda.stream)
+        }
+        .expect("d_out_tm alloc");
+        cuda.stream.synchronize().expect("roc many prep sync");
+
+        Box::new(RocManyDeviceState {
             cuda,
-            prices_tm: prices,
+            d_prices_tm,
+            d_first_valids,
+            d_out_tm,
         })
     }
 

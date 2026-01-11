@@ -1333,21 +1333,297 @@ impl CudaEhma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::ehma::{EhmaBatchRange, EhmaParams};
 
-    define_ma_period_benches!(
-        ehma_benches,
-        CudaEhma,
-        crate::indicators::moving_averages::ehma::EhmaBatchRange,
-        crate::indicators::moving_averages::ehma::EhmaParams,
-        ehma_batch_dev,
-        ehma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehma::EhmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::ehma::EhmaParams { period: Some(64) },
-        "ehma",
-        "ehma"
-    );
-    pub use ehma_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct EhmaBatchDevState {
+        cuda: CudaEhma,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warms: DeviceBuffer<i32>,
+        d_weights: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        use_tiled: bool,
+        tile: u32,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for EhmaBatchDevState {
+        fn launch(&mut self) {
+            if self.use_tiled {
+                let fname = self.cuda.batch_tiled_symbol(self.tile);
+                let func = self
+                    .cuda
+                    .module
+                    .get_function(fname)
+                    .expect("ehma tiled func");
+                let grid_x = ((self.series_len as u32) + self.tile - 1) / self.tile;
+                let block_x = (self.tile / 2) as u32;
+                let block: BlockSize = (block_x, 1, 1).into();
+                let period_aligned =
+                    CudaEhma::align_up_16(self.max_period * std::mem::size_of::<f32>());
+                let tile_elems = (self.tile as usize) + self.max_period - 1;
+                let shared_bytes =
+                    (period_aligned + tile_elems * std::mem::size_of::<f32>()) as u32;
+
+                for (_start, len) in CudaEhma::grid_y_chunks(self.n_combos) {
+                    let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
+                    unsafe {
+                        let out_ptr = self.d_out.as_device_ptr();
+                        let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                        let mut wflat_ptr = self.d_weights.as_device_ptr().as_raw();
+                        let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                        let mut inv_ptr: *const f32 = std::ptr::null();
+                        let mut maxp_i = self.max_period as i32;
+                        let mut len_i = self.series_len as i32;
+                        let mut ncomb_i = len as i32;
+                        let mut fv_i = self.first_valid as i32;
+                        let mut out_raw = out_ptr.as_raw();
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut prices_ptr as *mut _ as *mut c_void,
+                            &mut wflat_ptr as *mut _ as *mut c_void,
+                            &mut periods_ptr as *mut _ as *mut c_void,
+                            &mut inv_ptr as *mut _ as *mut c_void,
+                            &mut maxp_i as *mut _ as *mut c_void,
+                            &mut len_i as *mut _ as *mut c_void,
+                            &mut ncomb_i as *mut _ as *mut c_void,
+                            &mut fv_i as *mut _ as *mut c_void,
+                            &mut out_raw as *mut _ as *mut c_void,
+                        ];
+                        self.cuda
+                            .stream
+                            .launch(&func, grid, block, shared_bytes, args)
+                            .expect("ehma tiled launch");
+                    }
+                }
+            } else {
+                self.cuda
+                    .launch_batch_kernel_plain(
+                        &self.d_prices,
+                        &self.d_periods,
+                        &self.d_warms,
+                        self.series_len,
+                        self.n_combos,
+                        self.max_period,
+                        &mut self.d_out,
+                    )
+                    .expect("ehma plain launch");
+            }
+            self.cuda.stream.synchronize().expect("ehma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhma::new(0).expect("cuda ehma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = EhmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len, max_period) =
+            CudaEhma::prepare_batch_inputs(&price, &sweep).expect("ehma prepare batch inputs");
+        let n_combos = combos.len();
+
+        let mut periods_i32 = vec![0i32; n_combos];
+        let mut warms_i32 = vec![0i32; n_combos];
+        let mut weights_flat = vec![0f32; n_combos * max_period];
+        for (i, prm) in combos.iter().enumerate() {
+            let p = prm.period.unwrap();
+            periods_i32[i] = p as i32;
+            warms_i32[i] = (first_valid + p - 1) as i32;
+            let w = CudaEhma::compute_normalized_weights(p);
+            let base = i * max_period;
+            weights_flat[base..base + p].copy_from_slice(&w);
+        }
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_warms = DeviceBuffer::from_slice(&warms_i32).expect("d_warms");
+        let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }.expect("d_out");
+
+        let mut use_tiled = series_len > 8192;
+        let mut tile = cuda.pick_tiled_block(series_len);
+        match cuda.policy.batch {
+            BatchKernelPolicy::Auto => {}
+            BatchKernelPolicy::Plain { .. } => use_tiled = false,
+            BatchKernelPolicy::Tiled { tile: t, .. } => {
+                use_tiled = true;
+                tile = t;
+            }
+        }
+        if use_tiled {
+            let fname = cuda.batch_tiled_symbol(tile);
+            if cuda.module.get_function(fname).is_err() {
+                use_tiled = false;
+            }
+        }
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(EhmaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_warms,
+            d_weights,
+            series_len,
+            n_combos,
+            first_valid,
+            max_period,
+            use_tiled,
+            tile,
+            d_out,
+        })
+    }
+
+    enum EhmaManyKernel {
+        OneD,
+        Tiled2D { tx: u32, ty: u32 },
+    }
+
+    struct EhmaManyDevState {
+        cuda: CudaEhma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_weights: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        period: usize,
+        cols: usize,
+        rows: usize,
+        kernel: EhmaManyKernel,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for EhmaManyDevState {
+        fn launch(&mut self) {
+            match self.kernel {
+                EhmaManyKernel::OneD => {
+                    self.cuda
+                        .launch_many_series_kernel_1d(
+                            &self.d_prices_tm,
+                            &self.d_weights,
+                            self.period,
+                            self.cols,
+                            self.rows,
+                            &self.d_first_valids,
+                            &mut self.d_out_tm,
+                        )
+                        .expect("ehma many 1d");
+                }
+                EhmaManyKernel::Tiled2D { tx, ty } => {
+                    self.cuda
+                        .launch_many_series_kernel_2d(
+                            &self.d_prices_tm,
+                            &self.d_weights,
+                            self.period,
+                            self.cols,
+                            self.rows,
+                            &self.d_first_valids,
+                            &mut self.d_out_tm,
+                            tx,
+                            ty,
+                        )
+                        .expect("ehma many 2d");
+                }
+            }
+            self.cuda.stream.synchronize().expect("ehma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhma::new(0).expect("cuda ehma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = EhmaParams { period: Some(64) };
+
+        let (first_valids, period, weights) =
+            CudaEhma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("ehma prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_weights = DeviceBuffer::from_slice(&weights).expect("d_weights");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        let kernel = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::Auto => {
+                if cols >= 16
+                    && rows >= 8192
+                    && cuda
+                        .module
+                        .get_function("ehma_ms1p_tiled_f32_tx128_ty4")
+                        .is_ok()
+                {
+                    EhmaManyKernel::Tiled2D { tx: 128, ty: 4 }
+                } else if cuda
+                    .module
+                    .get_function("ehma_ms1p_tiled_f32_tx128_ty2")
+                    .is_ok()
+                    && (rows >= 8192)
+                {
+                    EhmaManyKernel::Tiled2D { tx: 128, ty: 2 }
+                } else {
+                    EhmaManyKernel::OneD
+                }
+            }
+            ManySeriesKernelPolicy::OneD { .. } => EhmaManyKernel::OneD,
+            ManySeriesKernelPolicy::Tiled2D { tx, ty } => EhmaManyKernel::Tiled2D { tx, ty },
+        };
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(EhmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_weights,
+            d_first_valids,
+            period,
+            cols,
+            rows,
+            kernel,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "ehma",
+                "one_series_many_params",
+                "ehma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ehma",
+                "many_series_one_param",
+                "ehma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

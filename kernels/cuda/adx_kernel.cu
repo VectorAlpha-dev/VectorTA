@@ -50,8 +50,6 @@ void adx_batch_f32(const float* __restrict__ high,
     if (tid >= n_combos) return;
 
     const int lane = threadIdx.x & 31;                        // lane id in warp
-    const int warp_id = threadIdx.x >> 5;                     // warp index within block
-    const int warp_base = warp_id * 32;                       // base slot in shared arrays
 
     // Load this thread's parameter
     const int p = periods[tid];
@@ -78,19 +76,19 @@ void adx_batch_f32(const float* __restrict__ high,
     // Stream time from t0 = first_valid
     const int t0 = first_valid;
 
-    // Each warp's lane0 loads; shfl broadcasts inside the warp
-    __shared__ float sh_h[1024];
-    __shared__ float sh_l[1024];
-    __shared__ float sh_c[1024];
-    if (lane == 0) {
-        sh_h[warp_base] = high[t0];
-        sh_l[warp_base] = low[t0];
-        sh_c[warp_base] = close[t0];
+    // Each warp's leader loads; values are broadcast via shfl.
+    const unsigned mask = __activemask();
+    const int leader = __ffs(mask) - 1;
+
+    float prev_h = 0.f, prev_l = 0.f, prev_c = 0.f;
+    if (lane == leader) {
+        prev_h = __ldg(high + t0);
+        prev_l = __ldg(low + t0);
+        prev_c = __ldg(close + t0);
     }
-    __syncthreads();
-    float prev_h = sh_h[warp_base];
-    float prev_l = sh_l[warp_base];
-    float prev_c = sh_c[warp_base];
+    prev_h = __shfl_sync(mask, prev_h, leader);
+    prev_l = __shfl_sync(mask, prev_l, leader);
+    prev_c = __shfl_sync(mask, prev_c, leader);
 
     // Per-thread parameter state
     int warm_j = 0;
@@ -104,16 +102,15 @@ void adx_batch_f32(const float* __restrict__ high,
     float adx_last = 0.f;
 
     for (int t = t0 + 1; t < series_len; ++t) {
-        // lane0 loads next prices and broadcasts to this warp
-        if (lane == 0) {
-            sh_h[warp_base] = high[t];
-            sh_l[warp_base] = low[t];
-            sh_c[warp_base] = close[t];
+        float ch = 0.f, cl = 0.f, cc = 0.f;
+        if (lane == leader) {
+            ch = __ldg(high + t);
+            cl = __ldg(low + t);
+            cc = __ldg(close + t);
         }
-        __syncthreads();
-        float ch = sh_h[warp_base];
-        float cl = sh_l[warp_base];
-        float cc = sh_c[warp_base];
+        ch = __shfl_sync(mask, ch, leader);
+        cl = __shfl_sync(mask, cl, leader);
+        cc = __shfl_sync(mask, cc, leader);
 
         const float hl  = ch - cl;
         const float hpc = fabsf(ch - prev_c);
@@ -171,7 +168,6 @@ void adx_batch_f32(const float* __restrict__ high,
 
         // advance previous for next bar
         prev_h = ch; prev_l = cl; prev_c = cc;
-        __syncthreads();
     }
 }
 

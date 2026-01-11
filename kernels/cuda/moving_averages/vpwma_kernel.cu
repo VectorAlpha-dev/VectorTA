@@ -35,7 +35,7 @@
 
 // Tuneable tile size for the optimized path
 #ifndef VPWMA_TILE_T
-#define VPWMA_TILE_T 128
+#define VPWMA_TILE_T 256
 #endif
 
 // ---------------------------------------------------------------------------
@@ -107,18 +107,19 @@ void vpwma_batch_f32(const float* __restrict__ prices,   // [series_len]
                     s_x[o] = prices[g_start + o];
                 }
                 __syncthreads();
-            
 
-            // Each thread computes one output in the tile
-            const int tid = threadIdx.x;
-            if (tid < tile_w) {
+
+            // Each thread computes multiple outputs in the tile (stride = blockDim.x).
+            // This allows VPWMA_TILE_T > blockDim.x to amortize sync + global loads.
+            for (int out_i = threadIdx.x; out_i < tile_w; out_i += blockDim.x) {
                 float acc = 0.0f;
-                // w[0] multiplies prices[t], i.e., s_x[tid + win_len - 1]
+                const int x_base = out_i + (win_len - 1);
+                // w[0] multiplies prices[t], i.e., s_x[x_base]
                 #pragma unroll 4
                 for (int k = 0; k < win_len; ++k) {
-                    acc = fmaf(s_w[k], s_x[tid + (win_len - 1) - k], acc);
+                    acc = fmaf(s_w[k], s_x[x_base - k], acc);
                 }
-                out[row_offset + (t0 + tid)] = acc * inv_norm;
+                out[row_offset + (t0 + out_i)] = acc * inv_norm;
             }
             __syncthreads();
         }

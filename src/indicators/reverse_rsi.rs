@@ -242,7 +242,7 @@ pub struct ReverseRsiBatchRange {
 impl Default for ReverseRsiBatchRange {
     fn default() -> Self {
         Self {
-            rsi_length_range: (14, 14, 0),
+            rsi_length_range: (14, 263, 1),
             rsi_level_range: (50.0, 50.0, 0.0),
         }
     }

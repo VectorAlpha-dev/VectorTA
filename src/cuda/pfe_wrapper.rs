@@ -563,6 +563,8 @@ pub mod benches {
     struct PfeBatchState {
         cuda: CudaPfe,
         d_data: DeviceBuffer<f32>,
+        d_pref_hi: DeviceBuffer<f32>,
+        d_pref_lo: DeviceBuffer<f32>,
         d_periods: DeviceBuffer<i32>,
         d_smooths: DeviceBuffer<i32>,
         d_out: DeviceBuffer<f32>,
@@ -575,7 +577,7 @@ pub mod benches {
             let func = self
                 .cuda
                 .module
-                .get_function("pfe_batch_f32")
+                .get_function("pfe_many_params_prefix_f32")
                 .expect("func");
             let block_x: u32 = 256;
             let grid_x: u32 = (((self.n_combos as u32) + block_x - 1) / block_x).max(1);
@@ -583,6 +585,8 @@ pub mod benches {
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
                 let mut data_ptr = self.d_data.as_device_ptr().as_raw();
+                let mut hi_ptr = self.d_pref_hi.as_device_ptr().as_raw();
+                let mut lo_ptr = self.d_pref_lo.as_device_ptr().as_raw();
                 let mut len_i = self.len as i32;
                 let mut fv_i = self.first_valid as i32;
                 let mut per_ptr = self.d_periods.as_device_ptr().as_raw();
@@ -591,6 +595,8 @@ pub mod benches {
                 let mut out_ptr = self.d_out.as_device_ptr().as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut data_ptr as *mut _ as *mut c_void,
+                    &mut hi_ptr as *mut _ as *mut c_void,
+                    &mut lo_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                     &mut fv_i as *mut _ as *mut c_void,
                     &mut per_ptr as *mut _ as *mut c_void,
@@ -625,6 +631,50 @@ pub mod benches {
         }
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
+
+        // Precompute per-step lengths + dual-FP32 prefix once (device-resident).
+        let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
+        let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
+        let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
+        unsafe {
+            let build_steps = cuda
+                .module
+                .get_function("pfe_build_steps_f32")
+                .expect("pfe_build_steps_f32");
+            let block_x: u32 = 256;
+            let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1).min(80), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let mut data_ptr = d_data.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut steps_ptr = d_steps.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut data_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut steps_ptr as *mut _ as *mut c_void,
+            ];
+            cuda.stream.launch(&build_steps, grid, block, 0, args).unwrap();
+
+            let build_pref = cuda
+                .module
+                .get_function("pfe_build_prefix_float2_serial")
+                .expect("pfe_build_prefix_float2_serial");
+            let grid: GridSize = (1u32, 1u32, 1u32).into();
+            let block: BlockSize = (1u32, 1u32, 1u32).into();
+            let mut steps_ptr = d_steps.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut hi_ptr = d_pref_hi.as_device_ptr().as_raw();
+            let mut lo_ptr = d_pref_lo.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut steps_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut hi_ptr as *mut _ as *mut c_void,
+                &mut lo_ptr as *mut _ as *mut c_void,
+            ];
+            cuda.stream.launch(&build_pref, grid, block, 0, args).unwrap();
+        }
+        cuda.synchronize().expect("sync prefix");
+
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
         let d_smooths = DeviceBuffer::from_slice(&smooths).expect("d_smooths");
         let d_out: DeviceBuffer<f32> =
@@ -632,6 +682,8 @@ pub mod benches {
         PfeBatchState {
             cuda,
             d_data,
+            d_pref_hi,
+            d_pref_lo,
             d_periods,
             d_smooths,
             d_out,

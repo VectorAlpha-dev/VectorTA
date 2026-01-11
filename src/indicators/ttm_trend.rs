@@ -594,7 +594,7 @@ pub struct TtmTrendBatchRange {
 
 impl Default for TtmTrendBatchRange {
     fn default() -> Self {
-        Self { period: (5, 60, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

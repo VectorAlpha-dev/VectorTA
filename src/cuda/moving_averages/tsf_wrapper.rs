@@ -28,6 +28,7 @@ use thiserror::Error;
 pub enum BatchKernelPolicy {
     Auto,
     Plain { block_x: u32 },
+    Prefix { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,6 +55,7 @@ impl Default for CudaTsfPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    Prefix { block_x: u32 },
 }
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
@@ -377,9 +379,14 @@ impl CudaTsf {
             .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_batch_f32" })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
+            BatchKernelPolicy::Prefix { .. } => {
+                return Err(CudaTsfError::InvalidPolicy(
+                    "Prefix policy requires launch_batch_from_prefix_kernel",
+                ));
+            }
         };
-        let bx = block_x.max(64).min(1024);
+        let bx = block_x.max(64).min(256);
         let grid_x = ((combos_len as u32) + bx - 1) / bx;
         let gx = grid_x.max(self.sm_count as u32);
         self.validate_launch(gx, 1, 1, bx, 1, 1)?;
@@ -418,6 +425,118 @@ impl CudaTsf {
         Ok(())
     }
 
+    fn launch_prefix_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_prefix_y: &mut DeviceBuffer<f64>,
+        d_prefix_yi: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaTsfError> {
+        let func = self
+            .module
+            .get_function("tsf_exclusive_prefix_y_yi_f64")
+            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_exclusive_prefix_y_yi_f64" })?;
+
+        let grid: GridSize = (1u32, 1u32, 1u32).into();
+        let block: BlockSize = (1u32, 1u32, 1u32).into();
+        self.validate_launch(1, 1, 1, 1, 1, 1)?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut first_i = first_valid as i32;
+            let mut prefix_y_ptr = d_prefix_y.as_device_ptr().as_raw();
+            let mut prefix_yi_ptr = d_prefix_yi.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut prefix_y_ptr as *mut _ as *mut c_void,
+                &mut prefix_yi_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_batch_from_prefix_kernel(
+        &self,
+        d_prefix_y: &DeviceBuffer<f64>,
+        d_prefix_yi: &DeviceBuffer<f64>,
+        d_periods: &DeviceBuffer<i32>,
+        d_x_sums: &DeviceBuffer<f32>,
+        d_denom_invs: &DeviceBuffer<f32>,
+        d_inv_periods: &DeviceBuffer<f32>,
+        series_len: usize,
+        combos_len: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaTsfError> {
+        let func = self
+            .module
+            .get_function("tsf_batch_from_prefix_f64")
+            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_batch_from_prefix_f64" })?;
+
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => match env::var("LINREG_PREFIX_BLOCK_X").ok().as_deref() {
+                Some(s) => s
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&v| v > 0)
+                    .unwrap_or(256)
+                    .max(32)
+                    .min(256),
+                None => 256,
+            },
+            BatchKernelPolicy::Prefix { block_x } => block_x.max(32).min(256),
+            BatchKernelPolicy::Plain { .. } => {
+                return Err(CudaTsfError::InvalidPolicy("Plain policy requires launch_batch_kernel"));
+            }
+        };
+
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid_y = combos_len as u32;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        self.validate_launch(grid_x.max(1), grid_y.max(1), 1, block_x, 1, 1)?;
+
+        unsafe {
+            (*(self as *const _ as *mut CudaTsf)).last_batch =
+                Some(BatchKernelSelected::Prefix { block_x });
+        }
+        self.maybe_log_batch_debug();
+
+        unsafe {
+            let mut prefix_y_ptr = d_prefix_y.as_device_ptr().as_raw();
+            let mut prefix_yi_ptr = d_prefix_yi.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut x_sums_ptr = d_x_sums.as_device_ptr().as_raw();
+            let mut denom_ptr = d_denom_invs.as_device_ptr().as_raw();
+            let mut inv_p_ptr = d_inv_periods.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut combos_i = combos_len as i32;
+            let mut first_i = first_valid as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prefix_y_ptr as *mut _ as *mut c_void,
+                &mut prefix_yi_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut x_sums_ptr as *mut _ as *mut c_void,
+                &mut denom_ptr as *mut _ as *mut c_void,
+                &mut inv_p_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -445,10 +564,25 @@ impl CudaTsf {
         let out_bytes = out_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaTsfError::InvalidInput("output bytes overflow".into()))?;
-        let required = prices_bytes
-            .checked_add(params_bytes)
-            .and_then(|v| v.checked_add(out_bytes))
-            .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?;
+        let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
+            prices_bytes
+                .checked_add(params_bytes)
+                .and_then(|v| v.checked_add(out_bytes))
+                .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?
+        } else {
+            let prefix_elems = series_len
+                .checked_add(1)
+                .ok_or_else(|| CudaTsfError::InvalidInput("prefix elems overflow".into()))?;
+            let prefix_bytes = prefix_elems
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| CudaTsfError::InvalidInput("prefix bytes overflow".into()))?;
+            prices_bytes
+                .checked_add(params_bytes)
+                .and_then(|v| v.checked_add(prefix_bytes))
+                .and_then(|v| v.checked_add(out_bytes))
+                .ok_or_else(|| CudaTsfError::InvalidInput("required bytes overflow".into()))?
+        };
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
@@ -465,17 +599,38 @@ impl CudaTsf {
         let d_inv_p = DeviceBuffer::from_slice(inv_periods)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems)? };
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_periods,
-            &d_x_sums,
-            &d_denoms,
-            &d_inv_p,
-            series_len,
-            combos.len(),
-            first_valid,
-            &mut d_out,
-        )?;
+        match self.policy.batch {
+            BatchKernelPolicy::Plain { .. } => {
+                self.launch_batch_kernel(
+                    &d_prices,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denoms,
+                    &d_inv_p,
+                    series_len,
+                    combos.len(),
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+            BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
+                let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
+                let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
+                self.launch_prefix_kernel(&d_prices, series_len, first_valid, &mut d_prefix_y, &mut d_prefix_yi)?;
+                self.launch_batch_from_prefix_kernel(
+                    &d_prefix_y,
+                    &d_prefix_yi,
+                    &d_periods,
+                    &d_x_sums,
+                    &d_denoms,
+                    &d_inv_p,
+                    series_len,
+                    combos.len(),
+                    first_valid,
+                    &mut d_out,
+                )?;
+            }
+        }
         Ok(DeviceArrayF32 {
             buf: d_out,
             rows: combos.len(),
@@ -611,9 +766,9 @@ impl CudaTsf {
             .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_many_series_one_param_f32" })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
-            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(1024),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(256),
         };
-        let bx = block_x.max(64).min(1024);
+        let bx = block_x.max(64).min(256);
         let grid_x = ((cols as u32) + bx - 1) / bx;
         let gx = grid_x.max(self.sm_count as u32);
         self.validate_launch(gx, 1, 1, bx, 1, 1)?;
@@ -762,23 +917,174 @@ impl CudaTsf {
 // ---------------- Benches registration ----------------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::tsf::TsfParams;
 
-    define_ma_period_benches!(
-        tsf_benches,
-        CudaTsf,
-        crate::indicators::tsf::TsfBatchRange,
-        crate::indicators::tsf::TsfParams,
-        tsf_batch_dev,
-        tsf_multi_series_one_param_time_major_dev,
-        crate::indicators::tsf::TsfBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::tsf::TsfParams { period: Some(64) },
-        "tsf",
-        "tsf"
-    );
-    pub use tsf_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct TsfBatchDevState {
+        cuda: CudaTsf,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_x_sums: DeviceBuffer<f32>,
+        d_denom_invs: DeviceBuffer<f32>,
+        d_inv_periods: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TsfBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_x_sums,
+                    &self.d_denom_invs,
+                    &self.d_inv_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("tsf batch kernel");
+            self.cuda.stream.synchronize().expect("tsf sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTsf::new(0).expect("cuda tsf");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = TsfBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (_combos, first_valid, len, periods_i32, x_sums, denom_invs, inv_periods) =
+            CudaTsf::prepare_batch_inputs(&price, &sweep).expect("tsf prepare batch inputs");
+        let n_combos = periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_x_sums = DeviceBuffer::from_slice(&x_sums).expect("d_x_sums");
+        let d_denom_invs = DeviceBuffer::from_slice(&denom_invs).expect("d_denom_invs");
+        let d_inv_periods = DeviceBuffer::from_slice(&inv_periods).expect("d_inv_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(TsfBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_x_sums,
+            d_denom_invs,
+            d_inv_periods,
+            series_len: len,
+            n_combos,
+            first_valid,
+            d_out,
+        })
+    }
+
+    struct TsfManyDevState {
+        cuda: CudaTsf,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        x_sum: f32,
+        denom_inv: f32,
+        inv_period: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TsfManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.x_sum,
+                    self.denom_inv,
+                    self.inv_period,
+                    &mut self.d_out_tm,
+                )
+                .expect("tsf many-series kernel");
+            self.cuda.stream.synchronize().expect("tsf sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTsf::new(0).expect("cuda tsf");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = TsfParams { period: Some(64) };
+        let (first_valids, period, x_sum, denom_inv, inv_period) =
+            CudaTsf::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("tsf prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(TsfManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            x_sum,
+            denom_inv,
+            inv_period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "tsf",
+                "one_series_many_params",
+                "tsf_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "tsf",
+                "many_series_one_param",
+                "tsf_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 // ---------------- Local helpers ----------------

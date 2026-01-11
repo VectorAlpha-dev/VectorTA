@@ -316,7 +316,7 @@ pub fn stc_with_kernel(input: &StcInput, kernel: Kernel) -> Result<StcOutput, St
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -407,7 +407,7 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1044,7 +1044,7 @@ impl Default for StcBatchRange {
     fn default() -> Self {
         Self {
             fast_period: (23, 23, 0),
-            slow_period: (50, 50, 0),
+            slow_period: (50, 299, 1),
             k_period: (10, 10, 0),
             d_period: (3, 3, 0),
         }

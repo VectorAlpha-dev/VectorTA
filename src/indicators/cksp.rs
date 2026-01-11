@@ -1401,9 +1401,9 @@ pub struct CkspBatchRange {
 impl Default for CkspBatchRange {
     fn default() -> Self {
         Self {
-            p: (10, 40, 1),
-            x: (1.0, 1.0, 0.0),
-            q: (9, 24, 1),
+            p: (10, 10, 0),
+            x: (1.0, 1.249, 0.001),
+            q: (9, 9, 0),
         }
     }
 }
@@ -3832,7 +3832,7 @@ pub fn cksp_js(
             q: Some(q),
         },
     );
-    let out = cksp_with_kernel(&input, detect_best_kernel())
+    let out = cksp_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let cols = close.len();
     let mut values = Vec::with_capacity(2 * cols);

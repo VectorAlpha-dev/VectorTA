@@ -183,6 +183,73 @@ extern "C" __global__ void coppock_batch_f32(
     }
 }
 
+// --- Kernel 1b: One price series × many parameter combos --------------------
+// Time-parallel mapping (grid.x over time, grid.y over combos).
+//
+// Computes WMA directly per output (O(m)), which is acceptable for the small
+// `ma_period` values used in practice and avoids the extremely uncoalesced
+// row-stride writes of the legacy 1D "thread-per-row" mapping.
+extern "C" __global__ void coppock_batch_time_parallel_f32(
+    const float* __restrict__ price, // [len]
+    const float* __restrict__ inv,   // [len] precomputed 1/price
+    int len,
+    int first_valid,
+    const int* __restrict__ shorts,      // [n_combos]
+    const int* __restrict__ longs,       // [n_combos]
+    const int* __restrict__ ma_periods,  // [n_combos]
+    int n_combos,
+    float* __restrict__ out              // [n_combos * len] row-major
+)
+{
+    const int row = (int)blockIdx.y;
+    if (row >= n_combos) return;
+
+    const int s = shorts[row];
+    const int l = longs[row];
+    const int m = ma_periods[row];
+    if (s <= 0 || l <= 0 || m <= 0 || len <= 0) return;
+
+    const int largest = s > l ? s : l;
+    const int warm = first_valid + largest + (m - 1);
+
+    float* row_out = out + (size_t)row * (size_t)len;
+
+    // Denominator for WMA weights 1..m (constant per row)
+    const float denom_w = 0.5f * (float)m * (float)(m + 1);
+    const float inv_denom = __fdividef(1.0f, denom_w);
+
+    int t = (int)blockIdx.x * (int)blockDim.x + (int)threadIdx.x;
+    const int stride = (int)gridDim.x * (int)blockDim.x;
+
+    while (t < len) {
+        float out_val = XNAN;
+        if (t >= warm) {
+            const int start = t - m + 1;
+            float wsum = 0.0f;
+            bool bad = false;
+
+            // weights are 1..m (relative within window)
+            int w = 1;
+            for (int j = start; j <= t; ++j, ++w) {
+                const int js = j - s;
+                const int jl = j - l;
+                // Parity reads for NaN semantics (match legacy behavior)
+                const float c  = price[j];
+                const float ps = price[js];
+                const float pl = price[jl];
+                if (any_nan3(c, ps, pl)) { bad = true; break; }
+
+                const float v = roc_sum_times100(c, inv[js], inv[jl]);
+                wsum = fmaf(v, (float)w, wsum);
+            }
+
+            if (!bad) out_val = wsum * inv_denom;
+        }
+        row_out[t] = out_val;
+        t += stride;
+    }
+}
+
 // --- Kernel 2: Many series × one param (time-major) ------------------------
 // One thread processes one series sequentially across time.
 // price_tm and inv_tm are time-major: t*cols + s

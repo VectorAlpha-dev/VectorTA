@@ -251,7 +251,7 @@ fn mab_prepare<'a>(
     let devup = input.get_devup();
     let devdn = input.get_devdn();
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         _ => kernel,
     };
     let warmup = first_valid + fast.max(slow) - 1;
@@ -291,7 +291,7 @@ fn mab_prepare2<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     let warmup = first + need_total - 1;
@@ -1045,8 +1045,8 @@ pub struct MabBatchRange {
 impl Default for MabBatchRange {
     fn default() -> Self {
         Self {
-            fast_period: (10, 12, 1),
-            slow_period: (50, 50, 0),
+            fast_period: (10, 10, 0),
+            slow_period: (50, 299, 1),
             devup: (1.0, 1.0, 0.0),
             devdn: (1.0, 1.0, 0.0),
             fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),

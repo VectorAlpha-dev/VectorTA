@@ -1522,7 +1522,7 @@ pub struct DtiBatchRange {
 impl Default for DtiBatchRange {
     fn default() -> Self {
         Self {
-            r: (14, 14, 0),
+            r: (14, 263, 1),
             s: (10, 10, 0),
             u: (5, 5, 0),
         }
@@ -2972,6 +2972,12 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_dti_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

@@ -389,16 +389,27 @@ pub fn var_scalar(
     let mean0 = sum * inv_p;
     out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    // Rolling updates using zipped old/new slices to avoid index-bound checks in the hot loop
-    let olds = &data[first..(len - period)];
-    let news = &data[(first + period)..len];
-    let mut out_i = idx0 + 1;
-    for (&old, &new) in olds.iter().zip(news.iter()) {
-        sum += new - old;
-        sum_sq += new * new - old * old;
-        let mean = sum * inv_p;
-        out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
-        out_i += 1;
+    // Rolling updates (pointer-based, Tulip-style) to minimize bounds checks and iterator overhead.
+    unsafe {
+        let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
+        let mut in_new = data.as_ptr().add(first + period);
+        let mut in_old = data.as_ptr().add(first);
+        let end = data.as_ptr().add(len);
+
+        while in_new < end {
+            let new = *in_new;
+            let old = *in_old;
+
+            sum += new - old;
+            sum_sq += new * new - old * old;
+
+            let mean = sum * inv_p;
+            *out_ptr = (sum_sq * inv_p - mean * mean) * nbdev2;
+
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
+        }
     }
 
     Ok(())
@@ -459,17 +470,27 @@ pub fn var_avx2(
     let mean0 = sum * inv_p;
     out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-    // Rolling updates – keep scalar/unrolled semantics; use mul_add to enable FMA
-    let olds = &data[first..(len - period)];
-    let news = &data[(first + period)..len];
-    let mut out_i = idx0 + 1;
-    for (&old, &new) in olds.iter().zip(news.iter()) {
-        sum += new - old;
-        // Avoid FMA here to keep parity with scalar rounding within test tolerances
-        sum_sq += new * new - old * old;
-        let mean = sum * inv_p;
-        out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
-        out_i += 1;
+    // Rolling updates (pointer-based, Tulip-style).
+    unsafe {
+        let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
+        let mut in_new = data.as_ptr().add(first + period);
+        let mut in_old = data.as_ptr().add(first);
+        let end = data.as_ptr().add(len);
+
+        while in_new < end {
+            let new = *in_new;
+            let old = *in_old;
+
+            sum += new - old;
+            sum_sq += new * new - old * old;
+
+            let mean = sum * inv_p;
+            *out_ptr = (sum_sq * inv_p - mean * mean) * nbdev2;
+
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
+        }
     }
 
     Ok(())
@@ -559,16 +580,25 @@ pub fn var_avx512(
         let mean0 = sum * inv_p;
         out[idx0] = (sum_sq * inv_p - mean0 * mean0) * nbdev2;
 
-        // Rolling updates remain scalar due to dependency chain
-        let olds = &data[first..(len - period)];
-        let news = &data[(first + period)..len];
-        let mut out_i = idx0 + 1;
-        for (&old, &new) in olds.iter().zip(news.iter()) {
+        // Rolling updates (pointer-based, Tulip-style).
+        let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
+        let mut in_new = data.as_ptr().add(first + period);
+        let mut in_old = data.as_ptr().add(first);
+        let end_ptr = data.as_ptr().add(len);
+
+        while in_new < end_ptr {
+            let new = *in_new;
+            let old = *in_old;
+
             sum += new - old;
             sum_sq += new * new - old * old;
+
             let mean = sum * inv_p;
-            out[out_i] = (sum_sq * inv_p - mean * mean) * nbdev2;
-            out_i += 1;
+            *out_ptr = (sum_sq * inv_p - mean * mean) * nbdev2;
+
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
         }
     }
 
@@ -613,7 +643,7 @@ pub fn var_into_slice(dst: &mut [f64], input: &VarInput, kern: Kernel) -> Result
         return Err(VarError::InvalidNbdev { nbdev });
     }
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -791,7 +821,7 @@ pub struct VarBatchRange {
 impl Default for VarBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 60, 1),
+            period: (14, 263, 1),
             nbdev: (1.0, 1.0, 0.0),
         }
     }

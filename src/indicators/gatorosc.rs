@@ -958,7 +958,7 @@ fn gatorosc_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1396,7 +1396,7 @@ pub struct GatorOscBatchRange {
 impl Default for GatorOscBatchRange {
     fn default() -> Self {
         Self {
-            jaws_length: (13, 13, 0),
+            jaws_length: (13, 262, 1),
             jaws_shift: (8, 8, 0),
             teeth_length: (8, 8, 0),
             teeth_shift: (5, 5, 0),

@@ -28,11 +28,6 @@ use std::env;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[inline]
-const fn qnan_u32() -> u32 {
-    0x7fc0_0000
-}
-
 #[derive(thiserror::Error, Debug)]
 pub enum CudaTrixError {
     #[error(transparent)]
@@ -71,6 +66,8 @@ impl Default for CudaTrixPolicy {
 pub enum BatchKernelSelected {
     /// One block per combo; single-thread sequential scan
     Plain { block_x: u32 },
+    /// One warp per combo; warp-cooperative scan over affine transforms
+    WarpScan { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -297,6 +294,7 @@ impl CudaTrix {
     }
 
     fn run_batch_kernel(&self, inputs: &BatchInputs) -> Result<DeviceArrayF32, CudaTrixError> {
+        let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
         // VRAM budget: logs + periods + outputs
         let logs_bytes = inputs
             .series_len
@@ -334,14 +332,24 @@ impl CudaTrix {
         }
 
         // Host precompute: ln(prices) already prepared in inputs.logs
+        if trace {
+            eprintln!(
+                "[TRACE] trix.run_batch_kernel: series_len={} combos={} first_valid={} (device={})",
+                inputs.series_len,
+                inputs.combos.len(),
+                inputs.first_valid,
+                self.device_id
+            );
+        }
         let d_logs = self.htod_copy_f32(&inputs.logs)?;
         let d_periods = self.htod_copy_i32(&inputs.periods)?;
         let out_len = out_elems;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_len) }?;
-        memset_f32_qnan_async(&self.stream, &mut d_out)
-            .map_err(|e| CudaTrixError::InvalidInput(e))?;
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream) }?;
 
+        if trace {
+            eprintln!("[TRACE] trix.run_batch_kernel: launching batch kernel");
+        }
         self.launch_batch_kernel(
             &d_logs,
             &d_periods,
@@ -355,7 +363,13 @@ impl CudaTrix {
         // the input buffers. Because kernel launches and H2D/D2D ops are async on a NON_BLOCKING
         // stream, we must synchronize before returning to avoid dropping inputs while the kernel
         // is still reading them (can surface as CUDA_ERROR_ILLEGAL_ADDRESS).
+        if trace {
+            eprintln!("[TRACE] trix.run_batch_kernel: stream.synchronize (begin)");
+        }
         self.stream.synchronize()?;
+        if trace {
+            eprintln!("[TRACE] trix.run_batch_kernel: stream.synchronize (done)");
+        }
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -373,6 +387,89 @@ impl CudaTrix {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTrixError> {
+        let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
+        // IMPORTANT: The warp-scan kernel is experimental and has exhibited hangs on some systems.
+        // Keep it opt-in only so default CI/dev remains stable.
+        let warp_scan_enabled =
+            std::env::var("TRIX_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
+        let block_x: u32 = if warp_scan_enabled {
+            match self.policy.batch {
+                BatchKernelPolicy::Auto => std::env::var("TRIX_BLOCK_X")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .unwrap_or(256),
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                BatchKernelPolicy::Tiled { .. } => {
+                    return Err(CudaTrixError::InvalidPolicy(
+                        "TRIX does not support BatchKernelPolicy::Tiled",
+                    ));
+                }
+            }
+        } else {
+            1
+        };
+
+        // Warp-scan fast path when block_x provides at least one warp.
+        if warp_scan_enabled && block_x >= 32 {
+            let block_x = (block_x / 32).max(1) * 32; // round down to a warp multiple
+            let warps_per_block = (block_x / 32).max(1) as usize;
+            let grid_x = ((n_combos + warps_per_block - 1) / warps_per_block) as u32;
+
+            if trace {
+                eprintln!(
+                    "[TRACE] trix.launch_batch_kernel: warp-scan path (block_x={}, warps_per_block={}, grid_x={}, combos={})",
+                    block_x,
+                    warps_per_block,
+                    grid_x,
+                    n_combos
+                );
+                eprintln!("[TRACE] trix.launch_batch_kernel: module.get_function(trix_batch_warp_scan_f32) (begin)");
+            }
+            let func = self
+                .module
+                .get_function("trix_batch_warp_scan_f32")
+                .map_err(|_| CudaTrixError::MissingKernelSymbol { name: "trix_batch_warp_scan_f32" })?;
+            if trace {
+                eprintln!("[TRACE] trix.launch_batch_kernel: module.get_function(trix_batch_warp_scan_f32) (done)");
+            }
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                (*(self as *const _ as *mut CudaTrix)).last_batch =
+                    Some(BatchKernelSelected::WarpScan { block_x });
+            }
+            self.maybe_log_batch_debug();
+
+            unsafe {
+                let mut logs_ptr = d_logs.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut n_combos_i = n_combos as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut logs_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                if trace {
+                    eprintln!("[TRACE] trix.launch_batch_kernel: stream.launch(warp-scan) (begin)");
+                }
+                self.stream.launch(&func, grid, block, 0, args)?;
+                if trace {
+                    eprintln!("[TRACE] trix.launch_batch_kernel: stream.launch(warp-scan) (done)");
+                }
+            }
+            return Ok(());
+        }
+
+        if trace {
+            eprintln!("[TRACE] trix.launch_batch_kernel: plain path (block_x=1) (begin)");
+        }
         let func = self
             .module
             .get_function("trix_batch_f32")
@@ -415,6 +512,9 @@ impl CudaTrix {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
+                if trace {
+                    eprintln!("[TRACE] trix.launch_batch_kernel: stream.launch(plain) launched={} chunk={}", launched, chunk);
+                }
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
             launched += chunk;
@@ -509,9 +609,7 @@ impl CudaTrix {
         let d_first_valids =
             unsafe { DeviceBuffer::from_slice_async(&inputs.first_valids, &self.stream) }?;
         let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        memset_f32_qnan_async(&self.stream, &mut d_out_tm)
-            .map_err(|e| CudaTrixError::InvalidInput(e))?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -735,20 +833,81 @@ impl CudaTrix {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches_batch_only;
+    use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::trix::TrixBatchRange;
 
-    define_ma_period_benches_batch_only!(
-        trix_benches,
-        CudaTrix,
-        crate::indicators::trix::TrixBatchRange,
-        trix_batch_dev,
-        crate::indicators::trix::TrixBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        "trix",
-        "trix"
-    );
-    pub use trix_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct TrixBatchDevState {
+        cuda: CudaTrix,
+        d_logs: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for TrixBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .trix_batch_device(
+                    &self.d_logs,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("trix batch kernel");
+            self.cuda.stream.synchronize().expect("trix sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaTrix::new(0).expect("cuda trix");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = TrixBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let inputs = CudaTrix::prepare_batch_inputs(&price, &sweep).expect("trix prepare batch");
+        let n_combos = inputs.combos.len();
+
+        let d_logs = DeviceBuffer::from_slice(&inputs.logs).expect("d_logs");
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(inputs.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(TrixBatchDevState {
+            cuda,
+            d_logs,
+            d_periods,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            d_out,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![CudaBenchScenario::new(
+            "trix",
+            "one_series_many_params",
+            "trix_cuda_batch_dev",
+            "1m_x_250",
+            prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series_many_params())]
+    }
 }
 
 fn expand_grid_trix(range: &TrixBatchRange) -> Result<Vec<TrixParams>, CudaTrixError> {
@@ -812,18 +971,4 @@ struct BatchInputs {
 
 struct ManySeriesInputs {
     first_valids: Vec<i32>,
-}
-
-// --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
-#[inline]
-fn memset_f32_qnan_async(stream: &Stream, buf: &mut DeviceBuffer<f32>) -> Result<(), String> {
-    unsafe {
-        let ptr: cust::sys::CUdeviceptr = buf.as_device_ptr().as_raw();
-        let n: usize = buf.len();
-        let st: cust::sys::CUstream = stream.as_inner();
-        match cust::sys::cuMemsetD32Async(ptr, qnan_u32(), n, st) {
-            cust::sys::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(format!("cuMemsetD32Async failed: {:?}", e)),
-        }
-    }
 }

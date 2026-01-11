@@ -99,14 +99,6 @@ __device__ void cksp_core_row(const float* __restrict__ high,
     const int start = (first_valid < 0 ? 0 : first_valid);
     if (start >= series_len) return;
 
-    // Parallel NaN init within this block
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out_long_row[i]  = CUDART_NAN_F;
-        out_short_row[i] = CUDART_NAN_F;
-    }
-    __syncthreads();
-    if (threadIdx.x != 0) return;  // single producer per row
-
     // Shared memory for ring deques
     extern __shared__ __align__(16) unsigned char shraw[];
     int*   h_idx  = (int*)shraw;
@@ -118,6 +110,15 @@ __device__ void cksp_core_row(const float* __restrict__ high,
 
     const int cap  = q + 1;
     const int warm = start + p + q - 1;
+
+    if (threadIdx.x != 0) return;  // single producer per row
+
+    // Warmup prefix only (everything else is written exactly once in the main loop).
+    const int warm_end = (warm < series_len) ? warm : series_len;
+    for (int i = 0; i < warm_end; ++i) {
+        out_long_row[i]  = CUDART_NAN_F;
+        out_short_row[i] = CUDART_NAN_F;
+    }
 
     int h_head = 0, h_tail = 0;
     int l_head = 0, l_tail = 0;

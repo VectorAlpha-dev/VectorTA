@@ -508,19 +508,29 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BopBatchState {
+    struct BopBatchDeviceState {
         cuda: CudaBop,
-        open: Vec<f32>,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
+        d_open: DeviceBuffer<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BopBatchState {
+    impl CudaBenchState for BopBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bop_batch_dev(&self.open, &self.high, &self.low, &self.close)
-                .expect("bop batch");
+            self.cuda
+                .launch_batch(
+                    &self.d_open,
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    self.len,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("bop launch");
         }
     }
     fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
@@ -536,36 +546,57 @@ pub mod benches {
             low[i] = open[i] - (0.5 + 0.05 * x.sin()).abs();
             close[i] = open[i] + 0.2 * (x).sin();
         }
-        Box::new(BopBatchState {
+
+        let (first_valid, len) =
+            CudaBop::validate_ohlc_slices(&open, &high, &low, &close).expect("validate");
+        let d_open =
+            unsafe { DeviceBuffer::from_slice_async(&open, &cuda.stream) }.expect("d_open H2D");
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high H2D");
+        let d_low =
+            unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low H2D");
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }.expect("d_out alloc");
+        cuda.stream.synchronize().expect("bop prep sync");
+
+        Box::new(BopBatchDeviceState {
             cuda,
-            open,
-            high,
-            low,
-            close,
+            d_open,
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            d_out,
         })
     }
 
     
-    struct BopManyState {
+    struct BopManyDeviceState {
         cuda: CudaBop,
-        open_tm: Vec<f32>,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_open_tm: DeviceBuffer<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BopManyState {
+    impl CudaBenchState for BopManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bop_many_series_one_param_time_major_dev(
-                    &self.open_tm,
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series(
+                    &self.d_open_tm,
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
+                    &self.d_first_valids,
                     MANY_COLS,
                     MANY_ROWS,
+                    &mut self.d_out_tm,
                 )
-                .expect("bop many");
+                .expect("bop many launch");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
@@ -587,12 +618,47 @@ pub mod benches {
                 close[idx] = b + 0.05 * x.sin();
             }
         }
-        Box::new(BopManyState {
+
+        let mut first_valids = vec![0i32; MANY_COLS];
+        for s in 0..MANY_COLS {
+            let mut fv = -1i32;
+            for t in 0..MANY_ROWS {
+                let idx = t * MANY_COLS + s;
+                let o = open[idx];
+                let h = high[idx];
+                let l = low[idx];
+                let c = close[idx];
+                if !o.is_nan() && !h.is_nan() && !l.is_nan() && !c.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv;
+        }
+
+        let d_open_tm =
+            unsafe { DeviceBuffer::from_slice_async(&open, &cuda.stream) }.expect("d_open_tm H2D");
+        let d_high_tm =
+            unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high_tm H2D");
+        let d_low_tm =
+            unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low_tm H2D");
+        let d_close_tm =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close_tm H2D");
+        let d_first_valids =
+            unsafe { DeviceBuffer::from_slice_async(&first_valids, &cuda.stream) }
+                .expect("d_first_valids H2D");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &cuda.stream) }.expect("d_out_tm alloc");
+        cuda.stream.synchronize().expect("bop many prep sync");
+
+        Box::new(BopManyDeviceState {
             cuda,
-            open_tm: open,
-            high_tm: high,
-            low_tm: low,
-            close_tm: close,
+            d_open_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
+            d_out_tm,
         })
     }
 

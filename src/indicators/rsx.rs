@@ -232,7 +232,7 @@ fn rsx_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, period, first, chosen))
@@ -690,7 +690,7 @@ pub struct RsxBatchRange {
 impl Default for RsxBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 100, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -892,7 +892,7 @@ fn rsx_batch_inner(
 
     // Resolve kernel selection
     let actual_kernel = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1864,7 +1864,7 @@ fn rsx_batch_inner_into(
 
     // select scalar/placeholder SIMD kernel
     let actual = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

@@ -1021,15 +1021,36 @@ pub mod benches {
 
     struct WtBatchState {
         cuda: CudaWavetrend,
-        price: Vec<f32>,
-        sweep: WavetrendBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_channels: DeviceBuffer<i32>,
+        d_averages: DeviceBuffer<i32>,
+        d_mas: DeviceBuffer<i32>,
+        d_factors: DeviceBuffer<f32>,
+        first_valid: usize,
+        len: usize,
+        rows: usize,
+        d_wt1: DeviceBuffer<f32>,
+        d_wt2: DeviceBuffer<f32>,
+        d_wt_diff: DeviceBuffer<f32>,
     }
     impl CudaBenchState for WtBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .wavetrend_batch_dev(&self.price, &self.sweep)
-                .expect("wavetrend batch");
+            self.cuda
+                .launch_kernel(
+                    &self.d_prices,
+                    &self.d_channels,
+                    &self.d_averages,
+                    &self.d_mas,
+                    &self.d_factors,
+                    self.first_valid,
+                    self.len,
+                    self.rows,
+                    &mut self.d_wt1,
+                    &mut self.d_wt2,
+                    &mut self.d_wt_diff,
+                )
+                .expect("wavetrend batch launch_kernel");
+            self.cuda.stream.synchronize().expect("wavetrend batch sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1041,36 +1062,117 @@ pub mod benches {
             ma_length: (4, 4, 0),
             factor: (0.015, 0.015, 0.0),
         };
-        Box::new(WtBatchState { cuda, price, sweep })
+        let combos = CudaWavetrend::expand_range(&sweep).expect("wavetrend expand_range");
+        let rows = combos.len();
+        let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
+        let (channels, averages, mas, factors) =
+            CudaWavetrend::build_param_arrays(&combos).expect("wavetrend build_param_arrays");
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_channels = DeviceBuffer::from_slice(&channels).expect("d_channels");
+        let d_averages = DeviceBuffer::from_slice(&averages).expect("d_averages");
+        let d_mas = DeviceBuffer::from_slice(&mas).expect("d_mas");
+        let d_factors = DeviceBuffer::from_slice(&factors).expect("d_factors");
+
+        let out_elems = rows
+            .checked_mul(ONE_SERIES_LEN)
+            .expect("rows*len overflow");
+        let d_wt1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_wt1");
+        let d_wt2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_wt2");
+        let d_wt_diff: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_wt_diff");
+        cuda.stream.synchronize().expect("wavetrend prep sync");
+
+        Box::new(WtBatchState {
+            cuda,
+            d_prices,
+            d_channels,
+            d_averages,
+            d_mas,
+            d_factors,
+            first_valid,
+            len: ONE_SERIES_LEN,
+            rows,
+            d_wt1,
+            d_wt2,
+            d_wt_diff,
+        })
     }
 
     struct WtManySeriesState {
         cuda: CudaWavetrend,
-        tm: Vec<f32>,
+        d_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        ch: i32,
+        avg: i32,
+        ma: i32,
+        factor: f32,
+        d_wt1: DeviceBuffer<f32>,
+        d_wt2: DeviceBuffer<f32>,
+        d_wt_diff: DeviceBuffer<f32>,
     }
     impl CudaBenchState for WtManySeriesState {
         fn launch(&mut self) {
-            let params = WavetrendParams {
-                channel_length: Some(10),
-                average_length: Some(21),
-                ma_length: Some(4),
-                factor: Some(0.015),
-            };
-            let _ = self
-                .cuda
-                .wavetrend_many_series_one_param_time_major_dev(
-                    &self.tm,
-                    MANY_SERIES_COLS,
-                    MANY_SERIES_LEN,
-                    &params,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_tm,
+                    self.cols,
+                    self.rows,
+                    self.ch,
+                    self.avg,
+                    self.ma,
+                    self.factor,
+                    &self.d_first_valids,
+                    &mut self.d_wt1,
+                    &mut self.d_wt2,
+                    &mut self.d_wt_diff,
                 )
-                .expect("wavetrend many-series");
+                .expect("wavetrend many-series launch");
+            self.cuda.stream.synchronize().expect("wavetrend many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
         let cuda = CudaWavetrend::new(0).expect("cuda wavetrend");
         let tm = gen_time_major_prices(MANY_SERIES_COLS, MANY_SERIES_LEN);
-        Box::new(WtManySeriesState { cuda, tm })
+        let params = WavetrendParams {
+            channel_length: Some(10),
+            average_length: Some(21),
+            ma_length: Some(4),
+            factor: Some(0.015),
+        };
+        let (first_valids, ch, avg, ma, factor) =
+            CudaWavetrend::prepare_many_series_inputs(&tm, MANY_SERIES_COLS, MANY_SERIES_LEN, &params)
+                .expect("wavetrend prepare_many_series_inputs");
+
+        let d_tm = DeviceBuffer::from_slice(&tm).expect("d_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = MANY_SERIES_COLS
+            .checked_mul(MANY_SERIES_LEN)
+            .expect("cols*rows overflow");
+        let d_wt1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_wt1_tm");
+        let d_wt2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_wt2_tm");
+        let d_wt_diff: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_wt_diff_tm");
+        cuda.stream.synchronize().expect("wavetrend prep sync");
+
+        Box::new(WtManySeriesState {
+            cuda,
+            d_tm,
+            d_first_valids,
+            cols: MANY_SERIES_COLS,
+            rows: MANY_SERIES_LEN,
+            ch,
+            avg,
+            ma,
+            factor,
+            d_wt1,
+            d_wt2,
+            d_wt_diff,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

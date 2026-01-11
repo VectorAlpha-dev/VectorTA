@@ -625,15 +625,26 @@ pub mod benches {
 
     struct FoscBatchState {
         cuda: CudaFosc,
-        price: Vec<f32>,
-        sweep: FoscBatchRange,
+        d_price: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
     impl CudaBenchState for FoscBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .fosc_batch_dev(&self.price, &self.sweep)
-                .expect("fosc batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_price,
+                    self.len as i32,
+                    self.first_valid as i32,
+                    &self.d_periods,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                )
+                .expect("fosc launch_batch_kernel");
+            let _ = self.cuda.stream.synchronize();
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -642,27 +653,47 @@ pub mod benches {
         let sweep = FoscBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(FoscBatchState { cuda, price, sweep })
+        let (periods, first_valid) =
+            CudaFosc::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let len = price.len();
+        let n_combos = periods.len();
+        let d_price = DeviceBuffer::from_slice(&price).expect("d_price");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+        Box::new(FoscBatchState {
+            cuda,
+            d_price,
+            d_periods,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
     }
 
     struct FoscManyState {
         cuda: CudaFosc,
-        data_tm: Vec<f32>,
+        d_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: FoscParams,
+        period: usize,
     }
     impl CudaBenchState for FoscManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .fosc_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_tm,
+                    &self.d_first,
+                    self.cols as i32,
+                    self.rows as i32,
+                    self.period as i32,
+                    &mut self.d_out,
                 )
-                .expect("fosc many-series");
+                .expect("fosc launch_many_series_kernel");
+            let _ = self.cuda.stream.synchronize();
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -671,7 +702,21 @@ pub mod benches {
         let rows = MANY_SERIES_ROWS;
         let data_tm = gen_time_major_prices(cols, rows);
         let params = FoscParams { period: Some(14) };
-        Box::new(FoscManyState { cuda, data_tm, cols, rows, params })
+        let (first_valids, period) =
+            CudaFosc::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("prepare_many_series_inputs");
+        let d_tm = DeviceBuffer::from_slice(&data_tm).expect("d_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        Box::new(FoscManyState {
+            cuda,
+            d_tm,
+            d_first,
+            d_out,
+            cols,
+            rows,
+            period,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

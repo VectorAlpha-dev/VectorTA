@@ -45,6 +45,71 @@ pub mod tulip {
     use super::*;
     use std::slice;
 
+    /// Find a Tulip indicator by name and return its metadata pointer.
+    ///
+    /// This is useful for hot loops (benchmarks) that want to avoid allocating
+    /// per-call pointer arrays in `call_indicator`.
+    pub unsafe fn find_indicator(name: &str) -> Result<*const ti_indicator_info, String> {
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let indicator = ti_find_indicator(c_name.as_ptr());
+
+        if indicator.is_null() {
+            return Err(format!("Indicator '{}' not found", name));
+        }
+
+        Ok(indicator)
+    }
+
+    /// Low-overhead Tulip call that uses precomputed input/output pointer arrays.
+    ///
+    /// This avoids per-call allocations present in `call_indicator` and is intended for
+    /// benchmark hot loops. Caller must ensure pointer arrays have the correct lengths.
+    pub unsafe fn call_indicator_ptrs(
+        indicator: *const ti_indicator_info,
+        size: usize,
+        input_ptrs: &[*const TulipReal],
+        options: &[f64],
+        output_ptrs: &mut [*mut TulipReal],
+    ) -> Result<(), String> {
+        if indicator.is_null() {
+            return Err("Null indicator pointer".to_string());
+        }
+
+        let info = &*indicator;
+
+        // Verify input/output counts
+        if input_ptrs.len() != info.inputs as usize {
+            return Err(format!(
+                "Expected {} inputs, got {}",
+                info.inputs,
+                input_ptrs.len()
+            ));
+        }
+
+        if output_ptrs.len() != info.outputs as usize {
+            return Err(format!(
+                "Expected {} outputs, got {}",
+                info.outputs,
+                output_ptrs.len()
+            ));
+        }
+
+        // Call the indicator function if it exists
+        let indicator_fn = info.indicator.expect("Indicator function not found");
+        let result = indicator_fn(
+            size as c_int,
+            input_ptrs.as_ptr(),
+            options.as_ptr() as *const TulipReal,
+            output_ptrs.as_mut_ptr(),
+        );
+
+        if result != TI_OKAY as i32 {
+            return Err(format!("Indicator failed with code {}", result));
+        }
+
+        Ok(())
+    }
+
     /// Safe wrapper for Tulip indicator calls
     pub unsafe fn call_indicator(
         name: &str,

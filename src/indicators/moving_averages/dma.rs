@@ -453,7 +453,7 @@ fn dma_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -2071,7 +2071,7 @@ impl Default for DmaBatchRange {
     fn default() -> Self {
         Self {
             hull_length: (7, 7, 0),
-            ema_length: (20, 20, 0),
+            ema_length: (20, 269, 1),
             ema_gain_limit: (50, 50, 0),
             hull_ma_type: "WMA".to_string(),
         }
@@ -2659,7 +2659,7 @@ pub fn dma_js(
     let input = DmaInput::from_slice(data, params);
 
     let mut output = vec![0.0; data.len()];
-    dma_into_slice(&mut output, &input, detect_best_kernel())
+    dma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
@@ -2710,13 +2710,13 @@ pub fn dma_into(
 
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
-            dma_into_slice(&mut temp, &input, detect_best_kernel())
+            dma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            dma_into_slice(out, &input, detect_best_kernel())
+            dma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 

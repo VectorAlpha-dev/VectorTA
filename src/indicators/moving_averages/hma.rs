@@ -914,7 +914,7 @@ pub struct HmaBatchRange {
 impl Default for HmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (5, 120, 1),
+            period: (5, 254, 1),
         }
     }
 }

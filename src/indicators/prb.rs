@@ -1674,7 +1674,7 @@ impl Default for PrbBatchRange {
     fn default() -> Self {
         Self {
             smooth_period: (10, 10, 0),
-            regression_period: (100, 100, 0),
+            regression_period: (100, 349, 1),
             polynomial_order: (2, 2, 0),
             regression_offset: (0, 0, 0),
         }

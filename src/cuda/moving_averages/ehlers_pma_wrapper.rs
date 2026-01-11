@@ -1052,17 +1052,28 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct PmaBatchState {
+    struct PmaBatchDevState {
         cuda: CudaEhlersPma,
-        price: Vec<f32>,
-        sweep: EhlersPmaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_predict: DeviceBuffer<f32>,
+        d_trigger: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for PmaBatchState {
+    impl CudaBenchState for PmaBatchDevState {
         fn launch(&mut self) {
-            let _pair = self
-                .cuda
-                .ehlers_pma_batch_dev(&self.price, &self.sweep)
-                .expect("pma batch launch");
+            self.cuda
+                .launch_batch_kernel_select(
+                    &self.d_prices,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_predict,
+                    &mut self.d_trigger,
+                )
+                .expect("ehlers_pma batch kernel");
+            self.cuda.stream.synchronize().expect("ehlers_pma sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1071,25 +1082,52 @@ pub mod benches {
         let sweep = EhlersPmaBatchRange {
             combos: PARAM_SWEEP,
         };
-        Box::new(PmaBatchState { cuda, price, sweep })
+        let (combos, first_valid, series_len) =
+            CudaEhlersPma::prepare_batch_inputs(&price, &sweep).expect("pma prepare batch");
+        let n_combos = combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let out_elems = series_len.checked_mul(n_combos).expect("out size");
+        let d_predict: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_predict");
+        let d_trigger: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_trigger");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(PmaBatchDevState {
+            cuda,
+            d_prices,
+            series_len,
+            n_combos,
+            first_valid,
+            d_predict,
+            d_trigger,
+        })
     }
 
-    struct PmaManyState {
+    struct PmaManyDevState {
         cuda: CudaEhlersPma,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
+        d_predict_tm: DeviceBuffer<f32>,
+        d_trigger_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for PmaManyState {
+    impl CudaBenchState for PmaManyDevState {
         fn launch(&mut self) {
-            let _pair = self
-                .cuda
-                .ehlers_pma_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel_select(
+                    &self.d_prices_tm,
                     self.cols,
                     self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_predict_tm,
+                    &mut self.d_trigger_tm,
                 )
-                .expect("pma many-series launch");
+                .expect("ehlers_pma many-series kernel");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("ehlers_pma many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1097,11 +1135,25 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        Box::new(PmaManyState {
+        let first_valids =
+            CudaEhlersPma::prepare_many_series_inputs(&data_tm, cols, rows).expect("pma prepare many");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = cols.checked_mul(rows).expect("elems");
+        let d_predict_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_predict_tm");
+        let d_trigger_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_trigger_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(PmaManyDevState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
+            d_predict_tm,
+            d_trigger_tm,
         })
     }
 

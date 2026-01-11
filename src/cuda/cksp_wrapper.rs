@@ -265,7 +265,7 @@ impl CudaCksp {
             .ok_or_else(|| {
                 CudaCkspError::InvalidInput("output buffer size overflow".into())
             })?;
-        let use_pretr = combos.len() >= 2;
+        let use_pretr = false;
         let extra_tr_bytes = if use_pretr {
             len.checked_mul(f32_sz)
                 .ok_or_else(|| {
@@ -345,6 +345,10 @@ impl CudaCksp {
         }
 
         self.stream.synchronize()?;
+        // Ensure inputs/params stay alive until the stream is fully synchronized.
+        // In optimized builds, Rust may drop unused locals before `synchronize()`,
+        // which can free device buffers while kernels are still running.
+        std::mem::drop((d_high, d_low, d_close, d_p, d_x, d_q, d_tr_opt));
 
         Ok((
             DeviceArrayF32Pair {
@@ -396,8 +400,8 @@ impl CudaCksp {
             .map_err(|_| CudaCkspError::MissingKernelSymbol { name: func_name })?;
 
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256u32,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64).min(1024),
+            BatchKernelPolicy::Auto => 32u32,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
         let grid: GridSize = (1u32, n_rows as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -824,7 +828,7 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_000;
+    const ONE_SERIES_LEN: usize = 200_000;
     const PARAM_ROWS: usize = 128;
 
     fn bytes_one_series_many_params() -> usize {
@@ -835,17 +839,49 @@ pub mod benches {
 
     struct CkspBatchState {
         cuda: CudaCksp,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: CkspBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_p: DeviceBuffer<i32>,
+        d_x: DeviceBuffer<f32>,
+        d_q: DeviceBuffer<i32>,
+        d_tr: Option<DeviceBuffer<f32>>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        cap_max: i32,
+        shmem_bytes: u32,
+        d_long: DeviceBuffer<f32>,
+        d_short: DeviceBuffer<f32>,
     }
     impl CudaBenchState for CkspBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cksp_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("cksp batch");
+            const MAX_Y: usize = 65_535;
+            let mut start = 0usize;
+            while start < self.rows {
+                let count = (self.rows - start).min(MAX_Y);
+                self.cuda
+                    .launch_batch_kernel_subrange(
+                        &self.d_high,
+                        &self.d_low,
+                        &self.d_close,
+                        self.d_tr.as_ref(),
+                        self.len as i32,
+                        self.first_valid as i32,
+                        &self.d_p,
+                        &self.d_x,
+                        &self.d_q,
+                        start,
+                        count,
+                        self.cap_max,
+                        &mut self.d_long,
+                        &mut self.d_short,
+                        self.shmem_bytes,
+                    )
+                    .expect("cksp batch kernel");
+                start += count;
+            }
+            self.cuda.stream.synchronize().expect("cksp sync");
         }
     }
 
@@ -874,12 +910,62 @@ pub mod benches {
             x: (1.0, 1.0, 0.0),
             q: (9, 9, 0),
         };
+        let first_valid = first_valid_hlc(&high, &low, &close).unwrap_or(0);
+        let combos = expand_cksp_combos(&sweep).expect("expand_cksp_combos");
+        let mut p_i32 = Vec::with_capacity(combos.len());
+        let mut x_f32 = Vec::with_capacity(combos.len());
+        let mut q_i32 = Vec::with_capacity(combos.len());
+        let mut max_q: usize = 0;
+        let valid = ONE_SERIES_LEN - first_valid;
+        for prm in &combos {
+            let p = prm.p.unwrap_or(10);
+            let q = prm.q.unwrap_or(9);
+            let x = prm.x.unwrap_or(1.0) as f32;
+            let warm_rel = p + q - 1;
+            if valid <= warm_rel {
+                panic!("not enough valid data for CKSP warmup");
+            }
+            p_i32.push(p as i32);
+            q_i32.push(q as i32);
+            x_f32.push(x);
+            max_q = max_q.max(q);
+        }
+        let cap_max = (max_q + 1) as i32;
+        let cap_us = (max_q + 1) as usize;
+        let sh_i32 = cap_us * 4 * std::mem::size_of::<i32>();
+        let sh_f32 = cap_us * 2 * std::mem::size_of::<f32>();
+        let shmem_bytes = (sh_i32 + sh_f32) as u32;
+
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_p = unsafe { DeviceBuffer::from_slice_async(&p_i32, &cuda.stream) }.expect("d_p");
+        let d_x = unsafe { DeviceBuffer::from_slice_async(&x_f32, &cuda.stream) }.expect("d_x");
+        let d_q = unsafe { DeviceBuffer::from_slice_async(&q_i32, &cuda.stream) }.expect("d_q");
+
+        let elems = combos.len() * ONE_SERIES_LEN;
+        let d_long: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_long");
+        let d_short: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_short");
+
+        cuda.stream.synchronize().expect("cksp sync after prep");
         Box::new(CkspBatchState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            d_p,
+            d_x,
+            d_q,
+            d_tr: None,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            rows: combos.len(),
+            cap_max,
+            shmem_bytes,
+            d_long,
+            d_short,
         })
     }
 
@@ -888,7 +974,7 @@ pub mod benches {
             "cksp",
             "one_series_many_params",
             "cksp_cuda_batch_dev",
-            "1m_x_128",
+            "200k_x_128",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

@@ -239,7 +239,7 @@ pub fn msw_with_kernel(input: &MswInput, kernel: Kernel) -> Result<MswOutput, Ms
         });
     }
     let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     // Prefer AVX2 over AVX512 for MSW in Auto: AVX512 often downclocks and underperforms
@@ -653,7 +653,7 @@ pub struct MswBatchRange {
 
 impl Default for MswBatchRange {
     fn default() -> Self {
-        Self { period: (5, 30, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 
@@ -1496,7 +1496,7 @@ pub fn msw_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

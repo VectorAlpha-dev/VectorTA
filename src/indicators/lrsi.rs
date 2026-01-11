@@ -244,7 +244,7 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
     let mut out = alloc_with_nan_prefix(n, warmup_period);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         // Reject batch kernels in single-row calculations
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::NotEnoughValidData {
@@ -320,7 +320,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         // Reject batch kernels in single-row calculations
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::InvalidKernelForBatch(kern));
@@ -673,7 +673,7 @@ pub struct LrsiBatchRange {
 impl Default for LrsiBatchRange {
     fn default() -> Self {
         Self {
-            alpha: (0.2, 0.2, 0.0),
+            alpha: (0.2, 0.449, 0.001),
         }
     }
 }
@@ -1783,6 +1783,12 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_lrsi_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

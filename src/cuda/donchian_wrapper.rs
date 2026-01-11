@@ -456,7 +456,6 @@ impl CudaDonchian {
         }
 
         self.stream.synchronize()?;
-        self.stream.synchronize()?;
         self.maybe_log_batch_debug();
 
         Ok((
@@ -596,7 +595,6 @@ impl CudaDonchian {
         }
 
         self.stream.synchronize()?;
-        self.stream.synchronize()?;
         self.maybe_log_many_debug();
         Ok(DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 { buf: d_upper, rows, cols, ctx: self.context.clone(), device_id: self.device_id },
@@ -659,18 +657,57 @@ pub mod benches {
         in_bytes + out_bytes + rmq_bytes + 64 * 1024 * 1024
     }
 
-    struct DonchianBatchState {
+    struct DonchianBatchDeviceState {
         cuda: CudaDonchian,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: DonchianBatchRange,
+        d_periods: DeviceBuffer<i32>,
+        d_st_high: DeviceBuffer<f32>,
+        d_st_low: DeviceBuffer<f32>,
+        d_st_nan: DeviceBuffer<u8>,
+        d_upper: DeviceBuffer<f32>,
+        d_middle: DeviceBuffer<f32>,
+        d_lower: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        query_grid: GridSize,
+        query_block: BlockSize,
     }
-    impl CudaBenchState for DonchianBatchState {
+    impl CudaBenchState for DonchianBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .donchian_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("donchian batch");
+                .module
+                .get_function("donchian_batch_from_rmq_f32")
+                .expect("donchian_batch_from_rmq_f32");
+            unsafe {
+                let mut periods = self.d_periods.as_device_ptr().as_raw();
+                let mut series_len_i = self.len as i32;
+                let mut n_combos_i = self.n_combos as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut st_hi = as_raw_offset(&self.d_st_high, 0);
+                let mut st_lo = as_raw_offset(&self.d_st_low, 0);
+                let mut st_nm = as_raw_offset(&self.d_st_nan, 0);
+                let mut up_ptr = self.d_upper.as_device_ptr().as_raw();
+                let mut mid_ptr = self.d_middle.as_device_ptr().as_raw();
+                let mut lowo_ptr = self.d_lower.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut periods as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut st_hi as *mut _ as *mut c_void,
+                    &mut st_lo as *mut _ as *mut c_void,
+                    &mut st_nm as *mut _ as *mut c_void,
+                    &mut up_ptr as *mut _ as *mut c_void,
+                    &mut mid_ptr as *mut _ as *mut c_void,
+                    &mut lowo_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.query_grid, self.query_block, 0, args)
+                    .expect("donchian query launch");
+            }
+            self.cuda.stream.synchronize().expect("donchian sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -689,11 +726,180 @@ pub mod benches {
         let sweep = DonchianBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(DonchianBatchState {
+
+        // Expand combos and build RMQ once (prep is outside measurement loop)
+        let (combos, first_valid, len) =
+            CudaDonchian::prepare_batch_inputs(&high, &low, &sweep).expect("prep inputs");
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap_or(1);
+        let levels = rmq_levels_for_max_period(max_period);
+        let stride = len;
+
+        // Upload base inputs for RMQ build
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+
+        // RMQ tables (levels x len)
+        let mut d_st_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &cuda.stream) }
+                .expect("d_st_high");
+        let mut d_st_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &cuda.stream) }
+                .expect("d_st_low");
+        let mut d_st_nan: DeviceBuffer<u8> =
+            unsafe { DeviceBuffer::uninitialized_async(levels * stride, &cuda.stream) }
+                .expect("d_st_nan");
+
+        let init_lvl0_f32 = cuda
+            .module
+            .get_function("rmq_init_level0_f32")
+            .expect("rmq_init_level0_f32");
+        let init_nan_u8 = cuda
+            .module
+            .get_function("rmq_init_nan_mask_u8")
+            .expect("rmq_init_nan_mask_u8");
+        let build_max = cuda
+            .module
+            .get_function("rmq_build_level_max_f32")
+            .expect("rmq_build_level_max_f32");
+        let build_min = cuda
+            .module
+            .get_function("rmq_build_level_min_f32")
+            .expect("rmq_build_level_min_f32");
+        let build_or = cuda
+            .module
+            .get_function("rmq_build_level_or_u8")
+            .expect("rmq_build_level_or_u8");
+
+        let build_bx: u32 = 256;
+        let build_grid_x: u32 = ((len as u32) + build_bx - 1) / build_bx;
+        let build_grid: GridSize = (build_grid_x.max(1), 1, 1).into();
+        let build_block: BlockSize = (build_bx, 1, 1).into();
+
+        unsafe {
+            // level 0 copies
+            let mut high_in = d_high.as_device_ptr().as_raw();
+            let mut low_in = d_low.as_device_ptr().as_raw();
+            let mut out_hi0 = as_raw_offset(&d_st_high, 0);
+            let mut out_lo0 = as_raw_offset(&d_st_low, 0);
+            let mut n_i = len as i32;
+            let mut first_i = first_valid as i32;
+            let mut mask0 = as_raw_offset(&d_st_nan, 0);
+
+            let mut args_hi0: &mut [*mut c_void] = &mut [
+                &mut high_in as *mut _ as *mut c_void,
+                &mut out_hi0 as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+            ];
+            cuda.stream
+                .launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_hi0)
+                .expect("rmq init hi0");
+
+            let mut args_lo0: &mut [*mut c_void] = &mut [
+                &mut low_in as *mut _ as *mut c_void,
+                &mut out_lo0 as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+            ];
+            cuda.stream
+                .launch(&init_lvl0_f32, build_grid, build_block, 0, &mut args_lo0)
+                .expect("rmq init lo0");
+
+            let mut args_nm0: &mut [*mut c_void] = &mut [
+                &mut high_in as *mut _ as *mut c_void,
+                &mut low_in as *mut _ as *mut c_void,
+                &mut n_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut mask0 as *mut _ as *mut c_void,
+            ];
+            cuda.stream
+                .launch(&init_nan_u8, build_grid, build_block, 0, &mut args_nm0)
+                .expect("rmq init nan");
+        }
+
+        for k in 1..levels {
+            let offset = 1 << (k - 1);
+            unsafe {
+                let mut n_i = len as i32;
+                let mut off_i = offset as i32;
+                let prev_elems = (k - 1) * stride;
+                let curr_elems = k * stride;
+
+                // MAX
+                let mut prev = as_raw_offset(&d_st_high, prev_elems);
+                let mut curr = as_raw_offset(&d_st_high, curr_elems);
+                let mut args: &mut [*mut c_void] = &mut [
+                    &mut prev as *mut _ as *mut c_void,
+                    &mut curr as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                cuda.stream
+                    .launch(&build_max, build_grid, build_block, 0, &mut args)
+                    .expect("rmq build max");
+
+                // MIN
+                prev = as_raw_offset(&d_st_low, prev_elems);
+                curr = as_raw_offset(&d_st_low, curr_elems);
+                let mut args2: &mut [*mut c_void] = &mut [
+                    &mut prev as *mut _ as *mut c_void,
+                    &mut curr as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                cuda.stream
+                    .launch(&build_min, build_grid, build_block, 0, &mut args2)
+                    .expect("rmq build min");
+
+                // OR
+                let mut prev_b = as_raw_offset(&d_st_nan, prev_elems);
+                let mut curr_b = as_raw_offset(&d_st_nan, curr_elems);
+                let mut args3: &mut [*mut c_void] = &mut [
+                    &mut prev_b as *mut _ as *mut c_void,
+                    &mut curr_b as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                ];
+                cuda.stream
+                    .launch(&build_or, build_grid, build_block, 0, &mut args3)
+                    .expect("rmq build or");
+            }
+        }
+
+        // Params + outputs for query kernel
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }.expect("d_periods");
+        let mut d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
+                .expect("d_upper");
+        let mut d_middle: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
+                .expect("d_middle");
+        let mut d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
+                .expect("d_lower");
+
+        // Query launch config (matches wrapper defaults)
+        let query_bx: u32 = 256;
+        let query_grid_x: u32 = ((combos.len() as u32) + query_bx - 1) / query_bx;
+        let query_grid: GridSize = (query_grid_x.max(1), 1, 1).into();
+        let query_block: BlockSize = (query_bx, 1, 1).into();
+
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(DonchianBatchDeviceState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_periods,
+            d_st_high,
+            d_st_low,
+            d_st_nan,
+            d_upper,
+            d_middle,
+            d_lower,
+            len,
+            first_valid,
+            n_combos: combos.len(),
+            query_grid,
+            query_block,
         })
     }
 

@@ -105,6 +105,11 @@ impl CudaZscore {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
     pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
     pub fn device_id(&self) -> u32 { self.device_id }
+
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaZscoreError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
     // duplicate accessors removed above
 
     fn expand_combos(
@@ -390,16 +395,15 @@ impl CudaZscore {
             (*(self as *const _ as *mut CudaZscore)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
-        unsafe {
-            (*(self as *const _ as *mut CudaZscore)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
-        }
         self.maybe_log_batch_debug();
 
         let grid_x = ((len as u32) + block_x - 1) / block_x;
+        // Must match `ZSCORE_COMBO_TILE` in `kernels/cuda/zscore_kernel.cu`.
+        const COMBO_TILE: usize = 4;
         // Chunk grid.y to ≤ 65_535
         for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
-            let grid: GridSize = (grid_x.max(1), chunk_len as u32, 1).into();
+            let grid_y = ((chunk_len + (COMBO_TILE - 1)) / COMBO_TILE) as u32;
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
@@ -458,9 +462,12 @@ impl CudaZscore {
         unsafe { (*(self as *const _ as *mut CudaZscore)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
         self.maybe_log_batch_debug();
         let grid_x = ((len as u32) + block_x - 1) / block_x;
+        // Must match `ZSCORE_COMBO_TILE` in `kernels/cuda/zscore_kernel.cu`.
+        const COMBO_TILE: usize = 4;
 
         for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
-            let grid: GridSize = (grid_x.max(1), chunk_len as u32, 1).into();
+            let grid_y = ((chunk_len + (COMBO_TILE - 1)) / COMBO_TILE) as u32;
+            let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
                 let mut data_ptr = d_data.as_device_ptr().as_raw();
@@ -835,21 +842,42 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let prefixes_bytes = (ONE_SERIES_LEN + 1)
+            * (2 * std::mem::size_of::<Float2>() + std::mem::size_of::<i32>());
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + prefixes_bytes + out_bytes + 64 * 1024 * 1024
     }
 
     struct ZscoreBatchState {
         cuda: CudaZscore,
-        price: Vec<f32>,
-        sweep: ZscoreBatchRange,
+        d_data: DeviceBuffer<f32>,
+        d_ps: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_pnan: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_nbdevs: DeviceBuffer<f32>,
+        first_valid: usize,
+        len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ZscoreBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .zscore_batch_dev(&self.price, &self.sweep)
+            self.cuda
+                .launch_batch_kernel_ds(
+                    &self.d_data,
+                    &self.d_ps,
+                    &self.d_ps2,
+                    &self.d_pnan,
+                    &self.d_periods,
+                    &self.d_nbdevs,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
                 .expect("zscore batch");
+            self.cuda.synchronize().expect("zscore sync");
         }
     }
 
@@ -863,7 +891,34 @@ pub mod benches {
             nbdev: (2.0, 2.0, 0.0),
             devtype: (0, 0, 0),
         };
-        Box::new(ZscoreBatchState { cuda, price, sweep })
+        let (combos, first_valid, len) = CudaZscore::prepare_batch_inputs(&price, &sweep)
+            .expect("zscore prep");
+
+        let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let nbdevs: Vec<f32> = combos.iter().map(|c| c.nbdev).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_nbdevs = DeviceBuffer::from_slice(&nbdevs).expect("d_nbdevs");
+        let (ps, ps2, pnan) = CudaZscore::build_prefixes_ds_pinned(&price).expect("prefixes");
+        let d_ps: DeviceBuffer<Float2> = DeviceBuffer::from_slice(ps.as_slice()).expect("d_ps");
+        let d_ps2: DeviceBuffer<Float2> = DeviceBuffer::from_slice(ps2.as_slice()).expect("d_ps2");
+        let d_pnan: DeviceBuffer<i32> = DeviceBuffer::from_slice(pnan.as_slice()).expect("d_pnan");
+        let elems = len * combos.len();
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_out");
+
+        Box::new(ZscoreBatchState {
+            cuda,
+            d_data,
+            d_ps,
+            d_ps2,
+            d_pnan,
+            d_periods,
+            d_nbdevs,
+            first_valid,
+            len,
+            n_combos: combos.len(),
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

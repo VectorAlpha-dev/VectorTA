@@ -72,7 +72,11 @@ extern "C" __global__ void cmo_batch_f32(
     int first_valid,
     float* __restrict__ out              // length = n_combos * series_len
 ) {
-    const int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    // One warp per combo. Each lane advances 1 timestep; warp scan emits 32 outputs per iteration.
+    const unsigned lane = threadIdx.x & 31u;
+    const unsigned warp = threadIdx.x >> 5;
+    const unsigned warps_per_block = blockDim.x >> 5;
+    const int combo = (int)(blockIdx.x * warps_per_block + warp);
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
@@ -81,92 +85,97 @@ extern "C" __global__ void cmo_batch_f32(
     // Basic validation mirroring wrapper guards
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
-        for (int i = 0; i < series_len; ++i) out_row[i] = CMO_NAN;
+        for (int i = (int)lane; i < series_len; i += 32) out_row[i] = CMO_NAN;
         return;
     }
-    const int tail = series_len - first_valid;
+    const int fv   = first_valid;
+    const int tail = series_len - fv;
     if (UNLIKELY(tail <= period)) {
-        for (int i = 0; i < series_len; ++i) out_row[i] = CMO_NAN;
+        for (int i = (int)lane; i < series_len; i += 32) out_row[i] = CMO_NAN;
         return;
     }
 
-    const int fv   = first_valid;
     const int warm = fv + period; // first index with a defined output
 
-    // Prefill NaN up to (warm-1)
-    for (int i = 0; i < warm; ++i) out_row[i] = CMO_NAN;
+    // Prefill NaN up to (warm-1) only (avoid full-row writes)
+    for (int i = (int)lane; i < warm; i += 32) out_row[i] = CMO_NAN;
 
     // Precompute alpha & beta for Wilder smoothing (FP32)
     const float beta  = 1.0f / (float)period;
     const float alpha = 1.0f - beta; // (period - 1) / period
 
-    // ----- Initial averages over (fv+1 ..= warm) using compensated sum -----
-    float prev = prices[fv];
-    KBN32 sum_g, sum_l;
-    sum_g.init(); sum_l.init();
-
-    for (int i = fv + 1; i <= warm; ++i) {
-        float curr = prices[i];
-        float diff = curr - prev;
-        prev = curr;
-        float g = fmaxf(diff, 0.0f);
-        float l = fmaxf(-diff, 0.0f);
-        sum_g.add(g);
-        sum_l.add(l);
-    }
-    float avg_g = sum_g.result() * beta;
-    float avg_l = sum_l.result() * beta;
-
-    // First defined output
-    out_row[warm] = cmo_from_avgs(avg_g, avg_l);
-
-    // ====== Rolling update with shared-memory tiling ======
-    // Important: Threads in a block share the same tile range. Since each
-    // combo can have a different 'warm', we stream tiles from fv+1 and only
-    // start updating/writing once (t >= warm+1) for this thread.
-    if (fv + 1 >= series_len) return;
-
-    __shared__ float sh_prices[CMO_TILE + 1];
-
-    int t = fv + 1; // common tile start for all threads in block
-    while (t < series_len) {
-        const int tile_start = t;
-        const int tile_end   = min(series_len - 1, tile_start + CMO_TILE - 1);
-        const int diffs_in_tile = tile_end - tile_start + 1;
-        const int load_base = tile_start - 1;             // include previous element
-        const int load_elems = diffs_in_tile + 1;         // T+1
-
-        // Load tile into shared memory once per block.
-        if (threadIdx.x == 0) {
-            for (int j = 0; j < load_elems; ++j) {
-                sh_prices[j] = prices[load_base + j];
-            }
-        }
-        __syncthreads();
-
-        // Stream through tile diffs
-        float p0 = sh_prices[0];
-        // Debug: verify second tile content for first combo/thread
-        // (debug print removed)
-        for (int j = 0; j < diffs_in_tile; ++j) {
-            float p1 = sh_prices[j + 1];
-            float diff = p1 - p0;
-            p0 = p1;
-
+    // ----- Initial averages over (fv+1 ..= warm) computed by lane 0 -----
+    float avg_g = 0.0f;
+    float avg_l = 0.0f;
+    if (lane == 0) {
+        float prev = prices[fv];
+        KBN32 sum_g, sum_l;
+        sum_g.init();
+        sum_l.init();
+        for (int i = fv + 1; i <= warm; ++i) {
+            float curr = prices[i];
+            float diff = curr - prev;
+            prev = curr;
             float g = fmaxf(diff, 0.0f);
             float l = fmaxf(-diff, 0.0f);
+            sum_g.add(g);
+            sum_l.add(l);
+        }
+        avg_g = sum_g.result() * beta;
+        avg_l = sum_l.result() * beta;
+        out_row[warm] = cmo_from_avgs(avg_g, avg_l);
+    }
 
-            // Only start rolling once past warm for this combo
-            const int tt = t + j;
-            if (tt >= warm + 1) {
-                avg_g = __fmaf_rn(alpha, avg_g, beta * g);
-                avg_l = __fmaf_rn(alpha, avg_l, beta * l);
-                out_row[tt] = cmo_from_avgs(avg_g, avg_l);
+    const unsigned mask = 0xffffffffu;
+    avg_g = __shfl_sync(mask, avg_g, 0);
+    avg_l = __shfl_sync(mask, avg_l, 0);
+
+    // Rolling update: process 32 timesteps per iteration, starting at warm+1
+    for (int t0 = warm + 1; t0 < series_len; t0 += 32) {
+        const int t = t0 + (int)lane;
+
+        float A  = 1.0f;
+        float Bg = 0.0f;
+        float Bl = 0.0f;
+        if (t < series_len) {
+            const float p1 = prices[t];
+            const float p0 = prices[t - 1];
+            const float diff = p1 - p0;
+            const float g = fmaxf(diff, 0.0f);
+            const float l = fmaxf(-diff, 0.0f);
+            A  = alpha;
+            Bg = beta * g;
+            Bl = beta * l;
+        }
+
+        // Inclusive warp scan composing (A,B) left-to-right.
+        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev  = __shfl_up_sync(mask, A, offset);
+            const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
+            const float Bl_prev = __shfl_up_sync(mask, Bl, offset);
+            if (lane >= (unsigned)offset) {
+                const float A_cur  = A;
+                const float Bg_cur = Bg;
+                const float Bl_cur = Bl;
+                A  = A_cur * A_prev;
+                Bg = __fmaf_rn(A_cur, Bg_prev, Bg_cur);
+                Bl = __fmaf_rn(A_cur, Bl_prev, Bl_cur);
             }
         }
 
-        __syncthreads();
-        t += diffs_in_tile;
+        const float yg = __fmaf_rn(A, avg_g, Bg);
+        const float yl = __fmaf_rn(A, avg_l, Bl);
+
+        if (t < series_len) {
+            out_row[t] = cmo_from_avgs(yg, yl);
+        }
+
+        // Advance to next tile using the last valid lane.
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        avg_g = __shfl_sync(mask, yg, last_lane);
+        avg_l = __shfl_sync(mask, yl, last_lane);
     }
 }
 

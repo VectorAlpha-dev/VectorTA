@@ -165,6 +165,7 @@ impl CudaNwe {
 
     pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
     pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn synchronize(&self) -> Result<(), CudaNweError> { Ok(self.stream.synchronize()?) }
 
     fn expand_grid(r: &NweBatchRange) -> Result<Vec<NweParams>, CudaNweError> {
         fn axis_usize(
@@ -438,6 +439,76 @@ impl CudaNwe {
                 .map_err(CudaNweError::from)?;
         }
 
+        self.nwe_batch_device(
+            &d_prices,
+            &d_weights,
+            &d_looks,
+            &d_mults,
+            len,
+            n,
+            first_valid,
+            max_lb,
+            &mut d_upper,
+            &mut d_lower,
+        )?;
+
+        self.synchronize()?;
+
+        let pair = DeviceNwePair {
+            upper: DeviceArrayF32 {
+                buf: d_upper,
+                rows: n,
+                cols: len,
+            },
+            lower: DeviceArrayF32 {
+                buf: d_lower,
+                rows: n,
+                cols: len,
+            },
+        };
+        Ok((pair, combos))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn nwe_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_looks: &DeviceBuffer<i32>,
+        d_mults: &DeviceBuffer<f32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_lb: usize,
+        d_upper: &mut DeviceBuffer<f32>,
+        d_lower: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNweError> {
+        if d_prices.len() != len {
+            return Err(CudaNweError::InvalidInput("prices length mismatch".into()));
+        }
+        if d_looks.len() != n_combos {
+            return Err(CudaNweError::InvalidInput(
+                "lookbacks length must match n_combos".into(),
+            ));
+        }
+        if d_mults.len() != n_combos {
+            return Err(CudaNweError::InvalidInput(
+                "multipliers length must match n_combos".into(),
+            ));
+        }
+        let expected_w = n_combos
+            .checked_mul(max_lb)
+            .ok_or_else(|| CudaNweError::InvalidInput("weights length overflow".into()))?;
+        if d_weights.len() != expected_w {
+            return Err(CudaNweError::InvalidInput("weights length mismatch".into()));
+        }
+        let expected_out = n_combos
+            .checked_mul(len)
+            .ok_or_else(|| CudaNweError::InvalidInput("rows*cols overflow".into()))?;
+        if d_upper.len() != expected_out || d_lower.len() != expected_out {
+            return Err(CudaNweError::InvalidInput("output length mismatch".into()));
+        }
+
         let func = self
             .module
             .get_function("nadaraya_watson_envelope_batch_f32")
@@ -449,7 +520,7 @@ impl CudaNwe {
         // Use 128 threads per block by default and dynamic shared memory for weights + time tile.
         const NWE_THREADS: u32 = 128; // must match tuned kernel policy
         const NWE_TILE_T: usize = 64; // must match CUDA kernel constant
-        let grid = GridSize::xy(1, n as u32);
+        let grid = GridSize::xy(1, n_combos as u32);
         let block = BlockSize::xyz(NWE_THREADS, 1, 1);
         self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
         // s_w[L] + s_x[L+T-1] + s_mask[L+T-1]
@@ -462,7 +533,7 @@ impl CudaNwe {
             let mut looks_p = d_looks.as_device_ptr().as_raw();
             let mut mults_p = d_mults.as_device_ptr().as_raw();
             let mut len_i = len as i32;
-            let mut n_i = n as i32;
+            let mut n_i = n_combos as i32;
             let mut fv_i = first_valid as i32;
             let mut max_lb_i = max_lb as i32;
             let mut upper_p = d_upper.as_device_ptr().as_raw();
@@ -483,16 +554,7 @@ impl CudaNwe {
                 .launch(&func, grid, block, smem_bytes, args)
                 .map_err(CudaNweError::from)?;
         }
-
-        self.stream
-            .synchronize()
-            .map_err(CudaNweError::from)?;
-
-        let pair = DeviceNwePair {
-            upper: DeviceArrayF32 { buf: d_upper, rows: n, cols: len },
-            lower: DeviceArrayF32 { buf: d_lower, rows: n, cols: len },
-        };
-        Ok((pair, combos))
+        Ok(())
     }
 
     pub fn nwe_many_series_one_param_time_major_dev(
@@ -681,21 +743,44 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use cust::memory::LockedBuffer;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        // Batch
-        struct BatchState {
+        // Batch (device-resident): pre-upload inputs/weights and reuse output buffers.
+        struct BatchDevState {
             cuda: CudaNwe,
-            price: Vec<f32>,
-            sweep: NweBatchRange,
+            d_prices: DeviceBuffer<f32>,
+            d_weights: DeviceBuffer<f32>,
+            d_looks: DeviceBuffer<i32>,
+            d_mults: DeviceBuffer<f32>,
+            len: usize,
+            n_combos: usize,
+            first_valid: usize,
+            max_lb: usize,
+            d_upper: DeviceBuffer<f32>,
+            d_lower: DeviceBuffer<f32>,
         }
-        impl CudaBenchState for BatchState {
+        impl CudaBenchState for BatchDevState {
             fn launch(&mut self) {
-                let _ = self.cuda.nwe_batch_dev(&self.price, &self.sweep);
+                self.cuda
+                    .nwe_batch_device(
+                        &self.d_prices,
+                        &self.d_weights,
+                        &self.d_looks,
+                        &self.d_mults,
+                        self.len,
+                        self.n_combos,
+                        self.first_valid,
+                        self.max_lb,
+                        &mut self.d_upper,
+                        &mut self.d_lower,
+                    )
+                    .expect("nwe batch device");
+                self.cuda.synchronize().expect("sync");
             }
         }
         let prep_batch = || {
@@ -706,24 +791,85 @@ pub mod benches {
                 multiplier: (2.0, 3.0, 0.5),
                 lookback: (128, 512, 64),
             };
-            Box::new(BatchState { cuda, price, sweep }) as Box<dyn CudaBenchState>
+            let (_combos, first_valid, len, lookbacks, multipliers, weights_flat, max_lb) =
+                CudaNwe::prepare_batch_inputs(&price, &sweep).expect("prep");
+            let n_combos = lookbacks.len();
+            let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+            let d_weights = DeviceBuffer::from_slice(&weights_flat).expect("d_weights");
+            let d_looks = DeviceBuffer::from_slice(&lookbacks).expect("d_looks");
+            let d_mults = DeviceBuffer::from_slice(&multipliers).expect("d_mults");
+            let out_len = n_combos * len;
+            let d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }
+                .expect("d_upper");
+            let d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }
+                .expect("d_lower");
+            Box::new(BatchDevState {
+                cuda,
+                d_prices,
+                d_weights,
+                d_looks,
+                d_mults,
+                len,
+                n_combos,
+                first_valid,
+                max_lb,
+                d_upper,
+                d_lower,
+            }) as Box<dyn CudaBenchState>
         };
         // Many-series
         struct ManyState {
             cuda: CudaNwe,
-            data_tm: Vec<f32>,
+            d_prices_tm: DeviceBuffer<f32>,
+            d_weights: DeviceBuffer<f32>,
+            d_first_valids: DeviceBuffer<i32>,
             cols: usize,
             rows: usize,
-            params: NweParams,
+            lookback: i32,
+            multiplier: f32,
+            d_upper: DeviceBuffer<f32>,
+            d_lower: DeviceBuffer<f32>,
         }
         impl CudaBenchState for ManyState {
             fn launch(&mut self) {
-                let _ = self.cuda.nwe_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                );
+                let func = self
+                    .cuda
+                    .module
+                    .get_function("nadaraya_watson_envelope_many_series_one_param_f32")
+                    .expect("nadaraya_watson_envelope_many_series_one_param_f32");
+                let grid = GridSize::xy(1, self.cols as u32);
+                let block = BlockSize::xyz(128, 1, 1);
+                self.cuda
+                    .validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)
+                    .expect("nwe many validate");
+
+                unsafe {
+                    let mut prices_p = self.d_prices_tm.as_device_ptr().as_raw();
+                    let mut weights_p = self.d_weights.as_device_ptr().as_raw();
+                    let mut lookback_i = self.lookback as i32;
+                    let mut mult_f = self.multiplier;
+                    let mut num_series_i = self.cols as i32;
+                    let mut series_len_i = self.rows as i32;
+                    let mut first_p = self.d_first_valids.as_device_ptr().as_raw();
+                    let mut out_u_p = self.d_upper.as_device_ptr().as_raw();
+                    let mut out_l_p = self.d_lower.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_p as *mut _ as *mut c_void,
+                        &mut weights_p as *mut _ as *mut c_void,
+                        &mut lookback_i as *mut _ as *mut c_void,
+                        &mut mult_f as *mut _ as *mut c_void,
+                        &mut num_series_i as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut first_p as *mut _ as *mut c_void,
+                        &mut out_u_p as *mut _ as *mut c_void,
+                        &mut out_l_p as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&func, grid, block, 0, args)
+                        .expect("nwe many launch");
+                }
+                self.cuda.synchronize().expect("nwe many sync");
             }
         }
         let prep_many = || {
@@ -731,24 +877,62 @@ pub mod benches {
             let cols = MANY_SERIES_COLS;
             let rows = MANY_SERIES_LEN;
             let data_tm = gen_time_major_prices(cols, rows);
-            let params = NweParams {
-                bandwidth: Some(8.0),
-                multiplier: Some(3.0),
-                lookback: Some(256),
-            };
+
+            // Mirror the wrapper defaults used in the dev path.
+            let bandwidth = 8.0;
+            let lookback = 256usize;
+            let multiplier = 3.0f32;
+
+            let mut first_valids = vec![rows as i32; cols];
+            for s in 0..cols {
+                for t in 0..rows {
+                    let v = data_tm[t * cols + s];
+                    if !v.is_nan() {
+                        first_valids[s] = t as i32;
+                        break;
+                    }
+                }
+            }
+            let (w_row, _l) = CudaNwe::compute_weights_row(bandwidth, lookback);
+
+            let h_tm = LockedBuffer::from_slice(&data_tm).expect("h_tm locked");
+            let len_tm = cols * rows;
+            let mut d_prices_tm: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(len_tm) }.expect("d_prices_tm");
+            unsafe {
+                d_prices_tm
+                    .async_copy_from(&h_tm, &cuda.stream)
+                    .expect("d_prices_tm H2D");
+            }
+            let d_weights = DeviceBuffer::from_slice(&w_row).expect("d_weights");
+            let d_first_valids =
+                DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+            let d_upper: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(len_tm) }.expect("d_upper");
+            let d_lower: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(len_tm) }.expect("d_lower");
+            cuda.stream.synchronize().expect("nwe prep sync");
             Box::new(ManyState {
                 cuda,
-                data_tm,
+                d_prices_tm,
+                d_weights,
+                d_first_valids,
                 cols,
                 rows,
-                params,
+                lookback: lookback as i32,
+                multiplier,
+                d_upper,
+                d_lower,
             }) as Box<dyn CudaBenchState>
         };
         let bytes_batch = ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + (ONE_SERIES_LEN * 256) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024;
         let bytes_many =
-            MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>() + 64 * 1024 * 1024;
+            MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>()
+                + 256usize * std::mem::size_of::<f32>()
+                + MANY_SERIES_COLS * std::mem::size_of::<i32>()
+                + 64 * 1024 * 1024;
         vec![
             CudaBenchScenario::new(
                 "nwe",
@@ -766,25 +950,6 @@ pub mod benches {
                 "256x1m",
                 prep_many,
             )
-            .with_sample_size(5)
-            .with_mem_required(bytes_many),
-            CudaBenchScenario::new(
-                "nwe",
-                "one_series_many_params",
-                "nwe_cuda_batch_dev",
-                "1m_x_grid",
-                prep_batch,
-            )
-            .with_sample_size(10)
-            .with_mem_required(bytes_batch),
-            CudaBenchScenario::new(
-                "nwe",
-                "many_series_one_param",
-                "nwe_cuda_many_series_one_param",
-                "256x1m",
-                prep_many,
-            )
-            .with_sample_size(5)
             .with_mem_required(bytes_many),
         ]
     }

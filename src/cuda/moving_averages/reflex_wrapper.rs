@@ -701,20 +701,87 @@ impl CudaReflex {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches_batch_only;
+    use crate::cuda::bench::helpers::gen_series;
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    define_ma_period_benches_batch_only!(
-        reflex_benches,
-        CudaReflex,
-        crate::indicators::moving_averages::reflex::ReflexBatchRange,
-        reflex_batch_dev,
-        crate::indicators::moving_averages::reflex::ReflexBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        "reflex",
-        "reflex"
-    );
-    pub use reflex_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct ReflexBatchDeviceState {
+        cuda: CudaReflex,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+    }
+    impl CudaBenchState for ReflexBatchDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .reflex_batch_device(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_period,
+                    &mut self.d_out,
+                )
+                .expect("reflex_batch_device");
+            self.cuda.synchronize().expect("sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaReflex::new(0).expect("cuda reflex");
+        let price = gen_series(ONE_SERIES_LEN);
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+
+        let start = 10i32;
+        let mut periods = Vec::with_capacity(PARAM_SWEEP);
+        for i in 0..PARAM_SWEEP {
+            periods.push(start + i as i32);
+        }
+        let max_period = (start as usize) + PARAM_SWEEP - 1;
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("upload prices");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("upload periods");
+        let out_elems = ONE_SERIES_LEN * PARAM_SWEEP;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
+            .expect("alloc out");
+
+        Box::new(ReflexBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            series_len: ONE_SERIES_LEN,
+            n_combos: PARAM_SWEEP,
+            first_valid,
+            max_period,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![CudaBenchScenario::new(
+            "reflex",
+            "one_series_many_params",
+            "reflex_cuda_batch_dev",
+            "1m_x_250",
+            prep_one_series_many_params,
+        )
+        .with_sample_size(10)
+        .with_mem_required(bytes_one_series_many_params())]
+    }
 }
 
 fn expand_grid_reflex_checked(range: &ReflexBatchRange) -> Result<Vec<ReflexParams>, CudaReflexError> {

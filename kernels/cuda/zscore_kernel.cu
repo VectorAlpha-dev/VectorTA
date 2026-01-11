@@ -10,6 +10,14 @@
 #include <math.h>
 #include "ds_float2.cuh"
 
+// Combo tiling reduces redundant loads of:
+// - data[t]
+// - prefix_*[t+1]
+// across multiple parameter rows sharing the same `end` index.
+#ifndef ZSCORE_COMBO_TILE
+#define ZSCORE_COMBO_TILE 4
+#endif
+
 // ----------------- Helpers -----------------
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 __device__ __forceinline__ bool nonpos_or_nan(float x) { return !(x > 0.0f); }
@@ -34,48 +42,78 @@ extern "C" __global__ void zscore_sma_prefix_f32ds(
     int n_combos,
     float* __restrict__ out                      // [n_combos * len]
 ) {
-    const int combo = blockIdx.y;
-    if (combo >= n_combos) return;
+    const int group = blockIdx.y;
+    const int co_base = group * ZSCORE_COMBO_TILE;
 
-    const int   period = periods[combo];
-    const float nbdev  = nbdevs[combo];
-    if (period <= 0) return;
+    __shared__ int s_period[ZSCORE_COMBO_TILE];
+    __shared__ int s_warm[ZSCORE_COMBO_TILE];
+    __shared__ float s_inv_n[ZSCORE_COMBO_TILE];
+    __shared__ float s_inv_nb[ZSCORE_COMBO_TILE];
 
-    const int   warm       = first_valid + period - 1;
-    const int   row_offset = combo * len;
-    const float invN       = 1.0f / (float)period;
-    const float inv_nbdev  = (nbdev != 0.0f) ? (1.0f / nbdev) : 0.0f;
+    if (threadIdx.x < ZSCORE_COMBO_TILE) {
+        const int c = co_base + (int)threadIdx.x;
+        if (c < n_combos) {
+            const int p = periods[c];
+            const float nb = nbdevs[c];
+            s_period[threadIdx.x] = p;
+            s_warm[threadIdx.x] = first_valid + p - 1;
+            s_inv_n[threadIdx.x] = (p > 0) ? (1.0f / (float)p) : 0.0f;
+            s_inv_nb[threadIdx.x] = (nb != 0.0f) ? (1.0f / nb) : 0.0f;
+        } else {
+            s_period[threadIdx.x] = 0;
+            s_warm[threadIdx.x] = 0;
+            s_inv_n[threadIdx.x] = 0.0f;
+            s_inv_nb[threadIdx.x] = 0.0f;
+        }
+    }
+    __syncthreads();
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
     while (t < len) {
-        float out_val = nan_f32();
+        const int end = t + 1;
+        const dsf ex = load_dsf_f2(prefix_sum, end);
+        const dsf ex2 = load_dsf_f2(prefix_sum_sq, end);
+        const int end_bad = prefix_nan[end];
+        const float x = data[t];
 
-        if (t >= warm && nbdev != 0.0f) {
-            const int end = t + 1;
-            int start = end - period; if (start < 0) start = 0;
-            const int nan_count = prefix_nan[end] - prefix_nan[start];
-            if (nan_count == 0) {
-                // DS window sums via prefix diffs
-                const dsf s1 = ds_sub(load_dsf_f2(prefix_sum, end),    load_dsf_f2(prefix_sum, start));
-                const dsf s2 = ds_sub(load_dsf_f2(prefix_sum_sq, end), load_dsf_f2(prefix_sum_sq, start));
-                const dsf mean_ds = ds_scale(s1, invN);
-                const dsf ex2_ds  = ds_scale(s2, invN);
-                const dsf var_ds  = ds_sub(ex2_ds, ds_mul(mean_ds, mean_ds));
-                const float mean  = ds_to_f(mean_ds);
-                const float var   = ds_to_f(var_ds);
-                if (var > 0.0f && isfinite(var)) {
-                    const float sd = sqrtf(var);
-                    const float denom_inv = (sd > 0.0f) ? (inv_nbdev / sd) : 0.0f;
-                    const float x = data[t];
-                    const float z = (x - mean) * denom_inv;
-                    out_val = z;
+#pragma unroll
+        for (int k = 0; k < ZSCORE_COMBO_TILE; ++k) {
+            const int combo = co_base + k;
+            if (combo >= n_combos) break;
+
+            float out_val = nan_f32();
+            const int period = s_period[k];
+            if (period > 0) {
+                const int warm = s_warm[k];
+                const float invN = s_inv_n[k];
+                const float inv_nbdev = s_inv_nb[k];
+
+                if (t >= warm && inv_nbdev != 0.0f) {
+                    int start = end - period;
+                    if (start < 0) start = 0;
+                    const int nan_count = end_bad - prefix_nan[start];
+                    if (nan_count == 0) {
+                        // DS window sums via prefix diffs
+                        const dsf s1 = ds_sub(ex, load_dsf_f2(prefix_sum, start));
+                        const dsf s2 = ds_sub(ex2, load_dsf_f2(prefix_sum_sq, start));
+                        const dsf mean_ds = ds_scale(s1, invN);
+                        const dsf ex2_ds = ds_scale(s2, invN);
+                        const dsf var_ds = ds_sub(ex2_ds, ds_mul(mean_ds, mean_ds));
+                        const float mean = ds_to_f(mean_ds);
+                        const float var = ds_to_f(var_ds);
+                        if (var > 0.0f && isfinite(var)) {
+                            const float sd = sqrtf(var);
+                            const float denom_inv = (sd > 0.0f) ? (inv_nbdev / sd) : 0.0f;
+                            out_val = (x - mean) * denom_inv;
+                        }
+                    }
                 }
             }
+            out[combo * len + t] = out_val;
         }
 
-        out[row_offset + t] = out_val;
         t += stride;
     }
 }
@@ -106,54 +144,78 @@ extern "C" __global__ void zscore_sma_prefix_f32(
     const float* __restrict__ nbdevs,
     int n_combos,
     float* __restrict__ out) {
-    const int combo = blockIdx.y;
-    if (combo >= n_combos) {
-        return;
-    }
-
-    const int period = periods[combo];
-    const float nbdev = nbdevs[combo];
-    if (period <= 0) {
-        return;
-    }
-
-    const int warm = first_valid + period - 1;
-    const int row_offset = combo * len;
     const float nan_f = __int_as_float(0x7fffffff);
+
+    const int group = blockIdx.y;
+    const int co_base = group * ZSCORE_COMBO_TILE;
+
+    __shared__ int s_period[ZSCORE_COMBO_TILE];
+    __shared__ int s_warm[ZSCORE_COMBO_TILE];
+    __shared__ double s_inv_n[ZSCORE_COMBO_TILE];
+    __shared__ float s_nbdev[ZSCORE_COMBO_TILE];
+
+    if (threadIdx.x < ZSCORE_COMBO_TILE) {
+        const int c = co_base + (int)threadIdx.x;
+        if (c < n_combos) {
+            const int p = periods[c];
+            s_period[threadIdx.x] = p;
+            s_warm[threadIdx.x] = first_valid + p - 1;
+            s_inv_n[threadIdx.x] = (p > 0) ? (1.0 / (double)p) : 0.0;
+            s_nbdev[threadIdx.x] = nbdevs[c];
+        } else {
+            s_period[threadIdx.x] = 0;
+            s_warm[threadIdx.x] = 0;
+            s_inv_n[threadIdx.x] = 0.0;
+            s_nbdev[threadIdx.x] = 0.0f;
+        }
+    }
+    __syncthreads();
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
     while (t < len) {
-        float out_val = nan_f;
+        const int end = t + 1;
+        const double ps_end = prefix_sum[end];
+        const double ps2_end = prefix_sum_sq[end];
+        const int end_bad = prefix_nan[end];
+        const double x = (double)data[t];
 
-        if (t >= warm) {
-            if (nbdev != 0.0f) {
-                int start = t + 1 - period;
-                if (start < 0) {
-                    start = 0;
-                }
+#pragma unroll
+        for (int k = 0; k < ZSCORE_COMBO_TILE; ++k) {
+            const int combo = co_base + k;
+            if (combo >= n_combos) break;
 
-                const int nan_count = prefix_nan[t + 1] - prefix_nan[start];
-                if (nan_count == 0) {
-                    const double sum = prefix_sum[t + 1] - prefix_sum[start];
-                    const double sum2 = prefix_sum_sq[t + 1] - prefix_sum_sq[start];
-                    const double mean = sum / static_cast<double>(period);
-                    double variance = (sum2 / static_cast<double>(period)) - (mean * mean);
-                    if (variance > 0.0) {
-                        const double std_base = sqrt(variance);
-                        const double denom = std_base * static_cast<double>(nbdev);
-                        if (denom != 0.0 && !isnan(denom)) {
-                            const double val = static_cast<double>(data[t]);
-                            const double z = (val - mean) / denom;
-                            out_val = static_cast<float>(z);
+            float out_val = nan_f;
+            const int period = s_period[k];
+            if (period > 0) {
+                const int warm = s_warm[k];
+                const float nbdev = s_nbdev[k];
+                const double inv_n = s_inv_n[k];
+
+                if (t >= warm && nbdev != 0.0f) {
+                    int start = end - period;
+                    if (start < 0) start = 0;
+
+                    const int nan_count = end_bad - prefix_nan[start];
+                    if (nan_count == 0) {
+                        const double sum = ps_end - prefix_sum[start];
+                        const double sum2 = ps2_end - prefix_sum_sq[start];
+                        const double mean = sum * inv_n;
+                        const double variance = (sum2 * inv_n) - (mean * mean);
+                        if (variance > 0.0) {
+                            const double denom = sqrt(variance) * (double)nbdev;
+                            if (denom != 0.0 && !isnan(denom)) {
+                                out_val = (float)((x - mean) / denom);
+                            }
                         }
                     }
                 }
             }
+
+            out[combo * len + t] = out_val;
         }
 
-        out[row_offset + t] = out_val;
         t += stride;
     }
 }

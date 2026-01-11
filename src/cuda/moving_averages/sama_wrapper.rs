@@ -805,29 +805,180 @@ fn memset_i32_async(
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::sama::{SamaBatchRange, SamaParams};
 
-    define_ma_period_benches!(
-        sama_benches,
-        CudaSama,
-        crate::indicators::moving_averages::sama::SamaBatchRange,
-        crate::indicators::moving_averages::sama::SamaParams,
-        sama_batch_dev,
-        sama_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::sama::SamaBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct SamaBatchDevState {
+        cuda: CudaSama,
+        d_prices: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_min_alphas: DeviceBuffer<f32>,
+        d_maj_alphas: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        host_lengths: Vec<i32>,
+        max_window_total: i32,
+        d_out: DeviceBuffer<f32>,
+    }
+
+    impl CudaBenchState for SamaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel_sliced_opt(
+                    &self.d_prices,
+                    &self.d_lengths,
+                    &self.d_min_alphas,
+                    &self.d_maj_alphas,
+                    &self.d_first_valids,
+                    self.series_len,
+                    self.n_combos,
+                    Some(&self.host_lengths),
+                    self.max_window_total,
+                    &mut self.d_out,
+                )
+                .expect("sama batch kernel");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSama::new(0).expect("cuda sama");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = SamaBatchRange {
             length: (64, 64 + PARAM_SWEEP - 1, 1),
             maj_length: (14, 14, 0),
-            min_length: (6, 6, 0)
-        },
-        crate::indicators::moving_averages::sama::SamaParams {
+            min_length: (6, 6, 0),
+        };
+        let prepared =
+            CudaSama::prepare_batch_inputs(&price, &sweep).expect("sama prepare batch inputs");
+        let n_combos = prepared.combos.len();
+        let max_window_total: i32 = *prepared.lengths_i32.iter().max().unwrap_or(&0);
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_lengths = DeviceBuffer::from_slice(&prepared.lengths_i32).expect("d_lengths");
+        let d_min_alphas = DeviceBuffer::from_slice(&prepared.min_alphas).expect("d_min_alphas");
+        let d_maj_alphas = DeviceBuffer::from_slice(&prepared.maj_alphas).expect("d_maj_alphas");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }
+            .expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SamaBatchDevState {
+            cuda,
+            d_prices,
+            d_lengths,
+            d_min_alphas,
+            d_maj_alphas,
+            d_first_valids,
+            series_len: prepared.series_len,
+            n_combos,
+            host_lengths: prepared.lengths_i32,
+            max_window_total,
+            d_out,
+        })
+    }
+
+    struct SamaManyDevState {
+        cuda: CudaSama,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        length: i32,
+        min_alpha: f32,
+        maj_alpha: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+
+    impl CudaBenchState for SamaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .sama_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.length,
+                    self.min_alpha,
+                    self.maj_alpha,
+                    self.cols as i32,
+                    self.rows as i32,
+                    &mut self.d_out_tm,
+                )
+                .expect("sama many-series kernel");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSama::new(0).expect("cuda sama");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = SamaParams {
             length: Some(64),
             maj_length: Some(14),
-            min_length: Some(6)
-        },
-        "sama",
-        "sama"
-    );
-    pub use sama_benches::bench_profiles;
+            min_length: Some(6),
+        };
+        let prepared =
+            CudaSama::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("sama prep");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SamaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            length: prepared.length,
+            min_alpha: prepared.min_alpha,
+            maj_alpha: prepared.maj_alpha,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "sama",
+                "one_series_many_params",
+                "sama_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "sama",
+                "many_series_one_param",
+                "sama_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_grid(range: &SamaBatchRange) -> Result<Vec<SamaParams>, CudaSamaError> {

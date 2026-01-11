@@ -335,7 +335,7 @@ pub fn linreg_compute_into(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -562,7 +562,7 @@ pub struct LinRegBatchRange {
 impl Default for LinRegBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 40, 1),
+            period: (14, 263, 1),
         }
     }
 }

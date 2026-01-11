@@ -15,6 +15,98 @@ __device__ __forceinline__ float qnan32() {
     return __int_as_float(0x7fffffff);
 }
 
+__device__ __forceinline__ float sma_from_prefix_f32(
+    const double* __restrict__ pref_sum,
+    const int* __restrict__ pref_nan,
+    int t,
+    int period
+) {
+    const int t1 = t + 1;
+    const int t0 = t + 1 - period;
+    if ((pref_nan[t1] - pref_nan[t0]) != 0) return qnan32();
+    const double sum = pref_sum[t1] - pref_sum[t0];
+    return (float)(sum / (double)period);
+}
+
+// Batch: one series × many params, SMA-only. Uses host-precomputed prefix sums
+// (f64) and prefix NaN counts to compute SMA(fast) and SMA(slow) on device, then
+// computes the RMS deviation over a window of length fast_period.
+//
+// One thread per row scans time sequentially (rolling update matches scalar).
+extern "C" __global__ void mab_batch_from_prefix_sma_f32(
+    const double* __restrict__ pref_close_sum,
+    const int* __restrict__ pref_close_nan,
+    const int* __restrict__ fast_periods,
+    const int* __restrict__ slow_periods,
+    const float* __restrict__ devups,
+    const float* __restrict__ devdns,
+    int len,
+    int first_valid,
+    int rows,
+    float* __restrict__ out_upper,  // rows x len
+    float* __restrict__ out_middle, // rows x len
+    float* __restrict__ out_lower   // rows x len
+) {
+    const int row = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (row >= rows) return;
+
+    const int fast_period = fast_periods[row];
+    const int slow_period = slow_periods[row];
+    const float devup = devups[row];
+    const float devdn = devdns[row];
+
+    if (fast_period <= 0 || slow_period <= 0 || len <= 0) return;
+
+    const int warm = first_valid + max(fast_period, slow_period) + fast_period - 1;
+    const int row_off = row * len;
+    const float nanf = qnan32();
+
+    for (int t = 0; t < min(warm, len); ++t) {
+        out_upper[row_off + t] = nanf;
+        out_middle[row_off + t] = nanf;
+        out_lower[row_off + t] = nanf;
+    }
+    if (warm >= len) return;
+
+    const float inv_fast = 1.0f / (float)fast_period;
+
+    float sumsq = 0.0f;
+    const int start0 = (warm + 1) - fast_period;
+    for (int k = 0; k < fast_period; ++k) {
+        const int idx = start0 + k;
+        const float fm = sma_from_prefix_f32(pref_close_sum, pref_close_nan, idx, fast_period);
+        const float sm = sma_from_prefix_f32(pref_close_sum, pref_close_nan, idx, slow_period);
+        const float d = fm - sm;
+        sumsq = fmaf(d, d, sumsq);
+    }
+
+    float dev = sqrtf(sumsq * inv_fast);
+    float fm = sma_from_prefix_f32(pref_close_sum, pref_close_nan, warm, fast_period);
+    float sm = sma_from_prefix_f32(pref_close_sum, pref_close_nan, warm, slow_period);
+    out_middle[row_off + warm] = fm;
+    out_upper[row_off + warm] = sm + devup * dev;
+    out_lower[row_off + warm] = sm - devdn * dev;
+
+    for (int i = warm + 1; i < len; ++i) {
+        const int old_idx = i - fast_period;
+
+        const float fn = sma_from_prefix_f32(pref_close_sum, pref_close_nan, i, fast_period);
+        const float sn = sma_from_prefix_f32(pref_close_sum, pref_close_nan, i, slow_period);
+        const float fo = sma_from_prefix_f32(pref_close_sum, pref_close_nan, old_idx, fast_period);
+        const float so = sma_from_prefix_f32(pref_close_sum, pref_close_nan, old_idx, slow_period);
+
+        const float newd = fn - sn;
+        const float oldd = fo - so;
+        sumsq = (sumsq + newd * newd) - oldd * oldd;
+        if (!isnan(sumsq) && sumsq < 0.0f) sumsq = 0.0f;
+        dev = sqrtf(sumsq * inv_fast);
+
+        out_middle[row_off + i] = fn;
+        out_upper[row_off + i] = sn + devup * dev;
+        out_lower[row_off + i] = sn - devdn * dev;
+    }
+}
+
 // Compute dev[t] = sqrt(mean((fast-slow)^2 over last fast_period)) for a single series
 // Inputs are 1D fast and slow arrays of length len.
 extern "C" __global__ void mab_dev_from_ma_f32(
@@ -211,4 +303,3 @@ extern "C" __global__ void mab_many_series_one_param_time_major_f32(
         out_lower_tm[new_idx] = slow_tm[new_idx] - devdn * dev;
     }
 }
-

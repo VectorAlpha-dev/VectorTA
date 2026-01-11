@@ -576,110 +576,156 @@ pub mod benches {
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let mut v = Vec::new();
-        // Batch: 100k samples, modest parameter grid
-        v.push(
+        vec![
             CudaBenchScenario::new(
                 "stc",
                 "one_series_many_params",
-                "stc/batch",
-                "100k x 64",
+                "stc_cuda_batch_dev",
+                "100k_x_64",
                 || {
-                    struct State {
-                        cuda: CudaStc,
-                        data: Vec<f32>,
-                        sweep: StcBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.stc_batch_dev(&self.data, &self.sweep);
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut data = vec![f32::NAN; n];
-                    for i in 200..n {
+                    const N: usize = 100_000;
+                    let mut data = vec![f32::NAN; N];
+                    for i in 200..N {
                         let x = i as f32;
                         data[i] = (x * 0.0013).sin() + 0.0002 * x;
                     }
+                    // 4x4x4 = 64 combos
                     let sweep = StcBatchRange {
                         fast_period: (10, 25, 5),
                         slow_period: (30, 60, 10),
-                        k_period: (10, 10, 0),
+                        k_period: (5, 20, 5),
                         d_period: (3, 3, 0),
                     };
-                    Box::new(State {
-                        cuda: CudaStc::new(0).unwrap(),
-                        data,
-                        sweep,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-        v.push(
-            CudaBenchScenario::new(
-                "stc",
-                "one_series_many_params",
-                "stc/batch",
-                "100k x 64",
-                || {
-                    struct State {
-                        cuda: CudaStc,
-                        data: Vec<f32>,
-                        sweep: StcBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.stc_batch_dev(&self.data, &self.sweep);
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut data = vec![f32::NAN; n];
-                    for i in 200..n {
-                        let x = i as f32;
-                        data[i] = (x * 0.0013).sin() + 0.0002 * x;
-                    }
-                    let sweep = StcBatchRange {
-                        fast_period: (10, 25, 5),
-                        slow_period: (30, 60, 10),
-                        k_period: (10, 10, 0),
-                        d_period: (3, 3, 0),
-                    };
-                    Box::new(State {
-                        cuda: CudaStc::new(0).unwrap(),
-                        data,
-                        sweep,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
+                    let combos = CudaStc::expand_grid(&sweep).expect("expand_grid");
+                    let rows = combos.len();
+                    let first_valid = data.iter().position(|v| v.is_finite()).unwrap_or(0);
 
-        // Many-series: 512 series x 2048 rows
-        v.push(
-            CudaBenchScenario::new(
-                "stc",
-                "many_series_one_param",
-                "stc/many_series",
-                "2048r x 512c",
-                || {
-                    struct State {
-                        cuda: CudaStc,
-                        data_tm: Vec<f32>,
-                        cols: usize,
-                        rows: usize,
-                        params: StcParams,
+                    let mut fasts: Vec<i32> = Vec::with_capacity(rows);
+                    let mut slows: Vec<i32> = Vec::with_capacity(rows);
+                    let mut ks: Vec<i32> = Vec::with_capacity(rows);
+                    let mut ds: Vec<i32> = Vec::with_capacity(rows);
+                    let mut max_k = 0usize;
+                    for c in &combos {
+                        let f = c.fast_period.unwrap() as i32;
+                        let s = c.slow_period.unwrap() as i32;
+                        let k = c.k_period.unwrap() as i32;
+                        let d = c.d_period.unwrap() as i32;
+                        fasts.push(f);
+                        slows.push(s);
+                        ks.push(k);
+                        ds.push(d);
+                        max_k = max_k.max(k as usize);
                     }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.stc_many_series_one_param_time_major_dev(
-                                &self.data_tm,
-                                self.cols,
-                                self.rows,
-                                &self.params,
+
+                    let mut cuda = CudaStc::new(0).unwrap();
+                    let d_prices =
+                        unsafe { DeviceBuffer::from_slice_async(&data, &cuda.stream) }.expect("d_prices");
+                    let d_f = DeviceBuffer::from_slice(&fasts).expect("d_f");
+                    let d_s = DeviceBuffer::from_slice(&slows).expect("d_s");
+                    let d_k = DeviceBuffer::from_slice(&ks).expect("d_k");
+                    let d_d = DeviceBuffer::from_slice(&ds).expect("d_d");
+                    let mut d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(rows * N) }.expect("d_out");
+
+                    let mut func = cuda.module.get_function("stc_batch_f32").expect("stc_batch_f32");
+                    func.set_cache_config(CacheConfig::PreferShared).expect("cache_config");
+                    func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
+                        .expect("smem_config");
+
+                    let shmem_bytes = CudaStc::stc_batch_smem_bytes(max_k);
+                    if shmem_bytes > 48 * 1024 {
+                        unsafe {
+                            let _ = cuFuncSetAttribute(
+                                func.to_raw(),
+                                CUfuncAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                shmem_bytes as i32,
                             );
                         }
                     }
+
+                    let block_x = match cuda.policy.batch {
+                        BatchKernelPolicy::Auto => 1,
+                        BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+                    };
+                    let func: Function<'static> = unsafe { std::mem::transmute(func) };
+                    cuda.stream.synchronize().expect("sync after prep");
+
+                    struct State {
+                        cuda: CudaStc,
+                        func: Function<'static>,
+                        d_prices: DeviceBuffer<f32>,
+                        d_f: DeviceBuffer<i32>,
+                        d_s: DeviceBuffer<i32>,
+                        d_k: DeviceBuffer<i32>,
+                        d_d: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
+                        len: usize,
+                        first_valid: usize,
+                        rows: usize,
+                        max_k: usize,
+                        block_x: u32,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let shmem_bytes = CudaStc::stc_batch_smem_bytes(self.max_k) as u32;
+                            let grid: GridSize = (self.rows as u32, 1, 1).into();
+                            let block: BlockSize = (self.block_x, 1, 1).into();
+                            unsafe {
+                                let mut p_ptr = self.d_prices.as_device_ptr().as_raw();
+                                let mut f_ptr = self.d_f.as_device_ptr().as_raw();
+                                let mut s_ptr = self.d_s.as_device_ptr().as_raw();
+                                let mut k_ptr = self.d_k.as_device_ptr().as_raw();
+                                let mut d_ptr = self.d_d.as_device_ptr().as_raw();
+                                let mut n_i = self.len as i32;
+                                let mut fv_i = self.first_valid as i32;
+                                let mut r_i = self.rows as i32;
+                                let mut mk_i = self.max_k as i32;
+                                let mut o_ptr = self.d_out.as_device_ptr().as_raw();
+                                let mut args: [*mut c_void; 10] = [
+                                    &mut p_ptr as *mut _ as *mut c_void,
+                                    &mut f_ptr as *mut _ as *mut c_void,
+                                    &mut s_ptr as *mut _ as *mut c_void,
+                                    &mut k_ptr as *mut _ as *mut c_void,
+                                    &mut d_ptr as *mut _ as *mut c_void,
+                                    &mut n_i as *mut _ as *mut c_void,
+                                    &mut fv_i as *mut _ as *mut c_void,
+                                    &mut r_i as *mut _ as *mut c_void,
+                                    &mut mk_i as *mut _ as *mut c_void,
+                                    &mut o_ptr as *mut _ as *mut c_void,
+                                ];
+                                self.cuda
+                                    .stream
+                                    .launch(&self.func, grid, block, shmem_bytes, &mut args)
+                                    .expect("stc launch");
+                            }
+                            self.cuda.stream.synchronize().expect("stc sync");
+                        }
+                    }
+
+                    Box::new(State {
+                        cuda,
+                        func,
+                        d_prices,
+                        d_f,
+                        d_s,
+                        d_k,
+                        d_d,
+                        d_out,
+                        len: N,
+                        first_valid,
+                        rows,
+                        max_k,
+                        block_x,
+                    })
+                },
+            )
+            .with_sample_size(20),
+            CudaBenchScenario::new(
+                "stc",
+                "many_series_one_param",
+                "stc_cuda_many_series_one_param_dev",
+                "512x2048",
+                || {
                     let cols = 512usize;
                     let rows = 2048usize;
                     let mut tm = vec![f32::NAN; cols * rows];
@@ -689,6 +735,7 @@ pub mod benches {
                             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
                         }
                     }
+                    let first_valids: Vec<i32> = (0..cols).map(|i| i as i32).collect();
                     let params = StcParams {
                         fast_period: Some(23),
                         slow_period: Some(50),
@@ -697,70 +744,84 @@ pub mod benches {
                         fast_ma_type: None,
                         slow_ma_type: None,
                     };
-                    Box::new(State {
-                        cuda: CudaStc::new(0).unwrap(),
-                        data_tm: tm,
-                        cols,
-                        rows,
-                        params,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-        v.push(
-            CudaBenchScenario::new(
-                "stc",
-                "many_series_one_param",
-                "stc/many_series",
-                "2048r x 512c",
-                || {
+                    let block_x = 256u32;
+                    let grid_x = ((cols as u32) + block_x - 1) / block_x;
+
+                    let mut cuda = CudaStc::new(0).unwrap();
+                    let d_data =
+                        unsafe { DeviceBuffer::from_slice_async(&tm, &cuda.stream) }.expect("d_data");
+                    let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+                    let mut d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+                    let func = cuda
+                        .module
+                        .get_function("stc_many_series_one_param_f32")
+                        .expect("stc_many_series_one_param_f32");
+                    let func: Function<'static> = unsafe { std::mem::transmute(func) };
+                    cuda.stream.synchronize().expect("sync after prep");
+
                     struct State {
                         cuda: CudaStc,
-                        data_tm: Vec<f32>,
+                        func: Function<'static>,
+                        d_data: DeviceBuffer<f32>,
+                        d_first: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
                         cols: usize,
                         rows: usize,
                         params: StcParams,
+                        block_x: u32,
+                        grid_x: u32,
                     }
                     impl CudaBenchState for State {
                         fn launch(&mut self) {
-                            let _ = self.cuda.stc_many_series_one_param_time_major_dev(
-                                &self.data_tm,
-                                self.cols,
-                                self.rows,
-                                &self.params,
-                            );
+                            let grid: GridSize = (self.grid_x.max(1), 1, 1).into();
+                            let block: BlockSize = (self.block_x, 1, 1).into();
+                            unsafe {
+                                let mut d_ptr = self.d_data.as_device_ptr().as_raw();
+                                let mut f_ptr = self.d_first.as_device_ptr().as_raw();
+                                let mut c_i = self.cols as i32;
+                                let mut r_i = self.rows as i32;
+                                let mut fast_i = self.params.fast_period.unwrap() as i32;
+                                let mut slow_i = self.params.slow_period.unwrap() as i32;
+                                let mut k_i = self.params.k_period.unwrap() as i32;
+                                let mut d_i = self.params.d_period.unwrap() as i32;
+                                let mut o_ptr = self.d_out.as_device_ptr().as_raw();
+                                let mut args: [*mut c_void; 10] = [
+                                    &mut d_ptr as *mut _ as *mut c_void,
+                                    &mut f_ptr as *mut _ as *mut c_void,
+                                    &mut c_i as *mut _ as *mut c_void,
+                                    &mut r_i as *mut _ as *mut c_void,
+                                    &mut fast_i as *mut _ as *mut c_void,
+                                    &mut slow_i as *mut _ as *mut c_void,
+                                    &mut k_i as *mut _ as *mut c_void,
+                                    &mut d_i as *mut _ as *mut c_void,
+                                    &mut o_ptr as *mut _ as *mut c_void,
+                                    std::ptr::null_mut(),
+                                ];
+                                self.cuda
+                                    .stream
+                                    .launch(&self.func, grid, block, 0, &mut args)
+                                    .expect("stc many launch");
+                            }
+                            self.cuda.stream.synchronize().expect("stc sync");
                         }
                     }
-                    let cols = 512usize;
-                    let rows = 2048usize;
-                    let mut tm = vec![f32::NAN; cols * rows];
-                    for s in 0..cols {
-                        for t in s..rows {
-                            let x = t as f32 + (s as f32) * 0.1;
-                            tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                        }
-                    }
-                    let params = StcParams {
-                        fast_period: Some(23),
-                        slow_period: Some(50),
-                        k_period: Some(10),
-                        d_period: Some(3),
-                        fast_ma_type: None,
-                        slow_ma_type: None,
-                    };
+
                     Box::new(State {
-                        cuda: CudaStc::new(0).unwrap(),
-                        data_tm: tm,
+                        cuda,
+                        func,
+                        d_data,
+                        d_first,
+                        d_out,
                         cols,
                         rows,
                         params,
+                        block_x,
+                        grid_x,
                     })
                 },
             )
             .with_sample_size(20),
-        );
-
-        v
+        ]
     }
 }

@@ -762,8 +762,8 @@ pub struct DamianiVolatmeterBatchRange {
 impl Default for DamianiVolatmeterBatchRange {
     fn default() -> Self {
         Self {
-            vis_atr: (13, 40, 1),
-            vis_std: (20, 40, 1),
+            vis_atr: (13, 262, 1),
+            vis_std: (20, 20, 0),
             sed_atr: (40, 40, 0),
             sed_std: (100, 100, 0),
             threshold: (1.4, 1.4, 0.0),
@@ -3885,7 +3885,7 @@ pub fn damiani_volatmeter_wasm(
         threshold: Some(threshold),
     };
     let input = DamianiVolatmeterInput::from_slice(data, params);
-    let out = damiani_volatmeter_with_kernel(&input, detect_best_kernel())
+    let out = damiani_volatmeter_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let cols = data.len();
     let mut values = Vec::with_capacity(2 * cols);
@@ -3963,7 +3963,7 @@ pub fn damiani_volatmeter_into(
             let vol = std::slice::from_raw_parts_mut(out_vol_ptr, len);
             let anti = std::slice::from_raw_parts_mut(out_anti_ptr, len);
             let input = DamianiVolatmeterInput::from_slice(&data_copy, params);
-            damiani_volatmeter_into_slice(vol, anti, &input, detect_best_kernel())
+            damiani_volatmeter_into_slice(vol, anti, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))
         } else {
             // No aliasing, use directly
@@ -3971,7 +3971,7 @@ pub fn damiani_volatmeter_into(
             let vol = std::slice::from_raw_parts_mut(out_vol_ptr, len);
             let anti = std::slice::from_raw_parts_mut(out_anti_ptr, len);
             let input = DamianiVolatmeterInput::from_slice(data, params);
-            damiani_volatmeter_into_slice(vol, anti, &input, detect_best_kernel())
+            damiani_volatmeter_into_slice(vol, anti, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))
         }
     }

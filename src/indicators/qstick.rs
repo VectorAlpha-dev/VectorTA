@@ -255,7 +255,7 @@ pub fn qstick_with_kernel(
     let mut out = alloc_with_nan_prefix(len, warmup_end);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -350,7 +350,7 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
 
     // Dispatch to the best compute kernel
     let chosen = match Kernel::Auto {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -727,7 +727,7 @@ pub struct QstickBatchRange {
 impl Default for QstickBatchRange {
     fn default() -> Self {
         Self {
-            period: (5, 240, 1),
+            period: (5, 254, 1),
         }
     }
 }
@@ -2256,7 +2256,7 @@ pub fn qstick_into_slice(
 
     // Compute directly into output
     let kernel = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

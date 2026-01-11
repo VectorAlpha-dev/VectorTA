@@ -1033,7 +1033,7 @@ impl Default for EhlersITrendBatchRange {
     fn default() -> Self {
         Self {
             warmup_bars: (12, 12, 0),
-            max_dc_period: (50, 50, 0),
+            max_dc_period: (50, 299, 1),
         }
     }
 }

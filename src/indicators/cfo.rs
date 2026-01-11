@@ -263,7 +263,7 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -331,7 +331,7 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -748,8 +748,8 @@ pub struct CfoBatchRange {
 impl Default for CfoBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 60, 1),
-            scalar: (100.0, 100.0, 0.0), // Keep default at 100.0 for static sweeps
+            period: (14, 14, 0),
+            scalar: (100.0, 124.9, 0.1), // 250 combos
         }
     }
 }
@@ -1657,6 +1657,12 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "proptest"))]
+    fn check_cfo_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
+    }
+
     generate_all_cfo_tests!(
         check_cfo_partial_params,
         check_cfo_accuracy,
@@ -2263,13 +2269,13 @@ pub fn cfo_into(
         if core::ptr::eq(in_ptr, out_ptr as *const f64) {
             // alias-safe temp
             let mut temp = vec![0.0; len];
-            cfo_into_slice(&mut temp, &input, detect_best_kernel())
+            cfo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            cfo_into_slice(out, &input, detect_best_kernel())
+            cfo_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())

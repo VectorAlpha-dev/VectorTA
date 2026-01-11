@@ -699,7 +699,7 @@ pub struct MassBatchRange {
 
 impl Default for MassBatchRange {
     fn default() -> Self {
-        Self { period: (5, 20, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

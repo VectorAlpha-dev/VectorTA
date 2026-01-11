@@ -252,12 +252,7 @@ pub fn jsa_with_kernel(input: &JsaInput, kernel: Kernel) -> Result<JsaOutput, Js
         // JSA is bandwidth-bound; on AVX512-capable CPUs the explicit AVX2/AVX512
         // kernels can underperform due to downclock versus the compiler’s scalar
         // autovec. Prefer the scalar reference for `Auto`.
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
-                Kernel::Scalar
-            }
-            other => other,
-        },
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     jsa_compute_into(data, period, first, chosen, &mut out);
@@ -332,12 +327,7 @@ pub fn jsa_with_kernel_into(
 
     let chosen = match kernel {
         // See `jsa_with_kernel`: avoid AVX downclock for `Auto`.
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
-                Kernel::Scalar
-            }
-            other => other,
-        },
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     jsa_compute_into(data, period, first, chosen, out);
@@ -540,7 +530,7 @@ pub struct JsaBatchRange {
 impl Default for JsaBatchRange {
     fn default() -> Self {
         Self {
-            period: (30, 120, 1),
+            period: (30, 279, 1),
         }
     }
 }
@@ -1390,14 +1380,14 @@ pub fn jsa_into_wasm(
         );
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
-            jsa_into_slice(&mut temp, &input, detect_best_kernel())
+            jsa_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&temp);
         } else {
             jsa_into_slice(
                 std::slice::from_raw_parts_mut(out_ptr, len),
                 &input,
-                detect_best_kernel(),
+                Kernel::Auto,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }

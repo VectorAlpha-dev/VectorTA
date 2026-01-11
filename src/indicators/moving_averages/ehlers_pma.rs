@@ -33,7 +33,7 @@
 //!
 //! ## Example
 //! ```rust
-//! use my_project::indicators::moving_averages::ehlers_pma::*;
+//! use vector_ta::indicators::moving_averages::ehlers_pma::*;
 //!
 //! let data = vec![100.0; 20]; // Sample data
 //! let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
@@ -118,7 +118,7 @@ pub struct EhlersPmaBatchRange {
 impl Default for EhlersPmaBatchRange {
     #[inline]
     fn default() -> Self {
-        Self { combos: 1 }
+        Self { combos: 250 }
     }
 }
 
@@ -401,7 +401,7 @@ pub fn ehlers_pma_with_kernel(
 
     // Determine which kernel to use
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -651,7 +651,7 @@ pub fn ehlers_pma_into_flat_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -735,7 +735,7 @@ pub fn ehlers_pma_into_slices_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

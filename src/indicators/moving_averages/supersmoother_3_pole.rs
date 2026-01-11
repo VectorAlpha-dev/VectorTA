@@ -233,7 +233,7 @@ pub fn supersmoother_3_pole_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     // Use alloc_with_nan_prefix to ensure [0..first) is NaN
@@ -634,7 +634,7 @@ pub struct SuperSmoother3PoleBatchRange {
 impl Default for SuperSmoother3PoleBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1936,7 +1936,7 @@ pub fn supersmoother_3_pole_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

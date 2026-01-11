@@ -764,8 +764,8 @@ pub struct DeviationBatchRange {
 impl Default for DeviationBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 60, 1),
-            devtype: (0, 2, 1),
+            period: (9, 258, 1),
+            devtype: (0, 0, 0),
         }
     }
 }

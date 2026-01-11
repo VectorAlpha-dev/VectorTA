@@ -1071,7 +1071,7 @@ pub struct SafeZoneStopBatchRange {
 impl Default for SafeZoneStopBatchRange {
     fn default() -> Self {
         Self {
-            period: (22, 22, 0),
+            period: (22, 271, 1),
             mult: (2.5, 2.5, 0.0),
             max_lookback: (3, 3, 0),
         }

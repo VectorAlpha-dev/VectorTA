@@ -86,6 +86,65 @@ fn adxr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "cuda")]
 #[test]
+fn adxr_cuda_batch_opt_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[adxr_cuda_batch_opt_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    // Trigger the optimized path (n_combos >= 64) without making the test huge.
+    let len = 4096usize;
+    let mut high = vec![f64::NAN; len];
+    let mut low = vec![f64::NAN; len];
+    let mut close = vec![f64::NAN; len];
+    for i in 1..len {
+        let x = i as f64 * 0.0031;
+        let base = (x).sin() + 0.0002 * (i as f64);
+        let hi = base + 0.6 + 0.05 * (x * 3.0).cos();
+        let lo = base - 0.6 - 0.04 * (x * 1.7).sin();
+        high[i] = hi;
+        low[i] = lo;
+        close[i] = (hi + lo) * 0.5;
+    }
+    // 64 combos: 5..=320 step 5
+    let sweep = AdxrBatchRange { period: (5, 320, 5) };
+
+    // CPU baseline
+    let cpu = adxr_batch_slice(&high, &low, &close, &sweep, Kernel::Scalar)?;
+
+    // GPU
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let cuda = CudaAdxr::new(0).expect("CudaAdxr::new");
+    let (dev, _combos) = cuda
+        .adxr_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
+        .expect("cuda adxr_batch_dev");
+
+    assert_eq!(cpu.rows, dev.rows);
+    assert_eq!(cpu.cols, dev.cols);
+
+    let mut host = vec![0f32; dev.len()];
+    dev.buf.copy_to(&mut host)?;
+
+    let tol = 2e-1;
+    for idx in 0..(cpu.rows * cpu.cols) {
+        let c = cpu.values[idx];
+        let g = host[idx] as f64;
+        assert!(
+            approx_eq(c, g, tol),
+            "mismatch at {}: cpu={} gpu={}",
+            idx,
+            c,
+            g
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[adxr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");

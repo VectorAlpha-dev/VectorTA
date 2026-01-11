@@ -493,13 +493,6 @@ pub mod benches {
             ),
             CudaBenchScenario::new(
                 "er",
-                "batch_dev",
-                "er_cuda_batch_dev",
-                "60k_x_49",
-                prep_er_batch_box,
-            ),
-            CudaBenchScenario::new(
-                "er",
                 "many_series_one_param",
                 "er_cuda_many_series_one_param",
                 "250x1m",
@@ -564,19 +557,9 @@ pub mod benches {
             let x = i as f32;
             price[i] = (x * 0.001).sin() + 0.0002 * x;
         }
-        for i in 5..len {
-            let x = i as f32;
-            price[i] = (x * 0.001).sin() + 0.0002 * x;
-        }
         let sweep = ErBatchRange { period: (5, 49, 1) };
-        let combos: Vec<i32> = (5..=49)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|p| p as i32)
-            .collect();
-        let combos: Vec<i32> = (5..=49)
-            .collect::<Vec<_>>()
-            .into_iter()
+        let combos: Vec<i32> = (sweep.period.0..=sweep.period.1)
+            .step_by(sweep.period.2.max(1))
             .map(|p| p as i32)
             .collect();
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
@@ -652,12 +635,6 @@ pub mod benches {
         let rows = 1_000_000usize;
         let period = 20usize;
         let mut tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + (s as f32) * 0.1;
-                tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
-            }
-        }
         for s in 0..cols {
             for t in s..rows {
                 let x = (t as f32) + (s as f32) * 0.1;

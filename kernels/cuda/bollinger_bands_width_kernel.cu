@@ -215,6 +215,29 @@ CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff(
     return stdv / m; // allow div-by-zero as in scalar
 }
 
+// Fast path when there are no NaNs after `first_valid` (common in real inputs).
+CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff_no_nan(
+    const float2* __restrict__ ps,
+    const float2* __restrict__ ps2,
+    int t, int period, int warm)
+{
+    if (t < warm) return nan_f32();
+    const int a = t + 1;
+    const int b = t + 1 - period;
+
+    float2 sum  = ff_sub(ps [a], ps [b]);
+    float2 sum2 = ff_sub(ps2[a], ps2[b]);
+
+    const float den = (float)period;
+    float2 mean  = ff_div_scalar(sum,  den);
+    float2 m2    = ff_div_scalar(sum2, den);
+    float2 var2  = ff_sub(m2, ff_mul(mean, mean));
+    float var    = clamp_nonneg(var2.x + var2.y);
+    float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
+    float m      = mean.x + mean.y;
+    return stdv / m; // allow div-by-zero as in scalar
+}
+
 // 1) One series × many params (compat mapping): one combo per block.y
 extern "C" __global__ void bbw_sma_prefix_ff_f32(
     const float2* __restrict__ prefix_sum,
@@ -235,12 +258,16 @@ extern "C" __global__ void bbw_sma_prefix_ff_f32(
     const float k = uplusd[combo];
     const int warm = first_valid + period - 1;
     const int row_off = combo * len;
+    const int nan_base = prefix_nan[first_valid];
+    const bool any_nan_since_first = (prefix_nan[len] - nan_base) != 0;
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
     while (t < len) {
-        float base = bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm);
+        float base = any_nan_since_first
+            ? bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm)
+            : bbw_base_from_prefix_ff_no_nan(prefix_sum, prefix_sum_sq, t, period, warm);
         out[row_off + t] = k * base; // NaN/inf propagate as desired
         t += stride;
     }
@@ -268,12 +295,16 @@ extern "C" __global__ void bbw_sma_prefix_grouped_ff_f32(
     const int warm = first_valid + period - 1;
     const int begin = offsets[up];
     const int end   = offsets[up + 1];
+    const int nan_base = prefix_nan[first_valid];
+    const bool any_nan_since_first = (prefix_nan[len] - nan_base) != 0;
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
     while (t < len) {
-        float base = bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm);
+        float base = any_nan_since_first
+            ? bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm)
+            : bbw_base_from_prefix_ff_no_nan(prefix_sum, prefix_sum_sq, t, period, warm);
         for (int j = begin; j < end; ++j) {
             const int row = combo_index[j];
             out[row * len + t] = uplusd_sorted[j] * base;

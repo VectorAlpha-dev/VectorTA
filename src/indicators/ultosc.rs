@@ -424,7 +424,7 @@ fn ultosc_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -636,23 +636,15 @@ unsafe fn ultosc_scalar_impl(
             // true_low = min(low, prev_close)
             let tl = if lo < prev_c { lo } else { prev_c };
 
-            // TR = max( high - low, |high - prev_close|, |low - prev_close| )
-            let tr1 = hi - lo;
-            let d1 = (hi - prev_c).abs();
-            let d2 = (lo - prev_c).abs();
-            let tr = if d1 > tr1 {
-                if d2 > d1 {
-                    d2
-                } else {
-                    d1
-                }
-            } else {
-                if d2 > tr1 {
-                    d2
-                } else {
-                    tr1
-                }
-            };
+            // True range for ULTOSC uses "true high/low":
+            //   true_low  = min(low, prev_close)
+            //   true_high = max(high, prev_close)
+            //   TR        = true_high - true_low
+            //
+            // This matches Tulip's `ultosc` and is equivalent to the standard
+            // "max of three distances" formulation when candle data is well-formed.
+            let th = if hi > prev_c { hi } else { prev_c };
+            let tr = th - tl;
             (ci - tl, tr)
         } else {
             (0.0, 0.0)
@@ -873,6 +865,16 @@ pub struct UltOscBatchRange {
     pub timeperiod1: (usize, usize, usize),
     pub timeperiod2: (usize, usize, usize),
     pub timeperiod3: (usize, usize, usize),
+}
+
+impl Default for UltOscBatchRange {
+    fn default() -> Self {
+        Self {
+            timeperiod1: (7, 7, 0),
+            timeperiod2: (14, 14, 0),
+            timeperiod3: (28, 277, 1),
+        }
+    }
 }
 
 #[cfg(feature = "wasm")]

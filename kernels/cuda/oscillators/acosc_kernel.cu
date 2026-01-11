@@ -43,6 +43,64 @@ __device__ __forceinline__ void kahan_add_sub(float add, float sub, float &sum, 
     kahan_add(-sub, sum, c);
 }
 
+// ------------------------------
+// AO helpers for time-parallel path
+// ------------------------------
+static __device__ __forceinline__ float acosc_median(const float* __restrict__ high,
+                                                     const float* __restrict__ low,
+                                                     int idx) {
+    return (high[idx] + low[idx]) * 0.5f;
+}
+
+static __device__ __forceinline__ float acosc_ao_at(const float* __restrict__ high,
+                                                    const float* __restrict__ low,
+                                                    int idx,
+                                                    int first_valid) {
+    float sum34 = 0.0f;
+    float sum5 = 0.0f;
+    const int rel = idx - first_valid;
+#pragma unroll
+    for (int k = 0; k < 34; ++k) {
+        const float med = acosc_median(high, low, idx - k);
+        sum34 += med;
+        if (rel >= 38 && k < 5) sum5 += med;
+    }
+    if (rel < 38) {
+        // Match the scalar warmup quirk: SMA5(median) is only updated starting at i=34, so the
+        // first four AO samples (i=34..37) use a non-contiguous short window that still includes
+        // medians from the very beginning of the valid slice.
+        //
+        // This affects ACOSC at i=38..41 because SMA5(AO) includes AO[34..37].
+        if (rel == 34) {
+            sum5 = acosc_median(high, low, first_valid + 1) +
+                   acosc_median(high, low, first_valid + 2) +
+                   acosc_median(high, low, first_valid + 3) +
+                   acosc_median(high, low, first_valid + 4) +
+                   acosc_median(high, low, idx);
+        } else if (rel == 35) {
+            sum5 = acosc_median(high, low, first_valid + 2) +
+                   acosc_median(high, low, first_valid + 3) +
+                   acosc_median(high, low, first_valid + 4) +
+                   acosc_median(high, low, idx - 1) +
+                   acosc_median(high, low, idx);
+        } else if (rel == 36) {
+            sum5 = acosc_median(high, low, first_valid + 3) +
+                   acosc_median(high, low, first_valid + 4) +
+                   acosc_median(high, low, idx - 2) +
+                   acosc_median(high, low, idx - 1) +
+                   acosc_median(high, low, idx);
+        } else {
+            // rel == 37 (the only remaining value we rely on)
+            sum5 = acosc_median(high, low, first_valid + 4) +
+                   acosc_median(high, low, idx - 3) +
+                   acosc_median(high, low, idx - 2) +
+                   acosc_median(high, low, idx - 1) +
+                   acosc_median(high, low, idx);
+        }
+    }
+    return sum5 * (1.0f / 5.0f) - sum34 * (1.0f / 34.0f);
+}
+
 // One-series × one-(fixed)-param batch entry. We keep the name *_batch_f32 to
 // stay consistent with other indicators even though n_combos == 1.
 extern "C" __global__
@@ -54,99 +112,38 @@ void acosc_batch_f32(const float* __restrict__ high,
                      float* __restrict__ out_change) {
     if (series_len <= 0) return;
 
-    // Initialize outputs to NaN in parallel within the single block (wrapper launches grid=1).
-    for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < series_len; idx += blockDim.x * gridDim.x) {
-        out_osc[idx] = CUDART_NAN_F;
-        out_change[idx] = CUDART_NAN_F;
-    }
-    __syncthreads();
-
-    // Single-threaded rolling pass; others return after init barrier.
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-
     const int fv = first_valid < 0 ? 0 : first_valid;
-    if (fv >= series_len) return;
+    const int warm = fv + 34 + 5 - 1; // first_valid + 38
+    const float nn = CUDART_NAN_F;
 
-    // Constants and ring buffers.
-    const int P5 = 5;
-    const int P34 = 34;
-    const float INV5 = 1.0f / 5.0f;
-    const float INV34 = 1.0f / 34.0f;
-    float q5[5];
-    float q34[34];
-    float q5ao[5];
-    float sum5 = 0.0f, c5 = 0.0f;
-    float sum34 = 0.0f, c34 = 0.0f;
-    float sum5ao = 0.0f, c5ao = 0.0f;
-    int i5 = 0, i34 = 0, i5ao = 0;
-
-    // Minimum length check: need 34 prefill + 4 warm + 1 output = 39
-    if ((series_len - fv) < (P34 + P5)) return;
-
-    // Prefill 34 medians and the first 5 for SMA5.
-    #pragma unroll
-    for (int k = 0; k < P34; ++k) {
-        const int i = fv + k;
-        const float med = (high[i] + low[i]) * 0.5f;
-        kahan_add(med, sum34, c34);
-        q34[k] = med;
-        if (k < P5) {
-            kahan_add(med, sum5, c5);
-            q5[k] = med;
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < series_len; i += stride) {
+        if (i < warm) {
+            out_osc[i] = nn;
+            out_change[i] = nn;
+            continue;
         }
-    }
 
-    // Warm phase: accumulate first 4 AO samples into SMA5(AO).
-    for (int i = fv + P34; i < fv + P34 + P5 - 1; ++i) {
-        const float med = (high[i] + low[i]) * 0.5f;
+        // Compute AO for i..i-5 so we can also compute the prior ACOSC in-thread.
+        const float ao0 = acosc_ao_at(high, low, i, fv);
+        const float ao1 = acosc_ao_at(high, low, i - 1, fv);
+        const float ao2 = acosc_ao_at(high, low, i - 2, fv);
+        const float ao3 = acosc_ao_at(high, low, i - 3, fv);
+        const float ao4 = acosc_ao_at(high, low, i - 4, fv);
 
-        const float old34 = q34[i34];
-        kahan_add_sub(med, old34, sum34, c34);
-        q34[i34] = med;
-        ++i34; if (i34 == P34) i34 = 0;
-        const float sma34 = sum34 * INV34;
+        const float sma5_ao = (ao0 + ao1 + ao2 + ao3 + ao4) * (1.0f / 5.0f);
+        const float res = ao0 - sma5_ao;
 
-        const float old5 = q5[i5];
-        kahan_add_sub(med, old5, sum5, c5);
-        q5[i5] = med;
-        ++i5; if (i5 == P5) i5 = 0;
-        const float sma5 = sum5 * INV5;
+        float prev_res = 0.0f;
+        if (i != warm) {
+            const float ao5 = acosc_ao_at(high, low, i - 5, fv);
+            const float sma5_ao_prev = (ao1 + ao2 + ao3 + ao4 + ao5) * (1.0f / 5.0f);
+            prev_res = ao1 - sma5_ao_prev;
+        }
 
-        const float ao = sma5 - sma34;
-        kahan_add(ao, sum5ao, c5ao);
-        q5ao[i5ao] = ao;
-        ++i5ao; if (i5ao == P5) i5ao = 0;
-    }
-
-    float prev_res = 0.0f;
-    // Main outputs begin at warm index (first_valid + 38)
-    for (int i = fv + P34 + P5 - 1; i < series_len; ++i) {
-        const float med = (high[i] + low[i]) * 0.5f;
-
-        const float old34 = q34[i34];
-        kahan_add_sub(med, old34, sum34, c34);
-        q34[i34] = med;
-        ++i34; if (i34 == P34) i34 = 0;
-        const float sma34 = sum34 * INV34;
-
-        const float old5 = q5[i5];
-        kahan_add_sub(med, old5, sum5, c5);
-        q5[i5] = med;
-        ++i5; if (i5 == P5) i5 = 0;
-        const float sma5 = sum5 * INV5;
-
-        const float ao = sma5 - sma34;
-        const float old_ao = q5ao[i5ao];
-        kahan_add_sub(ao, old_ao, sum5ao, c5ao);
-        q5ao[i5ao] = ao;
-        ++i5ao; if (i5ao == P5) i5ao = 0;
-
-        const float sma5ao = sum5ao * INV5;
-        const float res = ao - sma5ao;
-        const float mom = res - prev_res; // keep change at first output index non-NaN
-        prev_res = res;
         out_osc[i] = res;
-        out_change[i] = mom;
+        out_change[i] = res - prev_res;
     }
 }
 

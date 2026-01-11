@@ -781,7 +781,7 @@ pub fn fvg_trailing_stop_with_kernel(
     let mut lower_ts = alloc_with_nan_prefix(len, warm);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -841,7 +841,7 @@ pub fn fvg_trailing_stop_into_slices(
         return Err(FvgTrailingStopError::OutputLengthMismatch { expected: len, got: upper.len().min(lower.len()).min(upper_ts.len()).min(lower_ts.len()) });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -880,7 +880,7 @@ pub struct FvgTsBatchRange {
 impl Default for FvgTsBatchRange {
     fn default() -> Self {
         Self {
-            lookback: (5, 5, 0),
+            lookback: (5, 254, 1),
             smoothing: (9, 9, 0),
             reset_on_cross: (false, false),
         }
@@ -2543,7 +2543,7 @@ pub fn fvg_trailing_stop_js(
     let (u, l) = first_half.split_at_mut(len);
     let (uts, lts) = second_half.split_at_mut(len);
 
-    let chosen = detect_best_kernel();
+    let chosen = Kernel::Scalar;
     fvg_ts_compute_into(h, low_in, c, lookback, smoothing_len, reset, u, l, uts, lts, chosen);
     for v in &mut u[..warm] {
         *v = f64::NAN;
@@ -2792,7 +2792,7 @@ pub fn fvg_trailing_stop_zero_copy_js(
         upper_ts,
         lower_ts,
         &input,
-        detect_best_kernel(),
+        Kernel::Auto,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

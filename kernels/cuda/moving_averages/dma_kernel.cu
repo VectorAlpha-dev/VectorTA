@@ -100,10 +100,6 @@ void dma_batch_f32(const float* __restrict__ prices,
     const int ema_gain_limit = ema_gain_limits[combo];
     const int hull_type = hull_types[combo];
 
-    if (series_len <= 0 || hull_length <= 0 || ema_length <= 0) {
-        return;
-    }
-
     const int half = hull_length / 2;
     const int sqrt_len = static_cast<int>(floorf(sqrtf(static_cast<float>(hull_length)) + 0.5f));
     const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
@@ -114,12 +110,15 @@ void dma_batch_f32(const float* __restrict__ prices,
     const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
 
     const int base_out = combo * series_len;
-    for (int i = 0; i < series_len; ++i) {
-        out[base_out + i] = NAN;
+    if (series_len <= 0 || hull_length <= 0 || ema_length <= 0 || first_valid >= series_len) {
+        for (int i = 0; i < series_len; ++i) {
+            out[base_out + i] = NAN;
+        }
+        return;
     }
 
-    if (first_valid >= series_len) {
-        return;
+    for (int i = 0; i < first_valid; ++i) {
+        out[base_out + i] = NAN;
     }
 
     // Shared memory scratch ring for diff smoothing.
@@ -138,27 +137,23 @@ void dma_batch_f32(const float* __restrict__ prices,
     const int i0_full = first_valid + (hull_length > 0 ? hull_length - 1 : 0);
 
     float a_half = 0.0f;
-    float s_half = 0.0f;
     float a_half_c = 0.0f;
-    float s_half_c = 0.0f;
+    float s_half = 0.0f;
     bool half_ready = false;
 
     float a_full = 0.0f;
-    float s_full = 0.0f;
     float a_full_c = 0.0f;
-    float s_full_c = 0.0f;
+    float s_full = 0.0f;
     bool full_ready = false;
 
     int diff_filled = 0;
     int diff_pos = 0;
     float diff_sum_seed = 0.0f;
-    float diff_sum_seed_c = 0.0f;
 
     float a_diff = 0.0f;
     float s_diff = 0.0f;
     float a_diff_c = 0.0f;
     float s_diff_c = 0.0f;
-    bool diff_wma_init_done = false;
 
     float diff_ema = 0.0f;
     bool diff_ema_init_done = false;
@@ -187,11 +182,10 @@ void dma_batch_f32(const float* __restrict__ prices,
             if (i >= i0_e) {
                 int start = i + 1 - ema_length;
                 float sum = 0.0f;
-                float sum_c = 0.0f;
                 for (int k = start; k <= i; ++k) {
-                    kahan_add(prices[k], sum, sum_c);
+                    sum += prices[k];
                 }
-                e0_prev = sum_read(sum, sum_c) / static_cast<float>(ema_length);
+                e0_prev = sum / static_cast<float>(ema_length);
                 e0_init_done = true;
             }
         } else {
@@ -206,28 +200,25 @@ void dma_batch_f32(const float* __restrict__ prices,
                     if (i >= i0_half) {
                         int start = i + 1 - half;
                         float sum = 0.0f;
-                        float sum_c = 0.0f;
                         float wsum_local = 0.0f;
-                        float wsum_c = 0.0f;
                         for (int j = 0; j < half; ++j) {
                             const int idx = start + j;
                             const float w = static_cast<float>(j + 1);
                             const float v = prices[idx];
-                            kahan_add(v, sum, sum_c);
-                            kahan_add(w * v, wsum_local, wsum_c);
+                            sum += v;
+                            wsum_local = fmaf(w, v, wsum_local);
                         }
                         a_half = sum;
+                        a_half_c = 0.0f;
                         s_half = wsum_local;
-                        a_half_c = sum_c;
-                        s_half_c = wsum_c;
                         half_ready = true;
                     }
                 } else {
-                    const float a_prev = a_half;
+                    const float a_prev = sum_read(a_half, a_half_c);
                     const float old = prices[i - half];
                     kahan_add(x - old, a_half, a_half_c);
                     // Rolling WMA weighted-sum update: s_new = s_prev + half * x - a_prev
-                    kahan_add(fmaf(static_cast<float>(half), x, -a_prev), s_half, s_half_c);
+                    s_half += fmaf(static_cast<float>(half), x, -a_prev);
                 }
             }
 
@@ -236,34 +227,31 @@ void dma_batch_f32(const float* __restrict__ prices,
                     if (i >= i0_full) {
                         int start = i + 1 - hull_length;
                         float sum = 0.0f;
-                        float sum_c = 0.0f;
                         float wsum_local = 0.0f;
-                        float wsum_c = 0.0f;
                         for (int j = 0; j < hull_length; ++j) {
                             const int idx = start + j;
                             const float w = static_cast<float>(j + 1);
                             const float v = prices[idx];
-                            kahan_add(v, sum, sum_c);
-                            kahan_add(w * v, wsum_local, wsum_c);
+                            sum += v;
+                            wsum_local = fmaf(w, v, wsum_local);
                         }
                         a_full = sum;
+                        a_full_c = 0.0f;
                         s_full = wsum_local;
-                        a_full_c = sum_c;
-                        s_full_c = wsum_c;
                         full_ready = true;
                     }
                 } else {
-                    const float a_prev = a_full;
+                    const float a_prev = sum_read(a_full, a_full_c);
                     const float old = prices[i - hull_length];
                     kahan_add(x - old, a_full, a_full_c);
                     // Rolling WMA weighted-sum update: s_new = s_prev + hull_length * x - a_prev
-                    kahan_add(fmaf(static_cast<float>(hull_length), x, -a_prev), s_full, s_full_c);
+                    s_full += fmaf(static_cast<float>(hull_length), x, -a_prev);
                 }
             }
 
             if (half_ready && full_ready) {
-                const float w_half = sum_read(s_half, s_half_c) * inv_w_half;
-                const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
+                const float w_half = s_half * inv_w_half;
+                const float w_full = s_full * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
@@ -272,11 +260,10 @@ void dma_batch_f32(const float* __restrict__ prices,
                     if (i >= i0_half) {
                         int start = i + 1 - half;
                         float sum = 0.0f;
-                        float sum_c = 0.0f;
                         for (int k = start; k <= i; ++k) {
-                            kahan_add(prices[k], sum, sum_c);
+                            sum += prices[k];
                         }
-                        e_half_prev = sum_read(sum, sum_c) / static_cast<float>(half);
+                        e_half_prev = sum / static_cast<float>(half);
                         e_half_init_done = true;
                     }
                 } else {
@@ -289,11 +276,10 @@ void dma_batch_f32(const float* __restrict__ prices,
                     if (i >= i0_full) {
                         int start = i + 1 - hull_length;
                         float sum = 0.0f;
-                        float sum_c = 0.0f;
                         for (int k = start; k <= i; ++k) {
-                            kahan_add(prices[k], sum, sum_c);
+                            sum += prices[k];
                         }
-                        e_full_prev = sum_read(sum, sum_c) / static_cast<float>(hull_length);
+                        e_full_prev = sum / static_cast<float>(hull_length);
                         e_full_init_done = true;
                     }
                 } else {
@@ -309,7 +295,7 @@ void dma_batch_f32(const float* __restrict__ prices,
         if (!isnan(diff_now) && sqrt_len > 0) {
             if (diff_filled < sqrt_len) {
                 diff_ring[diff_filled] = diff_now;
-                kahan_add(diff_now, diff_sum_seed, diff_sum_seed_c);
+                diff_sum_seed += diff_now;
                 diff_filled += 1;
 
                 if (diff_filled == sqrt_len) {
@@ -324,10 +310,9 @@ void dma_batch_f32(const float* __restrict__ prices,
                             kahan_add(v, a_diff, a_diff_c);
                             kahan_add(w * v, s_diff, s_diff_c);
                         }
-                        diff_wma_init_done = true;
                         hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
-                        diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / static_cast<float>(sqrt_len);
+                        diff_ema = diff_sum_seed / static_cast<float>(sqrt_len);
                         diff_ema_init_done = true;
                         hull_val = diff_ema;
                     }
@@ -338,10 +323,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                 diff_pos += 1; if (diff_pos == sqrt_len) diff_pos = 0;
 
                 if (is_wma) {
-                    if (!diff_wma_init_done) {
-                        diff_wma_init_done = true;
-                    }
-                    const float a_prev = a_diff;
+                    const float a_prev = sum_read(a_diff, a_diff_c);
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     // Rolling WMA(diff) weighted-sum update: s_new = s_prev + sqrt_len * diff_now - a_prev
                     kahan_add(fmaf(static_cast<float>(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
@@ -370,9 +352,11 @@ void dma_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        if (!isnan(hull_val) && !isnan(ec_now)) {
-            out[base_out + i] = 0.5f * (hull_val + ec_now);
+        float out_val = NAN;
+        if (ec_init_done && diff_filled == sqrt_len) {
+            out_val = 0.5f * (hull_val + ec_prev);
         }
+        out[base_out + i] = out_val;
     }
 }
 
@@ -419,11 +403,16 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
     const float inv_w_sqrt   = 1.0f / denom_sqrt_f;
 
     const int base_out = global_idx * series_len;
-    // initialize outputs to NaN (one thread covers its series)
-    for (int i = 0; i < series_len; ++i) {
+    if (series_len <= 0 || hull_length <= 0 || ema_length <= 0 || first_valid >= series_len) {
+        for (int i = 0; i < series_len; ++i) {
+            out[base_out + i] = NAN;
+        }
+        return;
+    }
+
+    for (int i = 0; i < first_valid; ++i) {
         out[base_out + i] = NAN;
     }
-    if (first_valid >= series_len) { return; }
 
     const float alpha_e = 2.0f / (float(ema_length) + 1.0f);
     const int i0_e = first_valid + (ema_length > 0 ? ema_length - 1 : 0);
@@ -434,12 +423,13 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
     const int i0_half = first_valid + (half > 0 ? half - 1 : 0);
     const int i0_full = first_valid + (hull_length > 0 ? hull_length - 1 : 0);
 
-    float a_half = 0.0f, s_half = 0.0f, a_half_c = 0.0f, s_half_c = 0.0f; bool half_ready = false;
-    float a_full = 0.0f, s_full = 0.0f, a_full_c = 0.0f, s_full_c = 0.0f; bool full_ready = false;
+    float a_half = 0.0f, a_half_c = 0.0f, s_half = 0.0f; bool half_ready = false;
+    float a_full = 0.0f, a_full_c = 0.0f, s_full = 0.0f; bool full_ready = false;
 
     int diff_filled = 0, diff_pos = 0;
-    float diff_sum_seed = 0.0f, diff_sum_seed_c = 0.0f;
-    float a_diff = 0.0f, s_diff = 0.0f, a_diff_c = 0.0f, s_diff_c = 0.0f; bool diff_wma_init_done = false;
+    float diff_sum_seed = 0.0f;
+    float a_diff = 0.0f, s_diff = 0.0f;
+    float a_diff_c = 0.0f, s_diff_c = 0.0f;
     float diff_ema = 0.0f; bool diff_ema_init_done = false;
     const float alpha_sqrt = (sqrt_len > 0) ? 2.0f / (float(sqrt_len) + 1.0f) : 0.0f;
 
@@ -456,9 +446,9 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
         if (!e0_init_done) {
             if (i >= i0_e) {
                 int start = i + 1 - ema_length;
-                float sum = 0.0f, sum_c = 0.0f;
-                for (int k = start; k <= i; ++k) { kahan_add(prices[k], sum, sum_c); }
-                e0_prev = sum_read(sum, sum_c) / float(ema_length);
+                float sum = 0.0f;
+                for (int k = start; k <= i; ++k) { sum += prices[k]; }
+                e0_prev = sum / float(ema_length);
                 e0_init_done = true;
             }
         } else {
@@ -471,57 +461,57 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
                 if (!half_ready) {
                     if (i >= i0_half) {
                         int start = i + 1 - half;
-                        float sum = 0.0f, sum_c = 0.0f, wsum = 0.0f, wsum_c = 0.0f;
+                        float sum = 0.0f, wsum = 0.0f;
                         for (int j = 0; j < half; ++j) {
                             const int idx = start + j; const float w = float(j + 1); const float v = prices[idx];
-                            kahan_add(v, sum, sum_c); kahan_add(w * v, wsum, wsum_c);
+                            sum += v; wsum = fmaf(w, v, wsum);
                         }
-                        a_half = sum; s_half = wsum; a_half_c = sum_c; s_half_c = wsum_c; half_ready = true;
+                        a_half = sum; a_half_c = 0.0f; s_half = wsum; half_ready = true;
                     }
                 } else {
-                    const float a_prev = a_half; const float old = prices[i - half];
+                    const float a_prev = sum_read(a_half, a_half_c); const float old = prices[i - half];
                     kahan_add(x - old, a_half, a_half_c);
-                    kahan_add(fmaf(float(half), x, -a_prev), s_half, s_half_c);
+                    s_half += fmaf(float(half), x, -a_prev);
                 }
             }
             if (hull_length > 0) {
                 if (!full_ready) {
                     if (i >= i0_full) {
                         int start = i + 1 - hull_length;
-                        float sum = 0.0f, sum_c = 0.0f, wsum = 0.0f, wsum_c = 0.0f;
+                        float sum = 0.0f, wsum = 0.0f;
                         for (int j = 0; j < hull_length; ++j) {
                             const int idx = start + j; const float w = float(j + 1); const float v = prices[idx];
-                            kahan_add(v, sum, sum_c); kahan_add(w * v, wsum, wsum_c);
+                            sum += v; wsum = fmaf(w, v, wsum);
                         }
-                        a_full = sum; s_full = wsum; a_full_c = sum_c; s_full_c = wsum_c; full_ready = true;
+                        a_full = sum; a_full_c = 0.0f; s_full = wsum; full_ready = true;
                     }
                 } else {
-                    const float a_prev = a_full; const float old = prices[i - hull_length];
+                    const float a_prev = sum_read(a_full, a_full_c); const float old = prices[i - hull_length];
                     kahan_add(x - old, a_full, a_full_c);
-                    kahan_add(fmaf(float(hull_length), x, -a_prev), s_full, s_full_c);
+                    s_full += fmaf(float(hull_length), x, -a_prev);
                 }
             }
             if (half_ready && full_ready) {
-                const float w_half = sum_read(s_half, s_half_c) * inv_w_half;
-                const float w_full = sum_read(s_full, s_full_c) * inv_w_full;
+                const float w_half = s_half * inv_w_half;
+                const float w_full = s_full * inv_w_full;
                 diff_now = 2.0f * w_half - w_full;
             }
         } else {
             if (half > 0) {
                 if (!e_half_init_done) {
                     if (i >= i0_half) {
-                        int start = i + 1 - half; float sum = 0.0f, sum_c = 0.0f;
-                        for (int k = start; k <= i; ++k) { kahan_add(prices[k], sum, sum_c); }
-                        e_half_prev = sum_read(sum, sum_c) / float(half); e_half_init_done = true;
+                        int start = i + 1 - half; float sum = 0.0f;
+                        for (int k = start; k <= i; ++k) { sum += prices[k]; }
+                        e_half_prev = sum / float(half); e_half_init_done = true;
                     }
                 } else { e_half_prev = fmaf(alpha_half, x - e_half_prev, e_half_prev); }
             }
             if (hull_length > 0) {
                 if (!e_full_init_done) {
                     if (i >= i0_full) {
-                        int start = i + 1 - hull_length; float sum = 0.0f, sum_c = 0.0f;
-                        for (int k = start; k <= i; ++k) { kahan_add(prices[k], sum, sum_c); }
-                        e_full_prev = sum_read(sum, sum_c) / float(hull_length); e_full_init_done = true;
+                        int start = i + 1 - hull_length; float sum = 0.0f;
+                        for (int k = start; k <= i; ++k) { sum += prices[k]; }
+                        e_full_prev = sum / float(hull_length); e_full_init_done = true;
                     }
                 } else { e_full_prev = fmaf(alpha_full, x - e_full_prev, e_full_prev); }
             }
@@ -530,26 +520,25 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
 
         if (!isnan(diff_now) && sqrt_len > 0) {
             if (diff_filled < sqrt_len) {
-                diff_ring[diff_filled] = diff_now; kahan_add(diff_now, diff_sum_seed, diff_sum_seed_c);
+                diff_ring[diff_filled] = diff_now; diff_sum_seed += diff_now;
                 diff_filled += 1;
                 if (diff_filled == sqrt_len) {
                     if (is_wma) {
-                        a_diff = 0.0f; s_diff = 0.0f; a_diff_c = 0.0f; s_diff_c = 0.0f;
+                        a_diff = 0.0f; s_diff = 0.0f;
+                        a_diff_c = 0.0f; s_diff_c = 0.0f;
                         for (int j = 0; j < sqrt_len; ++j) {
                             const float w = float(j + 1); const float v = diff_ring[j];
                             kahan_add(v, a_diff, a_diff_c); kahan_add(w * v, s_diff, s_diff_c);
                         }
-                        diff_wma_init_done = true;
                         hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                     } else {
-                        diff_ema = sum_read(diff_sum_seed, diff_sum_seed_c) / float(sqrt_len); diff_ema_init_done = true; hull_val = diff_ema;
+                        diff_ema = diff_sum_seed / float(sqrt_len); diff_ema_init_done = true; hull_val = diff_ema;
                     }
                 }
             } else {
                 const float old = diff_ring[diff_pos]; diff_ring[diff_pos] = diff_now; diff_pos += 1; if (diff_pos == sqrt_len) diff_pos = 0;
                 if (is_wma) {
-                    if (!diff_wma_init_done) { diff_wma_init_done = true; }
-                    const float a_prev = a_diff;
+                    const float a_prev = sum_read(a_diff, a_diff_c);
                     kahan_add(diff_now - old, a_diff, a_diff_c);
                     kahan_add(fmaf(float(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
                     hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
@@ -567,11 +556,30 @@ __device__ void dma_batch_tiled_f32_tx_core(const float* __restrict__ prices,
             else { ec_now = dma_update_ec(x, e0_prev, ec_prev, alpha_e, ema_gain_limit); ec_prev = ec_now; }
         }
 
-        if (!isnan(hull_val) && !isnan(ec_now)) { out[base_out + i] = 0.5f * (hull_val + ec_now); }
+        float out_val = NAN;
+        if (ec_init_done && diff_filled == sqrt_len) {
+            out_val = 0.5f * (hull_val + ec_prev);
+        }
+        out[base_out + i] = out_val;
     }
 }
 
 extern "C" {
+__global__ void dma_batch_tiled_f32_tx32(
+    const float* __restrict__ prices,
+    const int* __restrict__ hull_lengths,
+    const int* __restrict__ ema_lengths,
+    const int* __restrict__ ema_gain_limits,
+    const int* __restrict__ hull_types,
+    int series_len,
+    int n_combos,
+    int first_valid,
+    int combo_start,
+    int sqrt_stride,
+    float* __restrict__ out) {
+    dma_batch_tiled_f32_tx_core<32>(prices, hull_lengths, ema_lengths, ema_gain_limits, hull_types,
+                                    series_len, n_combos, first_valid, combo_start, sqrt_stride, out);
+}
 __global__ void dma_batch_tiled_f32_tx64(
     const float* __restrict__ prices,
     const int* __restrict__ hull_lengths,

@@ -993,7 +993,7 @@ pub struct VpwmaBatchRange {
 impl Default for VpwmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
             power: (0.382, 0.382, 0.0),
         }
     }
@@ -2221,6 +2221,15 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_vpwma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

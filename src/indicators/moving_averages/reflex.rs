@@ -433,7 +433,7 @@ fn reflex_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -630,7 +630,7 @@ pub struct ReflexBatchRange {
 impl Default for ReflexBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 20, 0),
+            period: (20, 269, 1),
         }
     }
 }
@@ -1760,6 +1760,12 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_reflex_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

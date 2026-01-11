@@ -95,32 +95,52 @@ extern "C" __global__ void kdj_batch_f32(
 
     const int base = combo * series_len;
 
-    // Parallel init of NaNs (also clears scratch in out_j)
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out_k[base + i] = KDJ_QNAN;
-        out_d[base + i] = KDJ_QNAN;
-        out_j[base + i] = KDJ_QNAN; // later used as scratch for S[t]
+    // Fast path avoids writing NaNs for the entire output surface; only the warm prefixes
+    // are initialized. For invalid inputs/warmups, fall back to full NaN init.
+    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_k[base + i] = KDJ_QNAN;
+            out_d[base + i] = KDJ_QNAN;
+            out_j[base + i] = KDJ_QNAN;
+        }
+        return;
     }
-    __syncthreads();
-
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
 
     const int fk = fast_k_arr[combo];
     const int sk = slow_k_arr[combo];
     const int sd = slow_d_arr[combo];
-    if (UNLIKELY(fk <= 0 || sk <= 0 || sd <= 0)) return;
-
-    if (UNLIKELY(level_count <= 0)) return;
+    if (UNLIKELY(fk <= 0 || sk <= 0 || sd <= 0 || level_count <= 0)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_k[base + i] = KDJ_QNAN;
+            out_d[base + i] = KDJ_QNAN;
+            out_j[base + i] = KDJ_QNAN;
+        }
+        return;
+    }
 
     const int stoch_warm = first_valid + fk - 1;
-    if (UNLIKELY(stoch_warm >= series_len)) return;
+    if (UNLIKELY(stoch_warm >= series_len)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_k[base + i] = KDJ_QNAN;
+            out_d[base + i] = KDJ_QNAN;
+            out_j[base + i] = KDJ_QNAN;
+        }
+        return;
+    }
 
     const int k_ma = k_ma_types[combo];
     const int d_ma = d_ma_types[combo];
 
     // Precompute sparse-table constants for this fk
     const int k_log2 = log2_tbl[fk];
-    if (UNLIKELY(k_log2 < 0 || k_log2 >= level_count)) return;
+    if (UNLIKELY(k_log2 < 0 || k_log2 >= level_count)) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_k[base + i] = KDJ_QNAN;
+            out_d[base + i] = KDJ_QNAN;
+            out_j[base + i] = KDJ_QNAN;
+        }
+        return;
+    }
     const int offset     = 1 << k_log2;
     const int level_base = level_offsets[k_log2];
 
@@ -140,62 +160,62 @@ extern "C" __global__ void kdj_batch_f32(
     }
     __syncthreads();
 
-    // All smoothing is inherently sequential; run it in lane 0 for this combo
-    if (threadIdx.x != 0) return;
-
     const int k_warm = stoch_warm + sk - 1;
     const int d_warm = k_warm     + sd - 1;
 
     // ---- SMA -> SMA fused path (ignore NaNs within windows) ----
     if (k_ma == 0 && d_ma == 0) {
-        if (k_warm >= series_len) return;
-
-        // Seed K at t = k_warm over S[t-sk+1..t]
-        float sum_k = 0.0f, ck = 0.0f; int cnt_k = 0;
-        {
-            const int start = k_warm - sk + 1;
-            for (int ti = start; ti <= k_warm; ++ti) {
-                const float s = out_j[base + ti];
-                if (s == s) { kahan_add(s, sum_k, ck); ++cnt_k; }
+        if (UNLIKELY(k_warm >= series_len)) {
+            for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+                out_k[base + i] = KDJ_QNAN;
+                out_d[base + i] = KDJ_QNAN;
+                out_j[base + i] = KDJ_QNAN;
             }
-            const float kv = (cnt_k > 0) ? (sum_k / (float)cnt_k) : KDJ_QNAN;
-            out_k[base + k_warm] = kv;
+            return;
         }
 
-        // Prepare D sliding accumulators
-        float sum_d = 0.0f, cd = 0.0f; int cnt_d = 0;
-        const float kv0 = out_k[base + k_warm];
-        if (kv0 == kv0) { kahan_add(kv0, sum_d, cd); ++cnt_d; }
+        // Warm prefixes (cheap): K < k_warm, D/J < d_warm.
+        for (int i = threadIdx.x; i < k_warm; i += blockDim.x) out_k[base + i] = KDJ_QNAN;
+        for (int i = threadIdx.x; i < d_warm && i < series_len; i += blockDim.x) out_d[base + i] = KDJ_QNAN;
 
-        // Slide forward
-        for (int t = k_warm + 1; t < series_len; ++t) {
-            // Update K window: +S[t], -S[t-sk]
-            const float s_new = out_j[base + t];
-            if (s_new == s_new) { kahan_add(s_new, sum_k, ck); ++cnt_k; }
-            const int t_old = t - sk;
-            if (t_old >= stoch_warm) {
-                const float s_old = out_j[base + t_old];
-                if (s_old == s_old) { kahan_add(-s_old, sum_k, ck); --cnt_k; }
+        // Compute K in parallel: SMA over S[t-sk+1..t], ignoring NaNs (divide by count).
+        for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x) {
+            float sum = 0.0f;
+            int cnt = 0;
+            const int start = t - sk + 1;
+            for (int ti = start; ti <= t; ++ti) {
+                const float s = out_j[base + ti];
+                if (s == s) { sum += s; ++cnt; }
             }
-            const float kv = (cnt_k > 0) ? (sum_k / (float)cnt_k) : KDJ_QNAN;
-            out_k[base + t] = kv;
+            out_k[base + t] = (cnt > 0) ? (sum / (float)cnt) : KDJ_QNAN;
+        }
+        __syncthreads();
 
-            // Update D window over K: +K[t], -K[t-sd]
-            if (kv == kv) { kahan_add(kv, sum_d, cd); ++cnt_d; }
-            const int t_old_k = t - sd;
-            if (t_old_k >= k_warm) {
-                const float kk_old = out_k[base + t_old_k];
-                if (kk_old == kk_old) { kahan_add(-kk_old, sum_d, cd); --cnt_d; }
-            }
+        // J output is NaN until d_warm; out_j was used as scratch for S, so clear the prefix now.
+        for (int i = threadIdx.x; i < d_warm && i < series_len; i += blockDim.x) out_j[base + i] = KDJ_QNAN;
 
-            if (t >= d_warm) {
-                const float dv = (cnt_d > 0) ? (sum_d / (float)cnt_d) : KDJ_QNAN;
+        // Compute D and J in parallel from d_warm onward.
+        if (d_warm < series_len) {
+            for (int t = d_warm + threadIdx.x; t < series_len; t += blockDim.x) {
+                float sum = 0.0f;
+                int cnt = 0;
+                const int start = t - sd + 1;
+                for (int ti = start; ti <= t; ++ti) {
+                    const float kv = out_k[base + ti];
+                    if (kv == kv) { sum += kv; ++cnt; }
+                }
+                const float dv = (cnt > 0) ? (sum / (float)cnt) : KDJ_QNAN;
                 out_d[base + t] = dv;
+
+                const float kv = out_k[base + t];
                 out_j[base + t] = (kv == kv && dv == dv) ? (3.0f * kv - 2.0f * dv) : KDJ_QNAN;
             }
         }
         return;
     }
+
+    // All other smoothing is inherently sequential; run it in lane 0 for this combo
+    if (threadIdx.x != 0) return;
 
     // ---- EMA -> EMA fused path (seed averages, update only on finite samples) ----
     if (k_ma == 1 && d_ma == 1) {

@@ -1086,19 +1086,36 @@ pub mod benches {
         (high, low)
     }
 
-    struct FramaBatchState {
+    struct FramaBatchDevState {
         cuda: CudaFrama,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: FramaBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_windows: DeviceBuffer<i32>,
+        d_scs: DeviceBuffer<i32>,
+        d_fcs: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for FramaBatchState {
+    impl CudaBenchState for FramaBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .frama_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("frama batch launch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_windows,
+                    &self.d_scs,
+                    &self.d_fcs,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("frama batch kernel");
+            self.cuda.stream.synchronize().expect("frama sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1110,37 +1127,70 @@ pub mod benches {
             sc: (300, 300, 0),
             fc: (1, 1, 0),
         };
-        Box::new(FramaBatchState {
+        let (combos, first_valid, series_len) =
+            CudaFrama::prepare_batch_inputs(&high, &low, &close, &sweep).expect("frama prepare batch");
+        let n_combos = combos.len();
+        let windows_i32: Vec<i32> = combos.iter().map(|p| p.window.unwrap_or(0) as i32).collect();
+        let scs_i32: Vec<i32> = combos.iter().map(|p| p.sc.unwrap_or(0) as i32).collect();
+        let fcs_i32: Vec<i32> = combos.iter().map(|p| p.fc.unwrap_or(0) as i32).collect();
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_windows = DeviceBuffer::from_slice(&windows_i32).expect("d_windows");
+        let d_scs = DeviceBuffer::from_slice(&scs_i32).expect("d_scs");
+        let d_fcs = DeviceBuffer::from_slice(&fcs_i32).expect("d_fcs");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(FramaBatchDevState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            d_windows,
+            d_scs,
+            d_fcs,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
         })
     }
 
-    struct FramaManyState {
+    struct FramaManyDevState {
         cuda: CudaFrama,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: FramaParams,
+        window: i32,
+        sc: i32,
+        fc: i32,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for FramaManyState {
+    impl CudaBenchState for FramaManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .frama_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
+                    &self.d_first_valids,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.window,
+                    self.sc,
+                    self.fc,
+                    &mut self.d_out_tm,
                 )
-                .expect("frama many-series launch");
+                .expect("frama many-series kernel");
+            self.cuda.stream.synchronize().expect("frama many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1154,14 +1204,31 @@ pub mod benches {
             sc: Some(300),
             fc: Some(1),
         };
-        Box::new(FramaManyState {
+        let (first_valids, _even, window, sc, fc) =
+            CudaFrama::prepare_many_series_inputs(&high_tm, &low_tm, &close_tm, cols, rows, &params)
+                .expect("frama prepare many");
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(FramaManyDevState {
             cuda,
-            high_tm,
-            low_tm,
-            close_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
+            window,
+            sc,
+            fc,
+            d_out_tm,
         })
     }
 

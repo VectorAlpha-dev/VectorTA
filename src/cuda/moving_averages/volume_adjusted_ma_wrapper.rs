@@ -1169,29 +1169,59 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        // prices + volumes + prefix_volumes + prefix_price_volumes
+        let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP
+            * (std::mem::size_of::<i32>()  // length
+                + std::mem::size_of::<f32>() // vi_factor
+                + std::mem::size_of::<i32>() // sample_period
+                + std::mem::size_of::<u8>()); // strict flag
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
-        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
+        // prices + volumes + prefix_volumes + prefix_price_volumes
+        let in_bytes = 4 * elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
         let out_bytes = elems * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct VamaBatchState {
+    struct VamaBatchDevState {
         cuda: CudaVama,
-        price: Vec<f32>,
-        volume: Vec<f32>,
-        sweep: VolumeAdjustedMaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_volumes: DeviceBuffer<f32>,
+        d_prefix_volumes: DeviceBuffer<f32>,
+        d_prefix_price_volumes: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_vi_factors: DeviceBuffer<f32>,
+        d_sample_periods: DeviceBuffer<i32>,
+        d_strict_flags: DeviceBuffer<u8>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for VamaBatchState {
+    impl CudaBenchState for VamaBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .vama_batch_dev(&self.price, &self.volume, &self.sweep)
-                .expect("vama batch launch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_volumes,
+                    &self.d_prefix_volumes,
+                    &self.d_prefix_price_volumes,
+                    &self.d_lengths,
+                    &self.d_vi_factors,
+                    &self.d_sample_periods,
+                    &self.d_strict_flags,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("volume_adjusted_ma batch kernel");
+            self.cuda.stream.synchronize().expect("vama sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1213,34 +1243,88 @@ pub mod benches {
             sample_period: (1, 1, 0),
             strict: Some(true),
         };
-        Box::new(VamaBatchState {
+        let (combos, first_valid, series_len, _max_length) =
+            CudaVama::prepare_batch_inputs(&price, &volume, &sweep).expect("vama prepare batch");
+        let n_combos = combos.len();
+        let mut lengths = Vec::with_capacity(n_combos);
+        let mut vi_factors = Vec::with_capacity(n_combos);
+        let mut sample_periods = Vec::with_capacity(n_combos);
+        let mut strict_flags = Vec::with_capacity(n_combos);
+        for prm in &combos {
+            lengths.push(prm.length.unwrap_or(0) as i32);
+            vi_factors.push(prm.vi_factor.unwrap_or(0.0) as f32);
+            sample_periods.push(prm.sample_period.unwrap_or(0) as i32);
+            strict_flags.push(if prm.strict.unwrap_or(true) { 1u8 } else { 0u8 });
+        }
+
+        let (prefix_volumes, prefix_price_volumes) = CudaVama::build_prefix_sums(&price, &volume);
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_volumes = DeviceBuffer::from_slice(&volume).expect("d_volumes");
+        let d_prefix_volumes = DeviceBuffer::from_slice(&prefix_volumes).expect("d_prefix_volumes");
+        let d_prefix_price_volumes =
+            DeviceBuffer::from_slice(&prefix_price_volumes).expect("d_prefix_price_volumes");
+        let d_lengths = DeviceBuffer::from_slice(&lengths).expect("d_lengths");
+        let d_vi_factors = DeviceBuffer::from_slice(&vi_factors).expect("d_vi_factors");
+        let d_sample_periods = DeviceBuffer::from_slice(&sample_periods).expect("d_sample_periods");
+        let d_strict_flags = DeviceBuffer::from_slice(&strict_flags).expect("d_strict_flags");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(VamaBatchDevState {
             cuda,
-            price,
-            volume,
-            sweep,
+            d_prices,
+            d_volumes,
+            d_prefix_volumes,
+            d_prefix_price_volumes,
+            d_lengths,
+            d_vi_factors,
+            d_sample_periods,
+            d_strict_flags,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
         })
     }
 
-    struct VamaManyState {
+    struct VamaManyDevState {
         cuda: CudaVama,
-        price_tm: Vec<f32>,
-        vol_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_volumes_tm: DeviceBuffer<f32>,
+        d_prefix_volumes_tm: DeviceBuffer<f32>,
+        d_prefix_price_volumes_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: VolumeAdjustedMaParams,
+        length: usize,
+        vi_factor: f32,
+        sample_period: usize,
+        strict: bool,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for VamaManyState {
+    impl CudaBenchState for VamaManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .vama_multi_series_one_param_time_major_dev(
-                    &self.price_tm,
-                    &self.vol_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_volumes_tm,
+                    &self.d_prefix_volumes_tm,
+                    &self.d_prefix_price_volumes_tm,
+                    self.length,
+                    self.vi_factor,
+                    self.sample_period,
+                    self.strict,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .expect("vama many-series launch");
+                .expect("volume_adjusted_ma many-series kernel");
+            self.cuda.stream.synchronize().expect("vama many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1255,13 +1339,38 @@ pub mod benches {
             sample_period: Some(1),
             strict: Some(true),
         };
-        Box::new(VamaManyState {
+        let (first_valids, length, vi_factor, sample_period, strict) =
+            CudaVama::prepare_many_series_inputs(&price_tm, &vol_tm, cols, rows, &params)
+                .expect("vama prepare many-series");
+        let (prefix_volumes_tm, prefix_price_volumes_tm) =
+            CudaVama::build_prefix_sums_time_major(&price_tm, &vol_tm, cols, rows);
+
+        let d_prices_tm = DeviceBuffer::from_slice(&price_tm).expect("d_prices_tm");
+        let d_volumes_tm = DeviceBuffer::from_slice(&vol_tm).expect("d_volumes_tm");
+        let d_prefix_volumes_tm =
+            DeviceBuffer::from_slice(&prefix_volumes_tm).expect("d_prefix_volumes_tm");
+        let d_prefix_price_volumes_tm =
+            DeviceBuffer::from_slice(&prefix_price_volumes_tm).expect("d_prefix_price_volumes_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(VamaManyDevState {
             cuda,
-            price_tm,
-            vol_tm,
+            d_prices_tm,
+            d_volumes_tm,
+            d_prefix_volumes_tm,
+            d_prefix_price_volumes_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
+            length,
+            vi_factor,
+            sample_period,
+            strict,
+            d_out_tm,
         })
     }
 

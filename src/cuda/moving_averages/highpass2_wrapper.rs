@@ -85,6 +85,7 @@ impl Default for CudaHighPass2Policy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    WarpScan { block_x: u32 },
 }
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
@@ -600,6 +601,57 @@ impl CudaHighPass2 {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaHighPass2Error> {
+        if matches!(self.policy.batch, BatchKernelPolicy::Auto) {
+            if let Ok(mut func) = self.module.get_function("highpass2_batch_warp_scan_f32") {
+                let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+                const MAX_GRID_X: usize = 65_535;
+                let block: BlockSize = (32u32, 1, 1).into();
+
+                unsafe {
+                    (*(self as *const _ as *mut CudaHighPass2)).last_batch =
+                        Some(BatchKernelSelected::WarpScan { block_x: 32 });
+                }
+
+                let mut launched = 0usize;
+                while launched < n_combos {
+                    let rows = (n_combos - launched).min(MAX_GRID_X);
+                    let grid: GridSize = (rows as u32, 1, 1).into();
+
+                    unsafe {
+                        let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                        let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
+                        let mut c_ptr = d_c.as_device_ptr().add(launched).as_raw();
+                        let mut cm2_ptr = d_cm2.as_device_ptr().add(launched).as_raw();
+                        let mut two_ptr = d_two_1m.as_device_ptr().add(launched).as_raw();
+                        let mut neg_ptr = d_neg_oma_sq.as_device_ptr().add(launched).as_raw();
+                        let mut series_len_i = series_len as i32;
+                        let mut combos_i = rows as i32;
+                        let mut first_valid_i = first_valid as i32;
+                        let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
+                        let mut args: [*mut c_void; 10] = [
+                            &mut prices_ptr as *mut _ as *mut c_void,
+                            &mut periods_ptr as *mut _ as *mut c_void,
+                            &mut c_ptr as *mut _ as *mut c_void,
+                            &mut cm2_ptr as *mut _ as *mut c_void,
+                            &mut two_ptr as *mut _ as *mut c_void,
+                            &mut neg_ptr as *mut _ as *mut c_void,
+                            &mut series_len_i as *mut _ as *mut c_void,
+                            &mut combos_i as *mut _ as *mut c_void,
+                            &mut first_valid_i as *mut _ as *mut c_void,
+                            &mut out_ptr as *mut _ as *mut c_void,
+                        ];
+                        self.stream.launch(&func, grid, block, 0, &mut args)?;
+                    }
+
+                    launched += rows;
+                }
+
+                self.maybe_log_batch_debug();
+                return Ok(());
+            }
+        }
+
         let func = self
             .module
             .get_function("highpass2_batch_f32")
@@ -984,27 +1036,182 @@ impl CudaHighPass2 {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::highpass_2_pole::HighPass2Params;
 
-    define_ma_period_benches!(
-        highpass2_benches,
-        CudaHighPass2,
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange,
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params,
-        highpass2_batch_dev,
-        highpass2_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * (std::mem::size_of::<i32>() + 4 * std::mem::size_of::<f32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDevState {
+        cuda: CudaHighPass2,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_c: DeviceBuffer<f32>,
+        d_cm2: DeviceBuffer<f32>,
+        d_two_1m: DeviceBuffer<f32>,
+        d_neg_oma_sq: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for BatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_c,
+                    &self.d_cm2,
+                    &self.d_two_1m,
+                    &self.d_neg_oma_sq,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("highpass2 batch kernel");
+            self.cuda.stream.synchronize().expect("highpass2 sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHighPass2::new(0).expect("cuda highpass2");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = crate::indicators::moving_averages::highpass_2_pole::HighPass2BatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
-            k: (0.5, 0.5, 0.0)
-        },
-        crate::indicators::moving_averages::highpass_2_pole::HighPass2Params {
+            k: (0.5, 0.5, 0.0),
+        };
+        let prepared =
+            CudaHighPass2::prepare_batch_inputs(&price, &sweep).expect("highpass2 prepare batch");
+        let n_combos = prepared.periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32).expect("d_periods");
+        let d_c = DeviceBuffer::from_slice(&prepared.c_vals).expect("d_c");
+        let d_cm2 = DeviceBuffer::from_slice(&prepared.cm2_vals).expect("d_cm2");
+        let d_two_1m = DeviceBuffer::from_slice(&prepared.two_1m_vals).expect("d_two_1m");
+        let d_neg_oma_sq =
+            DeviceBuffer::from_slice(&prepared.neg_oma_sq_vals).expect("d_neg_oma_sq");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(prepared.series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_c,
+            d_cm2,
+            d_two_1m,
+            d_neg_oma_sq,
+            series_len: prepared.series_len,
+            n_combos,
+            first_valid: prepared.first_valid,
+            d_out,
+        })
+    }
+
+    struct ManyDevState {
+        cuda: CudaHighPass2,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        prepared: PreparedHighPass2ManySeries,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.prepared.period,
+                    self.prepared.c,
+                    self.prepared.cm2,
+                    self.prepared.two_1m,
+                    self.prepared.neg_oma_sq,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("highpass2 many-series kernel");
+            self.cuda.stream.synchronize().expect("highpass2 sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHighPass2::new(0).expect("cuda highpass2");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = HighPass2Params {
             period: Some(64),
-            k: Some(0.5)
-        },
-        "highpass2",
-        "highpass2"
-    );
-    pub use highpass2_benches::bench_profiles;
+            k: Some(0.5),
+        };
+        let prepared = CudaHighPass2::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("highpass2 prepare many");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            prepared,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "highpass2",
+                "one_series_many_params",
+                "highpass2_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "highpass2",
+                "many_series_one_param",
+                "highpass2_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 struct Coefficients {

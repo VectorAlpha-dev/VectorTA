@@ -1,5 +1,5 @@
 // CUDA kernels for the Trend Adjusted EMA (TrAdjEMA).
-// FP32 I/O for API compatibility; promote arithmetic to FP64 for CPU parity.
+// FP32 I/O for API compatibility; prefer FP32 arithmetic for throughput.
 
 #ifndef _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 #define _ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
@@ -13,8 +13,7 @@ __device__ __forceinline__ double div_rn_f64(double num, double den) {
     return __ddiv_rn(num, den);
 }
 
-// Force-inline for tiny hot helper
-__device__ __forceinline__ double compute_true_range(
+__device__ __forceinline__ double compute_true_range_f64(
     double high, double low, double prev_close, bool first_bar)
 {
     if (first_bar) {
@@ -24,6 +23,19 @@ __device__ __forceinline__ double compute_true_range(
     const double hc = fabs(high - prev_close);
     const double lc = fabs(low - prev_close);
     return fmax(hl, fmax(hc, lc));
+}
+
+// Force-inline for tiny hot helper
+__device__ __forceinline__ float compute_true_range_f32(
+    float high, float low, float prev_close, bool first_bar)
+{
+    if (first_bar) {
+        return high - low;
+    }
+    const float hl = high - low;
+    const float hc = fabsf(high - prev_close);
+    const float lc = fabsf(low - prev_close);
+    return fmaxf(hl, fmaxf(hc, lc));
 }
 
 // Small helpers for circular indexing without %
@@ -60,7 +72,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
     const int   length   = lengths[combo];
     const float mult_f32 = mults[combo];
-    const double mult    = (double)mult_f32;
+    const float mult     = mult_f32;
 
     const int base = combo * series_len;
 
@@ -73,7 +85,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
     }
 
     const int warm  = first_valid + length - 1;
-    const double alpha = div_rn_f64(2.0, (double)length + 1.0);
+    const float alpha = 2.0f / (static_cast<float>(length) + 1.0f);
 
     // Only write the necessary NaN prefix: [0, warm-1]
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
@@ -85,17 +97,17 @@ void tradjema_batch_f32(const float* __restrict__ high,
     if (warm >= series_len || threadIdx.x != 0) return;
 
     // Shared memory layout (mirrors the scalar ring-deque behavior):
-    // [ double min_vals[length] ][ double max_vals[length] ][ int min_idx[length] ][ int max_idx[length] ]
-    extern __shared__ double smem[];
-    double* min_vals = smem;
-    double* max_vals = min_vals + length;
+    // [ f32 min_vals[length] ][ f32 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+    extern __shared__ __align__(16) unsigned char smem[];
+    float* min_vals = reinterpret_cast<float*>(smem);
+    float* max_vals = min_vals + length;
     int* min_idx = reinterpret_cast<int*>(max_vals + length);
     int* max_idx = min_idx + length;
 
     int min_head = 0, min_tail = 0;
     int max_head = 0, max_tail = 0;
 
-    auto minq_push = [&](double v, int idx) {
+    auto minq_push = [&](float v, int idx) {
         int back = dec_wrap(min_tail, length);
         // strict ">" to preserve older equal elements (matches scalar path)
         while (min_tail != min_head && min_vals[back] > v) {
@@ -106,7 +118,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
         min_idx[min_tail] = idx;
         min_tail = inc_wrap(min_tail, length);
     };
-    auto maxq_push = [&](double v, int idx) {
+    auto maxq_push = [&](float v, int idx) {
         int back = dec_wrap(max_tail, length);
         // strict "<" to preserve older equal elements (matches scalar path)
         while (max_tail != max_head && max_vals[back] < v) {
@@ -119,29 +131,28 @@ void tradjema_batch_f32(const float* __restrict__ high,
     };
 
     // Seed window: [first_valid .. warm]
-    double last_tr = (double)high[first_valid] - (double)low[first_valid];
+    float last_tr = high[first_valid] - low[first_valid];
     minq_push(last_tr, first_valid);
     maxq_push(last_tr, first_valid);
 
     for (int i = first_valid + 1; i <= warm; ++i) {
-        const double prev_close = (double)close[i - 1];
-        const double tr = compute_true_range(
-            (double)high[i], (double)low[i], prev_close, false);
+        const float prev_close = close[i - 1];
+        const float tr = compute_true_range_f32(high[i], low[i], prev_close, false);
         minq_push(tr, i);
         maxq_push(tr, i);
         last_tr = tr;
     }
 
-    const double tr_low  = min_vals[min_head];
-    const double tr_high = max_vals[max_head];
-    const double denom0 = tr_high - tr_low;
-    const double tr_adj0 = (denom0 != 0.0) ? div_rn_f64(last_tr - tr_low, denom0) : 0.0;
+    const float tr_low  = min_vals[min_head];
+    const float tr_high = max_vals[max_head];
+    const float denom0 = tr_high - tr_low;
+    const float tr_adj0 = (denom0 != 0.0f) ? ((last_tr - tr_low) / denom0) : 0.0f;
 
     // Initial EMA output at 'warm'
-    const double src0 = (double)close[warm - 1];
-    const double a0 = alpha * (1.0 + tr_adj0 * mult);
-    double y = fma(src0, a0, 0.0);
-    out[base + warm] = (float)y;
+    const float src0 = close[warm - 1];
+    const float a0 = alpha * (1.0f + tr_adj0 * mult);
+    float y = src0 * a0;
+    out[base + warm] = y;
 
     // Main sequential loop
     for (int i = warm + 1; i < series_len; ++i) {
@@ -153,22 +164,21 @@ void tradjema_batch_f32(const float* __restrict__ high,
             max_head = inc_wrap(max_head, length);
         }
 
-        const double prev_close = (double)close[i - 1];
-        const double tr = compute_true_range(
-            (double)high[i], (double)low[i], prev_close, false);
+        const float prev_close = close[i - 1];
+        const float tr = compute_true_range_f32(high[i], low[i], prev_close, false);
 
         minq_push(tr, i);
         maxq_push(tr, i);
 
-        const double lo_tr = min_vals[min_head];
-        const double hi_tr = max_vals[max_head];
-        const double den = hi_tr - lo_tr;
-        const double tr_adj = (den != 0.0) ? div_rn_f64(tr - lo_tr, den) : 0.0;
-        const double a = alpha * (1.0 + tr_adj * mult);
+        const float lo_tr = min_vals[min_head];
+        const float hi_tr = max_vals[max_head];
+        const float den = hi_tr - lo_tr;
+        const float tr_adj = (den != 0.0f) ? ((tr - lo_tr) / den) : 0.0f;
+        const float a = alpha * (1.0f + tr_adj * mult);
 
-        const double src = prev_close; // src is close[i-1]
-        y = fma(a, (src - y), y);
-        out[base + i] = (float)y;
+        const float src = prev_close; // src is close[i-1]
+        y = fmaf(a, (src - y), y);
+        out[base + i] = y;
     }
 }
 
@@ -220,9 +230,9 @@ void tradjema_many_series_one_param_time_major_f32(
     };
 
     // Shared memory layout (mirrors the scalar ring-deque behavior):
-    // [ double min_vals[length] ][ double max_vals[length] ][ int min_idx[length] ][ int max_idx[length] ]
-    extern __shared__ double smem[];
-    double* min_vals = smem;
+    // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
+    extern __shared__ __align__(16) unsigned char smem[];
+    double* min_vals = reinterpret_cast<double*>(smem);
     double* max_vals = min_vals + length;
     int* min_idx = reinterpret_cast<int*>(max_vals + length);
     int* max_idx = min_idx + length;
@@ -260,7 +270,7 @@ void tradjema_many_series_one_param_time_major_f32(
 
     for (int i = first_valid + 1; i <= warm; ++i) {
         const double prev_close = static_cast<double>(at(close_tm, i - 1, series));
-        const double tr = compute_true_range(
+        const double tr = compute_true_range_f64(
             static_cast<double>(at(high_tm, i, series)),
             static_cast<double>(at(low_tm, i, series)),
             prev_close,
@@ -291,7 +301,7 @@ void tradjema_many_series_one_param_time_major_f32(
         }
 
         const double prev_close = static_cast<double>(at(close_tm, i - 1, series));
-        const double tr = compute_true_range(
+        const double tr = compute_true_range_f64(
             static_cast<double>(at(high_tm, i, series)),
             static_cast<double>(at(low_tm, i, series)),
             prev_close,

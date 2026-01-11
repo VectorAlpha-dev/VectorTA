@@ -466,20 +466,41 @@ impl CudaNatr {
             d_inv = Some(d);
         }
 
-        // Choose kernel symbol based on availability of precompute buffer
-        let func = if d_inv.is_some() {
-            self.module
-                .get_function("natr_batch_f32_with_inv")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32_with_inv" })?
-        } else {
-            self.module
-                .get_function("natr_batch_f32")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32" })?
-        };
+        let warp_io_enabled = std::env::var("NATR_BATCH_WARP_IO")
+            .map(|v| v != "0")
+            .unwrap_or(true);
 
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256u32,
+            BatchKernelPolicy::Auto => {
+                if warp_io_enabled {
+                    32u32
+                } else {
+                    256u32
+                }
+            }
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+        };
+
+        let use_warp_io = warp_io_enabled && block_x == 32;
+
+        // Choose kernel symbol based on policy + availability of precompute buffer
+        let func = match (use_warp_io, d_inv.is_some()) {
+            (true, true) => self
+                .module
+                .get_function("natr_batch_warp_io_f32_with_inv")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_warp_io_f32_with_inv" })?,
+            (true, false) => self
+                .module
+                .get_function("natr_batch_warp_io_f32")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_warp_io_f32" })?,
+            (false, true) => self
+                .module
+                .get_function("natr_batch_f32_with_inv")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32_with_inv" })?,
+            (false, false) => self
+                .module
+                .get_function("natr_batch_f32")
+                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32" })?,
         };
         let grid_x = rows as u32; // one block per period row
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -701,17 +722,48 @@ pub mod benches {
 
     struct NatrBatchState {
         cuda: CudaNatr,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: NatrBatchRange,
+        d_tr: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        block_x: u32,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for NatrBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .natr_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("natr batch dev");
+                .module
+                .get_function("natr_batch_warp_io_f32")
+                .or_else(|_| self.cuda.module.get_function("natr_batch_f32"))
+                .expect("natr batch kernel");
+            let grid: GridSize = (self.rows as u32, 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut tr_ptr = self.d_tr.as_device_ptr().as_raw();
+                let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut rows_i = self.rows as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut tr_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("natr launch");
+            }
+            self.cuda.stream.synchronize().expect("natr sync");
         }
     }
 
@@ -720,12 +772,32 @@ pub mod benches {
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = NatrBatchRange { period: (7, 64, 3) };
+        let periods: Vec<usize> = (sweep.period.0..=sweep.period.1)
+            .step_by(sweep.period.2.max(1))
+            .collect();
+        let rows = periods.len();
+        let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
+
+        let (tr, first_valid) = CudaNatr::build_tr_one_series(&high, &low, &close).expect("tr");
+        let d_tr = unsafe { DeviceBuffer::from_slice_async(&tr, &cuda.stream) }.expect("d_tr");
+        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }.expect("d_periods");
+        let out_elems = rows * ONE_SERIES_LEN;
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(NatrBatchState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_tr,
+            d_close,
+            d_periods,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            rows,
+            block_x: 32,
+            d_out,
         })
     }
 

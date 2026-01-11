@@ -849,8 +849,8 @@ pub struct AsoBatchRange {
 impl Default for AsoBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 50, 1),
-            mode: (0, 2, 1),
+            period: (10, 259, 1),
+            mode: (0, 0, 0),
         }
     }
 }

@@ -805,8 +805,8 @@ pub struct BandPassBatchRange {
 impl Default for BandPassBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 60, 1),
-            bandwidth: (0.3, 0.3, 0.0),
+            period: (20, 20, 0),
+            bandwidth: (0.3, 0.549, 0.001),
         }
     }
 }
@@ -2639,6 +2639,15 @@ mod tests {
             Ok(())
         })?;
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_bandpass_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

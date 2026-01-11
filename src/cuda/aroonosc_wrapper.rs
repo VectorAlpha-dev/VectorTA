@@ -733,18 +733,32 @@ pub mod benches {
         (high, low)
     }
 
-    struct AroonOscBatchState {
+    struct AroonOscBatchDeviceState {
         cuda: CudaAroonOsc,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: AroonOscBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        avg_len: f32,
     }
-    impl CudaBenchState for AroonOscBatchState {
+    impl CudaBenchState for AroonOscBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .aroonosc_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("aroonosc batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_lengths,
+                    self.series_len as i32,
+                    self.first_valid as i32,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                    self.avg_len,
+                )
+                .expect("aroonosc launch");
+            self.cuda.stream.synchronize().expect("aroonosc sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -754,11 +768,36 @@ pub mod benches {
         let sweep = AroonOscBatchRange {
             length: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(AroonOscBatchState {
+
+        let (combos, first_valid, series_len) =
+            CudaAroonOsc::prepare_batch_inputs(&high, &low, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let lengths_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0) as i32)
+            .collect();
+        let avg_len: f32 = lengths_i32
+            .iter()
+            .map(|&x| (x.max(1)) as f32)
+            .sum::<f32>()
+            / (n_combos as f32).max(1.0);
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high H2D");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low H2D");
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).expect("d_lengths H2D");
+        let elems = series_len * n_combos;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("out");
+
+        Box::new(AroonOscBatchDeviceState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_high,
+            d_low,
+            d_lengths,
+            d_out,
+            series_len,
+            first_valid,
+            n_combos,
+            avg_len,
         })
     }
 

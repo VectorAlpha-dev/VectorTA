@@ -736,45 +736,159 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaVpci,
-        c: Vec<f32>,
-        v: Vec<f32>,
-        sweep: VpciBatchRange,
+        d_pfx_c: DeviceBuffer<Float2>,
+        d_pfx_v: DeviceBuffer<Float2>,
+        d_pfx_cv: DeviceBuffer<Float2>,
+        d_vol: DeviceBuffer<f32>,
+        d_shorts: DeviceBuffer<i32>,
+        d_longs: DeviceBuffer<i32>,
+        d_vpci: DeviceBuffer<f32>,
+        d_vpcis: DeviceBuffer<f32>,
+        series_len: usize,
+        n_rows: usize,
+        first_valid: usize,
+        grid: GridSize,
+        block: BlockSize,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.vpci_batch_dev(&self.c, &self.v, &self.sweep);
+            let func = self
+                .cuda
+                .module
+                .get_function("vpci_batch_f32")
+                .expect("vpci_batch_f32");
+            unsafe {
+                let mut pfx_c_ptr = self.d_pfx_c.as_device_ptr().as_raw();
+                let mut pfx_v_ptr = self.d_pfx_v.as_device_ptr().as_raw();
+                let mut pfx_cv_ptr = self.d_pfx_cv.as_device_ptr().as_raw();
+                let mut vol_ptr = self.d_vol.as_device_ptr().as_raw();
+                let mut shorts_ptr = self.d_shorts.as_device_ptr().as_raw();
+                let mut longs_ptr = self.d_longs.as_device_ptr().as_raw();
+                let mut series_len_i = self.series_len as i32;
+                let mut n_rows_i = self.n_rows as i32;
+                let mut first_valid_i = (self.first_valid.min(self.series_len)) as i32;
+                let mut out_vpci_ptr = self.d_vpci.as_device_ptr().as_raw();
+                let mut out_vpcis_ptr = self.d_vpcis.as_device_ptr().as_raw();
+
+                let mut args: [*mut c_void; 11] = [
+                    &mut pfx_c_ptr as *mut _ as *mut c_void,
+                    &mut pfx_v_ptr as *mut _ as *mut c_void,
+                    &mut pfx_cv_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut shorts_ptr as *mut _ as *mut c_void,
+                    &mut longs_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_rows_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_vpci_ptr as *mut _ as *mut c_void,
+                    &mut out_vpcis_ptr as *mut _ as *mut c_void,
+                ];
+
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, &mut args)
+                    .expect("vpci launch");
+            }
+            self.cuda.stream.synchronize().expect("vpci sync");
         }
     }
 
+    fn prep_vpci_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let mut close = gen_series(ONE_SERIES_LEN);
+        let mut vol = gen_series(ONE_SERIES_LEN);
+        // Ensure both finite from some point
+        for i in 0..1024 {
+            close[i] = f32::NAN;
+            vol[i] = f32::NAN;
+        }
+
+        let sweep = VpciBatchRange {
+            short_range: (5, 20, 1),
+            long_range: (25, 60, 5),
+        };
+
+        let shorts: Vec<usize> = (sweep.short_range.0..=sweep.short_range.1).collect();
+        let longs: Vec<usize> = (sweep.long_range.0..=sweep.long_range.1)
+            .step_by(sweep.long_range.2.max(1))
+            .collect();
+        let n_rows = shorts.len() * longs.len();
+        assert_eq!(n_rows, ((60 - 25) / 5 + 1) * ((20 - 5) / 1 + 1));
+
+        let mut shorts_i32 = Vec::with_capacity(n_rows);
+        let mut longs_i32 = Vec::with_capacity(n_rows);
+        for &s in &shorts {
+            for &l in &longs {
+                shorts_i32.push(s as i32);
+                longs_i32.push(l as i32);
+            }
+        }
+
+        let cuda = CudaVpci::new(0).expect("cuda vpci");
+        let (first_valid, h_pfx_c, h_pfx_v, h_pfx_cv) =
+            cuda.build_prefix_single(&close, &vol).expect("build_prefix_single");
+
+        let d_pfx_c: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(h_pfx_c.as_slice(), &cuda.stream)
+        }
+        .expect("d_pfx_c");
+        let d_pfx_v: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(h_pfx_v.as_slice(), &cuda.stream)
+        }
+        .expect("d_pfx_v");
+        let d_pfx_cv: DeviceBuffer<Float2> = unsafe {
+            DeviceBuffer::from_slice_async(h_pfx_cv.as_slice(), &cuda.stream)
+        }
+        .expect("d_pfx_cv");
+        let h_vol = LockedBuffer::from_slice(&vol).expect("h_vol");
+        let d_vol: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::from_slice_async(h_vol.as_slice(), &cuda.stream)
+        }
+        .expect("d_vol");
+        let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts_i32, &cuda.stream) }
+            .expect("d_shorts");
+        let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs_i32, &cuda.stream) }
+            .expect("d_longs");
+
+        let out_elems = n_rows
+            .checked_mul(ONE_SERIES_LEN)
+            .expect("vpci out_elems overflow");
+        let d_vpci: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_vpci");
+        let d_vpcis: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_vpcis");
+
+        let block_x: u32 = 128;
+        let grid_x = ((n_rows as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("vpci prep sync");
+
+        Box::new(BatchState {
+            cuda,
+            d_pfx_c,
+            d_pfx_v,
+            d_pfx_cv,
+            d_vol,
+            d_shorts,
+            d_longs,
+            d_vpci,
+            d_vpcis,
+            series_len: ONE_SERIES_LEN,
+            n_rows,
+            first_valid,
+            grid,
+            block,
+        })
+    }
+
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let mut v = Vec::new();
-        v.push(
-            CudaBenchScenario::new(
-                "vpci",
-                "one_series_many_params",
-                "vpci_batch",
-                "vpci/batch/1e6",
-                || {
-                    let mut close = gen_series(ONE_SERIES_LEN);
-                    let mut vol = gen_series(ONE_SERIES_LEN);
-                    // Ensure both finite from some point
-                    for i in 0..1024 {
-                        close[i] = f32::NAN;
-                        vol[i] = f32::NAN;
-                    }
-                    Box::new(BatchState {
-                        cuda: CudaVpci::new(0).unwrap(),
-                        c: close,
-                        v: vol,
-                        sweep: VpciBatchRange {
-                            short_range: (5, 20, 1),
-                            long_range: (25, 60, 5),
-                        },
-                    })
-                },
-            )
-            .with_mem_required(bytes_one_series(((60 - 25) / 5 + 1) * ((20 - 5) / 1 + 1))),
-        );
-        v
+        vec![CudaBenchScenario::new(
+            "vpci",
+            "one_series_many_params",
+            "vpci_batch",
+            "vpci/batch/1e6",
+            prep_vpci_one_series_many_params,
+        )
+        .with_mem_required(bytes_one_series(((60 - 25) / 5 + 1) * ((20 - 5) / 1 + 1)))]
     }
 }

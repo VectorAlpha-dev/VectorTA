@@ -215,11 +215,12 @@ impl CudaAdxr {
             // Dynamic shared memory for two f32 tiles of length 256
             let shmem_bytes: usize = 2 * 256 * core::mem::size_of::<f32>();
 
-            // Occupancy-aware block size for given shmem
-            let (_min_grid, suggested) = func
-                .suggested_launch_configuration(shmem_bytes, BlockSize::xyz(0, 0, 0))
-                .unwrap_or((0, 128));
-            let mut block_x = if suggested > 0 { suggested } else { 128 } as u32;
+            // For this recurrence kernel, prefer smaller blocks so we get enough
+            // concurrent blocks to utilize the GPU even for modest combo counts.
+            // Keep block_x as a multiple of warp size.
+            const TARGET_BLOCKS: u32 = 64;
+            let mut block_x = ((n_combos as u32 + TARGET_BLOCKS - 1) / TARGET_BLOCKS).max(32);
+            block_x = ((block_x + 31) / 32) * 32;
             if block_x > 256 { block_x = 256; }
 
             // 1D launch: one thread per combo (period)
@@ -457,41 +458,127 @@ impl CudaAdxr {
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
+    use cust::launch;
+    use cust::memory::DeviceBuffer;
 
-    struct AdxrBatchBench {
+    struct AdxrBatchDevBench {
         cuda: CudaAdxr,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: AdxrBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_periods: usize,
+        d_ring: DeviceBuffer<f32>,
+        ring_pitch: usize,
+        d_out: DeviceBuffer<f32>,
+        shmem_bytes: u32,
     }
-    impl CudaBenchState for AdxrBatchBench {
+    impl CudaBenchState for AdxrBatchDevBench {
         fn launch(&mut self) {
-            let _ = self
+            // Benchmark the optimized batch kernel directly to avoid per-iter allocs/H2D.
+            let func = self
                 .cuda
-                .adxr_batch_dev(&self.high, &self.low, &self.close, &self.sweep);
+                .module
+                .get_function("adxr_one_series_many_params_f32_opt")
+                .expect("adxr opt kernel");
+
+            let block_x: u32 = 32;
+            let grid_x: u32 = ((self.n_periods as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            let stream = &self.cuda.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, self.shmem_bytes, stream>>>(
+                        self.d_high.as_device_ptr(),
+                        self.d_low.as_device_ptr(),
+                        self.d_close.as_device_ptr(),
+                        self.d_periods.as_device_ptr(),
+                        self.series_len as i32,
+                        self.first_valid as i32,
+                        self.n_periods as i32,
+                        self.d_ring.as_device_ptr(),
+                        self.ring_pitch as i32,
+                        self.d_out.as_device_ptr()
+                    )
+                )
+                .expect("adxr opt launch");
+            }
+            self.cuda.stream.synchronize().expect("cuda sync");
         }
     }
 
     struct AdxrManySeriesBench {
         cuda: CudaAdxr,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
+        d_ring: Option<DeviceBuffer<f32>>,
+        ring_pitch: i32,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for AdxrManySeriesBench {
         fn launch(&mut self) {
-            let _ = self.cuda.adxr_many_series_one_param_time_major_dev(
-                &self.high_tm,
-                &self.low_tm,
-                &self.close_tm,
-                self.cols,
-                self.rows,
-                self.period,
-            );
+            // Mirror wrapper selection: try optimized time-major kernel first.
+            if let Ok(func_opt) = self
+                .cuda
+                .module
+                .get_function("adxr_many_series_one_param_time_major_f32_opt")
+            {
+                let d_ring = self.d_ring.as_ref().expect("d_ring");
+                let grid: GridSize = (self.cols as u32, 1u32, 1u32).into();
+                let block: BlockSize = (1u32, 1u32, 1u32).into();
+                let stream = &self.cuda.stream;
+                unsafe {
+                    launch!(
+                        func_opt<<<grid, block, 0, stream>>>(
+                            self.d_high_tm.as_device_ptr(),
+                            self.d_low_tm.as_device_ptr(),
+                            self.d_close_tm.as_device_ptr(),
+                            self.d_first_valids.as_device_ptr(),
+                            self.period as i32,
+                            self.cols as i32,
+                            self.rows as i32,
+                            d_ring.as_device_ptr(),
+                            self.ring_pitch,
+                            self.d_out_tm.as_device_ptr()
+                        )
+                    )
+                    .expect("adxr many-series opt launch");
+                }
+            } else {
+                let func = self
+                    .cuda
+                    .module
+                    .get_function("adxr_many_series_one_param_f32")
+                    .expect("adxr legacy kernel");
+                let grid: GridSize = (self.cols as u32, 1u32, 1u32).into();
+                let block: BlockSize = (1u32, 1u32, 1u32).into();
+                let stream = &self.cuda.stream;
+                unsafe {
+                    launch!(
+                        func<<<grid, block, 0, stream>>>(
+                            self.d_high_tm.as_device_ptr(),
+                            self.d_low_tm.as_device_ptr(),
+                            self.d_close_tm.as_device_ptr(),
+                            self.d_first_valids.as_device_ptr(),
+                            self.period as i32,
+                            self.cols as i32,
+                            self.rows as i32,
+                            self.d_out_tm.as_device_ptr()
+                        )
+                    )
+                    .expect("adxr many-series legacy launch");
+                }
+            }
+
+            self.cuda.stream.synchronize().expect("cuda sync");
         }
     }
 
@@ -512,16 +599,50 @@ pub mod benches {
         (h, l, c)
     }
 
-    fn prep_batch() -> Box<dyn CudaBenchState> {
-        let (h, l, c) = make_series(50_000);
-        let sweep = AdxrBatchRange { period: (5, 60, 5) };
+    fn prep_batch_dev_1m_x_250() -> Box<dyn CudaBenchState> {
+        const LEN_1M: usize = 1_000_000;
+        const PARAM_SWEEP_250: usize = 250;
+
+        let (h, l, c) = make_series(LEN_1M);
+        let first_valid = c.iter().position(|v| v.is_finite()).unwrap_or(LEN_1M);
+
+        // 250 periods: 8..2000 step 8
+        let periods_host: Vec<i32> = (0..PARAM_SWEEP_250)
+            .map(|i| (8 + 8 * i) as i32)
+            .collect();
+        let n_periods = periods_host.len();
+        let max_p = 8 + 8 * (PARAM_SWEEP_250 - 1);
+
         let cuda = CudaAdxr::new(0).expect("cuda");
-        Box::new(AdxrBatchBench {
+
+        // Use sync allocations for large buffers (WDDM can fail stream-ordered allocs).
+        let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&l).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&c).expect("d_close");
+        let d_periods = DeviceBuffer::from_slice(&periods_host).expect("d_periods");
+
+        let ring_pitch = CudaAdxr::round_up(max_p, 32);
+        let ring_elems = ring_pitch * n_periods;
+        let d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ring_elems) }.expect("d_ring");
+
+        let out_elems = n_periods * LEN_1M;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+
+        let shmem_bytes: u32 = (2 * 256 * core::mem::size_of::<f32>()) as u32;
+        cuda.stream.synchronize().expect("sync");
+        Box::new(AdxrBatchDevBench {
             cuda,
-            high: h,
-            low: l,
-            close: c,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            d_periods,
+            series_len: LEN_1M,
+            first_valid,
+            n_periods,
+            d_ring,
+            ring_pitch,
+            d_out,
+            shmem_bytes,
         })
     }
 
@@ -535,23 +656,69 @@ pub mod benches {
             c[s] = f32::NAN;
         }
         let cuda = CudaAdxr::new(0).expect("cuda");
+        let mut first_valids: Vec<i32> = vec![-1; cols];
+        for s in 0..cols {
+            let mut fv = -1i32;
+            for t in 0..rows {
+                let v = c[t * cols + s];
+                if v == v {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            first_valids[s] = fv;
+        }
+
+        let d_high_tm = DeviceBuffer::from_slice(&h).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&l).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&c).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        let mut d_ring = None;
+        let mut ring_pitch = 0i32;
+        if cuda
+            .module
+            .get_function("adxr_many_series_one_param_time_major_f32_opt")
+            .is_ok()
+        {
+            ring_pitch = CudaAdxr::round_up(14, 32) as i32;
+            let ring_elems = cols * (ring_pitch as usize);
+            d_ring = Some(
+                unsafe { DeviceBuffer::<f32>::uninitialized(ring_elems) }.expect("d_ring"),
+            );
+        }
+        cuda.stream.synchronize().expect("sync");
         Box::new(AdxrManySeriesBench {
             cuda,
-            high_tm: h,
-            low_tm: l,
-            close_tm: c,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
             cols,
             rows,
             period: 14,
+            d_ring,
+            ring_pitch,
+            d_out_tm,
         })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let bytes_batch = (50_000usize * 3 + (1 + (60 - 5) / 5) * 50_000) * 4;
+        let bytes_batch_1m_x_250 =
+            (1_000_000usize * 3 + 250usize * 1_000_000usize + (250usize * 2016usize)) * 4
+                + 64 * 1024 * 1024;
         let bytes_many = 128usize * 8192usize * 4usize * 4usize; // 3 inputs + out + firsts
         vec![
-            CudaBenchScenario::new("adxr", "one_series", "adxr_cuda_batch", "50k", prep_batch)
-                .with_mem_required(bytes_batch),
+            CudaBenchScenario::new(
+                "adxr",
+                "one_series_many_params",
+                "adxr_cuda_batch_dev",
+                "1m_x_250",
+                prep_batch_dev_1m_x_250,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_batch_1m_x_250),
             CudaBenchScenario::new("adxr", "many_series", "adxr_cuda_ms1p", "128x8k", prep_many)
                 .with_mem_required(bytes_many),
         ]

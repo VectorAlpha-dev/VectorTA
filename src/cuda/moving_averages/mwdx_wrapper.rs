@@ -740,23 +740,151 @@ impl CudaMwdx {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::mwdx::{MwdxBatchRange, MwdxParams};
 
-    define_ma_period_benches!(
-        mwdx_benches,
-        CudaMwdx,
-        crate::indicators::moving_averages::mwdx::MwdxBatchRange,
-        crate::indicators::moving_averages::mwdx::MwdxParams,
-        mwdx_batch_dev,
-        mwdx_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::mwdx::MwdxBatchRange {
-            factor: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001)
-        },
-        crate::indicators::moving_averages::mwdx::MwdxParams { factor: Some(0.2) },
-        "mwdx",
-        "mwdx"
-    );
-    pub use mwdx_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct MwdxBatchDevState {
+        cuda: CudaMwdx,
+        d_prices: DeviceBuffer<f32>,
+        d_factors: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for MwdxBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .mwdx_batch_device(
+                    &self.d_prices,
+                    &self.d_factors,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("mwdx batch kernel");
+            self.cuda.stream.synchronize().expect("mwdx sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaMwdx::new(0).expect("cuda mwdx");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = MwdxBatchRange {
+            factor: (0.05, 0.05 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
+        };
+        let prepared = CudaMwdx::prepare_batch_inputs(&price, &sweep).expect("mwdx prepare batch");
+        let n_combos = prepared.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_factors = DeviceBuffer::from_slice(&prepared.factors_f32).expect("d_factors");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(MwdxBatchDevState {
+            cuda,
+            d_prices,
+            d_factors,
+            series_len: prepared.series_len,
+            n_combos,
+            first_valid: prepared.first_valid,
+            d_out,
+        })
+    }
+
+    struct MwdxManyDevState {
+        cuda: CudaMwdx,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        factor: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for MwdxManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .mwdx_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.factor,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("mwdx many-series kernel");
+            self.cuda.stream.synchronize().expect("mwdx sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaMwdx::new(0).expect("cuda mwdx");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = MwdxParams { factor: Some(0.2) };
+        let prepared =
+            CudaMwdx::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("mwdx prep");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(MwdxManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            factor: prepared.factor,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "mwdx",
+                "one_series_many_params",
+                "mwdx_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "mwdx",
+                "many_series_one_param",
+                "mwdx_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 // ---------------- Policy, debugging, and utilities (ALMA-style) ----------------

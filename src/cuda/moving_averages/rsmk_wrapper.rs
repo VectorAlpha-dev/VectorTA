@@ -512,6 +512,28 @@ impl CudaRsmk {
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use std::collections::{BTreeSet, HashMap};
+    use std::ffi::c_void;
+
+    const BATCH_LEN: usize = 45_000;
+    const MANY_COLS: usize = 64;
+    const MANY_ROWS: usize = 500_000;
+
+    fn bytes_batch() -> usize {
+        // combos: 3 lookbacks * 3 periods * 3 signal_periods = 27
+        let rows = 27usize;
+        let in_bytes = 2 * BATCH_LEN * std::mem::size_of::<f32>();
+        let out_bytes = 2 * rows * BATCH_LEN * std::mem::size_of::<f32>();
+        let mom_bytes = 3 * BATCH_LEN * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + mom_bytes + 32 * 1024 * 1024
+    }
+    fn bytes_many() -> usize {
+        let elems = MANY_COLS * MANY_ROWS;
+        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
+        let out_bytes = 2 * elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_COLS * std::mem::size_of::<i32>();
+        in_bytes + out_bytes + first_bytes + 64 * 1024 * 1024
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
@@ -522,7 +544,8 @@ pub mod benches {
                 "45k_x_27combos",
                 prep_rsmk_batch_box,
             )
-            .with_inner_iters(4),
+            .with_inner_iters(4)
+            .with_mem_required(bytes_batch()),
             CudaBenchScenario::new(
                 "rsmk",
                 "many_series_one_param",
@@ -530,28 +553,117 @@ pub mod benches {
                 "64x500k",
                 prep_rsmk_many_series_box,
             )
-            .with_inner_iters(2),
+            .with_inner_iters(2)
+            .with_mem_required(bytes_many()),
         ]
     }
 
-    struct RsmkBatchState {
+    struct RsmkBatchDevState {
         cuda: CudaRsmk,
-        main: Vec<f32>,
-        comp: Vec<f32>,
-        sweep: RsmkBatchRange,
+        d_main: DeviceBuffer<f32>,
+        d_comp: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        lookbacks: Vec<usize>,
+        d_moms: Vec<DeviceBuffer<f32>>,
+        row_mom_idx: Vec<usize>,
+        periods: Vec<usize>,
+        signals: Vec<usize>,
+        first_moms: Vec<usize>,
+        d_indicator: DeviceBuffer<f32>,
+        d_signal: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RsmkBatchState {
+
+    impl CudaBenchState for RsmkBatchDevState {
         fn launch(&mut self) {
-            let _ = self
+            let mut k_mom = self
                 .cuda
-                .rsmk_batch_dev(&self.main, &self.comp, &self.sweep)
-                .unwrap();
+                .module
+                .get_function("rsmk_momentum_f32")
+                .expect("rsmk_momentum_f32");
+            let mut k_apply = self
+                .cuda
+                .module
+                .get_function("rsmk_apply_mom_single_row_ema_ema_f32")
+                .expect("rsmk_apply_mom_single_row_ema_ema_f32");
+
+            for (idx, &lb) in self.lookbacks.iter().enumerate() {
+                unsafe {
+                    let mut main_ptr = self.d_main.as_device_ptr().as_raw();
+                    let mut comp_ptr = self.d_comp.as_device_ptr().as_raw();
+                    let mut fv_i = self.first_valid as i32;
+                    let mut lb_i = lb as i32;
+                    let mut len_i = self.len as i32;
+                    let mut mom_ptr = self.d_moms[idx].as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut main_ptr as *mut _ as *mut c_void,
+                        &mut comp_ptr as *mut _ as *mut c_void,
+                        &mut fv_i as *mut _ as *mut c_void,
+                        &mut lb_i as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut mom_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(
+                            &mut k_mom,
+                            GridSize::xyz(1, 1, 1),
+                            BlockSize::xyz(1, 1, 1),
+                            0,
+                            args,
+                        )
+                        .expect("rsmk_momentum_f32 launch");
+                }
+            }
+
+            for row in 0..self.periods.len() {
+                let mom_idx = self.row_mom_idx[row];
+                let d_m = &self.d_moms[mom_idx];
+                unsafe {
+                    let mut mom_ptr = d_m.as_device_ptr().as_raw();
+                    let mut len_i = self.len as i32;
+                    let mut fv_m_i = self.first_moms[row] as i32;
+                    let mut p_i = self.periods[row] as i32;
+                    let mut s_i = self.signals[row] as i32;
+                    let mut ind_ptr = self
+                        .d_indicator
+                        .as_device_ptr()
+                        .offset((row * self.len) as isize)
+                        .as_raw();
+                    let mut sig_ptr = self
+                        .d_signal
+                        .as_device_ptr()
+                        .offset((row * self.len) as isize)
+                        .as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut mom_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut fv_m_i as *mut _ as *mut c_void,
+                        &mut p_i as *mut _ as *mut c_void,
+                        &mut s_i as *mut _ as *mut c_void,
+                        &mut ind_ptr as *mut _ as *mut c_void,
+                        &mut sig_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(
+                            &mut k_apply,
+                            GridSize::xyz(1, 1, 1),
+                            BlockSize::xyz(1, 1, 1),
+                            0,
+                            args,
+                        )
+                        .expect("rsmk_apply launch");
+                }
+            }
+
             self.cuda.stream.synchronize().unwrap();
         }
     }
-    fn prep_rsmk_batch() -> RsmkBatchState {
+
+    fn prep_rsmk_batch_box() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsmk::new(0).expect("cuda rsmk");
-        let len = 45_000usize;
+        let len = BATCH_LEN;
         let mut main = vec![f32::NAN; len];
         let mut comp = vec![f32::NAN; len];
         for i in 5..len {
@@ -564,44 +676,157 @@ pub mod benches {
             period: (3, 9, 3),
             signal_period: (10, 22, 6),
         };
-        RsmkBatchState {
-            cuda,
-            main,
-            comp,
-            sweep,
+        let first_valid = CudaRsmk::first_valid(&main, &comp).expect("first_valid");
+
+        fn axis(a: (usize, usize, usize)) -> Vec<usize> {
+            let (start, end, step) = a;
+            if step == 0 || start == end {
+                return vec![start];
+            }
+            let mut vals = Vec::new();
+            if start <= end {
+                let st = step.max(1);
+                for v in (start..=end).step_by(st) {
+                    vals.push(v);
+                }
+            } else {
+                let mut cur = start;
+                let s = step.max(1);
+                loop {
+                    vals.push(cur);
+                    if cur <= end {
+                        break;
+                    }
+                    if cur < s {
+                        break;
+                    }
+                    let next = cur - s;
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                }
+            }
+            vals
         }
-    }
-    fn prep_rsmk_batch_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_rsmk_batch())
+
+        let looks = axis(sweep.lookback);
+        let periods = axis(sweep.period);
+        let sigs = axis(sweep.signal_period);
+        let mut row_lookbacks = Vec::with_capacity(looks.len() * periods.len() * sigs.len());
+        let mut row_periods = Vec::with_capacity(row_lookbacks.capacity());
+        let mut row_sigs = Vec::with_capacity(row_lookbacks.capacity());
+        for &l in &looks {
+            for &p in &periods {
+                for &s in &sigs {
+                    row_lookbacks.push(l);
+                    row_periods.push(p);
+                    row_sigs.push(s);
+                }
+            }
+        }
+        let uniq: BTreeSet<usize> = row_lookbacks.iter().copied().collect();
+        let lookbacks: Vec<usize> = uniq.into_iter().collect();
+        let mut map = HashMap::new();
+        for (i, &lb) in lookbacks.iter().enumerate() {
+            map.insert(lb, i);
+        }
+        let row_mom_idx: Vec<usize> = row_lookbacks
+            .iter()
+            .map(|lb| *map.get(lb).expect("lb idx"))
+            .collect();
+        let first_moms: Vec<usize> = row_lookbacks.iter().map(|&lb| first_valid + lb).collect();
+
+        let d_main = DeviceBuffer::from_slice(&main).expect("d_main");
+        let d_comp = DeviceBuffer::from_slice(&comp).expect("d_comp");
+        let mut d_moms = Vec::with_capacity(lookbacks.len());
+        for _ in 0..lookbacks.len() {
+            d_moms.push(unsafe { DeviceBuffer::uninitialized(len) }.expect("d_mom"));
+        }
+        let n_rows = row_lookbacks.len();
+        let rows_len = n_rows.checked_mul(len).expect("rows*len");
+        let d_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_len) }.expect("d_indicator");
+        let d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows_len) }.expect("d_signal");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(RsmkBatchDevState {
+            cuda,
+            d_main,
+            d_comp,
+            len,
+            first_valid,
+            lookbacks,
+            d_moms,
+            row_mom_idx,
+            periods: row_periods,
+            signals: row_sigs,
+            first_moms,
+            d_indicator,
+            d_signal,
+        })
     }
 
-    struct RsmkManyState {
+    struct RsmkManyDevState {
         cuda: CudaRsmk,
-        tm_main: Vec<f32>,
-        tm_comp: Vec<f32>,
+        d_main: DeviceBuffer<f32>,
+        d_comp: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        p: RsmkParams,
+        lb: usize,
+        p: usize,
+        s: usize,
+        d_indicator: DeviceBuffer<f32>,
+        d_signal: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for RsmkManyState {
+
+    impl CudaBenchState for RsmkManyDevState {
         fn launch(&mut self) {
-            let _ = self
+            let mut func = self
                 .cuda
-                .rsmk_many_series_one_param_time_major_dev(
-                    &self.tm_main,
-                    &self.tm_comp,
-                    self.cols,
-                    self.rows,
-                    &self.p,
-                )
-                .unwrap();
+                .module
+                .get_function("rsmk_many_series_one_param_time_major_ema_ema_f32")
+                .expect("rsmk_many_series_one_param_time_major_ema_ema_f32");
+            let block = BlockSize::xyz(1, 1, 1);
+            let grid = GridSize::xyz(1, self.cols as u32, 1);
+            unsafe {
+                let mut main_ptr = self.d_main.as_device_ptr().as_raw();
+                let mut comp_ptr = self.d_comp.as_device_ptr().as_raw();
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut lb_i = self.lb as i32;
+                let mut p_i = self.p as i32;
+                let mut s_i = self.s as i32;
+                let mut ind_ptr = self.d_indicator.as_device_ptr().as_raw();
+                let mut sig_ptr = self.d_signal.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut main_ptr as *mut _ as *mut c_void,
+                    &mut comp_ptr as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut lb_i as *mut _ as *mut c_void,
+                    &mut p_i as *mut _ as *mut c_void,
+                    &mut s_i as *mut _ as *mut c_void,
+                    &mut ind_ptr as *mut _ as *mut c_void,
+                    &mut sig_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&mut func, grid, block, 0, args)
+                    .expect("rsmk many-series launch");
+            }
             self.cuda.stream.synchronize().unwrap();
         }
     }
-    fn prep_rsmk_many_series() -> RsmkManyState {
+
+    fn prep_rsmk_many_series_box() -> Box<dyn CudaBenchState> {
         let cuda = CudaRsmk::new(0).expect("cuda rsmk");
-        let cols = 64usize;
-        let rows = 500_000usize;
+        let cols = MANY_COLS;
+        let rows = MANY_ROWS;
         let mut tm_main = vec![f32::NAN; cols * rows];
         let mut tm_comp = vec![f32::NAN; cols * rows];
         for s in 0..cols {
@@ -611,23 +836,55 @@ pub mod benches {
                 tm_comp[r * cols + s] = (x * 0.0012).cos().abs() + 0.4;
             }
         }
-        let p = RsmkParams {
+        let params = RsmkParams {
             lookback: Some(90),
             period: Some(3),
             signal_period: Some(20),
             matype: Some("ema".into()),
             signal_matype: Some("ema".into()),
         };
-        RsmkManyState {
+        let lb = params.lookback.unwrap_or(90);
+        let p = params.period.unwrap_or(3);
+        let s = params.signal_period.unwrap_or(20);
+
+        let mut firsts = vec![0i32; cols];
+        for sidx in 0..cols {
+            let mut fv = -1i32;
+            for r in 0..rows {
+                let idx = r * cols + sidx;
+                let m = tm_main[idx];
+                let c = tm_comp[idx];
+                if m.is_finite() && c.is_finite() && c != 0.0 {
+                    fv = r as i32;
+                    break;
+                }
+            }
+            assert!(fv >= 0, "series has no valid sample");
+            firsts[sidx] = fv;
+        }
+
+        let d_main = DeviceBuffer::from_slice(&tm_main).expect("d_main_tm");
+        let d_comp = DeviceBuffer::from_slice(&tm_comp).expect("d_comp_tm");
+        let d_first = DeviceBuffer::from_slice(&firsts).expect("d_first");
+        let elems = cols.checked_mul(rows).expect("elems");
+        let d_indicator: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_indicator");
+        let d_signal: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_signal");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(RsmkManyDevState {
             cuda,
-            tm_main,
-            tm_comp,
+            d_main,
+            d_comp,
+            d_first,
             cols,
             rows,
+            lb,
             p,
-        }
-    }
-    fn prep_rsmk_many_series_box() -> Box<dyn CudaBenchState> {
-        Box::new(prep_rsmk_many_series())
+            s,
+            d_indicator,
+            d_signal,
+        })
     }
 }

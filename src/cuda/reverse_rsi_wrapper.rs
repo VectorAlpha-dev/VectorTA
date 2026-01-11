@@ -354,11 +354,6 @@ impl CudaReverseRsi {
             .map(|p| p.rsi_length.unwrap_or(14))
             .max()
             .unwrap_or(14);
-        let max_len = combos
-            .iter()
-            .map(|p| p.rsi_length.unwrap_or(14))
-            .max()
-            .unwrap_or(14);
         let ema_len = (2usize)
             .checked_mul(max_len)
             .and_then(|v| v.checked_sub(1))
@@ -676,8 +671,6 @@ impl CudaReverseRsi {
     ) -> Result<DeviceArrayF32, CudaReverseRsiError> {
         let (first_valids, period, level) =
             Self::prepare_many_series_inputs(prices_tm, cols, rows, params)?;
-        let (first_valids, period, level) =
-            Self::prepare_many_series_inputs(prices_tm, cols, rows, params)?;
 
         // VRAM estimate
         let elems = cols
@@ -773,23 +766,33 @@ pub mod benches {
         in_bytes + out_bytes + first_bytes + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaReverseRsi,
-        price: Vec<f32>,
-        sweep: ReverseRsiBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_levels: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .reverse_rsi_batch_dev(&self.price, &self.sweep)
-                .expect("reverse_rsi_batch_dev");
-            let _ = self
-                .cuda
-                .reverse_rsi_batch_dev(&self.price, &self.sweep)
-                .expect("reverse_rsi_batch_dev");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_lengths,
+                    &self.d_levels,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("reverse_rsi batch launch");
+            self.cuda.synchronize().expect("reverse_rsi batch sync");
         }
     }
+
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaReverseRsi::new(0).expect("cuda");
         let price = gen_series(ONE_SERIES_LEN);
@@ -797,53 +800,92 @@ pub mod benches {
             rsi_length_range: (5, 5 + PARAM_SWEEP_L as usize - 1, 1),
             rsi_level_range: (10.0, 10.0 + PARAM_SWEEP_V as f64 - 1.0, 1.0),
         };
-        Box::new(BatchState { cuda, price, sweep })
+
+        let (combos, first_valid, len) =
+            CudaReverseRsi::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let lengths_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.rsi_length.unwrap_or(14) as i32)
+            .collect();
+        let levels_f32: Vec<f32> = combos
+            .iter()
+            .map(|c| c.rsi_level.unwrap_or(50.0) as f32)
+            .collect();
+
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).expect("d_lengths");
+        let d_levels = DeviceBuffer::from_slice(&levels_f32).expect("d_levels");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream)
+        }
+        .expect("d_out");
+
+        cuda.synchronize().expect("sync after prep");
+        Box::new(BatchDeviceState {
+            cuda,
+            d_prices,
+            d_lengths,
+            d_levels,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
     }
 
-    struct ManyState {
+    struct ManySeriesDeviceState {
         cuda: CudaReverseRsi,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: ReverseRsiParams,
+        period: i32,
+        level: f32,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .reverse_rsi_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.period,
+                    self.level,
+                    &mut self.d_out_tm,
                 )
-                .expect("reverse_rsi_many_series_one_param_time_major_dev");
-            let _ = self
-                .cuda
-                .reverse_rsi_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .expect("reverse_rsi_many_series_one_param_time_major_dev");
+                .expect("reverse_rsi many-series launch");
+            self.cuda.synchronize().expect("reverse_rsi many-series sync");
         }
     }
+
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
         let cuda = CudaReverseRsi::new(0).expect("cuda");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        let params = ReverseRsiParams {
-            rsi_length: Some(14),
-            rsi_level: Some(50.0),
-        };
-        Box::new(ManyState {
+        let first_valids: Vec<i32> = (0..cols).map(|s| s as i32).collect();
+
+        let d_prices_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&data_tm, &cuda.stream) }.expect("d_prices_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &cuda.stream) }
+                .expect("d_out_tm");
+
+        cuda.synchronize().expect("sync after prep");
+        Box::new(ManySeriesDeviceState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first,
+            d_out_tm,
             cols,
             rows,
-            params,
+            period: 14,
+            level: 50.0,
         })
     }
 

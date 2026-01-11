@@ -947,8 +947,8 @@ pub struct TilsonBatchRange {
 impl Default for TilsonBatchRange {
     fn default() -> Self {
         Self {
-            period: (5, 40, 1),
-            volume_factor: (0.0, 1.0, 0.1),
+            period: (5, 254, 1),
+            volume_factor: (0.0, 0.0, 0.0),
         }
     }
 }
@@ -2020,6 +2020,12 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(feature = "proptest"))]
+    fn check_tilson_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
+    }
+
     generate_all_tilson_tests!(
         check_tilson_partial_params,
         check_tilson_accuracy,
@@ -2299,7 +2305,7 @@ fn tilson_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -2851,7 +2857,7 @@ pub fn tilson_js(data: &[f64], period: usize, volume_factor: f64) -> Result<Vec<
     };
     let input = TilsonInput::from_slice(data, params);
     let mut out = vec![0.0; data.len()];
-    tilson_into_slice(&mut out, &input, detect_best_kernel())
+    tilson_into_slice(&mut out, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(out)
 }

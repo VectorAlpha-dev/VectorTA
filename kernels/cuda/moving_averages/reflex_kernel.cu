@@ -71,8 +71,7 @@ void reflex_batch_f32(const float* __restrict__ prices,
     if (series_len > 1) ring[1] = static_cast<double>(__ldg(prices + 1));
 
     // Rolling sum of last 'period' ssf values before including ssf[i]
-    double ssf_sum = 0.0, ssf_c = 0.0; // Kahan comp
-    ssf_sum = ((series_len > 0) ? ring[0] : 0.0) + ((series_len > 1) ? ring[1] : 0.0);
+    double ssf_sum = ((series_len > 0) ? ring[0] : 0.0) + ((series_len > 1) ? ring[1] : 0.0);
 
     const double inv_p = 1.0 / static_cast<double>(period);
     const double alpha = 0.5 * (1.0 + inv_p);
@@ -119,11 +118,8 @@ void reflex_batch_f32(const float* __restrict__ prices,
                 ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
                 out_row[i] = reflex_out_if_valid(ms, my_sum);
 
-                // Kahan: ssf_sum += (ssf_i - ssf_old)
-                double y  = (ssf_i - ssf_old) - ssf_c;
-                double t2 = ssf_sum + y;
-                ssf_c     = (t2 - ssf_sum) - y;
-                ssf_sum   = t2;
+                // Match CPU scalar update (no Kahan): ssf_sum += (ssf_i - ssf_old)
+                ssf_sum += ssf_i - ssf_old;
 
                 // advance i-period pointer
                 idx_ip = wrap_inc(idx_ip, ring_len);
@@ -175,7 +171,6 @@ void reflex_batch_f32_precomp(const float* __restrict__ prices,
     if (series_len > 1) ring[1] = static_cast<double>(__ldg(prices + 1));
 
     double ssf_sum = ((series_len > 0) ? ring[0] : 0.0) + ((series_len > 1) ? ring[1] : 0.0);
-    double ssf_c = 0.0;
 
     const double inv_p = 1.0 / static_cast<double>(period);
     const double alpha = 0.5 * (1.0 + inv_p);
@@ -211,10 +206,7 @@ void reflex_batch_f32_precomp(const float* __restrict__ prices,
                 ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
                 out_row[i] = reflex_out_if_valid(ms, my_sum);
 
-                double y  = (ssf_i - ssf_old) - ssf_c;
-                double t2 = ssf_sum + y;
-                ssf_c     = (t2 - ssf_sum) - y;
-                ssf_sum   = t2;
+                ssf_sum += ssf_i - ssf_old;
 
                 idx_ip = wrap_inc(idx_ip, ring_len);
             }
@@ -296,9 +288,7 @@ void reflex_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const double my_sum = beta * ssf_t + alpha * ssf_ip - mean_lp;
 
         ms = fma(0.96, ms, 0.04 * my_sum * my_sum);
-        if (ms > 0.0 && isfinite(ms)) {
-            out_tm[t * num_series + series] = static_cast<float>(my_sum / sqrt(ms));
-        }
+        out_tm[t * num_series + series] = reflex_out_if_valid(ms, my_sum);
 
         // Match CPU scalar update exactly (no Kahan): ssf_sum += (ssf_t - ssf_ip)
         ssf_sum += ssf_t - ssf_ip;

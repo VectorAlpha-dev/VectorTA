@@ -779,21 +779,75 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series(rows: usize, len: usize) -> usize {
-        // prices + hp(unique ~ 1) + 4 outputs
+        // prices + hp(unique ~= rows) + 4 outputs
         let in_b = len * std::mem::size_of::<f32>();
-        let hp_b = len * std::mem::size_of::<f32>();
+        let hp_b = rows * len * std::mem::size_of::<f32>();
         let out_b = 4 * rows * len * std::mem::size_of::<f32>();
         in_b + hp_b + out_b + 32 * 1024 * 1024
     }
 
     struct BPBatchState {
         cuda: CudaBandpass,
-        prices: Vec<f32>,
-        sweep: BandPassBatchRange,
+        hp_rows: usize,
+        len: usize,
+        n_combos: usize,
+        d_hp: DeviceBuffer<f32>,
+        d_hp_idx: DeviceBuffer<i32>,
+        d_alpha: DeviceBuffer<f32>,
+        d_beta: DeviceBuffer<f32>,
+        d_trig: DeviceBuffer<i32>,
+        d_bp: DeviceBuffer<f32>,
+        d_bpn: DeviceBuffer<f32>,
+        d_sig: DeviceBuffer<f32>,
+        d_trg: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BPBatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.bandpass_batch_dev(&self.prices, &self.sweep);
+            let mut func = self
+                .cuda
+                .module
+                .get_function("bandpass_batch_from_hp_f32")
+                .expect("bandpass kernel");
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+            let bx = 128u32;
+            let gx = ((self.n_combos as u32) + bx - 1) / bx;
+            let grid: GridSize = (gx.max(1), 1, 1).into();
+            let block: BlockSize = (bx, 1, 1).into();
+
+            unsafe {
+                let mut hp_ptr = self.d_hp.as_device_ptr().as_raw();
+                let mut hp_rows_i = self.hp_rows as i32;
+                let mut len_i = self.len as i32;
+                let mut hp_idx_ptr = self.d_hp_idx.as_device_ptr().as_raw();
+                let mut alpha_ptr = self.d_alpha.as_device_ptr().as_raw();
+                let mut beta_ptr = self.d_beta.as_device_ptr().as_raw();
+                let mut trig_ptr = self.d_trig.as_device_ptr().as_raw();
+                let mut combos_i = self.n_combos as i32;
+                let mut bp_ptr = self.d_bp.as_device_ptr().as_raw();
+                let mut bpn_ptr = self.d_bpn.as_device_ptr().as_raw();
+                let mut sig_ptr = self.d_sig.as_device_ptr().as_raw();
+                let mut trg_ptr = self.d_trg.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut hp_ptr as *mut _ as *mut c_void,
+                    &mut hp_rows_i as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut hp_idx_ptr as *mut _ as *mut c_void,
+                    &mut alpha_ptr as *mut _ as *mut c_void,
+                    &mut beta_ptr as *mut _ as *mut c_void,
+                    &mut trig_ptr as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut bp_ptr as *mut _ as *mut c_void,
+                    &mut bpn_ptr as *mut _ as *mut c_void,
+                    &mut sig_ptr as *mut _ as *mut c_void,
+                    &mut trg_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("bandpass launch");
+            }
+            self.cuda.stream.synchronize().expect("bandpass sync");
         }
     }
 
@@ -805,28 +859,131 @@ pub mod benches {
             period: (16, 22, 2),
             bandwidth: (0.2, 0.4, 0.1),
         };
+
+        let (combos, first_valid, len) =
+            CudaBandpass::prepare_batch(&prices, &sweep).expect("bandpass prep");
+        let rows = combos.len();
+
+        let mut alphas = vec![0f32; rows];
+        let mut betas = vec![0f32; rows];
+        let mut trig = vec![0i32; rows];
+        let mut hp_row_idx = vec![0i32; rows];
+        let mut hp_map: HashMap<usize, usize> = HashMap::new();
+        let mut hp_unique: Vec<i32> = Vec::new();
+        for (i, p) in combos.iter().enumerate() {
+            let period = p.period.unwrap();
+            let bw = p.bandwidth.unwrap();
+            let (a, b, t, hp_p) = CudaBandpass::host_coeffs(period, bw);
+            alphas[i] = a;
+            betas[i] = b;
+            trig[i] = t;
+            let idx = *hp_map.entry(hp_p).or_insert_with(|| {
+                hp_unique.push(hp_p as i32);
+                hp_unique.len() - 1
+            });
+            hp_row_idx[i] = idx as i32;
+        }
+
+        // Compute HP table once using the existing highpass CUDA (device-resident).
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_hp_periods = DeviceBuffer::from_slice(&hp_unique).expect("d_hp_periods");
+        let hp_rows = hp_unique.len();
+        let hp_len = hp_rows * len;
+        let mut d_hp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(hp_len) }.expect("d_hp");
+        let cuda_hp = CudaHighpass::new(0).expect("cuda highpass");
+        cuda_hp
+            .highpass_batch_device(
+                &d_prices,
+                first_valid as i32,
+                &d_hp_periods,
+                len as i32,
+                hp_rows as i32,
+                &mut d_hp,
+            )
+            .expect("highpass batch device");
+        cuda_hp.synchronize().expect("highpass sync");
+
+        let d_hp_idx = DeviceBuffer::from_slice(&hp_row_idx).expect("d_hp_idx");
+        let d_alpha = DeviceBuffer::from_slice(&alphas).expect("d_alpha");
+        let d_beta = DeviceBuffer::from_slice(&betas).expect("d_beta");
+        let d_trig = DeviceBuffer::from_slice(&trig).expect("d_trig");
+
+        let total_out = rows * len;
+        let d_bp = unsafe { DeviceBuffer::<f32>::uninitialized(total_out) }.expect("d_bp");
+        let d_bpn = unsafe { DeviceBuffer::<f32>::uninitialized(total_out) }.expect("d_bpn");
+        let d_sig = unsafe { DeviceBuffer::<f32>::uninitialized(total_out) }.expect("d_sig");
+        let d_trg = unsafe { DeviceBuffer::<f32>::uninitialized(total_out) }.expect("d_trg");
+
         Box::new(BPBatchState {
             cuda,
-            prices,
-            sweep,
+            hp_rows,
+            len,
+            n_combos: rows,
+            d_hp,
+            d_hp_idx,
+            d_alpha,
+            d_beta,
+            d_trig,
+            d_bp,
+            d_bpn,
+            d_sig,
+            d_trg,
         })
     }
 
     struct BPManyState {
         cuda: CudaBandpass,
-        data_tm: Vec<f32>,
+        d_hp: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: BandPassParams,
+        alpha: f32,
+        beta: f32,
+        trig: i32,
+        grid: GridSize,
+        block: BlockSize,
+        d_bp: DeviceBuffer<f32>,
+        d_bpn: DeviceBuffer<f32>,
+        d_sig: DeviceBuffer<f32>,
+        d_trg: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BPManyState {
         fn launch(&mut self) {
-            let _ = self.cuda.bandpass_many_series_one_param_time_major_dev(
-                &self.data_tm,
-                self.cols,
-                self.rows,
-                &self.params,
-            );
+            let mut func = self
+                .cuda
+                .module
+                .get_function("bandpass_many_series_one_param_time_major_from_hp_f32")
+                .expect("bandpass many-series kernel");
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+            unsafe {
+                let mut hp_ptr = self.d_hp.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut alpha_f = self.alpha;
+                let mut beta_f = self.beta;
+                let mut trig_i = self.trig;
+                let mut bp_ptr = self.d_bp.as_device_ptr().as_raw();
+                let mut bpn_ptr = self.d_bpn.as_device_ptr().as_raw();
+                let mut sig_ptr = self.d_sig.as_device_ptr().as_raw();
+                let mut trg_ptr = self.d_trg.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut hp_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut alpha_f as *mut _ as *mut c_void,
+                    &mut beta_f as *mut _ as *mut c_void,
+                    &mut trig_i as *mut _ as *mut c_void,
+                    &mut bp_ptr as *mut _ as *mut c_void,
+                    &mut bpn_ptr as *mut _ as *mut c_void,
+                    &mut sig_ptr as *mut _ as *mut c_void,
+                    &mut trg_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("bandpass many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("bandpass many-series sync");
         }
     }
 
@@ -839,12 +996,81 @@ pub mod benches {
             period: Some(20),
             bandwidth: Some(0.3),
         };
+        let period = params.period.unwrap_or(0);
+        let bw = params.bandwidth.unwrap_or(0.0);
+        let (_a, _b, _trig, hp_period) = CudaBandpass::host_coeffs(period, bw);
+
+        // Prepare HP time-major once (device-resident) using CUDA highpass.
+        let mut first_valids = vec![0i32; cols];
+        for s in 0..cols {
+            let mut fv: Option<i32> = None;
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if !data_tm[idx].is_nan() {
+                    fv = Some(t as i32);
+                    break;
+                }
+            }
+            first_valids[s] = fv.unwrap_or(-1);
+        }
+        let cuda_hp = CudaHighpass::new(0).expect("cuda highpass");
+        let d_prices = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let mut d_hp: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_hp");
+        cuda_hp
+            .highpass_many_series_one_param_time_major_device(
+                &d_prices,
+                &d_first_valids,
+                hp_period as i32,
+                cols as i32,
+                rows as i32,
+                &mut d_hp,
+            )
+            .expect("highpass_many_series_one_param_time_major_device");
+        cuda_hp.synchronize().expect("highpass sync");
+
+        let (alpha, beta, trig, _hp) = CudaBandpass::host_coeffs(period, bw);
+
+        let total = cols * rows;
+        let d_bp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_bp");
+        let d_bpn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_bpn");
+        let d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_sig");
+        let d_trg: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_trg");
+
+        let mut func = cuda
+            .module
+            .get_function("bandpass_many_series_one_param_time_major_from_hp_f32")
+            .expect("bandpass_many_series_one_param_time_major_from_hp_f32");
+        let (suggested, _mg) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((256, 0));
+        let bx = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::Auto => suggested.clamp(128, 256),
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.clamp(32, 256),
+        };
+        let grid_x = ((cols as u32) + bx - 1) / bx;
+        let grid_tuple = (grid_x.max(1), 1, 1);
+        let block_tuple = (bx, 1, 1);
+        cuda.validate_launch_dims(grid_tuple, block_tuple)
+            .expect("bandpass many-series launch dims");
+        let grid: GridSize = grid_tuple.into();
+        let block: BlockSize = block_tuple.into();
+        cuda.stream.synchronize().expect("bandpass prep sync");
         Box::new(BPManyState {
             cuda,
-            data_tm,
+            d_hp,
             cols,
             rows,
-            params,
+            alpha,
+            beta,
+            trig,
+            grid,
+            block,
+            d_bp,
+            d_bpn,
+            d_sig,
+            d_trg,
         })
     }
 
@@ -857,14 +1083,19 @@ pub mod benches {
                 "1m",
                 prep_one_series,
             )
-            .with_mem_required(bytes_one_series(6, ONE_SERIES_LEN)),
+            .with_mem_required(bytes_one_series(12, ONE_SERIES_LEN)),
             CudaBenchScenario::new(
                 "bandpass",
                 "many_series_one_param",
                 "bandpass_cuda_many_series_one_param",
                 "tm",
                 prep_many_series_one_param,
-            ),
+            )
+            .with_mem_required({
+                let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
+                // peak during prep: prices + hp + 4 outputs
+                (6 * elems * std::mem::size_of::<f32>()) + (MANY_SERIES_COLS * std::mem::size_of::<i32>()) + 64 * 1024 * 1024
+            }),
         ]
     }
 }

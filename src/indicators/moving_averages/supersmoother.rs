@@ -246,7 +246,7 @@ pub fn supersmoother_with_kernel(
 
     // ---------- 2. choose kernel ----------
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -305,7 +305,7 @@ pub fn supersmoother_into_slice(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     unsafe {
@@ -367,7 +367,7 @@ pub fn supersmoother_compute_into(
 
     // Match with_kernel dispatch semantics
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -620,7 +620,7 @@ pub struct SuperSmootherBatchRange {
 impl Default for SuperSmootherBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 100, 1),
+            period: (14, 263, 1),
         }
     }
 }

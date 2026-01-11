@@ -63,23 +63,50 @@ extern "C" __global__ void chop_batch_f32(
     const int base = combo * series_len;
     float* __restrict__ row_out = out + base;
 
-    // Initialize row with NaNs in parallel (warmup semantics).
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        row_out[i] = NAN;
-    }
-    __syncthreads();
-
-    // Single thread performs sequential scan per row.
-    if (threadIdx.x != 0) return;
-
     const int period = periods[combo];
     const int drift  = drifts[combo];
     const float scalar = scalars[combo];
 
-    if (UNLIKELY(period <= 0 || drift <= 0)) return;
-    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) return;
+    auto fill_all_nan = [&]() {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            row_out[i] = NAN;
+        }
+    };
+
+    if (UNLIKELY(period <= 0 || drift <= 0 ||
+                 first_valid < 0 || first_valid >= series_len)) {
+        fill_all_nan();
+        return;
+    }
     const int tail = series_len - first_valid;
-    if (UNLIKELY(tail < period)) return;
+    if (UNLIKELY(tail < period)) {
+        fill_all_nan();
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+    for (int i = threadIdx.x; i < warm; i += blockDim.x) {
+        row_out[i] = NAN;
+    }
+
+    __shared__ int sh_k;
+    __shared__ int sh_k_ok;
+    if (threadIdx.x == 0) {
+        sh_k = log2_tbl[period];
+        sh_k_ok = (sh_k >= 0 && sh_k < level_count) ? 1 : 0;
+    }
+    __syncthreads();
+
+    if (UNLIKELY(sh_k_ok == 0)) {
+        // Rare invalid sparse-table state; keep semantics obvious.
+        fill_all_nan();
+        return;
+    }
+
+    // Single thread performs sequential scan per row.
+    if (threadIdx.x != 0) return;
+
+    const int k = sh_k;
 
     // Precompute invariants
     const float inv_drift = 1.0f / (float)drift;
@@ -89,8 +116,6 @@ extern "C" __global__ void chop_batch_f32(
     const float scale_over_log2p = scalar * inv_log2p;
 
     // Sparse table invariants (depend only on `period`)
-    const int k = log2_tbl[period];
-    if (UNLIKELY(k < 0 || k >= level_count)) return; // row already NaN-inited
     const int offset = 1 << k;
     const int level_base = level_offsets[k];
 
@@ -121,7 +146,6 @@ extern "C" __global__ void chop_batch_f32(
 
     // prev_close initialization
     float prev_close = close[first_valid];
-    const int warm = first_valid + period - 1;
 
     for (int t = first_valid; t < series_len; ++t) {
         const float hi = high[t];

@@ -798,7 +798,7 @@ pub struct DemaBatchRange {
 impl Default for DemaBatchRange {
     fn default() -> Self {
         Self {
-            period: (30, 240, 1),
+            period: (30, 279, 1),
         }
     }
 }
@@ -923,7 +923,7 @@ pub fn dema_batch_par_slice(
 }
 
 #[inline(always)]
-fn dema_batch_with_kernel(
+pub(crate) fn dema_batch_with_kernel(
     data: &[f64],
     sweep: &DemaBatchRange,
     k: Kernel,
@@ -1496,7 +1496,10 @@ mod tests {
                                 if y.is_finite() {
                                     let expected = a * y + b;
                                     let diff = (yt - expected).abs();
-                                    let tol = 1e-9_f64.max(expected.abs() * 1e-9);
+                                    // Affine equivariance is exact in real arithmetic, but floating-point
+                                    // cancellation can introduce small absolute error when `expected` is
+                                    // near zero (especially for DEMA's `2*ema - ema(ema)` form).
+                                    let tol = 1e-7_f64.max(expected.abs() * 1e-9);
                                     let ulp = yt.to_bits().abs_diff(expected.to_bits());
                                     prop_assert!(
                                         diff <= tol || ulp <= 8,

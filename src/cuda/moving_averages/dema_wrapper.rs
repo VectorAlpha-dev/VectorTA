@@ -441,9 +441,6 @@ impl CudaDema {
             return Ok(());
         }
 
-        // Prefill outputs with canonical qNaN on this stream
-        memset_f32_qnan_async(&self.stream, d_out)?;
-
         let func = self
             .module
             .get_function("dema_batch_f32")
@@ -614,9 +611,6 @@ impl CudaDema {
             .get_function("dema_many_series_one_param_time_major_f32")
             .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_many_series_one_param_time_major_f32" })?;
 
-        // Prefill output with qNaN (entire time-major buffer)
-        memset_f32_qnan_async(&self.stream, d_out_tm)?;
-
         // Warp-mapped launch config
         let mut block_x_req: u32 = 128; // default 4 warps per block
         if let ManySeriesKernelPolicy::OneD { block_x: bx } = self.policy.many_series {
@@ -737,28 +731,6 @@ impl CudaDema {
     }
 }
 
-// --- utility: async memset to canonical quiet-NaN (0x7FC0_0000) ---
-#[inline]
-fn memset_f32_qnan_async(
-    stream: &Stream,
-    buf: &mut DeviceBuffer<f32>,
-) -> Result<(), CudaDemaError> {
-    const QNAN_BITS: u32 = 0x7FC0_0000;
-    unsafe {
-        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw();
-        let n: usize = buf.len();
-        let st: cu::CUstream = stream.as_inner();
-        let res = cu::cuMemsetD32Async(ptr, QNAN_BITS, n, st);
-        match res {
-            cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(CudaDemaError::InvalidInput(format!(
-                "cuMemsetD32Async failed: {:?}",
-                e
-            ))),
-        }
-    }
-}
-
 fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
@@ -784,21 +756,143 @@ fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::dema::DemaParams;
 
-    define_ma_period_benches!(
-        dema_benches,
-        CudaDema,
-        crate::indicators::moving_averages::dema::DemaBatchRange,
-        crate::indicators::moving_averages::dema::DemaParams,
-        dema_batch_dev,
-        dema_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::dema::DemaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::dema::DemaParams { period: Some(64) },
-        "dema",
-        "dema"
-    );
-    pub use dema_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct DemaBatchDevState {
+        cuda: CudaDema,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DemaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.first_valid,
+                    self.rows,
+                    &mut self.d_out,
+                )
+                .expect("dema batch kernel");
+            self.cuda.stream.synchronize().expect("dema sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDema::new(0).expect("cuda dema");
+        let price = gen_series(ONE_SERIES_LEN);
+        let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let periods_i32: Vec<i32> = (10..(10 + PARAM_SWEEP)).map(|p| p as i32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN * PARAM_SWEEP) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(DemaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            rows: PARAM_SWEEP,
+            d_out,
+        })
+    }
+
+    struct DemaManyDevState {
+        cuda: CudaDema,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: i32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DemaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .dema_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("dema many-series kernel");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDema::new(0).expect("cuda dema");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = DemaParams { period: Some(64) };
+        let period = params.period.unwrap() as i32;
+        let mut first_valids: Vec<i32> = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let v = data_tm[t * cols + s];
+                if v.is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(DemaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new("dema", "one_series_many_params", "dema_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new("dema", "many_series_one_param", "dema_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
+                .with_sample_size(5)
+                .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

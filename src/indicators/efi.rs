@@ -545,7 +545,7 @@ pub struct EfiBatchRange {
 impl Default for EfiBatchRange {
     fn default() -> Self {
         Self {
-            period: (13, 100, 1),
+            period: (13, 262, 1),
         }
     }
 }

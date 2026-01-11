@@ -642,7 +642,7 @@ fn macd_prepare<'a>(
     let signal_warmup = first + slow + signal - 2;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((
@@ -1443,7 +1443,7 @@ impl Default for MacdBatchRange {
     fn default() -> Self {
         Self {
             fast_period: (12, 12, 0),
-            slow_period: (26, 26, 0),
+            slow_period: (26, 275, 1),
             signal_period: (9, 9, 0),
             ma_type: ("ema".to_string(), "ema".to_string(), "".to_string()),
         }

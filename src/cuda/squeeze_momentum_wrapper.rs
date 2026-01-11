@@ -881,19 +881,62 @@ pub mod benches {
         in_bytes + out_bytes + pre + 64 * 1024 * 1024
     }
 
-    struct SmiBatchState {
+    struct SmiBatchDeviceState {
         cuda: CudaSqueezeMomentum,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        sweep: SqueezeMomentumBatchRange,
+        d_h: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
+        d_c: DeviceBuffer<f32>,
+        d_lbb: DeviceBuffer<i32>,
+        d_mbb: DeviceBuffer<f32>,
+        d_lkc: DeviceBuffer<i32>,
+        d_mkc: DeviceBuffer<f32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        k: i32,
+        max_lkc: usize,
+        // Precompute buffers (params-independent; computed once in prep)
+        d_tr: DeviceBuffer<f32>,
+        d_ps_close: DeviceBuffer<f32>,
+        d_ps_close2: DeviceBuffer<f32>,
+        d_ps_tr: DeviceBuffer<f32>,
+        d_log2: DeviceBuffer<i32>,
+        d_st_max: DeviceBuffer<f32>,
+        d_st_min: DeviceBuffer<f32>,
+        // Outputs
+        d_sq: DeviceBuffer<f32>,
+        d_mo: DeviceBuffer<f32>,
+        d_si: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for SmiBatchState {
+    impl CudaBenchState for SmiBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .squeeze_momentum_batch_dev(&self.h, &self.l, &self.c, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_kernel_opt(
+                    &self.d_h,
+                    &self.d_l,
+                    &self.d_c,
+                    &self.d_lbb,
+                    &self.d_mbb,
+                    &self.d_lkc,
+                    &self.d_mkc,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &self.d_tr,
+                    &self.d_ps_close,
+                    &self.d_ps_close2,
+                    &self.d_ps_tr,
+                    &self.d_log2,
+                    &self.d_st_max,
+                    &self.d_st_min,
+                    self.k,
+                    self.max_lkc,
+                    &mut self.d_sq,
+                    &mut self.d_mo,
+                    &mut self.d_si,
+                )
+                .expect("smi launch");
+            self.cuda.stream.synchronize().expect("smi sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -913,12 +956,90 @@ pub mod benches {
             length_kc: (10, 10, 0),
             mult_kc: (1.5, 1.5, 0.0),
         };
-        Box::new(SmiBatchState {
+
+        let (combos, first_valid, len) =
+            CudaSqueezeMomentum::prepare_batch_inputs(&h, &l, &c, &sweep).expect("prep inputs");
+        let n_combos = combos.len();
+        let v_lbb: Vec<i32> = combos.iter().map(|c| c.lbb as i32).collect();
+        let v_mbb: Vec<f32> = combos.iter().map(|c| c.mbb).collect();
+        let v_lkc: Vec<i32> = combos.iter().map(|c| c.lkc as i32).collect();
+        let v_mkc: Vec<f32> = combos.iter().map(|c| c.mkc).collect();
+        let max_lkc = combos.iter().map(|c| c.lkc).max().unwrap_or(1);
+
+        // Upload inputs/params once
+        let d_h = DeviceBuffer::from_slice(&h).expect("d_h H2D");
+        let d_l = DeviceBuffer::from_slice(&l).expect("d_l H2D");
+        let d_c = DeviceBuffer::from_slice(&c).expect("d_c H2D");
+        let d_lbb = DeviceBuffer::from_slice(&v_lbb).expect("d_lbb H2D");
+        let d_mbb = DeviceBuffer::from_slice(&v_mbb).expect("d_mbb H2D");
+        let d_lkc = DeviceBuffer::from_slice(&v_lkc).expect("d_lkc H2D");
+        let d_mkc = DeviceBuffer::from_slice(&v_mkc).expect("d_mkc H2D");
+
+        // Allocate + compute precompute buffers once per series
+        let n = len;
+        let k = CudaSqueezeMomentum::sparse_k(len);
+        let k_levels_us = k as usize;
+        let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_tr");
+        let mut d_ps_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.expect("d_ps_close");
+        let mut d_ps_close2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.expect("d_ps_close2");
+        let mut d_ps_tr: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.expect("d_ps_tr");
+        let mut d_log2: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(n + 1) }.expect("d_log2");
+        let st_size = k_levels_us * n;
+        let mut d_st_max: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(st_size) }.expect("d_st_max");
+        let mut d_st_min: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(st_size) }.expect("d_st_min");
+        cuda.launch_precompute(
+            &d_h,
+            &d_l,
+            &d_c,
+            len,
+            &mut d_tr,
+            &mut d_ps_close,
+            &mut d_ps_close2,
+            &mut d_ps_tr,
+            &mut d_log2,
+            &mut d_st_max,
+            &mut d_st_min,
+            k,
+        )
+        .expect("precompute");
+
+        // Allocate outputs once
+        let elems = n_combos * len;
+        let d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_sq");
+        let d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_mo");
+        let d_si: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_si");
+        cuda.stream.synchronize().expect("smi prep sync");
+
+        Box::new(SmiBatchDeviceState {
             cuda,
-            h,
-            l,
-            c,
-            sweep,
+            d_h,
+            d_l,
+            d_c,
+            d_lbb,
+            d_mbb,
+            d_lkc,
+            d_mkc,
+            len,
+            n_combos,
+            first_valid,
+            k,
+            max_lkc,
+            d_tr,
+            d_ps_close,
+            d_ps_close2,
+            d_ps_tr,
+            d_log2,
+            d_st_max,
+            d_st_min,
+            d_sq,
+            d_mo,
+            d_si,
         })
     }
 

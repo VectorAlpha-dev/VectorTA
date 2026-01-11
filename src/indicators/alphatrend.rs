@@ -473,7 +473,7 @@ fn alphatrend_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1438,7 +1438,7 @@ pub fn alphatrend_js(
     let mut k1 = vec![0.0; close.len()];
     let mut k2 = vec![0.0; close.len()];
 
-    alphatrend_into_slices(&mut k1, &mut k2, &input, detect_best_kernel())
+    alphatrend_into_slices(&mut k1, &mut k2, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Return structured output with metadata
@@ -1511,7 +1511,7 @@ pub fn alphatrend_into_flat(
             no_volume: Some(no_volume),
         };
         let input = AlphaTrendInput::from_slices(open, high, low, close, volume, params);
-        alphatrend_into_slices(k1, k2, &input, detect_best_kernel())
+        alphatrend_into_slices(k1, k2, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -1541,7 +1541,7 @@ impl Default for AlphaTrendBatchRange {
     fn default() -> Self {
         Self {
             coeff: (1.0, 1.0, 0.0),
-            period: (14, 240, 1),
+            period: (14, 263, 1),
             no_volume: false,
         }
     }
@@ -2781,7 +2781,7 @@ pub fn alphatrend_into(
         let out_k1 = std::slice::from_raw_parts_mut(out_k1_ptr, len);
         let out_k2 = std::slice::from_raw_parts_mut(out_k2_ptr, len);
 
-        alphatrend_into_slices(out_k1, out_k2, &input, detect_best_kernel())
+        alphatrend_into_slices(out_k1, out_k2, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(())
@@ -2825,7 +2825,7 @@ impl AlphaTrendContext {
             coeff,
             period,
             no_volume,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Auto,
         })
     }
 

@@ -1223,7 +1223,7 @@ pub struct BollingerBandsWidthBatchRange {
 impl Default for BollingerBandsWidthBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 60, 1),
+            period: (20, 269, 1),
             devup: (2.0, 2.0, 0.0),
             devdn: (2.0, 2.0, 0.0),
         }
@@ -2752,7 +2752,7 @@ pub fn bollinger_bands_width_js(
     };
     let input = BollingerBandsWidthInput::from_slice(data, params);
     let mut out = vec![0.0; data.len()];
-    bollinger_bands_width_into_slice(&mut out, &input, detect_best_kernel())
+    bollinger_bands_width_into_slice(&mut out, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(out)
 }
@@ -2902,11 +2902,11 @@ pub fn bollinger_bands_width_into(
         let input = BollingerBandsWidthInput::from_slice(data, params);
         if core::ptr::eq(in_ptr, out_ptr as *const f64) {
             let mut tmp = vec![0.0; len];
-            bollinger_bands_width_into_slice(&mut tmp, &input, detect_best_kernel())
+            bollinger_bands_width_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             out.copy_from_slice(&tmp);
         } else {
-            bollinger_bands_width_into_slice(out, &input, detect_best_kernel())
+            bollinger_bands_width_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }

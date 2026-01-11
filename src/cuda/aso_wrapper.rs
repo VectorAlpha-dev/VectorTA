@@ -571,20 +571,48 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct AsoBatchState {
+    struct AsoBatchDeviceState {
         cuda: CudaAso,
-        o: Vec<f32>,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        sweep: AsoBatchRange,
+        d_open: DeviceBuffer<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_modes: DeviceBuffer<i32>,
+        d_log2: DeviceBuffer<i32>,
+        d_offsets: DeviceBuffer<i32>,
+        d_st_max: DeviceBuffer<f32>,
+        d_st_min: DeviceBuffer<f32>,
+        d_bulls: DeviceBuffer<f32>,
+        d_bears: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_period: usize,
     }
-    impl CudaBenchState for AsoBatchState {
+    impl CudaBenchState for AsoBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .aso_batch_dev(&self.o, &self.h, &self.l, &self.c, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_open,
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_periods,
+                    &self.d_modes,
+                    &self.d_log2,
+                    &self.d_offsets,
+                    &self.d_st_max,
+                    &self.d_st_min,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    self.max_period,
+                    &mut self.d_bulls,
+                    &mut self.d_bears,
+                )
+                .expect("aso launch");
+            self.cuda.stream.synchronize().expect("aso sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -608,7 +636,52 @@ pub mod benches {
             period: (10, 10 + PARAMS - 1, 1),
             mode: (0, 2, 1),
         };
-        Box::new(AsoBatchState { cuda, o, h, l, c, sweep })
+
+        let (combos, first_valid, series_len, max_period) =
+            prepare_batch_inputs(&o, &h, &l, &c, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let periods: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+        let modes: Vec<i32> = combos.iter().map(|p| p.mode.unwrap() as i32).collect();
+        let tables = build_willr_gpu_tables(&h, &l);
+
+        let d_open = DeviceBuffer::from_slice(&o).expect("d_open H2D");
+        let d_high = DeviceBuffer::from_slice(&h).expect("d_high H2D");
+        let d_low = DeviceBuffer::from_slice(&l).expect("d_low H2D");
+        let d_close = DeviceBuffer::from_slice(&c).expect("d_close H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods H2D");
+        let d_modes = DeviceBuffer::from_slice(&modes).expect("d_modes H2D");
+
+        let d_log2 = DeviceBuffer::from_slice(&tables.log2).expect("d_log2 H2D");
+        let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets).expect("d_offsets H2D");
+        let d_st_max = DeviceBuffer::from_slice(&tables.st_max).expect("d_st_max H2D");
+        let d_st_min = DeviceBuffer::from_slice(&tables.st_min).expect("d_st_min H2D");
+
+        let elems = n_combos * series_len;
+        let d_bulls: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_bulls");
+        let d_bears: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }.expect("d_bears");
+        cuda.stream.synchronize().expect("aso prep sync");
+
+        Box::new(AsoBatchDeviceState {
+            cuda,
+            d_open,
+            d_high,
+            d_low,
+            d_close,
+            d_periods,
+            d_modes,
+            d_log2,
+            d_offsets,
+            d_st_max,
+            d_st_min,
+            d_bulls,
+            d_bears,
+            series_len,
+            first_valid,
+            n_combos,
+            max_period,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

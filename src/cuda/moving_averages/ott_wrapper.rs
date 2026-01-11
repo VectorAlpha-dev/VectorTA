@@ -299,6 +299,71 @@ impl CudaOtt {
                 name: "ott_apply_single_f32",
             })?;
 
+        // Fast path: if this sweep is entirely VAR, launch the integrated batch kernel once.
+        // This avoids the extremely slow per-combo (n_combos=1) loop and matches the
+        // "one series x many params" batch intent.
+        let all_var = combos.iter().all(|p| {
+            p.ma_type
+                .as_deref()
+                .unwrap_or("VAR")
+                .eq_ignore_ascii_case("VAR")
+        });
+        if all_var {
+            if let Some(ref mut func) = f_var {
+                let mut periods_host: Vec<i32> = Vec::with_capacity(rows);
+                let mut percents_host: Vec<f32> = Vec::with_capacity(rows);
+                for p in &combos {
+                    let period = p.period.unwrap_or(2);
+                    let percent = p.percent.unwrap_or(1.4) as f32;
+                    if period == 0 {
+                        return Err(CudaOttError::InvalidInput("period must be positive".into()));
+                    }
+                    if !percent.is_finite() {
+                        return Err(CudaOttError::InvalidInput("percent must be finite".into()));
+                    }
+                    if period > i32::MAX as usize {
+                        return Err(CudaOttError::InvalidInput(
+                            "period exceeds CUDA i32 range".into(),
+                        ));
+                    }
+                    periods_host.push(period as i32);
+                    percents_host.push(percent);
+                }
+
+                let mut d_periods: DeviceBuffer<i32> =
+                    unsafe { DeviceBuffer::uninitialized(rows) }?;
+                let mut d_percents: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(rows) }?;
+                unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
+                unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
+
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                    let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                    let mut series_len_i = cols as i32;
+                    let mut n_combos_i = rows as i32;
+                    let mut out_ptr = d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percents_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
+                    let block: BlockSize = (1, 1, 1).into();
+                    self.stream
+                        .launch(func, grid, block, 0, args)
+                        .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                }
+
+                self.stream.synchronize()?;
+                return Ok(DeviceArrayF32 { buf: d_out, rows, cols });
+            }
+        }
+
         // Reusable 1-element device buffers for var path
         let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -593,29 +658,206 @@ impl CudaOtt {
 // ---------- Benches ----------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::ott::OttParams;
+    use std::ffi::c_void;
 
-    define_ma_period_benches!(
-        ott_benches,
-        CudaOtt,
-        crate::indicators::ott::OttBatchRange,
-        crate::indicators::ott::OttParams,
-        ott_batch_dev,
-        ott_many_series_one_param_time_major_dev,
-        crate::indicators::ott::OttBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct OttBatchVarDevState {
+        cuda: CudaOtt,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_percents: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for OttBatchVarDevState {
+        fn launch(&mut self) {
+            let out_elems = self.series_len * self.n_combos;
+            self.cuda
+                .memset_nan32_async(self.d_out.as_device_ptr().as_raw() as u64, out_elems)
+                .expect("ott memset nan");
+
+            let mut func = self
+                .cuda
+                .module
+                .get_function("ott_from_var_batch_f32")
+                .expect("ott_from_var_batch_f32");
+            unsafe {
+                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut percents_ptr = self.d_percents.as_device_ptr().as_raw();
+                let mut series_len_i = self.series_len as i32;
+                let mut n_combos_i = self.n_combos as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut percents_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let grid: GridSize = ((self.n_combos as u32).max(1), 1, 1).into();
+                let block: BlockSize = (1, 1, 1).into();
+                self.cuda
+                    .stream
+                    .launch(&mut func, grid, block, 0, args)
+                    .expect("ott_from_var_batch_f32 launch");
+            }
+            self.cuda.stream.synchronize().expect("ott sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaOtt::new(0).expect("cuda ott");
+        let prices = gen_series(ONE_SERIES_LEN);
+        let sweep = crate::indicators::ott::OttBatchRange {
             period: (2, 2 + PARAM_SWEEP - 1, 1),
-            percent: (0.2, 5.0, (5.0 - 0.2) / (PARAM_SWEEP - 1) as f64),
-            ma_types: vec!["VAR".to_string()]
-        },
-        crate::indicators::ott::OttParams {
+            percent: (1.4, 1.4, 0.0),
+            ma_types: vec!["VAR".to_string()],
+        };
+        let combos = expand_combos(&sweep).expect("ott expand combos");
+        let n_combos = combos.len();
+        let periods_host: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(2) as i32).collect();
+        let percents_host: Vec<f32> = combos.iter().map(|p| p.percent.unwrap_or(1.4) as f32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_host).expect("d_periods");
+        let d_percents = DeviceBuffer::from_slice(&percents_host).expect("d_percents");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(prices.len().checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(OttBatchVarDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_percents,
+            series_len: prices.len(),
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct OttManyVarDevState {
+        cuda: CudaOtt,
+        d_in: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        percent: f32,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for OttManyVarDevState {
+        fn launch(&mut self) {
+            let out_elems = self.cols * self.rows;
+            self.cuda
+                .memset_nan32_async(self.d_out.as_device_ptr().as_raw() as u64, out_elems)
+                .expect("ott memset nan");
+
+            let mut func = self
+                .cuda
+                .module
+                .get_function("ott_from_var_many_series_one_param_f32")
+                .expect("ott_from_var_many_series_one_param_f32");
+            unsafe {
+                let mut in_ptr = self.d_in.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut period_i = self.period as i32;
+                let mut pct = self.percent;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut in_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut pct as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                let grid: GridSize = ((self.rows as u32).max(1), 1, 1).into();
+                let block: BlockSize = (1, 1, 1).into();
+                self.cuda
+                    .stream
+                    .launch(&mut func, grid, block, 0, args)
+                    .expect("ott_from_var_many_series_one_param_f32 launch");
+            }
+            self.cuda.stream.synchronize().expect("ott sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaOtt::new(0).expect("cuda ott");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = OttParams {
             period: Some(16),
             percent: Some(1.4),
-            ma_type: Some("VAR".to_string())
-        },
-        "ott",
-        "ott"
-    );
-    pub use ott_benches::bench_profiles;
+            ma_type: Some("VAR".to_string()),
+        };
+
+        let d_in = DeviceBuffer::from_slice(&data_tm).expect("d_in");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(OttManyVarDevState {
+            cuda,
+            d_in,
+            cols,
+            rows,
+            period: params.period.unwrap_or(16),
+            percent: params.percent.unwrap_or(1.4) as f32,
+            d_out,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "ott",
+                "one_series_many_params",
+                "ott_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ott",
+                "many_series_one_param",
+                "ott_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_combos(range: &OttBatchRange) -> Result<Vec<OttParams>, CudaOttError> {

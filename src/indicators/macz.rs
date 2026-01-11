@@ -335,7 +335,7 @@ impl MaczBuilder {
 
     pub fn apply_slice(self, data: &[f64]) -> Result<MaczOutput, MaczError> {
         let kernel = if self.kernel == Kernel::Auto {
-            detect_best_kernel()
+            Kernel::Scalar
         } else {
             self.kernel
         };
@@ -346,7 +346,7 @@ impl MaczBuilder {
 
     pub fn apply_candles(self, c: &Candles, src: &str) -> Result<MaczOutput, MaczError> {
         let k = if self.kernel == Kernel::Auto {
-            detect_best_kernel()
+            Kernel::Scalar
         } else {
             self.kernel
         };
@@ -360,7 +360,7 @@ impl MaczBuilder {
         volume: &[f64],
     ) -> Result<MaczOutput, MaczError> {
         let kernel = if self.kernel == Kernel::Auto {
-            detect_best_kernel()
+            Kernel::Scalar
         } else {
             self.kernel
         };
@@ -372,7 +372,7 @@ impl MaczBuilder {
     #[inline(always)]
     pub fn apply(self, c: &Candles) -> Result<MaczOutput, MaczError> {
         let k = if self.kernel == Kernel::Auto {
-            detect_best_kernel()
+            Kernel::Scalar
         } else {
             self.kernel
         };
@@ -1305,8 +1305,8 @@ impl Default for MaczBatchRange {
             signal_length: (9, 9, 1),
             lengthz: (20, 20, 1),
             length_stdev: (25, 25, 1),
-            a: (1.0, 1.0, 0.1),
-            b: (1.0, 1.0, 0.1),
+            a: (1.0, 1.249, 0.001),
+            b: (1.0, 1.0, 0.0),
         }
     }
 }
@@ -2817,7 +2817,7 @@ pub fn macz_into(
         };
         let input = MaczInput::from_slice(data, params);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
-        macz_into_slice(out, &input, detect_best_kernel())
+        macz_into_slice(out, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -2857,7 +2857,7 @@ pub fn macz_wasm_zero_copy(
         };
 
         let input = MaczInput::from_slice(data, params);
-        macz_into_slice(out_slice, &input, detect_best_kernel())
+        macz_into_slice(out_slice, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -3059,7 +3059,7 @@ pub fn macz_batch_zero_copy(
             MaczInput::from_slice(data, params)
         };
 
-        macz_into_slice(&mut out_slice[..data.len()], &input, detect_best_kernel())
+        macz_into_slice(&mut out_slice[..data.len()], &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(num_combinations)

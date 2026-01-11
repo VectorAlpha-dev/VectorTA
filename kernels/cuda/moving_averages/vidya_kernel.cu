@@ -137,6 +137,138 @@ void vidya_batch_f32(const float* __restrict__ prices,
     }
 }
 
+// Prefix-scan batch kernel: uses host-provided prefix sums of x and x^2 to compute
+// rolling mean/variance in O(1), then applies a warp-scan of affine transforms
+// for the EMA-style recurrence (32 timesteps per iteration).
+//
+// prefix_sum / prefix_sum2 are length-(series_len+1) arrays where:
+//   prefix_sum[0] = 0, prefix_sum[t+1] = sum_{i=0..t} x[i]   (NaN treated as 0 on host)
+//   prefix_sum2[0] = 0, prefix_sum2[t+1] = sum_{i=0..t} x[i]^2 (NaN treated as 0 on host)
+extern "C" __global__ __launch_bounds__(32)
+void vidya_batch_prefix_f32(const float* __restrict__ prices,
+                            const double* __restrict__ prefix_sum,
+                            const double* __restrict__ prefix_sum2,
+                            const int*   __restrict__ short_periods,
+                            const int*   __restrict__ long_periods,
+                            const float* __restrict__ alphas,
+                            int series_len,
+                            int first_valid,
+                            int n_combos,
+                            float* __restrict__ out) {
+    constexpr int WARP = 32;
+
+    const int combo = blockIdx.x;
+    if (combo >= n_combos || series_len <= 0) return;
+
+    const int sp = short_periods[combo];
+    const int lp = long_periods[combo];
+    const float alpha = alphas[combo];
+    const int base = combo * series_len;
+
+    const bool invalid =
+        (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
+        (first_valid < 0) || (first_valid >= series_len) ||
+        (lp > (series_len - first_valid));
+
+    if (invalid) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out[base + i] = CUDART_NAN_F;
+        }
+        return;
+    }
+
+    const int warm_end = first_valid + lp;
+    const int idx_m2 = warm_end - 2;
+    const int idx_m1 = warm_end - 1;
+    const int warmup_prefix = idx_m2;
+
+    for (int i = threadIdx.x; i < warmup_prefix; i += blockDim.x) {
+        out[base + i] = CUDART_NAN_F;
+    }
+
+    if (threadIdx.x == 0) {
+        out[base + idx_m2] = prices[idx_m2];
+    }
+
+    const int lane = threadIdx.x;
+    if (lane >= WARP) return;
+
+    float prev = prices[idx_m2];
+    const double sp_inv = 1.0 / static_cast<double>(sp);
+    const double lp_inv = 1.0 / static_cast<double>(lp);
+
+    int chunk_start = idx_m1;
+    for (; (chunk_start + (WARP - 1)) < series_len; chunk_start += WARP) {
+        const int t = chunk_start + lane;
+        const int tp1 = t + 1;
+
+        const double long_sum = prefix_sum[tp1] - prefix_sum[tp1 - lp];
+        const double long_sum2 = prefix_sum2[tp1] - prefix_sum2[tp1 - lp];
+        const double short_sum = prefix_sum[tp1] - prefix_sum[tp1 - sp];
+        const double short_sum2 = prefix_sum2[tp1] - prefix_sum2[tp1 - sp];
+
+        const double short_mean = short_sum * sp_inv;
+        const double long_mean  = long_sum * lp_inv;
+        double short_var = fma(-short_mean, short_mean, short_sum2 * sp_inv);
+        double long_var  = fma(-long_mean,  long_mean,  long_sum2  * lp_inv);
+        short_var = fmax(0.0, short_var);
+        long_var  = fmax(0.0, long_var);
+
+        float k = 0.0f;
+        if (long_var > 0.0 && short_var > 0.0) {
+            const float ratio = static_cast<float>(short_var / long_var);
+            k = alpha * sqrtf(ratio);
+        }
+
+        float a = 1.0f - k;
+        float b = k * prices[t];
+
+        const unsigned m = 0xFFFFFFFFu;
+        #pragma unroll
+        for (int off = 1; off < WARP; off <<= 1) {
+            const float a_up = __shfl_up_sync(m, a, off);
+            const float b_up = __shfl_up_sync(m, b, off);
+            if (lane >= off) {
+                b = fmaf(a, b_up, b);
+                a = a * a_up;
+            }
+        }
+
+        const float x = fmaf(a, prev, b);
+        out[base + t] = x;
+
+        prev = __shfl_sync(m, x, WARP - 1);
+    }
+
+    if (lane == 0) {
+        float val = prev;
+        for (int t = chunk_start; t < series_len; ++t) {
+            const int tp1 = t + 1;
+            const double long_sum = prefix_sum[tp1] - prefix_sum[tp1 - lp];
+            const double long_sum2 = prefix_sum2[tp1] - prefix_sum2[tp1 - lp];
+            const double short_sum = prefix_sum[tp1] - prefix_sum[tp1 - sp];
+            const double short_sum2 = prefix_sum2[tp1] - prefix_sum2[tp1 - sp];
+
+            const double short_mean = short_sum * sp_inv;
+            const double long_mean  = long_sum * lp_inv;
+            double short_var = fma(-short_mean, short_mean, short_sum2 * sp_inv);
+            double long_var  = fma(-long_mean,  long_mean,  long_sum2  * lp_inv);
+            short_var = fmax(0.0, short_var);
+            long_var  = fmax(0.0, long_var);
+
+            float k = 0.0f;
+            if (long_var > 0.0 && short_var > 0.0) {
+                const float ratio = static_cast<float>(short_var / long_var);
+                k = alpha * sqrtf(ratio);
+            }
+
+            const float x = prices[t];
+            val = fmaf(x - val, k, val);
+            out[base + t] = val;
+        }
+    }
+}
+
 extern "C" __global__
 void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const int*   __restrict__ first_valids,

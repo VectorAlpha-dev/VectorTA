@@ -1143,7 +1143,7 @@ pub struct CwmaBatchRange {
 impl Default for CwmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 240, 1),
+            period: (14, 263, 1),
         }
     }
 }

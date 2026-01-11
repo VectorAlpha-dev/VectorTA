@@ -1382,8 +1382,8 @@ pub struct OttBatchRange {
 impl Default for OttBatchRange {
     fn default() -> Self {
         Self {
-            period: (2, 50, 1),
-            percent: (0.2, 5.0, 0.2),
+            period: (2, 251, 1),
+            percent: (1.4, 1.4, 0.0),
             ma_types: vec!["VAR".to_string()],
         }
     }
@@ -2706,7 +2706,7 @@ mod tests {
             Kernel::Avx2Batch => Kernel::Avx2,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512Batch => Kernel::Avx512,
-            Kernel::Auto => detect_best_kernel(),
+            Kernel::Auto => Kernel::Scalar,
             _ => Kernel::Scalar,
         };
         let single =

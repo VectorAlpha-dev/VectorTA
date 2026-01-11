@@ -310,6 +310,43 @@ impl CudaUma {
         self.stream.synchronize().map_err(CudaUmaError::from)
     }
 
+    /// Device-resident batch entry point that reuses a caller-provided scratch buffer.
+    ///
+    /// This avoids allocating `series_len * n_combos` intermediates per iteration and is
+    /// intended for benchmarks and repeated calls in performance-sensitive code.
+    #[allow(clippy::too_many_arguments)]
+    pub fn uma_batch_device_with_raw(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: Option<&DeviceBuffer<f32>>,
+        d_accelerators: &DeviceBuffer<f32>,
+        d_min_lengths: &DeviceBuffer<i32>,
+        d_max_lengths: &DeviceBuffer<i32>,
+        d_smooth_lengths: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        has_volume: bool,
+        d_raw: &mut DeviceBuffer<f32>,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaUmaError> {
+        self.launch_batch_kernel(
+            d_prices,
+            d_volumes,
+            d_accelerators,
+            d_min_lengths,
+            d_max_lengths,
+            d_smooth_lengths,
+            series_len,
+            n_combos,
+            first_valid,
+            has_volume,
+            d_raw,
+            d_out,
+        )?;
+        self.stream.synchronize().map_err(CudaUmaError::from)
+    }
+
     pub fn uma_many_series_one_param_device(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,
@@ -1120,61 +1157,134 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        // One output + one scratch buffer
+        let raw_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        // accelerator[f32] + min/max/smooth[i32]
+        let param_bytes = PARAM_SWEEP * (std::mem::size_of::<f32>() + 3 * std::mem::size_of::<i32>());
+        in_bytes + raw_bytes + out_bytes + param_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
         let in_bytes = elems * std::mem::size_of::<f32>();
-        let out_bytes = elems * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        let out_bytes = 2 * elems * std::mem::size_of::<f32>(); // raw + out
+        in_bytes
+            + out_bytes
+            + MANY_SERIES_COLS * std::mem::size_of::<i32>()
+            + 64 * 1024 * 1024
     }
 
-    struct UmaBatchState {
+    // Preallocated, device-resident batch state to avoid per-iteration allocs/copies.
+    struct UmaBatchDeviceState {
         cuda: CudaUma,
-        price: Vec<f32>,
-        sweep: UmaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_accelerators: DeviceBuffer<f32>,
+        d_min_lengths: DeviceBuffer<i32>,
+        d_max_lengths: DeviceBuffer<i32>,
+        d_smooth_lengths: DeviceBuffer<i32>,
+        d_raw: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
     }
-    impl CudaBenchState for UmaBatchState {
+    impl CudaBenchState for UmaBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .uma_batch_dev(&self.price, None, &self.sweep)
+            self.cuda
+                .uma_batch_device_with_raw(
+                    &self.d_prices,
+                    None,
+                    &self.d_accelerators,
+                    &self.d_min_lengths,
+                    &self.d_max_lengths,
+                    &self.d_smooth_lengths,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    false,
+                    &mut self.d_raw,
+                    &mut self.d_out,
+                )
                 .expect("launch uma batch");
         }
     }
     fn prep_uma_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaUma::new(0).expect("cuda uma");
         let price = gen_series(ONE_SERIES_LEN);
-        // Build 250-combo sweep by varying max_length, holding others constant.
-        let sweep = UmaBatchRange {
-            accelerator: (1.0, 1.0, 0.0),
-            min_length: (5, 5, 0),
-            max_length: (16, 16 + PARAM_SWEEP - 1, 1),
-            smooth_length: (4, 4, 0),
-        };
-        Box::new(UmaBatchState { cuda, price, sweep })
+
+        let series_len = ONE_SERIES_LEN;
+        let n_combos = PARAM_SWEEP;
+        let out_elems = series_len * n_combos;
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+
+        // Parameters: vary max_length only (250 combos), keep others fixed.
+        let accelerators = vec![1.0f32; n_combos];
+        let min_lengths = vec![5i32; n_combos];
+        let mut max_lengths = Vec::with_capacity(n_combos);
+        for i in 0..n_combos {
+            max_lengths.push(16i32 + i as i32);
+        }
+        let smooth_lengths = vec![4i32; n_combos];
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("upload prices");
+        let d_accelerators = DeviceBuffer::from_slice(&accelerators).expect("upload accelerators");
+        let d_min_lengths = DeviceBuffer::from_slice(&min_lengths).expect("upload min_lengths");
+        let d_max_lengths = DeviceBuffer::from_slice(&max_lengths).expect("upload max_lengths");
+        let d_smooth_lengths =
+            DeviceBuffer::from_slice(&smooth_lengths).expect("upload smooth_lengths");
+        let d_raw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
+            .expect("alloc raw");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
+            .expect("alloc out");
+
+        Box::new(UmaBatchDeviceState {
+            cuda,
+            d_prices,
+            d_accelerators,
+            d_min_lengths,
+            d_max_lengths,
+            d_smooth_lengths,
+            d_raw,
+            d_out,
+            series_len,
+            n_combos,
+            first_valid,
+        })
     }
 
     struct UmaManyState {
         cuda: CudaUma,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: UmaParams,
+        accelerator: f32,
+        min_length: i32,
+        max_length: i32,
+        smooth_length: i32,
+        has_volume: bool,
+        d_raw_tm: DeviceBuffer<f32>,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for UmaManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .uma_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
                     None,
+                    self.accelerator,
+                    self.min_length,
+                    self.max_length,
+                    self.smooth_length,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    &self.d_first_valids,
+                    self.has_volume,
+                    &mut self.d_raw_tm,
+                    &mut self.d_out_tm,
                 )
                 .expect("launch uma many-series");
+            self.cuda.stream.synchronize().expect("uma many-series sync");
         }
     }
     fn prep_uma_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1188,12 +1298,30 @@ pub mod benches {
             max_length: Some(64),
             smooth_length: Some(4),
         };
+        let prepared = CudaUma::prepare_many_series_inputs(&data_tm, None, cols, rows, &params)
+            .expect("uma prepare many-series inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let elems = cols * rows;
+        let d_raw_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_raw_tm");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("uma many prep sync");
         Box::new(UmaManyState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
+            accelerator: prepared.accelerator,
+            min_length: prepared.min_length,
+            max_length: prepared.max_length,
+            smooth_length: prepared.smooth_length,
+            has_volume: prepared.has_volume,
+            d_raw_tm,
+            d_out_tm,
         })
     }
 

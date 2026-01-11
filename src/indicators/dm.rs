@@ -931,7 +931,7 @@ pub struct DmBatchRange {
 impl Default for DmBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

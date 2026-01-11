@@ -1204,7 +1204,7 @@ pub struct NmaBatchRange {
 impl Default for NmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (40, 100, 1),
+            period: (40, 289, 1),
         }
     }
 }

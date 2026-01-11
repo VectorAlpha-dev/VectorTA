@@ -673,7 +673,7 @@ pub fn mod_god_mode_with_kernel(
 
     // Resolve kernel
     let kern = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -770,7 +770,7 @@ fn mod_god_mode_with_kernel_old(input: &ModGodModeInput, kernel: Kernel) -> Resu
 
     // Determine the actual kernel to use
     let actual_kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1022,7 +1022,7 @@ pub fn mod_god_mode_into_slices(
 
     let warm = first + need - 1;
     let actual = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -3304,6 +3304,17 @@ pub struct ModGodModeBatchRange {
     pub n2: (usize, usize, usize),
     pub n3: (usize, usize, usize),
     pub mode: ModGodModeMode,
+}
+
+impl Default for ModGodModeBatchRange {
+    fn default() -> Self {
+        Self {
+            n1: (17, 266, 1),
+            n2: (6, 6, 0),
+            n3: (4, 4, 0),
+            mode: ModGodModeMode::TraditionMg,
+        }
+    }
 }
 
 /// Batch output with flattened matrix layout

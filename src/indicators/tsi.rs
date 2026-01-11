@@ -821,8 +821,8 @@ pub struct TsiBatchRange {
 impl Default for TsiBatchRange {
     fn default() -> Self {
         Self {
-            long_period: (25, 25, 1),
-            short_period: (13, 13, 1),
+            long_period: (25, 274, 1),
+            short_period: (13, 13, 0),
         }
     }
 }

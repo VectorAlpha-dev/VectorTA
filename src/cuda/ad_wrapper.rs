@@ -578,56 +578,75 @@ pub mod benches {
         (high, low, vol)
     }
 
-    struct OneSeriesState {
+    struct OneSeriesDevState {
         cuda: CudaAd,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        vol: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_vol: DeviceBuffer<f32>,
+        len: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for OneSeriesState {
+    impl CudaBenchState for OneSeriesDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ad_series_dev(&self.high, &self.low, &self.close, &self.vol)
-                .expect("ad series");
+            self.cuda
+                .ad_series_device_inplace(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_vol,
+                    self.len,
+                    1,
+                    &mut self.d_out,
+                )
+                .expect("ad series kernel");
+            self.cuda.stream().synchronize().expect("ad sync");
         }
     }
-    fn prep_one_series() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_dev() -> Box<dyn CudaBenchState> {
         let cuda = CudaAd::new(0).expect("cuda ad");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low, vol) = synth_hlcv_from_close(&close);
-        Box::new(OneSeriesState {
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_vol = DeviceBuffer::from_slice(&vol).expect("d_vol");
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(ONE_SERIES_LEN) }.expect("d_out");
+        Box::new(OneSeriesDevState {
             cuda,
-            high,
-            low,
-            close,
-            vol,
+            d_high,
+            d_low,
+            d_close,
+            d_vol,
+            len: ONE_SERIES_LEN,
+            d_out,
         })
     }
 
     struct ManyState {
         cuda: CudaAd,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
-        vol_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_vol_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ad_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    &self.vol_tm,
+            self.cuda
+                .ad_many_series_one_param_time_major_device_inplace(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
+                    &self.d_vol_tm,
                     self.cols,
                     self.rows,
+                    &mut self.d_out_tm,
                 )
-                .expect("ad many");
+                .expect("ad many-series kernel");
+            self.cuda.stream().synchronize().expect("ad many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -649,22 +668,36 @@ pub mod benches {
                 vol_tm[idx] = ((x * 1.13).cos().abs() + 0.85) * 1200.0;
             }
         }
+        let elems = cols * rows;
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&prices_tm).expect("d_close_tm");
+        let d_vol_tm = DeviceBuffer::from_slice(&vol_tm).expect("d_vol_tm");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_out_tm");
         Box::new(ManyState {
             cuda,
-            high_tm,
-            low_tm,
-            close_tm: prices_tm,
-            vol_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_vol_tm,
             cols,
             rows,
+            d_out_tm,
         })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("ad", "one_series", "ad_cuda_series", "1m", prep_one_series)
-                .with_sample_size(10)
-                .with_mem_required(bytes_one_series()),
+            CudaBenchScenario::new(
+                "ad",
+                "one_series",
+                "ad_cuda_series_dev",
+                "1m",
+                prep_one_series_dev,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series()),
             CudaBenchScenario::new(
                 "ad",
                 "many_series_one_param",

@@ -912,27 +912,166 @@ impl CudaEhlersITrend {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams;
 
-    define_ma_period_benches!(
-        ehlers_itrend_benches,
-        CudaEhlersITrend,
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange,
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams,
-        ehlers_itrend_batch_dev,
-        ehlers_itrend_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct ITrendBatchDevState {
+        cuda: CudaEhlersITrend,
+        d_prices: DeviceBuffer<f32>,
+        d_warmups: DeviceBuffer<i32>,
+        d_max_dcs: DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_shared_dc: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ITrendBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_warmups,
+                    &self.d_max_dcs,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    self.max_shared_dc,
+                    &mut self.d_out,
+                )
+                .expect("itrend batch kernel");
+            self.cuda.stream.synchronize().expect("itrend sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersITrend::new(0).expect("cuda ehlers_itrend");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = EhlersITrendBatchRange {
             warmup_bars: (12, 12 + PARAM_SWEEP - 1, 1),
-            max_dc_period: (50, 50, 0)
-        },
-        crate::indicators::moving_averages::ehlers_itrend::EhlersITrendParams {
+            max_dc_period: (50, 50, 0),
+        };
+        let prep = CudaEhlersITrend::prepare_batch_inputs(&price, &sweep)
+            .expect("itrend prepare batch inputs");
+        let n_combos = prep.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_warmups = DeviceBuffer::from_slice(&prep.warmups).expect("d_warmups");
+        let d_max_dcs = DeviceBuffer::from_slice(&prep.max_dcs).expect("d_max_dcs");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prep.series_len * n_combos) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ITrendBatchDevState {
+            cuda,
+            d_prices,
+            d_warmups,
+            d_max_dcs,
+            series_len: prep.series_len,
+            first_valid: prep.first_valid,
+            n_combos,
+            max_shared_dc: prep.max_shared_dc,
+            d_out,
+        })
+    }
+
+    struct ITrendManyDevState {
+        cuda: CudaEhlersITrend,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        num_series: usize,
+        series_len: usize,
+        warmup: usize,
+        max_dc: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ITrendManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.num_series,
+                    self.series_len,
+                    self.warmup,
+                    self.max_dc,
+                    &mut self.d_out_tm,
+                )
+                .expect("itrend many-series kernel");
+            self.cuda.stream.synchronize().expect("itrend sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersITrend::new(0).expect("cuda ehlers_itrend");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = EhlersITrendParams {
             warmup_bars: Some(32),
-            max_dc_period: Some(50)
-        },
-        "ehlers_itrend",
-        "ehlers_itrend"
-    );
-    pub use ehlers_itrend_benches::bench_profiles;
+            max_dc_period: Some(50),
+        };
+        let prep = CudaEhlersITrend::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("itrend prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prep.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ITrendManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            num_series: prep.num_series,
+            series_len: prep.series_len,
+            warmup: prep.warmup,
+            max_dc: prep.max_dc,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "ehlers_itrend",
+                "one_series_many_params",
+                "ehlers_itrend_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ehlers_itrend",
+                "many_series_one_param",
+                "ehlers_itrend_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_grid_cuda(

@@ -52,6 +52,107 @@ void hpf_coeffs_from_period(int period, double& c, double& oma, bool& ok) {
     ok = true;
 }
 
+// FP32 coefficient helper for the warp-scan batch kernel.
+static __forceinline__ __device__
+void hpf_coeffs_from_period_f32(int period, float& c, float& oma, bool& ok) {
+    ok = false;
+    if (period <= 0) return;
+
+    float s, co;
+    // theta = 2*pi/period => sincos(pi * (2/period))
+    sincospif(2.0f / static_cast<float>(period), &s, &co);
+    if (fabsf(co) < 1e-6f) return;
+
+    const float alpha = 1.0f + ((s - 1.0f) / co);
+    c   = 1.0f - 0.5f * alpha;
+    oma = 1.0f - alpha;
+    ok = true;
+}
+
+// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
+// per iteration via an inclusive scan over the affine high-pass transform:
+//   y_t = oma * y_{t-1} + c * (x_t - x_{t-1})
+//
+// - blockDim.x must be exactly 32
+// - output is written once: prefix NaNs up to first_valid-1, then all t>=first_valid are computed
+extern "C" __global__
+void highpass_batch_warp_scan_f32(const float* __restrict__ prices,
+                                  int first_valid,
+                                  const int* __restrict__ periods,
+                                  int series_len,
+                                  int n_combos,
+                                  float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+    if (series_len <= 0) return;
+    if (threadIdx.x >= 32) return;
+
+    const int period = periods[combo];
+    float c, oma; bool ok;
+    hpf_coeffs_from_period_f32(period, c, oma, ok);
+    if (!ok || period > series_len) return;
+
+    int fv = first_valid;
+    if (fv < 0) fv = 0;
+    if (fv > series_len) fv = series_len;
+
+    const int lane = threadIdx.x & 31;
+    const unsigned mask = 0xffffffffu;
+    const size_t base = (size_t)combo * (size_t)series_len;
+
+    // NaN prefix up to fv-1
+    for (int t = lane; t < fv; t += 32) {
+        out[base + (size_t)t] = CUDART_NAN_F;
+    }
+    if (fv >= series_len) return;
+
+    float y_prev = 0.0f;
+    if (lane == 0) {
+        const float x0 = prices[fv];
+        y_prev = x0;
+        out[base + (size_t)fv] = y_prev;
+    }
+    y_prev = __shfl_sync(mask, y_prev, 0);
+
+    int t0 = fv + 1;
+    if (t0 >= series_len) return;
+
+    for (int tile = t0; tile < series_len; tile += 32) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        float A = valid ? oma : 1.0f;
+        float B = 0.0f;
+        if (valid) {
+            const float x = prices[t];
+            const float xm1 = prices[t - 1];
+            B = c * (x - xm1);
+        }
+
+        // Inclusive scan of composed affine transforms (A, B)
+        #pragma unroll
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+
+        const float y = fmaf(A, y_prev, B);
+        if (valid) {
+            out[base + (size_t)t] = y;
+        }
+
+        const int remaining = series_len - tile;
+        const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
+        y_prev = __shfl_sync(mask, y, last_lane);
+    }
+}
+
 extern "C" __global__
 void highpass_batch_f32(const float* __restrict__ prices,
                         int first_valid,

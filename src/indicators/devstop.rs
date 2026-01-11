@@ -730,7 +730,7 @@ pub struct DevStopBatchRange {
 impl Default for DevStopBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 20, 0),
+            period: (20, 269, 1),
             mult: (0.0, 0.0, 0.0),
             devtype: (0, 0, 0),
         }
@@ -3147,6 +3147,15 @@ mod tests {
             )
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_devstop_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

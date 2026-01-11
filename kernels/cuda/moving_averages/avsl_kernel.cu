@@ -13,7 +13,7 @@
 // - We keep local ring buffers for recent vpc/vpr (size 200) and for the slow-period
 //   pre_i accumulation. If slow_period exceeds MAX_PRE_RING, we fall back to a naive
 //   rolling window recompute for correctness (rare; default slow=26).
-// - Accumulators use double for critical sums; outputs remain FP32.
+// - Accumulators use FP32; outputs remain FP32.
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -31,11 +31,6 @@ __device__ __forceinline__ float avsl_adj(float x) {
     // Match scalar adjustment: (-1,0) -> -1; [0,1) -> 1; else x
     if (x > -1.0f && x < 0.0f) return -1.0f;
     if (x >= 0.0f && x < 1.0f) return 1.0f;
-    return x;
-}
-__device__ __forceinline__ double avsl_adj_d(double x) {
-    if (x > -1.0 && x < 0.0) return -1.0;
-    if (x >= 0.0 && x < 1.0) return 1.0;
     return x;
 }
 
@@ -70,7 +65,7 @@ extern "C" __global__ void avsl_batch_f32(
         return;
     }
 
-    // Rolling sums for SMA/VWMA windows (double for accuracy)
+    // Rolling sums for SMA/VWMA windows (FP64 for accuracy; rest of the kernel is FP32)
     double sum_close_f = 0.0, sum_close_s = 0.0;
     double sum_vol_f = 0.0, sum_vol_s = 0.0;
     double sum_cxv_f = 0.0, sum_cxv_s = 0.0;
@@ -78,8 +73,8 @@ extern "C" __global__ void avsl_batch_f32(
     const double inv_slow = 1.0 / (double)slow;
 
     // Rings
-    double ring_vpc[AVSL_MAX_WIN];
-    double ring_vpr[AVSL_MAX_WIN];
+    float ring_vpc[AVSL_MAX_WIN];
+    float ring_vpr[AVSL_MAX_WIN];
     #pragma unroll
     for (int k = 0; k < AVSL_MAX_WIN; ++k) { ring_vpc[k] = 0.0f; ring_vpr[k] = 1.0f; }
     int ring_pos = 0;
@@ -111,19 +106,24 @@ extern "C" __global__ void avsl_batch_f32(
         }
 
         if (i >= base) {
-            const double sma_f = sum_close_f * inv_fast;
-            const double sma_s = sum_close_s * inv_slow;
-            const double vwma_f = (sum_vol_f != 0.0) ? (sum_cxv_f / sum_vol_f) : sma_f;
-            const double vwma_s = (sum_vol_s != 0.0) ? (sum_cxv_s / sum_vol_s) : sma_s;
-            const double vpc = vwma_s - sma_s;
-            const double vpr = (sma_f != 0.0) ? (vwma_f / sma_f) : 1.0;
-            const double vol_f = sum_vol_f * inv_fast;
-            const double vol_s = sum_vol_s * inv_slow;
-            const double vm = (vol_s != 0.0) ? (vol_f / vol_s) : 1.0;
-            const double vpci = vpc * vpr * vm;
+            const double sma_f_d = sum_close_f * inv_fast;
+            const double sma_s_d = sum_close_s * inv_slow;
+            const double vwma_f_d = (sum_vol_f != 0.0) ? (sum_cxv_f / sum_vol_f) : sma_f_d;
+            const double vwma_s_d = (sum_vol_s != 0.0) ? (sum_cxv_s / sum_vol_s) : sma_s_d;
+            const double vpc_d = vwma_s_d - sma_s_d;
+            const double vpr_d = (sma_f_d != 0.0) ? (vwma_f_d / sma_f_d) : 1.0;
+            const double vol_f_d = sum_vol_f * inv_fast;
+            const double vol_s_d = sum_vol_s * inv_slow;
+            const double vm_d = (vol_s_d != 0.0) ? (vol_f_d / vol_s_d) : 1.0;
+            const double vpci_d = vpc_d * vpr_d * vm_d;
+
+            const float vpc = (float)vpc_d;
+            const float vpr = (float)vpr_d;
+            const float vm = (float)vm_d;
+            const float vpci = (float)vpci_d;
 
             // Adaptive window length
-            float t = (vpc < 0.0f) ? fabsf((float)vpci - 3.0f) : ((float)vpci + 3.0f);
+            float t = (vpc < 0.0f) ? fabsf(vpci - 3.0f) : (vpci + 3.0f);
             // Round half away from zero to match Rust's f64::round
             float r = (t >= 0.0f) ? floorf(t + 0.5f) : ceilf(t - 0.5f);
             int len_v = (int)r;
@@ -138,29 +138,29 @@ extern "C" __global__ void avsl_batch_f32(
             const int hist_n = ((i - base + 1) < take) ? (i - base + 1) : take;
             const int pref_n = take - hist_n;
 
-            double acc = 0.0;
+            float acc = 0.0f;
             if (hist_n > 0) {
                 int rp = (ring_pos == 0) ? (AVSL_MAX_WIN - 1) : (ring_pos - 1);
                 for (int j = 0; j < hist_n; ++j) {
                     const int idx_r = rp; rp = (rp == 0) ? (AVSL_MAX_WIN - 1) : (rp - 1);
-                    const double adj = avsl_adj_d(ring_vpc[idx_r]);
-                    const double r = ring_vpr[idx_r];
-                    if (adj != 0.0 && r != 0.0) {
-                        acc += (double)low[i - j] / (adj * r);
+                    const float adj = avsl_adj(ring_vpc[idx_r]);
+                    const float r = ring_vpr[idx_r];
+                    if (adj != 0.0f && r != 0.0f) {
+                        acc += low[i - j] / (adj * r);
                     }
                 }
             }
             if (pref_n > 0) {
                 const int start_idx = i + 1 - (hist_n + pref_n);
                 const int end_idx_excl = i + 1 - hist_n;
-                double s = 0.0;
+                float s = 0.0f;
                 for (int k = start_idx; k < end_idx_excl; ++k) s += low[k];
                 acc += s;
             }
 
-            const double price_v = (acc / (double)len_v) * 0.01;
-            const double dev = ((double)mult * vpci) * vm;
-            const double pre_i = ((double)low[i] - price_v) + dev;
+            const float price_v = (acc / (float)len_v) * 0.01f;
+            const float dev = (mult * vpci) * vm;
+            const float pre_i = (low[i] - price_v) + dev;
 
             if (slow <= AVSL_MAX_PRE_RING) {
                 if (pre_cnt < slow) {
@@ -174,18 +174,18 @@ extern "C" __global__ void avsl_batch_f32(
                     pre_sum += pre_i;
                     pre_pos += 1; if (pre_pos == slow) pre_pos = 0;
                 }
-                if (i >= warmup2) dst[i] = (float)(pre_sum * inv_slow);
+                if (i >= warmup2) dst[i] = pre_sum * (float)inv_slow;
             } else {
                 // Fallback: compute moving average of last `slow` pre_i values naively
                 // Only required after i >= warmup2; no need to fill during warmup
                 if (i >= warmup2) {
-                    double s = 0.0;
+                    float s = 0.0f;
                     for (int k = i - slow + 1; k <= i; ++k) {
                         // Recompute pre_k (matches scalar path but slower)
                         // NOTE: This branch should be rare; slow is usually small.
                         s += pre_i; // Approximation: use last pre_i to avoid recompute explosion
                     }
-                    dst[i] = (float)(s * inv_slow);
+                    dst[i] = s * (float)inv_slow;
                 }
             }
         }
@@ -216,17 +216,17 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
     const int base = first_valid + max(1, slow) - 1;
     const int warmup2 = base + max(1, slow) - 1;
 
-    // Rolling sums (double for accuracy)
-    double sum_close_f = 0.0, sum_close_s = 0.0;
-    double sum_vol_f = 0.0, sum_vol_s = 0.0;
-    double sum_cxv_f = 0.0, sum_cxv_s = 0.0;
+    // Rolling sums (FP32)
+    float sum_close_f = 0.0f, sum_close_s = 0.0f;
+    float sum_vol_f = 0.0f, sum_vol_s = 0.0f;
+    float sum_cxv_f = 0.0f, sum_cxv_s = 0.0f;
     const int f = max(1, fast);
     const int s = max(1, slow);
-    const double inv_fast = 1.0 / (double)f;
-    const double inv_slow = 1.0 / (double)s;
+    const float inv_fast = 1.0f / (float)f;
+    const float inv_slow = 1.0f / (float)s;
 
-    double ring_vpc[AVSL_MAX_WIN];
-    double ring_vpr[AVSL_MAX_WIN];
+    float ring_vpc[AVSL_MAX_WIN];
+    float ring_vpr[AVSL_MAX_WIN];
     #pragma unroll
     for (int k = 0; k < AVSL_MAX_WIN; ++k) { ring_vpc[k] = 0.0f; ring_vpr[k] = 1.0f; }
     int ring_pos = 0;
@@ -238,9 +238,9 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
     for (int i = 0; i < rows; ++i) {
         const int idx = i * cols + col;
         if (i >= first_valid) {
-            const double c = (double)close_tm[idx];
-            const double v = (double)volume_tm[idx];
-            const double cv = c * v;
+            const float c = close_tm[idx];
+            const float v = volume_tm[idx];
+            const float cv = c * v;
             sum_close_f += c; sum_vol_f += v; sum_cxv_f += cv;
             sum_close_s += c; sum_vol_s += v; sum_cxv_s += cv;
             // Match scalar window semantics: subtract once count > period
@@ -259,18 +259,18 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
         }
 
         if (i >= base) {
-            const double sma_f = sum_close_f * inv_fast;
-            const double sma_s = sum_close_s * inv_slow;
-            const double vwma_f = (sum_vol_f != 0.0) ? (sum_cxv_f / sum_vol_f) : sma_f;
-            const double vwma_s = (sum_vol_s != 0.0) ? (sum_cxv_s / sum_vol_s) : sma_s;
-            const double vpc = vwma_s - sma_s;
-            const double vpr = (sma_f != 0.0) ? (vwma_f / sma_f) : 1.0;
-            const double vol_f = sum_vol_f * inv_fast;
-            const double vol_s = sum_vol_s * inv_slow;
-            const double vm = (vol_s != 0.0) ? (vol_f / vol_s) : 1.0;
-            const double vpci = vpc * vpr * vm;
+            const float sma_f = sum_close_f * inv_fast;
+            const float sma_s = sum_close_s * inv_slow;
+            const float vwma_f = (sum_vol_f != 0.0f) ? (sum_cxv_f / sum_vol_f) : sma_f;
+            const float vwma_s = (sum_vol_s != 0.0f) ? (sum_cxv_s / sum_vol_s) : sma_s;
+            const float vpc = vwma_s - sma_s;
+            const float vpr = (sma_f != 0.0f) ? (vwma_f / sma_f) : 1.0f;
+            const float vol_f = sum_vol_f * inv_fast;
+            const float vol_s = sum_vol_s * inv_slow;
+            const float vm = (vol_s != 0.0f) ? (vol_f / vol_s) : 1.0f;
+            const float vpci = vpc * vpr * vm;
 
-            float t = (vpc < 0.0f) ? fabsf((float)vpci - 3.0f) : ((float)vpci + 3.0f);
+            float t = (vpc < 0.0f) ? fabsf(vpci - 3.0f) : (vpci + 3.0f);
             float r = (t >= 0.0f) ? floorf(t + 0.5f) : ceilf(t - 0.5f);
             int len_v = (int)r;
             if (len_v < 1) len_v = 1;
@@ -282,32 +282,32 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
             const int take = (len_v < i + 1) ? len_v : (i + 1);
             const int hist_n = ((i - base + 1) < take) ? (i - base + 1) : take;
             const int pref_n = take - hist_n;
-            double acc = 0.0;
+            float acc = 0.0f;
             if (hist_n > 0) {
                 int rp = (ring_pos == 0) ? (AVSL_MAX_WIN - 1) : (ring_pos - 1);
                 for (int j = 0; j < hist_n; ++j) {
                     const int idx_r = rp; rp = (rp == 0) ? (AVSL_MAX_WIN - 1) : (rp - 1);
-                    const double adj = avsl_adj_d(ring_vpc[idx_r]);
-                    const double r = ring_vpr[idx_r];
-                    if (adj != 0.0 && r != 0.0) {
+                    const float adj = avsl_adj(ring_vpc[idx_r]);
+                    const float r = ring_vpr[idx_r];
+                    if (adj != 0.0f && r != 0.0f) {
                         const int idl = (i - j) * cols + col;
-                        acc += (double)low_tm[idl] / (adj * r);
+                        acc += low_tm[idl] / (adj * r);
                     }
                 }
             }
             if (pref_n > 0) {
                 const int start_i = i + 1 - (hist_n + pref_n);
                 const int end_i = i + 1 - hist_n;
-                double ssum = 0.0;
+                float ssum = 0.0f;
                 for (int k = start_i; k < end_i; ++k) {
                     ssum += low_tm[k * cols + col];
                 }
                 acc += ssum;
             }
 
-            const double price_v = (acc / (double)len_v) * 0.01;
-            const double dev = ((double)multiplier * vpci) * vm;
-            const double pre_i = ((double)low_tm[idx] - price_v) + dev;
+            const float price_v = (acc / (float)len_v) * 0.01f;
+            const float dev = (multiplier * vpci) * vm;
+            const float pre_i = (low_tm[idx] - price_v) + dev;
 
             if (slow <= AVSL_MAX_PRE_RING) {
                 if (pre_cnt < s) {
@@ -320,13 +320,13 @@ extern "C" __global__ void avsl_many_series_one_param_f32(
                     pre_sum += pre_i;
                     pre_pos += 1; if (pre_pos == s) pre_pos = 0;
                 }
-                if (i >= warmup2) out_tm[idx] = (float)(pre_sum * inv_slow);
+                if (i >= warmup2) out_tm[idx] = pre_sum * inv_slow;
             } else {
                 if (i >= warmup2) {
                     // Fallback naive recompute (rare)
-                    double ssum = 0.0;
+                    float ssum = 0.0f;
                     for (int k = i - s + 1; k <= i; ++k) ssum += pre_i; // approximate
-                    out_tm[idx] = (float)(ssum * inv_slow);
+                    out_tm[idx] = ssum * inv_slow;
                 }
             }
         }

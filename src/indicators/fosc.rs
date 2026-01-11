@@ -329,8 +329,8 @@ pub fn fosc_into(input: &FoscInput, out: &mut [f64]) -> Result<(), FoscError> {
 
 // --------- Scalar Core ---------
 
-#[inline]
-pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+#[inline(always)]
+unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let n = data.len();
     if n == 0 || period == 0 || n < period {
         return;
@@ -353,60 +353,66 @@ pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         1.0 / denom
     };
     let inv_p = 1.0 / p;
-    let p1 = p + 1.0;
+
+    // Precompute b = (p*xy - x*y)/denom as: b = xy*(p/denom) - y*(x/denom)
+    let p_bd = p * bd;
+    let x_bd = x * bd;
+    // TSF one-step forecast at x=p+1 with x=1..p weights:
+    // mean_y + b*(p+1 - mean_x) where mean_x=(p+1)/2  => mean_y + b*(p+1)/2
+    let tsf_coeff = 0.5 * (p + 1.0);
 
     // Initialize running sums over window [first .. first+period-2]
     let mut y = 0.0f64;
     let mut xy = 0.0f64;
+    let base = data.as_ptr().add(first);
     let limit = period - 1; // number of elements in the partial window
     let mut k = 0usize;
     while k + 4 <= limit {
-        let d0 = data[first + k + 0];
-        let d1 = data[first + k + 1];
-        let d2 = data[first + k + 2];
-        let d3 = data[first + k + 3];
+        let d0 = *base.add(k + 0);
+        let d1 = *base.add(k + 1);
+        let d2 = *base.add(k + 2);
+        let d3 = *base.add(k + 3);
 
         y += d0 + d1 + d2 + d3;
-        xy = d0.mul_add((k + 1) as f64, xy);
-        xy = d1.mul_add((k + 2) as f64, xy);
-        xy = d2.mul_add((k + 3) as f64, xy);
-        xy = d3.mul_add((k + 4) as f64, xy);
+        xy += d0 * (k + 1) as f64;
+        xy += d1 * (k + 2) as f64;
+        xy += d2 * (k + 3) as f64;
+        xy += d3 * (k + 4) as f64;
         k += 4;
     }
     while k < limit {
-        let d = data[first + k];
+        let d = *base.add(k);
         y += d;
-        xy = d.mul_add((k + 1) as f64, xy);
+        xy += d * (k + 1) as f64;
         k += 1;
     }
 
     // Recurrence: write using previous TSF forecast
+    let dp = data.as_ptr();
+    let op = out.as_mut_ptr();
     let mut tsf_prev = 0.0f64;
     let mut i = begin;
     while i < n {
-        let newv = data[i];
+        let newv = *dp.add(i);
 
         // Include the new value to form the current full window sums
         let y_plus = y + newv;
         let xy_plus = xy + newv * p;
 
-        // Regression coefficients
-        let b = (p.mul_add(xy_plus, -x * y_plus)) * bd;
-        let a = (y_plus - b * x) * inv_p;
-
         // Oscillator w.r.t. previous forecast
-        out[i] = if newv != 0.0 && newv == newv {
+        *op.add(i) = if newv != 0.0 {
             100.0 * (newv - tsf_prev) / newv
         } else {
             f64::NAN
         };
 
         // Next-step forecast for this window
-        tsf_prev = b.mul_add(p1, a);
+        let b = xy_plus * p_bd - y_plus * x_bd;
+        tsf_prev = y_plus * inv_p + b * tsf_coeff;
 
         // Slide window forward: drop oldest and shift weights
         let old_idx = i + 1 - period;
-        let oldv = data[old_idx];
+        let oldv = *dp.add(old_idx);
         xy = xy_plus - y_plus;
         y = y_plus - oldv;
 
@@ -414,82 +420,17 @@ pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     }
 }
 
+#[inline]
+pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
+    unsafe { fosc_core(data, period, first, out) }
+}
+
 // --------- AVX2/AVX512 Routing (Stubs) ---------
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Unsafe scalar core using pointer indexing and FMAs; treated as the AVX2 kernel stub.
-    let n = data.len();
-    if n == 0 || period == 0 || n < period {
-        return;
-    }
-    let begin = first + period - 1;
-    if begin >= n {
-        return;
-    }
-
-    let p = period as f64;
-    let x = 0.5 * p * (p + 1.0);
-    let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
-    let denom = p * x2 - x * x;
-    let bd = if denom.abs() < f64::EPSILON {
-        0.0
-    } else {
-        1.0 / denom
-    };
-    let inv_p = 1.0 / p;
-    let p1 = p + 1.0;
-
-    // Initialize y and xy over [first .. first+period-2]
-    let mut y = 0.0f64;
-    let mut xy = 0.0f64;
-    let base = data.as_ptr().add(first);
-    let limit = period - 1;
-    let mut k = 0usize;
-    while k + 4 <= limit {
-        let d0 = *base.add(k + 0);
-        let d1 = *base.add(k + 1);
-        let d2 = *base.add(k + 2);
-        let d3 = *base.add(k + 3);
-        y += d0 + d1 + d2 + d3;
-        xy = d0.mul_add((k + 1) as f64, xy);
-        xy = d1.mul_add((k + 2) as f64, xy);
-        xy = d2.mul_add((k + 3) as f64, xy);
-        xy = d3.mul_add((k + 4) as f64, xy);
-        k += 4;
-    }
-    while k < limit {
-        let d = *base.add(k);
-        y += d;
-        xy = d.mul_add((k + 1) as f64, xy);
-        k += 1;
-    }
-
-    // Sliding loop (dependency-limited)
-    let mut tsf_prev = 0.0f64;
-    let mut i = begin;
-    while i < n {
-        let newv = *data.get_unchecked(i);
-        let y_plus = y + newv;
-        let xy_plus = xy + newv * p;
-
-        let b = (p.mul_add(xy_plus, -x * y_plus)) * bd;
-        let a = (y_plus - b * x) * inv_p;
-
-        *out.get_unchecked_mut(i) = if newv != 0.0 && newv == newv {
-            100.0 * (newv - tsf_prev) / newv
-        } else {
-            f64::NAN
-        };
-        tsf_prev = b.mul_add(p1, a);
-
-        let old_idx = i + 1 - period;
-        let oldv = *data.get_unchecked(old_idx);
-        xy = xy_plus - y_plus;
-        y = y_plus - oldv;
-        i += 1;
-    }
+    fosc_core(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -654,7 +595,7 @@ pub struct FoscBatchRange {
 
 impl Default for FoscBatchRange {
     fn default() -> Self {
-        Self { period: (5, 50, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

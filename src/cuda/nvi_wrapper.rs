@@ -193,13 +193,13 @@ impl CudaNvi {
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-        // Launch single-thread kernel (sequential scan)
+        // Launch one-warp kernel (warp-scan over 32-step tiles)
         let func = self
             .module
             .get_function("nvi_batch_f32")
             .map_err(|_| CudaNviError::MissingKernelSymbol { name: "nvi_batch_f32" })?;
         let grid_dims = (1u32, 1u32, 1u32);
-        let block_dims = (1u32, 1u32, 1u32);
+        let block_dims = (16u32, 1u32, 1u32);
         self.validate_launch_dims(grid_dims, block_dims)?;
         let grid: GridSize = grid_dims.into();
         let block: BlockSize = block_dims.into();
@@ -381,7 +381,7 @@ impl CudaNvi {
             .get_function("nvi_batch_f32")
             .map_err(|_| CudaNviError::MissingKernelSymbol { name: "nvi_batch_f32" })?;
         let grid_dims = (1u32, 1u32, 1u32);
-        let block_dims = (1u32, 1u32, 1u32);
+        let block_dims = (16u32, 1u32, 1u32);
         self.validate_launch_dims(grid_dims, block_dims)?;
         let grid: GridSize = grid_dims.into();
         let block: BlockSize = block_dims.into();
@@ -484,20 +484,29 @@ pub mod benches {
     }
     fn bytes_many_series() -> usize {
         let n = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-        (3 * n * std::mem::size_of::<f32>()) + (64 << 20)
+        (3 * n * std::mem::size_of::<f32>())
+            + (MANY_SERIES_COLS * std::mem::size_of::<i32>())
+            + (64 << 20)
     }
 
     struct NviOneSeriesState {
         cuda: CudaNvi,
-        close: Vec<f32>,
-        volume: Vec<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for NviOneSeriesState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .nvi_batch_dev(&self.close, &self.volume)
+            self.cuda
+                .nvi_batch_dev_inplace(
+                    &self.d_close,
+                    &self.d_volume,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
                 .expect("nvi one-series");
+            self.cuda.synchronize().expect("sync");
         }
     }
 
@@ -510,49 +519,95 @@ pub mod benches {
             close[0] = 100.0;
             volume[0] = 1000.0;
         }
+        let first_valid = CudaNvi::first_valid_pair(&close, &volume).expect("first_valid");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_volume = DeviceBuffer::from_slice(&volume).expect("d_volume");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN) }
+            .expect("d_out");
         Box::new(NviOneSeriesState {
             cuda,
-            close,
-            volume,
+            d_close,
+            d_volume,
+            first_valid,
+            d_out,
         })
     }
 
     struct NviManySeriesState {
         cuda: CudaNvi,
-        close_tm: Vec<f32>,
-        volume_tm: Vec<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_volume_tm: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        d_first_valids: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for NviManySeriesState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .nvi_many_series_one_param_time_major_dev(
-                    &self.close_tm,
-                    &self.volume_tm,
-                    MANY_SERIES_COLS,
-                    MANY_SERIES_ROWS,
+            self.cuda
+                .nvi_many_series_one_param_time_major_dev_inplace(
+                    &self.d_close_tm,
+                    &self.d_volume_tm,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
                 .expect("nvi many-series");
+            self.cuda.synchronize().expect("nvi many-series sync");
         }
     }
 
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaNvi::new(0).expect("cuda nvi");
-        let n = MANY_SERIES_COLS * MANY_SERIES_ROWS;
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_ROWS;
+        let n = cols * rows;
         let mut close_tm = vec![f32::NAN; n];
         let mut volume_tm = vec![f32::NAN; n];
-        for s in 0..MANY_SERIES_COLS {
+        for s in 0..cols {
             // Stagger warmups per series
-            for t in s.min(8)..MANY_SERIES_ROWS {
+            for t in s.min(8)..rows {
                 let x = (t as f32) + (s as f32) * 0.11;
-                close_tm[t * MANY_SERIES_COLS + s] = (x * 0.0021).sin() + 0.0002 * x + 100.0;
-                volume_tm[t * MANY_SERIES_COLS + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
+                close_tm[t * cols + s] = (x * 0.0021).sin() + 0.0002 * x + 100.0;
+                volume_tm[t * cols + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
             }
         }
+
+        // First-valid per series (host) - row-major scan for cache locality.
+        let rows_i32 = rows as i32;
+        let mut first_valids = vec![rows_i32; cols];
+        let mut remaining = cols;
+        'outer: for t in 0..rows {
+            let row_off = t * cols;
+            for s in 0..cols {
+                if first_valids[s] == rows_i32 {
+                    let c = close_tm[row_off + s];
+                    let v = volume_tm[row_off + s];
+                    if !c.is_nan() && !v.is_nan() {
+                        first_valids[s] = t as i32;
+                        remaining -= 1;
+                        if remaining == 0 {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_volume_tm = DeviceBuffer::from_slice(&volume_tm).expect("d_volume_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_out_tm");
+        cuda.synchronize().expect("nvi many prep sync");
         Box::new(NviManySeriesState {
             cuda,
-            close_tm,
-            volume_tm,
+            d_close_tm,
+            d_volume_tm,
+            cols,
+            rows,
+            d_first_valids,
+            d_out_tm,
         })
     }
 

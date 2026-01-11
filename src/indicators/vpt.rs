@@ -215,7 +215,7 @@ pub fn vpt_with_kernel(input: &VptInput, kernel: Kernel) -> Result<VptOutput, Vp
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1654,7 +1654,7 @@ pub fn vpt_batch_into(
 
 // Python CUDA handle for VPT: CAI v3 and DLPack v1.x. Keeps CUDA context alive.
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "my_project", name = "VptDeviceArrayF32", unsendable)]
+#[pyclass(module = "vector_ta", name = "VptDeviceArrayF32", unsendable)]
 pub struct VptDeviceArrayF32Py {
     // One-shot export via __dlpack__: move out of this Option
     pub(crate) buf: Option<DeviceBuffer<f32>>,

@@ -408,7 +408,7 @@ fn maaq_prepare<'a>(
 
     // Kernel auto-detection only once
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -811,7 +811,7 @@ pub struct MaaqBatchRange {
 impl Default for MaaqBatchRange {
     fn default() -> Self {
         Self {
-            period: (11, 50, 1),
+            period: (11, 260, 1),
             fast_period: (2, 2, 0),
             slow_period: (30, 30, 0),
         }

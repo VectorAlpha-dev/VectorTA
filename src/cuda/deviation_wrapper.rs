@@ -686,22 +686,38 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let prefix = (ONE_SERIES_LEN + 1)
+            * (2 * std::mem::size_of::<Float2>() + std::mem::size_of::<i32>());
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        prefix + out_bytes + 64 * 1024 * 1024
     }
 
     struct DeviationBatchState {
         cuda: CudaDeviation,
-        price: Vec<f32>,
-        sweep: DeviationBatchRange,
+        d_ps: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_pn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for DeviationBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .deviation_batch_dev(&self.price, &self.sweep)
-                .expect("deviation batch");
+            self.cuda
+                .launch_batch_kernel_ptrs(
+                    &self.d_ps,
+                    &self.d_ps2,
+                    &self.d_pn,
+                    self.d_periods.as_device_ptr(),
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    self.d_out.as_device_ptr(),
+                )
+                .expect("deviation launch");
+            self.cuda.stream.synchronize().expect("deviation sync");
         }
     }
 
@@ -712,11 +728,33 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             devtype: (0, 0, 0),
         };
-        let sweep = DeviationBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-            devtype: (0, 0, 0),
-        };
-        Box::new(DeviationBatchState { cuda, price, sweep })
+
+        let (ps, ps2, pn, first_valid, len) = CudaDeviation::build_prefixes_1d(&price);
+        let combos = deviation_expand_grid(&sweep)
+            .into_iter()
+            .filter(|p| p.devtype.unwrap_or(0) == 0)
+            .collect::<Vec<_>>();
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+
+        let d_ps = DeviceBuffer::from_slice(&ps).expect("ps H2D");
+        let d_ps2 = DeviceBuffer::from_slice(&ps2).expect("ps2 H2D");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("pn H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("periods H2D");
+
+        let elems = len * combos.len();
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out");
+
+        Box::new(DeviationBatchState {
+            cuda,
+            d_ps,
+            d_ps2,
+            d_pn,
+            d_periods,
+            len,
+            first_valid,
+            n_combos: combos.len(),
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

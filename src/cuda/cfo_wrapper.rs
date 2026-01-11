@@ -595,17 +595,34 @@ pub mod benches {
         in_bytes + out_bytes + prefix_bytes + fv_bytes + 64 * 1024 * 1024
     }
 
-    struct CfoBatchState {
+    struct CfoBatchDeviceState {
         cuda: CudaCfo,
-        price: Vec<f32>,
-        sweep: CfoBatchRange,
+        d_data: DeviceBuffer<f32>,
+        d_ps: DeviceBuffer<f64>,
+        d_pw: DeviceBuffer<f64>,
+        d_periods: DeviceBuffer<i32>,
+        d_scalars: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for CfoBatchState {
+    impl CudaBenchState for CfoBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cfo_batch_dev(&self.price, &self.sweep)
-                .expect("cfo batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_data,
+                    &self.d_ps,
+                    &self.d_pw,
+                    self.len as i32,
+                    self.first_valid as i32,
+                    &self.d_periods,
+                    &self.d_scalars,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                )
+                .expect("cfo launch");
+            self.cuda.stream.synchronize().expect("cfo sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -615,27 +632,63 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             scalar: (100.0, 100.0, 0.0),
         };
-        Box::new(CfoBatchState { cuda, price, sweep })
+
+        let (periods, scalars, first_valid) =
+            CudaCfo::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let len = price.len();
+        let n_combos = periods.len();
+        let (ps, pw) = build_prefixes_from_first(&price, first_valid);
+
+        let d_data = DeviceBuffer::from_slice(&price).expect("cfo d_data H2D");
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps).expect("cfo d_ps H2D");
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw).expect("cfo d_pw H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("cfo d_periods H2D");
+        let d_scalars = DeviceBuffer::from_slice(&scalars).expect("cfo d_scalars H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len * n_combos) }.expect("cfo out alloc");
+
+        Box::new(CfoBatchDeviceState {
+            cuda,
+            d_data,
+            d_ps,
+            d_pw,
+            d_periods,
+            d_scalars,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
-    struct CfoManyState {
+    struct CfoManyDeviceState {
         cuda: CudaCfo,
-        data_tm: Vec<f32>,
+        d_data: DeviceBuffer<f32>,
+        d_ps: DeviceBuffer<f64>,
+        d_pw: DeviceBuffer<f64>,
+        d_fv: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: CfoParams,
+        period: usize,
+        scalar: f32,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for CfoManyState {
+    impl CudaBenchState for CfoManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cfo_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_data,
+                    &self.d_ps,
+                    &self.d_pw,
+                    &self.d_fv,
+                    self.cols as i32,
+                    self.rows as i32,
+                    self.period as i32,
+                    self.scalar,
+                    &mut self.d_out,
                 )
-                .expect("cfo many-series");
+                .expect("cfo many-series launch");
+            self.cuda.stream.synchronize().expect("cfo many sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -647,12 +700,30 @@ pub mod benches {
             period: Some(14),
             scalar: Some(100.0),
         };
-        Box::new(CfoManyState {
+
+        let (first_valids, period, scalar) =
+            CudaCfo::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
+        let (ps_tm, pw_tm) = build_prefixes_time_major(&data_tm, cols, rows, &first_valids);
+
+        let d_data = DeviceBuffer::from_slice(&data_tm).expect("cfo d_data_tm H2D");
+        let d_ps: DeviceBuffer<f64> = DeviceBuffer::from_slice(&ps_tm).expect("cfo d_ps_tm H2D");
+        let d_pw: DeviceBuffer<f64> = DeviceBuffer::from_slice(&pw_tm).expect("cfo d_pw_tm H2D");
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("cfo d_fv H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("cfo d_out alloc");
+
+        Box::new(CfoManyDeviceState {
             cuda,
-            data_tm,
+            d_data,
+            d_ps,
+            d_pw,
+            d_fv,
             cols,
             rows,
-            params,
+            period,
+            scalar: scalar as f32,
+            d_out,
         })
     }
 

@@ -546,18 +546,46 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct IftRsiBatchState {
+    struct IftRsiBatchDeviceState {
         cuda: CudaIftRsi,
-        data: Vec<f32>,
-        sweep: IftRsiBatchRange,
+        func: Function<'static>,
+        d_in: DeviceBuffer<f32>,
+        d_rp: DeviceBuffer<i32>,
+        d_wp: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        block_x: u32,
+        grid_x: u32,
+        shmem_bytes: u32,
     }
-    impl CudaBenchState for IftRsiBatchState {
+    impl CudaBenchState for IftRsiBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ift_rsi_batch_dev(&self.data, &self.sweep)
-                .expect("ift_rsi batch");
-            // Explicit sync for deterministic benchmark timing since the API is non-blocking
+            unsafe {
+                let grid: GridSize = (self.grid_x.max(1), 1, 1).into();
+                let block: BlockSize = (self.block_x, 1, 1).into();
+                let mut in_ptr = self.d_in.as_device_ptr().as_raw();
+                let mut series_len_i = self.len as i32;
+                let mut n_combos_i = self.n_combos as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut rp_ptr = self.d_rp.as_device_ptr().as_raw();
+                let mut wp_ptr = self.d_wp.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut in_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut n_combos_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut rp_ptr as *mut _ as *mut c_void,
+                    &mut wp_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&self.func, grid, block, self.shmem_bytes, args)
+                    .expect("ift_rsi launch");
+            }
             self.cuda.synchronize().expect("stream sync");
         }
     }
@@ -568,19 +596,61 @@ pub mod benches {
         for i in 0..16 {
             data[i] = f32::NAN;
         }
-        for i in 0..16 {
-            data[i] = f32::NAN;
-        }
-        // Sweep rp in [5..(5+PARAM_SWEEP/2)], wp in [9..(9+PARAM_SWEEP/2)]
         let sweep = IftRsiBatchRange {
-            rsi_period: (5, 5 + PARAM_SWEEP / 2 - 1, 1),
-            wma_period: (9, 9 + PARAM_SWEEP / 2 - 1, 1),
+            rsi_period: (5, 5, 0),
+            wma_period: (9, 9 + PARAM_SWEEP - 1, 1),
         };
-        let sweep = IftRsiBatchRange {
-            rsi_period: (5, 5 + PARAM_SWEEP / 2 - 1, 1),
-            wma_period: (9, 9 + PARAM_SWEEP / 2 - 1, 1),
+
+        let (combos, first_valid, len, max_wp) =
+            CudaIftRsi::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+
+        let rsi_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.rsi_period.unwrap() as i32)
+            .collect();
+        let wma_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.wma_period.unwrap() as i32)
+            .collect();
+
+        let d_in = unsafe { DeviceBuffer::from_slice_async(&data, &cuda.stream) }.expect("d_in");
+        let d_rp = unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &cuda.stream) }.expect("d_rp");
+        let d_wp = unsafe { DeviceBuffer::from_slice_async(&wma_i32, &cuda.stream) }.expect("d_wp");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }.expect("d_out");
+
+        let func = cuda
+            .module
+            .get_function("ift_rsi_batch_f32")
+            .expect("ift_rsi_batch_f32");
+        let func: Function<'static> = unsafe { std::mem::transmute(func) };
+
+        let shmem_bytes = (max_wp * core::mem::size_of::<f32>()) as u32;
+
+        let block_x: u32 = match cuda.policy.batch {
+            BatchKernelPolicy::Auto => cuda.warp_size.max(32),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
-        Box::new(IftRsiBatchState { cuda, data, sweep })
+        let target_blocks = cuda.sm_count.saturating_mul(8).max(1);
+        let grid_x = (n_combos as u32).min(target_blocks).max(1);
+
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(IftRsiBatchDeviceState {
+            cuda,
+            func,
+            d_in,
+            d_rp,
+            d_wp,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+            block_x,
+            grid_x,
+            shmem_bytes,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

@@ -1327,7 +1327,7 @@ pub struct MinmaxBatchRange {
 
 impl Default for MinmaxBatchRange {
     fn default() -> Self {
-        Self { order: (3, 20, 1) }
+        Self { order: (3, 252, 1) }
     }
 }
 

@@ -410,7 +410,7 @@ impl UmaStream {
             wma_denom: (smooth_len as f64) * ((smooth_len as f64) + 1.0) * 0.5,
 
             params,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Auto,
         })
     }
 
@@ -1241,7 +1241,7 @@ pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, Um
 
     // Choose kernel (Auto -> detect) and thread through for parity and SIMD.
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     uma_core_into(input, first, min_len, max_len, accel, chosen, &mut out)?;
@@ -1284,7 +1284,7 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     uma_core_into(input, first, min_len, max_len, accel, chosen, dst)?;
@@ -1331,7 +1331,7 @@ impl Default for UmaBatchRange {
         Self {
             accelerator: (1.0, 1.0, 0.0),
             min_length: (5, 5, 0),
-            max_length: (50, 50, 0),
+            max_length: (50, 299, 1),
             smooth_length: (4, 4, 0),
         }
     }
@@ -1351,7 +1351,7 @@ impl Default for UmaBatchBuilder {
         Self {
             accelerator_range: (1.0, 1.0, 0.0),
             min_length_range: (5, 5, 0),
-            max_length_range: (50, 50, 0),
+            max_length_range: (50, 299, 1),
             smooth_length_range: (4, 4, 0),
             kernel: Kernel::Auto,
         }
@@ -1629,7 +1629,7 @@ fn debatch(k: Kernel) -> Kernel {
         Kernel::Avx512Batch | Kernel::Avx512 => Kernel::Avx512,
         Kernel::Avx2Batch | Kernel::Avx2 => Kernel::Avx2,
         Kernel::ScalarBatch | Kernel::Scalar => Kernel::Scalar,
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         _ => Kernel::Scalar,
     }
 }
@@ -2166,7 +2166,7 @@ pub fn uma_js(
     let vol_slice = volume.as_deref();
     let input = UmaInput::from_slice(data, vol_slice, params);
 
-    match uma_with_kernel(&input, detect_best_kernel()) {
+    match uma_with_kernel(&input, Kernel::Auto) {
         Ok(output) => {
             // Return as an object with values property to match test expectations
             let obj = js_sys::Object::new();
@@ -2266,13 +2266,13 @@ pub fn uma_into(
         if core::ptr::eq(in_ptr as *const u8, out_ptr as *const u8) {
             // in-place: compute into temp then copy once
             let mut tmp = vec![0.0; len];
-            uma_into_slice(&mut tmp, &input, detect_best_kernel())
+            uma_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            uma_into_slice(out, &input, detect_best_kernel())
+            uma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())
@@ -2378,7 +2378,7 @@ pub fn uma_update(
 
         // Compute into temporary buffer then copy back
         let mut tmp = vec![0.0; len];
-        uma_into_slice(&mut tmp, &input, detect_best_kernel())
+        uma_into_slice(&mut tmp, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let out = std::slice::from_raw_parts_mut(ptr, len);
@@ -3012,7 +3012,7 @@ mod tests {
         #[cfg(not(feature = "wasm"))]
         uma_into(&input, &mut via_into).unwrap();
         #[cfg(feature = "wasm")]
-        uma_into_slice(&mut via_into, &input, detect_best_kernel()).unwrap();
+        uma_into_slice(&mut via_into, &input, Kernel::Auto).unwrap();
 
         assert_eq!(baseline.len(), via_into.len());
         for (a, b) in baseline.iter().zip(via_into.iter()) {

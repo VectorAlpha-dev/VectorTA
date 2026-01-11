@@ -23,6 +23,7 @@ pub mod jsa;
 pub mod kama;
 pub mod linreg;
 pub mod ma;
+pub mod ma_batch;
 pub mod ma_stream;
 pub mod maaq;
 pub mod mama;

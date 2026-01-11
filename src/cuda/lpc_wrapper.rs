@@ -162,6 +162,183 @@ impl CudaLpc {
         Ok(())
     }
 
+    fn launch_batch_f32_v2(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_src: &DeviceBuffer<f32>,
+        series_len: usize,
+        d_tr_opt: Option<&DeviceBuffer<f32>>,
+        d_periods: &DeviceBuffer<i32>,
+        d_cms: &DeviceBuffer<f32>,
+        d_tms: &DeviceBuffer<f32>,
+        first_valid: usize,
+        cutoff_adaptive: bool,
+        max_cycle_limit: usize,
+        d_dom_opt: Option<&DeviceBuffer<f32>>,
+        d_alpha_lut_opt: Option<&DeviceBuffer<f32>>,
+        alpha_lut_len_i32: i32,
+        alpha_lut_pmin_i32: i32,
+        out_time_major: bool,
+        d_out_filter: &mut DeviceBuffer<f32>,
+        d_out_high: &mut DeviceBuffer<f32>,
+        d_out_low: &mut DeviceBuffer<f32>,
+    ) -> Result<BatchKernelSelected, CudaLpcError> {
+        if series_len == 0 {
+            return Err(CudaLpcError::InvalidInput("empty input".into()));
+        }
+        if [d_high.len(), d_low.len(), d_close.len(), d_src.len()]
+            .iter()
+            .copied()
+            .any(|n| n != series_len)
+        {
+            return Err(CudaLpcError::InvalidInput(
+                "device input buffer length mismatch".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaLpcError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        if let Some(d_tr) = d_tr_opt {
+            if d_tr.len() != series_len {
+                return Err(CudaLpcError::InvalidInput("TR buffer wrong length".into()));
+            }
+        }
+
+        let n_combos = d_periods.len();
+        if n_combos == 0 {
+            return Err(CudaLpcError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if d_cms.len() != n_combos || d_tms.len() != n_combos {
+            return Err(CudaLpcError::InvalidInput(
+                "parameter buffer length mismatch".into(),
+            ));
+        }
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaLpcError::InvalidInput("output length overflow".into()))?;
+        if [d_out_filter.len(), d_out_high.len(), d_out_low.len()]
+            .iter()
+            .copied()
+            .any(|n| n != out_elems)
+        {
+            return Err(CudaLpcError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        if cutoff_adaptive {
+            let d_dom = d_dom_opt.ok_or_else(|| {
+                CudaLpcError::InvalidInput("dom buffer required for adaptive cutoff".into())
+            })?;
+            if d_dom.len() != series_len {
+                return Err(CudaLpcError::InvalidInput(
+                    "dom buffer wrong length".into(),
+                ));
+            }
+        }
+        if let Some(d_alpha) = d_alpha_lut_opt {
+            if d_alpha.len() != alpha_lut_len_i32.max(0) as usize {
+                return Err(CudaLpcError::InvalidInput(
+                    "alpha LUT buffer length mismatch".into(),
+                ));
+            }
+        }
+
+        let func = self
+            .module
+            .get_function("lpc_batch_f32_v2")
+            .map_err(|_| CudaLpcError::MissingKernelSymbol { name: "lpc_batch_f32_v2" })?;
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x,
+        };
+        if block_x == 0 {
+            return Err(CudaLpcError::LaunchConfigTooLarge {
+                gx: 0,
+                gy: 0,
+                gz: 0,
+                bx: 0,
+                by: 0,
+                bz: 0,
+            });
+        }
+
+        // The kernel supports striding across combos; clamp grid_x to the HW limit.
+        let grid_x_full = ((n_combos as u32) + block_x - 1) / block_x;
+        let grid_x = grid_x_full.clamp(1, 65_535);
+
+        unsafe {
+            let grid: GridSize = ((grid_x, 1, 1)).into();
+            let block: BlockSize = ((block_x, 1, 1)).into();
+            let mut h_ptr = d_high.as_device_ptr().as_raw();
+            let mut l_ptr = d_low.as_device_ptr().as_raw();
+            let mut c_ptr = d_close.as_device_ptr().as_raw();
+            let mut s_ptr = d_src.as_device_ptr().as_raw();
+            let mut len_i = series_len as i32;
+            let mut tr_ptr: *const f32 = if let Some(d) = d_tr_opt {
+                d.as_device_ptr().as_raw() as *const f32
+            } else {
+                std::ptr::null()
+            };
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut cms_ptr = d_cms.as_device_ptr().as_raw();
+            let mut tms_ptr = d_tms.as_device_ptr().as_raw();
+            let mut combos_i = n_combos as i32;
+            let mut first_i = first_valid as i32;
+            let mut cutoff_i = if cutoff_adaptive { 1i32 } else { 0i32 };
+            let mut maxcl_i = max_cycle_limit as i32;
+            let mut dom_ptr: *const f32 = if let Some(ref d) = d_dom_opt {
+                d.as_device_ptr().as_raw() as *const f32
+            } else {
+                std::ptr::null()
+            };
+            let mut alpha_ptr: *const f32 = if let Some(ref d) = d_alpha_lut_opt {
+                d.as_device_ptr().as_raw() as *const f32
+            } else {
+                std::ptr::null()
+            };
+            let mut alpha_len = alpha_lut_len_i32;
+            let mut alpha_pmin = alpha_lut_pmin_i32;
+            let mut out_time_major_i = if out_time_major { 1i32 } else { 0i32 };
+            let mut out_f_ptr = d_out_filter.as_device_ptr().as_raw();
+            let mut out_hi_ptr = d_out_high.as_device_ptr().as_raw();
+            let mut out_lo_ptr = d_out_low.as_device_ptr().as_raw();
+
+            let mut args: [*mut c_void; 21] = [
+                &mut h_ptr as *mut _ as *mut c_void,
+                &mut l_ptr as *mut _ as *mut c_void,
+                &mut c_ptr as *mut _ as *mut c_void,
+                &mut s_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut cms_ptr as *mut _ as *mut c_void,
+                &mut tms_ptr as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut cutoff_i as *mut _ as *mut c_void,
+                &mut maxcl_i as *mut _ as *mut c_void,
+                &mut dom_ptr as *mut _ as *mut c_void,
+                &mut alpha_ptr as *mut _ as *mut c_void,
+                &mut alpha_len as *mut _ as *mut c_void,
+                &mut alpha_pmin as *mut _ as *mut c_void,
+                &mut out_time_major_i as *mut _ as *mut c_void,
+                &mut out_f_ptr as *mut _ as *mut c_void,
+                &mut out_hi_ptr as *mut _ as *mut c_void,
+                &mut out_lo_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+        }
+
+        Ok(BatchKernelSelected::Plain { block_x })
+    }
+
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -459,76 +636,29 @@ impl CudaLpc {
         let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
         // Launch v2 kernel; keep out_time_major=0 for API compatibility
-        let func = self
-            .module
-            .get_function("lpc_batch_f32_v2")
-            .map_err(|_| CudaLpcError::MissingKernelSymbol { name: "lpc_batch_f32_v2" })?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x;
-        if block_x == 0 || grid_x == 0 || grid_x > 65_535 {
-            return Err(CudaLpcError::LaunchConfigTooLarge {
-                gx: grid_x,
-                gy: 1,
-                gz: 1,
-                bx: block_x,
-                by: 1,
-                bz: 1,
-            });
-        }
-        unsafe {
-            let grid: GridSize = ((grid_x, 1, 1)).into();
-            let block: BlockSize = ((block_x, 1, 1)).into();
-            let mut h_ptr = d_h.as_device_ptr().as_raw();
-            let mut l_ptr = d_l.as_device_ptr().as_raw();
-            let mut c_ptr = d_c.as_device_ptr().as_raw();
-            let mut s_ptr = d_s.as_device_ptr().as_raw();
-            let mut len_i = n as i32;
-            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
-            let mut cms_ptr = d_cms.as_device_ptr().as_raw();
-            let mut tms_ptr = d_tms.as_device_ptr().as_raw();
-            let mut combos_i = rows as i32;
-            let mut first_i = first as i32;
-            let mut cutoff_i = if cutoff_adaptive { 1i32 } else { 0i32 };
-            let mut maxcl_i = range.max_cycle_limit as i32;
-            let mut dom_ptr: *const f32 = if let Some(ref d) = d_dom { d.as_device_ptr().as_raw() as *const f32 } else { std::ptr::null() };
-            let mut alpha_ptr: *const f32 = if let Some(ref d) = d_alpha_lut { d.as_device_ptr().as_raw() as *const f32 } else { std::ptr::null() };
-            let mut alpha_len = alpha_lut_len_i32;
-            let mut alpha_pmin = alpha_lut_pmin_i32;
-            let mut out_time_major = 0i32; // keep row-major externally
-            let mut out_f_ptr = d_f.as_device_ptr().as_raw();
-            let mut out_hi_ptr = d_hi.as_device_ptr().as_raw();
-            let mut out_lo_ptr = d_lo.as_device_ptr().as_raw();
-
-            let mut args: [*mut c_void; 21] = [
-                &mut h_ptr as *mut _ as *mut c_void,
-                &mut l_ptr as *mut _ as *mut c_void,
-                &mut c_ptr as *mut _ as *mut c_void,
-                &mut s_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut tr_ptr as *mut _ as *mut c_void,
-                &mut periods_ptr as *mut _ as *mut c_void,
-                &mut cms_ptr as *mut _ as *mut c_void,
-                &mut tms_ptr as *mut _ as *mut c_void,
-                &mut combos_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut cutoff_i as *mut _ as *mut c_void,
-                &mut maxcl_i as *mut _ as *mut c_void,
-                &mut dom_ptr as *mut _ as *mut c_void,
-                &mut alpha_ptr as *mut _ as *mut c_void,
-                &mut alpha_len as *mut _ as *mut c_void,
-                &mut alpha_pmin as *mut _ as *mut c_void,
-                &mut out_time_major as *mut _ as *mut c_void,
-                &mut out_f_ptr as *mut _ as *mut c_void,
-                &mut out_hi_ptr as *mut _ as *mut c_void,
-                &mut out_lo_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                ?;
-        }
-        self.stream
-            .synchronize()?;
+        let selected = self.launch_batch_f32_v2(
+            &d_h,
+            &d_l,
+            &d_c,
+            &d_s,
+            n,
+            Some(&d_tr),
+            &d_periods,
+            &d_cms,
+            &d_tms,
+            first,
+            cutoff_adaptive,
+            range.max_cycle_limit,
+            d_dom.as_ref(),
+            d_alpha_lut.as_ref(),
+            alpha_lut_len_i32,
+            alpha_lut_pmin_i32,
+            false,
+            &mut d_f,
+            &mut d_hi,
+            &mut d_lo,
+        )?;
+        self.stream.synchronize()?;
 
         let triplet = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 { buf: d_f, rows, cols: n },
@@ -536,8 +666,7 @@ impl CudaLpc {
             hist: DeviceArrayF32 { buf: d_lo, rows, cols: n },
         };
         unsafe {
-            (*(self as *const _ as *mut CudaLpc)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
+            (*(self as *const _ as *mut CudaLpc)).last_batch = Some(selected);
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
             eprintln!("[DEBUG] lpc batch selected kernel: {:?}", self.last_batch);
@@ -717,17 +846,51 @@ pub mod benches {
 
     struct LpcBatchState {
         cuda: CudaLpc,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        s: Vec<f32>,
-        range: LpcBatchRange,
+        d_h: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
+        d_c: DeviceBuffer<f32>,
+        d_s: DeviceBuffer<f32>,
+        d_tr: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_cms: DeviceBuffer<f32>,
+        d_tms: DeviceBuffer<f32>,
+        cutoff_adaptive: bool,
+        max_cycle_limit: usize,
+        d_dom: Option<DeviceBuffer<f32>>,
+        d_alpha_lut: Option<DeviceBuffer<f32>>,
+        alpha_lut_len_i32: i32,
+        alpha_lut_pmin_i32: i32,
+        first_valid: usize,
+        len: usize,
+        d_out_f: DeviceBuffer<f32>,
+        d_out_hi: DeviceBuffer<f32>,
+        d_out_lo: DeviceBuffer<f32>,
     }
     impl CudaBenchState for LpcBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .lpc_batch_dev(&self.h, &self.l, &self.c, &self.s, &self.range);
+            let _ = self.cuda.launch_batch_f32_v2(
+                &self.d_h,
+                &self.d_l,
+                &self.d_c,
+                &self.d_s,
+                self.len,
+                Some(&self.d_tr),
+                &self.d_periods,
+                &self.d_cms,
+                &self.d_tms,
+                self.first_valid,
+                self.cutoff_adaptive,
+                self.max_cycle_limit,
+                self.d_dom.as_ref(),
+                self.d_alpha_lut.as_ref(),
+                self.alpha_lut_len_i32,
+                self.alpha_lut_pmin_i32,
+                false,
+                &mut self.d_out_f,
+                &mut self.d_out_hi,
+                &mut self.d_out_lo,
+            );
+            let _ = self.cuda.synchronize();
         }
     }
 
@@ -751,13 +914,67 @@ pub mod benches {
             max_cycle_limit: 60,
         };
         let cuda = CudaLpc::new(0).expect("cuda lpc");
+
+        let first_valid = CudaLpc::first_valid_ohlc4(&h, &l, &c, &s).unwrap_or(0);
+        let combos = CudaLpc::expand_grid(&range).expect("lpc combos");
+        let rows = combos.len();
+
+        fn host_true_range_f32(h: &[f32], l: &[f32], c: &[f32]) -> Vec<f32> {
+            let n = h.len();
+            let mut tr = vec![0f32; n];
+            if n == 0 {
+                return tr;
+            }
+            tr[0] = h[0] - l[0];
+            for i in 1..n {
+                let hl = h[i] - l[i];
+                let c_l1 = (c[i] - l[i - 1]).abs();
+                let c_h1 = (c[i] - h[i - 1]).abs();
+                tr[i] = hl.max(c_l1).max(c_h1);
+            }
+            tr
+        }
+        let tr_host = host_true_range_f32(&h, &l, &c);
+
+        let periods: Vec<i32> = combos.iter().map(|p| p.fixed_period.unwrap() as i32).collect();
+        let cms: Vec<f32> = combos.iter().map(|p| p.cycle_mult.unwrap() as f32).collect();
+        let tms: Vec<f32> = combos.iter().map(|p| p.tr_mult.unwrap() as f32).collect();
+
+        let d_h = DeviceBuffer::from_slice(&h).expect("d_h");
+        let d_l = DeviceBuffer::from_slice(&l).expect("d_l");
+        let d_c = DeviceBuffer::from_slice(&c).expect("d_c");
+        let d_s = DeviceBuffer::from_slice(&s).expect("d_s");
+        let d_tr = DeviceBuffer::from_slice(&tr_host).expect("d_tr");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_cms = DeviceBuffer::from_slice(&cms).expect("d_cms");
+        let d_tms = DeviceBuffer::from_slice(&tms).expect("d_tms");
+
+        let out_elems = rows * n;
+        let d_out_f = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }.expect("d_out_f");
+        let d_out_hi = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }.expect("d_out_hi");
+        let d_out_lo = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }.expect("d_out_lo");
+
         Box::new(LpcBatchState {
             cuda,
-            h,
-            l,
-            c,
-            s,
-            range,
+            d_h,
+            d_l,
+            d_c,
+            d_s,
+            d_tr,
+            d_periods,
+            d_cms,
+            d_tms,
+            cutoff_adaptive: false,
+            max_cycle_limit: range.max_cycle_limit,
+            d_dom: None,
+            d_alpha_lut: None,
+            alpha_lut_len_i32: 0,
+            alpha_lut_pmin_i32: 0,
+            first_valid,
+            len: n,
+            d_out_f,
+            d_out_hi,
+            d_out_lo,
         })
     }
 

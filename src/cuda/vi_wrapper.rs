@@ -310,10 +310,6 @@ impl CudaVi {
                     first = Some(r);
                     break;
                 }
-                if h.is_finite() && l.is_finite() && c.is_finite() {
-                    first = Some(r);
-                    break;
-                }
             }
             if let Some(fv) = first {
                 first_valids[s] = fv as i32;
@@ -353,6 +349,184 @@ impl CudaVi {
         Ok((first_valids, pfx_tr, pfx_vp, pfx_vm))
     }
 
+    fn launch_vi_batch_f32(
+        &self,
+        d_tr: &DeviceBuffer<f32>,
+        d_vp: &DeviceBuffer<f32>,
+        d_vm: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        rows: usize,
+        first_valid: usize,
+        d_plus: &mut DeviceBuffer<f32>,
+        d_minus: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaViError> {
+        // Launch kernel
+        let mut func: Function = self
+            .module
+            .get_function("vi_batch_f32")
+            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_batch_f32" })?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let (min_grid_suggest, block_suggest) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((0, 256));
+        let bx: u32 = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+            _ => block_suggest.clamp(64, 1024),
+        };
+
+        // Prefer a 2D launch: X=time tiles, Y=row index.
+        let mut gx = ((len as u32) + bx - 1) / bx;
+        if min_grid_suggest > 0 {
+            gx = gx.max(min_grid_suggest);
+        }
+        let mut gy = rows as u32;
+
+        // Validate against device limits when possible; fall back to 1D when grid.y is too large.
+        if let Ok(device) = Device::get_device(self.device_id) {
+            if let Ok(max_block_x) =
+                device.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            {
+                if bx > max_block_x as u32 {
+                    return Err(CudaViError::LaunchConfigTooLarge {
+                        gx,
+                        gy,
+                        gz: 1,
+                        bx,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
+            }
+            if let Ok(max_grid_y) =
+                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            {
+                if gy > max_grid_y as u32 {
+                    // 1D fallback: total elements = rows * len
+                    let total = rows
+                        .checked_mul(len)
+                        .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
+                    let gx1 = ((total as u64) + (bx as u64) - 1) / (bx as u64);
+                    let gx1: u32 = gx1
+                        .try_into()
+                        .map_err(|_| CudaViError::InvalidInput("grid_x overflow".into()))?;
+                    gx = gx1.max(1);
+                    gy = 1;
+                }
+            }
+            if let Ok(max_grid_x) =
+                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            {
+                if gx > max_grid_x as u32 {
+                    return Err(CudaViError::LaunchConfigTooLarge {
+                        gx,
+                        gy,
+                        gz: 1,
+                        bx,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
+            }
+        }
+
+        let grid: GridSize = (gx.max(1), gy.max(1), 1).into();
+        let block: BlockSize = (bx, 1, 1).into();
+
+        unsafe {
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut vp_ptr = d_vp.as_device_ptr().as_raw();
+            let mut vm_ptr = d_vm.as_device_ptr().as_raw();
+            let mut pr_ptr = d_periods.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut rows_i = rows as i32;
+            let mut first_i = first_valid as i32;
+            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
+            let mut minus_ptr = d_minus.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut vp_ptr as *mut _ as *mut c_void,
+                &mut vm_ptr as *mut _ as *mut c_void,
+                &mut pr_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut plus_ptr as *mut _ as *mut c_void,
+                &mut minus_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
+    fn launch_vi_many_series_one_param_f32(
+        &self,
+        d_tr: &DeviceBuffer<f32>,
+        d_vp: &DeviceBuffer<f32>,
+        d_vm: &DeviceBuffer<f32>,
+        d_first: &DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_plus: &mut DeviceBuffer<f32>,
+        d_minus: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaViError> {
+        // Launch kernel
+        let mut func: Function = self
+            .module
+            .get_function("vi_many_series_one_param_f32")
+            .map_err(|_| CudaViError::MissingKernelSymbol {
+                name: "vi_many_series_one_param_f32",
+            })?;
+        let _ = func.set_cache_config(CacheConfig::PreferL1);
+        let (min_grid_suggest, block_suggest) = func
+            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((0, 256));
+        let bx: u32 = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
+            _ => block_suggest.clamp(64, 1024),
+        };
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaViError::InvalidInput("rows*cols overflow".into()))?;
+        let mut gx = ((total as u64) + (bx as u64) - 1) / (bx as u64);
+        if min_grid_suggest > 0 {
+            gx = gx.max(min_grid_suggest as u64);
+        }
+        let gx: u32 = gx
+            .try_into()
+            .map_err(|_| CudaViError::InvalidInput("grid_x overflow".into()))?;
+        let grid: GridSize = (gx.max(1), 1, 1).into();
+        let block: BlockSize = (bx, 1, 1).into();
+
+        unsafe {
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut vp_ptr = d_vp.as_device_ptr().as_raw();
+            let mut vm_ptr = d_vm.as_device_ptr().as_raw();
+            let mut fv_ptr = d_first.as_device_ptr().as_raw();
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
+            let mut p_i = period as i32;
+            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
+            let mut minus_ptr = d_minus.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut vp_ptr as *mut _ as *mut c_void,
+                &mut vm_ptr as *mut _ as *mut c_void,
+                &mut fv_ptr as *mut _ as *mut c_void,
+                &mut cols_i as *mut _ as *mut c_void,
+                &mut rows_i as *mut _ as *mut c_void,
+                &mut p_i as *mut _ as *mut c_void,
+                &mut plus_ptr as *mut _ as *mut c_void,
+                &mut minus_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     // ---------------- Batch entry ----------------
     pub fn vi_batch_dev(
         &self,
@@ -365,9 +539,6 @@ impl CudaVi {
             return Err(CudaViError::InvalidInput("length mismatch".into()));
         }
         let len = high_f32.len();
-        if len == 0 {
-            return Err(CudaViError::InvalidInput("empty input".into()));
-        }
         if len == 0 {
             return Err(CudaViError::InvalidInput("empty input".into()));
         }
@@ -406,15 +577,8 @@ impl CudaVi {
                 "no parameter combinations".into(),
             ));
         }
-        if combos.is_empty() {
-            return Err(CudaViError::InvalidInput(
-                "no parameter combinations".into(),
-            ));
-        }
         let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
 
-        let (first_valid, pfx_tr, pfx_vp, pfx_vm) =
-            self.build_prefix_single(high_f32, low_f32, close_f32)?;
         let (first_valid, pfx_tr, pfx_vp, pfx_vm) =
             self.build_prefix_single(high_f32, low_f32, close_f32)?;
         if len - first_valid < max_p {
@@ -471,44 +635,17 @@ impl CudaVi {
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
         let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }?;
 
-        // Launch kernel
-        let mut func: Function = self
-            .module
-            .get_function("vi_batch_f32")
-            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_batch_f32" })?;
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let (grid, block) = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => {
-                let bx = block_x.max(32).min(1024);
-                let gx = ((rows as u32) + bx - 1) / bx;
-                ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
-            }
-            _ => self.choose_launch_1d(&func, rows)?,
-        };
-
-        unsafe {
-            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-            let mut vp_ptr = d_vp.as_device_ptr().as_raw();
-            let mut vm_ptr = d_vm.as_device_ptr().as_raw();
-            let mut pr_ptr = d_periods.as_device_ptr().as_raw();
-            let mut len_i = len as i32;
-            let mut rows_i = rows as i32;
-            let mut first_i = first_valid as i32;
-            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
-            let mut minus_ptr = d_minus.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut tr_ptr as *mut _ as *mut c_void,
-                &mut vp_ptr as *mut _ as *mut c_void,
-                &mut vm_ptr as *mut _ as *mut c_void,
-                &mut pr_ptr as *mut _ as *mut c_void,
-                &mut len_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut first_i as *mut _ as *mut c_void,
-                &mut plus_ptr as *mut _ as *mut c_void,
-                &mut minus_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream.launch(&func, grid, block, 0, args)?;
-        }
+        self.launch_vi_batch_f32(
+            &d_tr,
+            &d_vp,
+            &d_vm,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_plus,
+            &mut d_minus,
+        )?;
 
         // Ensure kernels have completed before exposing VRAM handles to higher layers.
         self.stream.synchronize()?;
@@ -554,8 +691,6 @@ impl CudaVi {
             return Err(CudaViError::InvalidInput("invalid period".into()));
         }
 
-        let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
-            self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
         let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
             self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
         // Validate sufficient tail per series; if any series lacks enough tail, we still run and kernel will NaN-fill
@@ -604,44 +739,17 @@ impl CudaVi {
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
         let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
 
-        // Launch kernel
-        let mut func: Function = self
-            .module
-            .get_function("vi_many_series_one_param_f32")
-            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_many_series_one_param_f32" })?;
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let (grid, block) = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x } => {
-                let bx = block_x.max(32).min(1024);
-                let gx = ((cols as u32) + bx - 1) / bx;
-                ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
-            }
-            _ => self.choose_launch_1d(&func, cols)?,
-        };
-
-        unsafe {
-            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
-            let mut vp_ptr = d_vp.as_device_ptr().as_raw();
-            let mut vm_ptr = d_vm.as_device_ptr().as_raw();
-            let mut fv_ptr = d_first.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32;
-            let mut rows_i = rows as i32;
-            let mut p_i = period as i32;
-            let mut plus_ptr = d_plus.as_device_ptr().as_raw();
-            let mut minus_ptr = d_minus.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut tr_ptr as *mut _ as *mut c_void,
-                &mut vp_ptr as *mut _ as *mut c_void,
-                &mut vm_ptr as *mut _ as *mut c_void,
-                &mut fv_ptr as *mut _ as *mut c_void,
-                &mut cols_i as *mut _ as *mut c_void,
-                &mut rows_i as *mut _ as *mut c_void,
-                &mut p_i as *mut _ as *mut c_void,
-                &mut plus_ptr as *mut _ as *mut c_void,
-                &mut minus_ptr as *mut _ as *mut c_void,
-            ];
-            self.stream.launch(&func, grid, block, 0, args)?;
-        }
+        self.launch_vi_many_series_one_param_f32(
+            &d_tr,
+            &d_vp,
+            &d_vm,
+            &d_first,
+            cols,
+            rows,
+            period,
+            &mut d_plus,
+            &mut d_minus,
+        )?;
 
         // Ensure kernels have completed before exposing VRAM handles to higher layers.
         self.stream.synchronize()?;
@@ -660,21 +768,58 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaVi,
-        d: DeviceArrayF32Pair,
-        _combos: Vec<ViParams>,
+        d_tr: DeviceBuffer<f32>,
+        d_vp: DeviceBuffer<f32>,
+        d_vm: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        rows: usize,
+        first_valid: usize,
+        out_plus: DeviceBuffer<f32>,
+        out_minus: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
+            let _ = self.cuda.launch_vi_batch_f32(
+                &self.d_tr,
+                &self.d_vp,
+                &self.d_vm,
+                &self.d_periods,
+                self.len,
+                self.rows,
+                self.first_valid,
+                &mut self.out_plus,
+                &mut self.out_minus,
+            );
             let _ = self.cuda.stream.synchronize();
         }
     }
 
     struct ManyState {
         cuda: CudaVi,
-        d: DeviceArrayF32Pair,
+        d_tr: DeviceBuffer<f32>,
+        d_vp: DeviceBuffer<f32>,
+        d_vm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        out_plus: DeviceBuffer<f32>,
+        out_minus: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
+            let _ = self.cuda.launch_vi_many_series_one_param_f32(
+                &self.d_tr,
+                &self.d_vp,
+                &self.d_vm,
+                &self.d_first,
+                self.cols,
+                self.rows,
+                self.period,
+                &mut self.out_plus,
+                &mut self.out_minus,
+            );
             let _ = self.cuda.stream.synchronize();
         }
     }
@@ -700,11 +845,52 @@ pub mod benches {
                 }
                 let sweep = ViBatchRange { period: (7, 35, 2) };
                 let cuda = CudaVi::new(0).unwrap();
-                let (d, combos) = cuda.vi_batch_dev(&h, &l, &c, &sweep).unwrap();
+                let (start, end, step) = sweep.period;
+                let mut periods = Vec::new();
+                if step == 0 || start == end {
+                    periods.push(start);
+                } else if start < end {
+                    periods.extend((start..=end).step_by(step));
+                } else {
+                    let mut cur = start;
+                    loop {
+                        periods.push(cur);
+                        if cur == end {
+                            break;
+                        }
+                        cur = match cur.checked_sub(step) {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        if cur < end {
+                            break;
+                        }
+                    }
+                }
+                let rows = periods.len();
+                let max_p = periods.iter().copied().max().unwrap_or(1);
+                let (first_valid, pfx_tr, pfx_vp, pfx_vm) =
+                    cuda.build_prefix_single(&h, &l, &c).unwrap();
+                assert!(len - first_valid >= max_p);
+                let d_tr = cuda.h2d_upload(&pfx_tr).unwrap();
+                let d_vp = cuda.h2d_upload(&pfx_vp).unwrap();
+                let d_vm = cuda.h2d_upload(&pfx_vm).unwrap();
+                let periods_host: Vec<i32> = periods.into_iter().map(|p| p as i32).collect();
+                let d_periods = cuda.h2d_upload(&periods_host).unwrap();
+                let total = rows.checked_mul(len).unwrap();
+                let out_plus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }.unwrap();
+                let out_minus = unsafe { DeviceBuffer::<f32>::uninitialized(total) }.unwrap();
                 Box::new(BatchState {
                     cuda,
-                    d,
-                    _combos: combos,
+                    d_tr,
+                    d_vp,
+                    d_vm,
+                    d_periods,
+                    len,
+                    rows,
+                    first_valid,
+                    out_plus,
+                    out_minus,
                 }) as Box<dyn CudaBenchState>
             },
         ));
@@ -730,11 +916,27 @@ pub mod benches {
                     }
                 }
                 let cuda = CudaVi::new(0).unwrap();
-                let params = ViParams { period: Some(14) };
-                let d = cuda
-                    .vi_many_series_one_param_time_major_dev(&h, &l, &c, cols, rows, &params)
-                    .unwrap();
-                Box::new(ManyState { cuda, d }) as Box<dyn CudaBenchState>
+                let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
+                    cuda.build_prefix_time_major(&h, &l, &c, cols, rows).unwrap();
+                let d_tr = cuda.h2d_upload(&pfx_tr).unwrap();
+                let d_vp = cuda.h2d_upload(&pfx_vp).unwrap();
+                let d_vm = cuda.h2d_upload(&pfx_vm).unwrap();
+                let d_first = cuda.h2d_upload(&first_valids).unwrap();
+                let n = rows.checked_mul(cols).unwrap();
+                let out_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.unwrap();
+                let out_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.unwrap();
+                Box::new(ManyState {
+                    cuda,
+                    d_tr,
+                    d_vp,
+                    d_vm,
+                    d_first,
+                    cols,
+                    rows,
+                    period: 14,
+                    out_plus,
+                    out_minus,
+                }) as Box<dyn CudaBenchState>
             },
         ));
 

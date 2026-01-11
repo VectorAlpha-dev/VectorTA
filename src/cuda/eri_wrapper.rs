@@ -25,6 +25,7 @@ use std::fmt;
 use std::sync::Arc;
 
 const ERI_TIME_TILE: u32 = 16; // must match kernels/cuda/eri_kernel.cu
+const ERI_SMALL_P_NO_TRANSPOSE_THRESHOLD: usize = 64;
 #[inline]
 fn ceil_div(x: u32, y: u32) -> u32 {
     (x + y - 1) / y
@@ -279,6 +280,61 @@ impl CudaEri {
             debug_assert_eq!(ma_rm.rows, periods.len());
             debug_assert_eq!(ma_rm.cols, len);
 
+            if periods.len() <= ERI_SMALL_P_NO_TRANSPOSE_THRESHOLD {
+                // For small P, avoid the RM->TM transpose and just run the simple per-row subtract.
+                let func = self
+                    .module
+                    .get_function("eri_batch_f32")
+                    .map_err(|_| CudaEriError::MissingKernelSymbol { name: "eri_batch_f32" })?;
+                let block_x = match self.policy.batch {
+                    BatchKernelPolicy::Auto => 256,
+                    BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+                };
+                let block: BlockSize = (block_x, 1, 1).into();
+                let grid: GridSize = (((len as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
+
+                for (row_idx, &p) in periods.iter().enumerate() {
+                    let row_bytes = match row_idx
+                        .checked_mul(len)
+                        .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
+                    {
+                        Some(v) => v as u64,
+                        None => return Err(CudaEriError::InvalidInput("row offset overflow".into())),
+                    };
+                    unsafe {
+                        let mut h = d_high.as_device_ptr().as_raw();
+                        let mut l = d_low.as_device_ptr().as_raw();
+                        let mut m = ma_rm.buf.as_device_ptr().as_raw() + row_bytes;
+                        let mut n = len as i32;
+                        let mut fv = first_valid as i32;
+                        let mut per = p as i32;
+                        let mut bo = d_bull.as_device_ptr().as_raw() + row_bytes;
+                        let mut ro = d_bear.as_device_ptr().as_raw() + row_bytes;
+                        let mut args: [*mut c_void; 8] = [
+                            &mut h as *mut _ as *mut c_void,
+                            &mut l as *mut _ as *mut c_void,
+                            &mut m as *mut _ as *mut c_void,
+                            &mut n as *mut _ as *mut c_void,
+                            &mut fv as *mut _ as *mut c_void,
+                            &mut per as *mut _ as *mut c_void,
+                            &mut bo as *mut _ as *mut c_void,
+                            &mut ro as *mut _ as *mut c_void,
+                        ];
+                        self.stream.launch(&func, grid, block, 0, &mut args)?;
+                    }
+                }
+
+                combos.extend(periods.iter().map(|&p| EriParams {
+                    period: Some(p),
+                    ma_type: Some(sweep.ma_type.clone()),
+                }));
+
+                self.stream.synchronize()?;
+                let bull = DeviceArrayF32 { buf: d_bull, rows: periods.len(), cols: len };
+                let bear = DeviceArrayF32 { buf: d_bear, rows: periods.len(), cols: len };
+                return Ok(((bull, bear), combos));
+            }
+
             // 1) Transpose MA to time-major [len x P] on device
             let func_tr = self
                 .module
@@ -303,7 +359,6 @@ impl CudaEri {
                 self.stream.launch(&func_tr, grid_tr, block_tr, 0, &mut args)?;
             }
             // Debug logging removed: no indicator-specific env flags.
-            drop(ma_rm);
 
             // 2) Launch optimized ERI kernel once (write row-major outputs)
             let func = self
@@ -311,10 +366,13 @@ impl CudaEri {
                 .get_function("eri_one_series_many_params_time_major_f32")
                 .map_err(|_| CudaEriError::MissingKernelSymbol { name: "eri_one_series_many_params_time_major_f32" })?;
             let periods_i32: Vec<i32> = periods.iter().map(|&p| p as i32).collect();
-            let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
+            let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
             let block_x = match self.policy.batch {
-                BatchKernelPolicy::Auto => 256,
+                BatchKernelPolicy::Auto => {
+                    let p = periods.len() as u32;
+                    if p <= 32 { 32 } else if p <= 64 { 64 } else if p <= 128 { 128 } else { 256 }
+                }
                 BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             };
             let block: BlockSize = (block_x, 1, 1).into();
@@ -646,46 +704,106 @@ pub mod benches {
         (high, low)
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaEri,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: EriBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_ma_rm: DeviceBuffer<f32>,
+        d_bull: DeviceBuffer<f32>,
+        d_bear: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        periods: Vec<i32>,
+        grid: GridSize,
+        block: BlockSize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .eri_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
+                .module
+                .get_function("eri_batch_f32")
+                .expect("eri_batch_f32");
+
+            for (row_idx, &p) in self.periods.iter().enumerate() {
+                let row_bytes = (row_idx * self.len * std::mem::size_of::<f32>()) as u64;
+                unsafe {
+                    let mut h = self.d_high.as_device_ptr().as_raw();
+                    let mut l = self.d_low.as_device_ptr().as_raw();
+                    let mut m = self.d_ma_rm.as_device_ptr().as_raw() + row_bytes;
+                    let mut n = self.len as i32;
+                    let mut fv = self.first_valid as i32;
+                    let mut per = p;
+                    let mut bo = self.d_bull.as_device_ptr().as_raw() + row_bytes;
+                    let mut ro = self.d_bear.as_device_ptr().as_raw() + row_bytes;
+                    let mut args: [*mut c_void; 8] = [
+                        &mut h as *mut _ as *mut c_void,
+                        &mut l as *mut _ as *mut c_void,
+                        &mut m as *mut _ as *mut c_void,
+                        &mut n as *mut _ as *mut c_void,
+                        &mut fv as *mut _ as *mut c_void,
+                        &mut per as *mut _ as *mut c_void,
+                        &mut bo as *mut _ as *mut c_void,
+                        &mut ro as *mut _ as *mut c_void,
+                    ];
+                    self.cuda
+                        .stream
+                        .launch(&func, self.grid, self.block, 0, &mut args)
+                        .expect("eri_batch launch");
+                }
+            }
+            self.cuda.stream.synchronize().expect("eri batch sync");
         }
     }
 
-    struct ManySeriesState {
+    struct ManySeriesDeviceState {
         cuda: CudaEri,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_ma_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_bull: DeviceBuffer<f32>,
+        d_bear: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        period: usize,
-        ma_type: &'static str,
+        period: i32,
+        grid: GridSize,
+        block: BlockSize,
     }
-    impl CudaBenchState for ManySeriesState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .eri_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.ma_type,
-                )
-                .unwrap();
+                .module
+                .get_function("eri_many_series_one_param_time_major_f32")
+                .expect("eri_many_series_one_param_time_major_f32");
+            unsafe {
+                let mut h = self.d_high_tm.as_device_ptr().as_raw();
+                let mut l = self.d_low_tm.as_device_ptr().as_raw();
+                let mut m = self.d_ma_tm.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut fv = self.d_first.as_device_ptr().as_raw();
+                let mut p = self.period;
+                let mut bo = self.d_bull.as_device_ptr().as_raw();
+                let mut ro = self.d_bear.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 9] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut m as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut fv as *mut _ as *mut c_void,
+                    &mut p as *mut _ as *mut c_void,
+                    &mut bo as *mut _ as *mut c_void,
+                    &mut ro as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, &mut args)
+                    .expect("eri many launch");
+            }
+            self.cuda.stream.synchronize().expect("eri many sync");
         }
     }
 
@@ -697,12 +815,41 @@ pub mod benches {
             period: (8, 64, 8),
             ma_type: "ema".to_string(),
         };
-        Box::new(BatchState {
+        let periods = CudaEri::expand_periods(&sweep).expect("expand_periods");
+        let len = close.len();
+        let first_valid = close.iter().position(|v| v.is_finite()).unwrap_or(0);
+
+        let range = crate::indicators::moving_averages::ema::EmaBatchRange {
+            period: sweep.period,
+        };
+        let cuda_ma = crate::cuda::moving_averages::ema_wrapper::CudaEma::new(0).expect("cuda ema");
+        let ma_rm = cuda_ma.ema_batch_dev(&close, &range).expect("ema_batch_dev");
+        let d_ma_rm = ma_rm.buf;
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let rows = periods.len();
+        let d_bull: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_bull");
+        let d_bear: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_bear");
+
+        let block_x = 256u32;
+        let grid: GridSize = (((len as u32 + block_x - 1) / block_x).max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(BatchDeviceState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_high,
+            d_low,
+            d_ma_rm,
+            d_bull,
+            d_bear,
+            len,
+            first_valid,
+            periods: periods.into_iter().map(|p| p as i32).collect(),
+            grid,
+            block,
         })
     }
 
@@ -723,7 +870,53 @@ pub mod benches {
         let (high_tm, low_tm) = synth_hl_from_close(&close_tm);
         let period = 14usize;
         let ma_type = "ema";
-        Box::new(ManySeriesState { cuda, high_tm, low_tm, close_tm, cols, rows, period, ma_type })
+
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let ma_dev = cuda
+            .ma_many_series_one_param_time_major_dev(&close_tm, cols, rows, period, ma_type)
+            .expect("ma tm");
+        let d_ma_tm = ma_dev.buf;
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let total = cols * rows;
+        let d_bull: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_bull");
+        let d_bear: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }.expect("d_bear");
+
+        let block_x = 256u32;
+        let grid: GridSize = (
+            ceil_div(cols as u32, block_x),
+            ceil_div(rows as u32, ERI_TIME_TILE),
+            1,
+        )
+            .into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManySeriesDeviceState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_ma_tm,
+            d_first,
+            d_bull,
+            d_bear,
+            cols,
+            rows,
+            period: period as i32,
+            grid,
+            block,
+        })
     }
 
     

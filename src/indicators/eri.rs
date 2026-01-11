@@ -311,7 +311,7 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
         .map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -689,7 +689,7 @@ pub struct EriBatchRange {
 impl Default for EriBatchRange {
     fn default() -> Self {
         Self {
-            period: (13, 60, 1),
+            period: (13, 262, 1),
             ma_type: "ema".into(),
         }
     }
@@ -1753,7 +1753,7 @@ pub fn eri_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1838,7 +1838,7 @@ pub fn eri_js_flat(
 
     let mut bull = vec![0.0; source.len()];
     let mut bear = vec![0.0; source.len()];
-    eri_into_slice(&mut bull, &mut bear, &input, detect_best_kernel())
+    eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // flatten [bull..., bear...]

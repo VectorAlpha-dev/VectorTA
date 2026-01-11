@@ -860,7 +860,7 @@ pub struct EpmaBatchRange {
 impl Default for EpmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (11, 22, 1),
+            period: (11, 260, 1),
             offset: (4, 4, 0),
         }
     }

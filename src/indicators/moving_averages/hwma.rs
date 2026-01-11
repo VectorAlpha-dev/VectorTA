@@ -344,12 +344,7 @@ pub fn hwma_with_kernel(input: &HwmaInput, kernel: Kernel) -> Result<HwmaOutput,
         // AVX2/AVX512 `#[target_feature]` variants can underperform due to
         // downclock. Prefer the scalar reference for `Auto` unless a future
         // SIMD implementation demonstrates a consistent win.
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
-                Kernel::Scalar
-            }
-            other => other,
-        },
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -444,12 +439,7 @@ pub fn hwma_with_kernel_into(
 
     let chosen = match kernel {
         // See `hwma_with_kernel`: avoid AVX2/AVX512 downclock for `Auto`.
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Avx512 | Kernel::Avx2 | Kernel::Avx512Batch | Kernel::Avx2Batch => {
-                Kernel::Scalar
-            }
-            other => other,
-        },
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -822,7 +812,7 @@ pub struct HwmaBatchRange {
 impl Default for HwmaBatchRange {
     fn default() -> Self {
         Self {
-            na: (0.2, 0.2, 0.0),
+            na: (0.2, 0.449, 0.001),
             nb: (0.1, 0.1, 0.0),
             nc: (0.1, 0.1, 0.0),
         }
@@ -2822,6 +2812,15 @@ mod tests {
     // Release mode stub - does nothing
     #[cfg(not(debug_assertions))]
     fn check_hwma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_hwma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

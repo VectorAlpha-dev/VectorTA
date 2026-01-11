@@ -108,8 +108,6 @@ extern "C" __global__ void vpci_batch_f32(
     float sum_vpci_vol_short = 0.0f;  // rolling numerator sum
     float sum_comp           = 0.0f;  // Kahan compensation
 
-    const int lane = threadIdx.x & 31;
-
     for (int i = warm; i < series_len; ++i) {
         const int idx_long_prev  = i - long_p;
         const int idx_short_prev = i - short_p;
@@ -159,18 +157,20 @@ extern "C" __global__ void vpci_batch_f32(
 
         y_vpci[i] = vpci;
 
-        // Rolling numerator: recompute naive sum over the short window for better parity
-        float num = 0.0f;
-        const int win_start = i - short_p + 1;
-        for (int t = win_start; t <= i; ++t) {
-            const float vpci_t = y_vpci[t];
-            if (isfinite(vpci_t)) num += vpci_t * volume[t];
+        // Rolling numerator: SMA(vpci * volume, short), treating non-finite vpci as zero.
+        const float contrib = isfinite(vpci) ? (vpci * vol_i) : 0.0f;
+        kahan_add(contrib, sum_vpci_vol_short, sum_comp);
+        if (i >= warm + short_p) {
+            const int rm = i - short_p;
+            const float vpci_rm = y_vpci[rm];
+            const float rm_contrib = isfinite(vpci_rm) ? (vpci_rm * volume[rm]) : 0.0f;
+            kahan_add(-rm_contrib, sum_vpci_vol_short, sum_comp);
         }
 
         // Denominator = SMA(volume, short)
         const float denom = ds_to_f(sma_v_s);
         if (denom != 0.0f && isfinite(denom)) {
-            y_vpcis[i] = (num * inv_short) / denom;
+            y_vpcis[i] = (sum_vpci_vol_short * inv_short) / denom;
         } else {
             y_vpcis[i] = nan_f32();
         }

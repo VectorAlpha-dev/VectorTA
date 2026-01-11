@@ -1228,7 +1228,7 @@ pub struct TrendFlexBatchRange {
 impl Default for TrendFlexBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 80, 1),
+            period: (20, 269, 1),
         }
     }
 }

@@ -785,8 +785,8 @@ pub struct AoBatchRange {
 impl Default for AoBatchRange {
     fn default() -> Self {
         Self {
-            short_period: (5, 15, 1),
-            long_period: (34, 60, 1),
+            short_period: (5, 5, 0),
+            long_period: (34, 283, 1),
         }
     }
 }

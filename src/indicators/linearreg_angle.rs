@@ -725,7 +725,7 @@ pub struct Linearreg_angleBatchRange {
 impl Default for Linearreg_angleBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 60, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -2055,7 +2055,7 @@ pub fn linearreg_angle_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

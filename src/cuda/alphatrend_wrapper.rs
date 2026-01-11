@@ -1008,38 +1008,95 @@ impl CudaAlphaTrend {
 // -------- Benches (batch only for now) --------
 pub mod benches {
     use super::*;
-    use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 200_000;
     const PARAM_SWEEP: usize = 64;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * 4 * 4; // high, low, close, tr
-        let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * 4; // k1+k2
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        let len = ONE_SERIES_LEN;
+        let n_combos = PARAM_SWEEP;
+        let n_pr = PARAM_SWEEP;
+
+        let in_bytes = len * 3 * 4; // high, low, tr
+        let out_bytes = 2 * len * n_combos * 4; // k1+k2
+        let atr_bytes = len * n_pr * 4; // precomputed ATR table
+        let mask_words = (len + 31) / 32;
+        let mask_bytes = n_pr * mask_words * 4; // 1-bit momentum mask, packed in u32 words
+
+        in_bytes + out_bytes + atr_bytes + mask_bytes + 64 * 1024 * 1024
     }
 
     struct AtBatchState {
         cuda: CudaAlphaTrend,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        volume: Vec<f32>,
-        sweep: AlphaTrendBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_tr: DeviceBuffer<f32>,
+        d_atr_table: DeviceBuffer<f32>,
+        d_mask_bits: DeviceBuffer<u32>,
+        d_period_row_for_combo: DeviceBuffer<i32>,
+        d_mrow_for_combo: DeviceBuffer<i32>,
+        d_coeffs: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        first_valid: usize,
+        len: usize,
+        n_combos: usize,
+        n_pr: usize,
+        d_k1: DeviceBuffer<f32>,
+        d_k2: DeviceBuffer<f32>,
     }
     impl CudaBenchState for AtBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .alphatrend_batch_dev(
-                    &self.high,
-                    &self.low,
-                    &self.close,
-                    &self.volume,
-                    &self.sweep,
-                )
-                .expect("alphatrend batch");
+                .module
+                .get_function("alphatrend_batch_from_precomputed_f32")
+                .expect("alphatrend kernel");
+
+            let block_x = 64u32;
+            let grid_x = ((self.n_combos as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut high_ptr = self.d_high.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low.as_device_ptr().as_raw();
+                let mut atr_ptr = self.d_atr_table.as_device_ptr().as_raw();
+                let mut mask_ptr = self.d_mask_bits.as_device_ptr().as_raw();
+                let mut pr_map_ptr = self.d_period_row_for_combo.as_device_ptr().as_raw();
+                let mut mr_map_ptr = self.d_mrow_for_combo.as_device_ptr().as_raw();
+                let mut coeff_ptr = self.d_coeffs.as_device_ptr().as_raw();
+                let mut period_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut ncomb_i = self.n_combos as i32;
+                let mut npr_i = self.n_pr as i32;
+                let mut nmrows_i = self.n_pr as i32;
+                let mut k1_ptr = self.d_k1.as_device_ptr().as_raw();
+                let mut k2_ptr = self.d_k2.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut atr_ptr as *mut _ as *mut c_void,
+                    &mut mask_ptr as *mut _ as *mut c_void,
+                    &mut pr_map_ptr as *mut _ as *mut c_void,
+                    &mut mr_map_ptr as *mut _ as *mut c_void,
+                    &mut coeff_ptr as *mut _ as *mut c_void,
+                    &mut period_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut ncomb_i as *mut _ as *mut c_void,
+                    &mut npr_i as *mut _ as *mut c_void,
+                    &mut nmrows_i as *mut _ as *mut c_void,
+                    &mut k1_ptr as *mut _ as *mut c_void,
+                    &mut k2_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("alphatrend launch");
+            }
+            self.cuda.stream.synchronize().expect("alphatrend sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1066,13 +1123,102 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             no_volume: true,
         };
+
+        let (tr, first_valid) = CudaAlphaTrend::build_tr_f32(&h, &l, &c).expect("tr");
+        let combos = CudaAlphaTrend::expand_grid(&sweep).expect("combos");
+        let mut unique: Vec<usize> = combos.iter().map(|p| p.period.unwrap_or(14)).collect();
+        unique.sort_unstable();
+        unique.dedup();
+        let mom_map = CudaAlphaTrend::build_momentum_table_f32(
+            sweep.no_volume,
+            &h,
+            &l,
+            &c,
+            &v,
+            &unique,
+        )
+        .expect("momentum");
+        let (mask_bits_u32, _n_words) =
+            CudaAlphaTrend::pack_momentum_rows_to_bits(&unique, &mom_map, ONE_SERIES_LEN)
+                .expect("mask bits");
+
+        let mut period_to_row: HashMap<usize, i32> = HashMap::with_capacity(unique.len());
+        for (row_idx, &p) in unique.iter().enumerate() {
+            period_to_row.insert(p, row_idx as i32);
+        }
+        let coeffs: Vec<f32> = combos.iter().map(|c| c.coeff.unwrap_or(1.0) as f32).collect();
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(14) as i32).collect();
+        let map_rows: Vec<i32> = combos
+            .iter()
+            .map(|c| period_to_row.get(&c.period.unwrap_or(14)).copied().unwrap_or(-1))
+            .collect();
+
+        let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&l).expect("d_low");
+        let d_tr = DeviceBuffer::from_slice(&tr).expect("d_tr");
+        let d_mask_bits = DeviceBuffer::from_slice(&mask_bits_u32).expect("d_mask_bits");
+        let d_period_row_for_combo = DeviceBuffer::from_slice(&map_rows).expect("d_pr_map");
+        let d_mrow_for_combo = DeviceBuffer::from_slice(&map_rows).expect("d_mr_map");
+        let d_coeffs = DeviceBuffer::from_slice(&coeffs).expect("d_coeffs");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+
+        // Precompute ATR table once on device.
+        let periods_i32: Vec<i32> = unique.iter().map(|&p| p as i32).collect();
+        let d_periods_u = DeviceBuffer::from_slice(&periods_i32).expect("d_periods_u");
+        let atr_elems = unique.len() * ONE_SERIES_LEN;
+        let mut d_atr_table: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(atr_elems) }.expect("d_atr_table");
+
+        let func_atr = cuda
+            .module
+            .get_function("atr_table_from_tr_f32")
+            .expect("atr_table_from_tr_f32");
+        unsafe {
+            let mut tr_ptr = d_tr.as_device_ptr().as_raw();
+            let mut len_i = ONE_SERIES_LEN as i32;
+            let mut first_i = first_valid as i32;
+            let mut periods_ptr = d_periods_u.as_device_ptr().as_raw();
+            let mut n_u_i = unique.len() as i32;
+            let mut atr_ptr = d_atr_table.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut tr_ptr as *mut _ as *mut c_void,
+                &mut len_i as *mut _ as *mut c_void,
+                &mut first_i as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut n_u_i as *mut _ as *mut c_void,
+                &mut atr_ptr as *mut _ as *mut c_void,
+            ];
+            let bx = 128u32;
+            let gx = ((unique.len() as u32) + bx - 1) / bx;
+            let grid: GridSize = (gx.max(1), 1, 1).into();
+            let block: BlockSize = (bx, 1, 1).into();
+            cuda.stream
+                .launch(&func_atr, grid, block, 0, args)
+                .expect("atr launch");
+        }
+        cuda.stream.synchronize().expect("atr sync");
+
+        let elems = combos.len() * ONE_SERIES_LEN;
+        let d_k1 = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_k1");
+        let d_k2 = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_k2");
+
         Box::new(AtBatchState {
             cuda,
-            high: h,
-            low: l,
-            close: c,
-            volume: v,
-            sweep,
+            d_high,
+            d_low,
+            d_tr,
+            d_atr_table,
+            d_mask_bits,
+            d_period_row_for_combo,
+            d_mrow_for_combo,
+            d_coeffs,
+            d_periods,
+            first_valid,
+            len: ONE_SERIES_LEN,
+            n_combos: combos.len(),
+            n_pr: unique.len(),
+            d_k1,
+            d_k2,
         })
     }
 

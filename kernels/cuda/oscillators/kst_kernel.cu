@@ -20,7 +20,7 @@ static __device__ __forceinline__ float kst_qnan() {
   return __int_as_float(0x7fffffff);
 }
 
-// Compensated accumulator (Kahan-Babuška-Neumaier).
+// Compensated accumulator (Kahan-BabuÅ¡ka-Neumaier).
 // Adds with small extra cost, markedly better precision in FP32.
 struct CompSum {
   float sum;
@@ -47,7 +47,7 @@ __device__ __forceinline__ float kst_safe_roc(float curr, float prev) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Kernel: one series × many parameter combos (rows=combinations)
+// Kernel: one series Ã— many parameter combos (rows=combinations)
 
 extern "C" __global__
 void kst_batch_f32(const float* __restrict__ prices,
@@ -158,7 +158,7 @@ void kst_batch_f32(const float* __restrict__ prices,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Kernel: many series (time-major) × one parameter set
+// Kernel: many series (time-major) Ã— one parameter set
 
 extern "C" __global__
 void kst_many_series_one_param_f32(const float* __restrict__ prices_tm,

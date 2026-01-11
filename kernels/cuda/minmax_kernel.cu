@@ -325,6 +325,14 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         return;
     }
 
+    // For this kernel, all RMQ query spans are exactly `k`, so the sparse-table
+    // level and offsets are constant per row. Hoist them once to reduce per-t
+    // instruction count and redundant __clz().
+    const unsigned ku = (unsigned)k;
+    const int klog = ilog2_floor_u32(ku);
+    const int step = 1 << klog;
+    const int off = klog * series_len;
+
     const int fv = (first_valid < 0 ? 0 : first_valid);
     for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
         // Default outputs to NaN; overwrite if an extrema is found
@@ -339,22 +347,28 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         if (!(isfinite(cl) && isfinite(ch))) continue;
 
         // LOW min
-        uint8_t left_ok_low  = rmq_min_u8(valid_low_st,  series_len, t - k, t - 1);
-        uint8_t right_ok_low = rmq_min_u8(valid_low_st,  series_len, t + 1, t + k);
+        const int l0 = t - k;
+        const int r0 = t - 1;
+        const int r0b = t - step; // r0 - step + 1
+        const int l1 = t + 1;
+        const int r1 = t + k;
+        const int r1b = t + k - step + 1; // r1 - step + 1
+        uint8_t left_ok_low  = min_u8(valid_low_st[off + l0], valid_low_st[off + r0b]);
+        uint8_t right_ok_low = min_u8(valid_low_st[off + l1], valid_low_st[off + r1b]);
         if (left_ok_low && right_ok_low) {
-            float lmin = rmq_min_f32(low_min_st, series_len, t - k, t - 1);
-            float rmin = rmq_min_f32(low_min_st, series_len, t + 1, t + k);
+            float lmin = fminf2(low_min_st[off + l0], low_min_st[off + r0b]);
+            float rmin = fminf2(low_min_st[off + l1], low_min_st[off + r1b]);
             if (cl < lmin && cl < rmin) {
                 out_is_min[base + t] = cl;
             }
         }
 
         // HIGH max
-        uint8_t left_ok_high  = rmq_min_u8(valid_high_st, series_len, t - k, t - 1);
-        uint8_t right_ok_high = rmq_min_u8(valid_high_st, series_len, t + 1, t + k);
+        uint8_t left_ok_high  = min_u8(valid_high_st[off + l0], valid_high_st[off + r0b]);
+        uint8_t right_ok_high = min_u8(valid_high_st[off + l1], valid_high_st[off + r1b]);
         if (left_ok_high && right_ok_high) {
-            float lmax = rmq_max_f32(high_max_st, series_len, t - k, t - 1);
-            float rmax = rmq_max_f32(high_max_st, series_len, t + 1, t + k);
+            float lmax = fmaxf2(high_max_st[off + l0], high_max_st[off + r0b]);
+            float rmax = fmaxf2(high_max_st[off + l1], high_max_st[off + r1b]);
             if (ch > lmax && ch > rmax) {
                 out_is_max[base + t] = ch;
             }

@@ -397,7 +397,7 @@ pub struct SqueezeMomentumBatchRange {
 impl Default for SqueezeMomentumBatchRange {
     fn default() -> Self {
         Self {
-            length_bb: (20, 20, 0),
+            length_bb: (20, 269, 1),
             mult_bb: (2.0, 2.0, 0.0),
             length_kc: (20, 20, 0),
             mult_kc: (1.5, 1.5, 0.0),

@@ -60,18 +60,7 @@ use thiserror::Error;
 
 #[inline(always)]
 fn correlation_cycle_auto_kernel() -> Kernel {
-    let k = detect_best_kernel();
-    #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-    {
-        // AVX2 is faster than AVX-512 for this kernel on many CPUs (AVX-512 downclock).
-        if k == Kernel::Avx512
-            && std::arch::is_x86_feature_detected!("avx2")
-            && std::arch::is_x86_feature_detected!("fma")
-        {
-            return Kernel::Avx2;
-        }
-    }
-    k
+    Kernel::Scalar
 }
 
 impl<'a> AsRef<[f64]> for CorrelationCycleInput<'a> {
@@ -1433,7 +1422,7 @@ pub struct CorrelationCycleBatchRange {
 impl Default for CorrelationCycleBatchRange {
     fn default() -> Self {
         Self {
-            period: (20, 100, 1),
+            period: (20, 269, 1),
             threshold: (9.0, 9.0, 0.0),
         }
     }

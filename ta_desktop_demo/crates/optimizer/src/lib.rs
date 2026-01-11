@@ -23,11 +23,20 @@ pub trait BacktestEngine {
 
 pub struct CpuEngine<'a> {
     pub candles: &'a Candles,
+    pub fast_ma_types: &'a [String],
+    pub slow_ma_types: &'a [String],
+    pub ma_source: &'a str,
 }
 
 impl<'a> BacktestEngine for CpuEngine<'a> {
     fn eval_batch(&self, combos: &[DoubleMaParams]) -> Vec<Metrics> {
-        ta_strategies::double_ma::double_ma_batch_cpu(self.candles, combos)
+        ta_strategies::double_ma::double_ma_batch_cpu(
+            self.candles,
+            combos,
+            self.fast_ma_types,
+            self.slow_ma_types,
+            self.ma_source,
+        )
     }
 }
 

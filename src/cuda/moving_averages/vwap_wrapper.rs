@@ -384,16 +384,18 @@ impl CudaVwap {
             .get_function("vwap_batch_f32")
             .map_err(|_| CudaVwapError::MissingKernelSymbol { name: "vwap_batch_f32" })?;
 
-        // Occupancy-aware suggestion; default to 128 if unavailable
-        let (_grid_suggest, block_suggest) = func
-            .suggested_launch_configuration(0, (0, 0, 0).into())
-            .unwrap_or((0, 128));
-        let auto_block = block_suggest.max(128).min(1024);
+        // vwap_batch_f32 uses CUB BlockScan with a compile-time block size.
+        // Launch as one block per combo for coalesced I/O and full time-parallelism.
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Auto => auto_block,
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            BatchKernelPolicy::Auto => 256,
         };
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        if block_x != 256 {
+            return Err(CudaVwapError::InvalidPolicy(
+                "vwap batch kernel requires block_x=256",
+            ));
+        }
+        let grid_x = n_combos as u32;
 
         let series_len_i = series_len as i32;
         let n_combos_i = n_combos as i32;
@@ -746,14 +748,8 @@ impl CudaVwap {
             return Err(CudaVwapError::InvalidInput(
                 "timestamps len must equal rows".into(),
             ));
-            return Err(CudaVwapError::InvalidInput(
-                "timestamps len must equal rows".into(),
-            ));
         }
         if volumes_tm.len() != rows * cols {
-            return Err(CudaVwapError::InvalidInput(
-                "volumes_tm wrong length".into(),
-            ));
             return Err(CudaVwapError::InvalidInput(
                 "volumes_tm wrong length".into(),
             ));
@@ -777,16 +773,8 @@ impl CudaVwap {
                         cur_gid = gid;
                         vsum = 0.0;
                     }
-                    if gid != cur_gid {
-                        cur_gid = gid;
-                        vsum = 0.0;
-                    }
                     let v = volumes_tm[t * cols + s];
                     vsum += v;
-                    if vsum > 0.0 {
-                        out[s] = t as i32;
-                        break;
-                    }
                     if vsum > 0.0 {
                         out[s] = t as i32;
                         break;
@@ -794,26 +782,18 @@ impl CudaVwap {
                 }
             }
         } else {
+            let div = bucket_ms.max(1);
             for s in 0..cols {
                 let mut cur_gid = i64::MIN;
                 let mut vsum = 0.0f64;
                 for t in 0..rows {
-                    let ts = timestamps[t];
-                    let gid = ts / bucket_ms.max(1);
-                    if gid != cur_gid {
-                        cur_gid = gid;
-                        vsum = 0.0;
-                    }
+                    let gid = timestamps[t] / div;
                     if gid != cur_gid {
                         cur_gid = gid;
                         vsum = 0.0;
                     }
                     let v = volumes_tm[t * cols + s];
                     vsum += v;
-                    if vsum > 0.0 {
-                        out[s] = t as i32;
-                        break;
-                    }
                     if vsum > 0.0 {
                         out[s] = t as i32;
                         break;
@@ -1102,13 +1082,15 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        // timestamps (i64), prices (f64), volumes (f64), outputs PARAM_SWEEP × f32
+        // Device-resident benchmark: timestamps (i64), prices/volumes (f32), params, outputs.
         let in_bytes =
-            ONE_SERIES_LEN * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f64>());
-        let in_bytes =
-            ONE_SERIES_LEN * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f64>());
+            ONE_SERIES_LEN * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f32>());
+        let param_bytes = PARAM_SWEEP
+            * (2 * std::mem::size_of::<i32>()
+                + std::mem::size_of::<i64>()
+                + std::mem::size_of::<i32>());
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + param_bytes + out_bytes + 64 * 1024 * 1024
     }
 
     fn synth_vwap_inputs(len: usize) -> (Vec<i64>, Vec<f64>, Vec<f64>) {
@@ -1132,18 +1114,37 @@ pub mod benches {
         (ts, vols, prices)
     }
 
-    struct VwapBatchState {
+    struct VwapBatchDevState {
         cuda: CudaVwap,
-        ts: Vec<i64>,
-        vol: Vec<f64>,
-        price: Vec<f64>,
-        sweep: VwapBatchRange,
+        series_len: usize,
+        n_combos: usize,
+        d_timestamps: DeviceBuffer<i64>,
+        d_volumes: DeviceBuffer<f32>,
+        d_prices: DeviceBuffer<f32>,
+        d_counts: DeviceBuffer<i32>,
+        d_unit_codes: DeviceBuffer<i32>,
+        d_divisors: DeviceBuffer<i64>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_month_ids: Option<DeviceBuffer<i32>>,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for VwapBatchState {
+    impl CudaBenchState for VwapBatchDevState {
         fn launch(&mut self) {
             let _ = self
                 .cuda
-                .vwap_batch_dev(&self.ts, &self.vol, &self.price, &self.sweep)
+                .vwap_batch_device_with_params(
+                    &self.d_timestamps,
+                    &self.d_volumes,
+                    &self.d_prices,
+                    &self.d_counts,
+                    &self.d_unit_codes,
+                    &self.d_divisors,
+                    &self.d_first_valids,
+                    self.d_month_ids.as_ref(),
+                    self.series_len,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
                 .expect("vwap batch launch");
         }
     }
@@ -1154,59 +1155,101 @@ pub mod benches {
         let sweep = VwapBatchRange {
             anchor: ("1d".to_string(), "250d".to_string(), 1),
         };
-        Box::new(VwapBatchState {
+        let PreparedBatch {
+            counts,
+            unit_codes,
+            divisors,
+            first_valids,
+            month_ids,
+            series_len,
+            combos: _,
+        } = CudaVwap::prepare_batch_inputs(&ts, &vol, &price, &sweep)
+            .expect("vwap prepare batch inputs");
+        let n_combos = counts.len();
+
+        let prices_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
+        let volumes_f32: Vec<f32> = vol.iter().map(|&v| v as f32).collect();
+
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(&ts, &cuda.stream) }
+            .expect("vwap upload timestamps");
+        let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &cuda.stream) }
+            .expect("vwap upload volumes");
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &cuda.stream) }
+            .expect("vwap upload prices");
+
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &cuda.stream) }
+            .expect("vwap upload counts");
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &cuda.stream) }
+            .expect("vwap upload unit_codes");
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &cuda.stream) }
+            .expect("vwap upload divisors");
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &cuda.stream) }
+            .expect("vwap upload first_valids");
+        let d_month_ids = if let Some(ids) = month_ids {
+            Some(
+                unsafe { DeviceBuffer::from_slice_async(&ids, &cuda.stream) }
+                    .expect("vwap upload month_ids"),
+            )
+        } else {
+            None
+        };
+
+        let expected = n_combos * series_len;
+        let d_out =
+            unsafe { DeviceBuffer::uninitialized(expected) }.expect("vwap allocate output");
+
+        cuda.stream.synchronize().expect("vwap prep sync");
+
+        Box::new(VwapBatchDevState {
             cuda,
-            ts,
-            vol,
-            price,
-            sweep,
+            series_len,
+            n_combos,
+            d_timestamps,
+            d_volumes,
+            d_prices,
+            d_counts,
+            d_unit_codes,
+            d_divisors,
+            d_first_valids,
+            d_month_ids,
+            d_out,
         })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         struct VwapManySeriesState {
             cuda: CudaVwap,
-            ts: Vec<i64>,
-            vol_tm: Vec<f64>,
-            price_tm: Vec<f64>,
+            d_timestamps: DeviceBuffer<i64>,
+            d_vol_tm: DeviceBuffer<f32>,
+            d_price_tm: DeviceBuffer<f32>,
+            d_first_valids: DeviceBuffer<i32>,
+            d_month_ids: Option<DeviceBuffer<i32>>,
             cols: usize,
             rows: usize,
-            anchor: String,
-            warmed: bool,
+            count: u32,
+            unit_char: char,
+            d_out_tm: DeviceBuffer<f32>,
         }
         impl CudaBenchState for VwapManySeriesState {
             fn launch(&mut self) {
-                let _ = self
-                    .cuda
-                    .vwap_many_series_one_param_time_major_dev(
-                        &self.ts,
-                        &self.vol_tm,
-                        &self.price_tm,
+                self.cuda
+                    .launch_many_series_kernel(
+                        &self.d_timestamps,
+                        &self.d_vol_tm,
+                        &self.d_price_tm,
+                        self.count,
+                        self.unit_char,
+                        &self.d_first_valids,
+                        self.d_month_ids.as_mut(),
                         self.cols,
                         self.rows,
-                        &self.anchor,
+                        &mut self.d_out_tm,
                     )
                     .expect("vwap many-series");
-                if !self.warmed {
-                    let _ = self.cuda.synchronize();
-                    self.warmed = true;
-                }
-                if !self.warmed {
-                    let _ = self.cuda.synchronize();
-                    self.warmed = true;
-                }
+                self.cuda.synchronize().expect("vwap many sync");
             }
         }
 
-        let mut out = vec![CudaBenchScenario::new(
-            "vwap",
-            "one_series_many_params",
-            "vwap_cuda_batch_dev",
-            "1m_x_250",
-            prep_one_series_many_params,
-        )
-        .with_sample_size(10)
-        .with_mem_required(bytes_one_series_many_params())];
         let mut out = vec![CudaBenchScenario::new(
             "vwap",
             "one_series_many_params",
@@ -1218,19 +1261,16 @@ pub mod benches {
         .with_mem_required(bytes_one_series_many_params())];
 
         // Many-series synthetic (shared timestamps across series)
-        fn synth_many_series(rows: usize, cols: usize) -> (Vec<i64>, Vec<f64>, Vec<f64>) {
+        fn synth_many_series(rows: usize, cols: usize) -> (Vec<i64>, Vec<f32>, Vec<f32>) {
             let mut ts = vec![0i64; rows];
             for t in 0..rows {
                 ts[t] = (t as i64) * 60_000;
             }
-            for t in 0..rows {
-                ts[t] = (t as i64) * 60_000;
-            }
-            let mut price_tm = vec![f64::NAN; rows * cols];
-            let mut vol_tm = vec![f64::NAN; rows * cols];
+            let mut price_tm = vec![f32::NAN; rows * cols];
+            let mut vol_tm = vec![0f32; rows * cols];
             for s in 0..cols {
                 for t in (s % 7)..rows {
-                    let x = (t as f64) + (s as f64) * 0.1;
+                    let x = (t as f32) + (s as f32) * 0.1;
                     price_tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
                     vol_tm[t * cols + s] = (x * 0.003).cos().abs() + 0.8;
                 }
@@ -1241,16 +1281,57 @@ pub mod benches {
         const MS_COLS: usize = 256;
         const MS_ROWS: usize = 500_000;
         fn prep_vwap_many_series_256x500k() -> Box<dyn CudaBenchState> {
+            let cuda = CudaVwap::new(0).expect("cuda vwap");
             let (ts, vol_tm, price_tm) = synth_many_series(MS_ROWS, MS_COLS);
+            let (count, unit_char) = parse_anchor("1d").expect("parse_anchor");
+            let div = ((count as i64) * 86_400_000).max(1);
+            let mut first_valids = vec![MS_ROWS as i32; MS_COLS];
+            for s in 0..MS_COLS {
+                let mut cur_gid = i64::MIN;
+                let mut vsum = 0.0f64;
+                for t in 0..MS_ROWS {
+                    let gid = ts[t] / div;
+                    if gid != cur_gid {
+                        cur_gid = gid;
+                        vsum = 0.0;
+                    }
+                    let v = vol_tm[t * MS_COLS + s];
+                    if v.is_finite() {
+                        vsum += v as f64;
+                    }
+                    if vsum > 0.0 {
+                        first_valids[s] = t as i32;
+                        break;
+                    }
+                }
+            }
+
+            let d_timestamps =
+                unsafe { DeviceBuffer::from_slice_async(&ts, &cuda.stream) }.expect("d_ts");
+            let d_vol_tm =
+                unsafe { DeviceBuffer::from_slice_async(&vol_tm, &cuda.stream) }.expect("d_vol");
+            let d_price_tm =
+                unsafe { DeviceBuffer::from_slice_async(&price_tm, &cuda.stream) }.expect("d_px");
+            let d_first_valids = unsafe {
+                DeviceBuffer::from_slice_async(&first_valids, &cuda.stream)
+            }
+            .expect("d_first_valids");
+            let d_out_tm: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(MS_ROWS * MS_COLS, &cuda.stream) }
+                    .expect("d_out_tm");
+            cuda.stream.synchronize().expect("vwap many prep sync");
             Box::new(VwapManySeriesState {
-                cuda: CudaVwap::new(0).expect("cuda vwap"),
-                ts,
-                vol_tm,
-                price_tm,
+                cuda,
+                d_timestamps,
+                d_vol_tm,
+                d_price_tm,
+                d_first_valids,
+                d_month_ids: None,
                 cols: MS_COLS,
                 rows: MS_ROWS,
-                anchor: "1d".to_string(),
-                warmed: false,
+                count,
+                unit_char,
+                d_out_tm,
             })
         }
         out.push(
@@ -1262,7 +1343,9 @@ pub mod benches {
                 prep_vwap_many_series_256x500k,
             )
             .with_sample_size(10)
-            .with_mem_required(MS_ROWS * 8 + MS_ROWS * MS_COLS * 4 * 3 + 64 * 1024 * 1024),
+            .with_mem_required(
+                MS_ROWS * 8 + MS_ROWS * MS_COLS * 4 * 3 + MS_COLS * 4 + 64 * 1024 * 1024,
+            ),
         );
 
         out

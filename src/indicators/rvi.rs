@@ -311,7 +311,7 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
     let warmup_period = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
     let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -396,7 +396,7 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -2266,7 +2266,7 @@ pub struct RviBatchRange {
 impl Default for RviBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 40, 1),
+            period: (10, 259, 1),
             ma_len: (14, 14, 0),
             matype: (1, 1, 0),
             devtype: (0, 0, 0),

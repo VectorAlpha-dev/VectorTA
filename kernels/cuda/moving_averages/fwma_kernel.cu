@@ -96,9 +96,9 @@ void fwma_batch_f32(const float* __restrict__ prices,          // [series_len]
 }
 
 // -----------------------------
-// Many-series × one-parameter path (time-major input):
+// Many-series x one-parameter path (time-major input):
 // Map threads across series for a fixed time index, making loads for each k coalesced.
-// grid.x tiles series, grid.y tiles time in chunks of TIME_STEPS_PER_BLOCK.
+// grid.x tiles time in chunks of TIME_STEPS_PER_BLOCK, grid.y tiles series.
 // -----------------------------
 #ifndef FWMA_TIME_STEPS_PER_BLOCK
 #define FWMA_TIME_STEPS_PER_BLOCK 4   // small inner time loop per block to amortize weight staging
@@ -122,8 +122,8 @@ void fwma_multi_series_one_param_f32(const float* __restrict__ prices_tm, // [se
     const float nan_f = __int_as_float(0x7fffffff);
 
     // Threads cover series dimension for coalesced accesses
-    const int series = blockIdx.x * blockDim.x + threadIdx.x;
-    const int t_tile0 = blockIdx.y * FWMA_TIME_STEPS_PER_BLOCK;
+    const int series = blockIdx.y * blockDim.x + threadIdx.x;
+    const int t_tile0 = blockIdx.x * FWMA_TIME_STEPS_PER_BLOCK;
 
     // Small time loop inside the block
     #pragma unroll
@@ -142,7 +142,7 @@ void fwma_multi_series_one_param_f32(const float* __restrict__ prices_tm, // [se
                 float acc = 0.0f;
                 #pragma unroll 8
                 for (int k = 0; k < period; ++k) {
-                    // For fixed k, addresses across threads differ by +1 (series) → coalesced
+                    // For fixed k, addresses across threads differ by +1 (series) -> coalesced
                     acc = fmaf(prices_tm[base_in + k * num_series], s_w[k], acc);
                 }
                 out_tm[out_idx] = acc;
@@ -169,8 +169,8 @@ void fwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const float nan_f = __int_as_float(0x7fffffff);
 
-    const int series = blockIdx.x * blockDim.x + threadIdx.x;
-    const int t_tile0 = blockIdx.y * FWMA_TIME_STEPS_PER_BLOCK;
+    const int series = blockIdx.y * blockDim.x + threadIdx.x;
+    const int t_tile0 = blockIdx.x * FWMA_TIME_STEPS_PER_BLOCK;
 
     #pragma unroll
     for (int dt = 0; dt < FWMA_TIME_STEPS_PER_BLOCK; ++dt) {

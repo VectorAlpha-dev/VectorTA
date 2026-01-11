@@ -158,21 +158,28 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
 }
 
 pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
-    let field = source.to_lowercase();
-    match field.as_str() {
-        "open" => &candles.open,
-        "high" => &candles.high,
-        "low" => &candles.low,
-        "close" => &candles.close,
-        "volume" => &candles.volume,
-        "hl2" => &candles.hl2,
-        "hlc3" => &candles.hlc3,
-        "ohlc4" => &candles.ohlc4,
-        "hlcc4" => &candles.hlcc4,
-        _ => {
-            eprintln!("Warning: Invalid price source '{source}'. Defaulting to 'close'.");
-            &candles.close
-        }
+    // Hot path: avoid allocating `source.to_lowercase()` on every call.
+    if source.eq_ignore_ascii_case("open") {
+        &candles.open
+    } else if source.eq_ignore_ascii_case("high") {
+        &candles.high
+    } else if source.eq_ignore_ascii_case("low") {
+        &candles.low
+    } else if source.eq_ignore_ascii_case("close") {
+        &candles.close
+    } else if source.eq_ignore_ascii_case("volume") {
+        &candles.volume
+    } else if source.eq_ignore_ascii_case("hl2") {
+        &candles.hl2
+    } else if source.eq_ignore_ascii_case("hlc3") {
+        &candles.hlc3
+    } else if source.eq_ignore_ascii_case("ohlc4") {
+        &candles.ohlc4
+    } else if source.eq_ignore_ascii_case("hlcc4") || source.eq_ignore_ascii_case("hlcc") {
+        &candles.hlcc4
+    } else {
+        eprintln!("Warning: Invalid price source '{source}'. Defaulting to 'close'.");
+        &candles.close
     }
 }
 

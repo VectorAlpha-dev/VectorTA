@@ -300,7 +300,7 @@ fn wma_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -323,39 +323,49 @@ fn wma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 
 #[inline]
 pub fn wma_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
+    // Pre-validated by caller: period >= 2, len - first_val >= period, out.len() == data.len()
+    debug_assert_eq!(out.len(), data.len());
     let lookback = period - 1;
+    let period_f = period as f64;
     // Avoid potential usize overflow in period * (period + 1) by computing in f64.
-    let divider = (period as f64) * ((period + 1) as f64) * 0.5;
+    let weights = period_f * (period_f + 1.0) * 0.5;
 
-    let mut weighted_sum = 0.0;
-    let mut plain_sum = 0.0;
+    unsafe {
+        // Match Tulip's pointer-based implementation to minimize bounds checks and loop overhead.
+        let base = data.as_ptr().add(first_val);
+        let end = data.as_ptr().add(data.len());
 
-    for i in 0..lookback {
-        let val = data[first_val + i];
-        weighted_sum += (i as f64 + 1.0) * val;
-        plain_sum += val;
-    }
+        let mut sum = 0.0_f64;
+        let mut weight_sum = 0.0_f64;
 
-    let first_wma_idx = first_val + lookback;
-    let val = data[first_wma_idx];
-    weighted_sum += (period as f64) * val;
-    plain_sum += val;
+        // Seed with first (period - 1) samples.
+        let mut k = 0usize;
+        while k < lookback {
+            let v = *base.add(k);
+            weight_sum += v * (k as f64 + 1.0);
+            sum += v;
+            k += 1;
+        }
 
-    out[first_wma_idx] = weighted_sum / divider;
+        // Main loop: compute WMA for each window end.
+        let mut in_new = base.add(lookback);
+        let mut in_old = base;
+        let mut out_ptr = out.as_mut_ptr().add(first_val + lookback);
 
-    weighted_sum -= plain_sum;
-    plain_sum -= data[first_val];
+        while in_new < end {
+            let v = *in_new;
+            weight_sum += v * period_f;
+            sum += v;
 
-    for i in (first_wma_idx + 1)..data.len() {
-        let val = data[i];
-        weighted_sum += (period as f64) * val;
-        plain_sum += val;
+            *out_ptr = weight_sum / weights;
 
-        out[i] = weighted_sum / divider;
+            weight_sum -= sum;
+            sum -= *in_old;
 
-        weighted_sum -= plain_sum;
-        let old_val = data[i - lookback];
-        plain_sum -= old_val;
+            in_new = in_new.add(1);
+            in_old = in_old.add(1);
+            out_ptr = out_ptr.add(1);
+        }
     }
 }
 
@@ -520,7 +530,7 @@ pub struct WmaBatchRange {
 impl Default for WmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (2, 240, 1),
+            period: (2, 251, 1),
         }
     }
 }

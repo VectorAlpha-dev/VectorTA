@@ -103,6 +103,11 @@ impl CudaMedprice {
         self.device_id
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaMedpriceError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaMedpriceError> {
         if let Ok((free, _total)) = mem_get_info() {
@@ -372,15 +377,24 @@ pub mod benches {
 
     struct MedState {
         cuda: CudaMedprice,
-        high: Vec<f32>,
-        low: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for MedState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .medprice_dev(&self.high, &self.low)
+            self.cuda
+                .medprice_device(
+                    &self.d_high,
+                    &self.d_low,
+                    self.len,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
                 .expect("medprice kernel");
+            self.cuda.synchronize().expect("medprice sync");
         }
     }
 
@@ -388,7 +402,21 @@ pub mod benches {
         let cuda = CudaMedprice::new(0).expect("cuda medprice");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_close(&close);
-        Box::new(MedState { cuda, high, low })
+        let len = high.len().min(low.len());
+        let first_valid = (0..len)
+            .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+            .unwrap_or(0);
+        let d_high = DeviceBuffer::from_slice(&high[..len]).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low[..len]).expect("d_low");
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(len) }.expect("d_out");
+        Box::new(MedState {
+            cuda,
+            d_high,
+            d_low,
+            len,
+            first_valid,
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

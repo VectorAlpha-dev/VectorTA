@@ -522,7 +522,7 @@ fn vpci_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1198,8 +1198,8 @@ pub struct VpciBatchRange {
 impl Default for VpciBatchRange {
     fn default() -> Self {
         Self {
-            short_range: (5, 20, 1),
-            long_range: (25, 60, 5),
+            short_range: (5, 5, 0),
+            long_range: (25, 274, 1),
         }
     }
 }

@@ -99,3 +99,129 @@ fn cksp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cksp_cuda_large_p_sweep_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[cksp_cuda_large_p_sweep_smoke] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let n = 4096usize;
+    let mut high = vec![f64::NAN; n];
+    let mut low = vec![f64::NAN; n];
+    let mut close = vec![f64::NAN; n];
+    for i in 10..n {
+        let x = i as f64;
+        let base = (x * 0.003).sin() + 0.0005 * x;
+        high[i] = base + 0.8;
+        low[i] = base - 0.7;
+        close[i] = base;
+    }
+
+    // Wider p sweep than the accuracy test; this is a smoke test to catch
+    // large-sweep launch/indexing issues without changing reference outputs.
+    let sweep = CkspBatchRange {
+        p: (10, 137, 1),
+        x: (1.0, 1.0, 0.0),
+        q: (9, 9, 0),
+    };
+
+    let cuda = CudaCksp::new(0).expect("CudaCksp::new");
+    let hf: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let (dev_pair, combos) = cuda
+        .cksp_batch_dev(&hf, &lf, &cf, &sweep)
+        .expect("cksp batch dev (smoke)");
+    assert_eq!(combos.len(), 128);
+    assert_eq!(dev_pair.long.rows, combos.len());
+    assert_eq!(dev_pair.short.rows, combos.len());
+    assert_eq!(dev_pair.long.cols, n);
+    assert_eq!(dev_pair.short.cols, n);
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cksp_cuda_large_series_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[cksp_cuda_large_series_smoke] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let n = 20_000usize;
+    let mut high = vec![f64::NAN; n];
+    let mut low = vec![f64::NAN; n];
+    let mut close = vec![f64::NAN; n];
+    for i in 10..n {
+        let x = i as f64;
+        let base = (x * 0.003).sin() + 0.0005 * x;
+        high[i] = base + 0.8;
+        low[i] = base - 0.7;
+        close[i] = base;
+    }
+
+    let sweep = CkspBatchRange {
+        p: (10, 137, 1),
+        x: (1.0, 1.0, 0.0),
+        q: (9, 9, 0),
+    };
+
+    let cuda = CudaCksp::new(0).expect("CudaCksp::new");
+    let hf: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let (dev_pair, combos) = cuda
+        .cksp_batch_dev(&hf, &lf, &cf, &sweep)
+        .expect("cksp batch dev (large series smoke)");
+    assert_eq!(combos.len(), 128);
+    assert_eq!(dev_pair.long.rows, combos.len());
+    assert_eq!(dev_pair.short.rows, combos.len());
+    assert_eq!(dev_pair.long.cols, n);
+    assert_eq!(dev_pair.short.cols, n);
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cksp_cuda_single_combo_smoke() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[cksp_cuda_single_combo_smoke] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let n = 4096usize;
+    let mut high = vec![f64::NAN; n];
+    let mut low = vec![f64::NAN; n];
+    let mut close = vec![f64::NAN; n];
+    for i in 10..n {
+        let x = i as f64;
+        let base = (x * 0.003).sin() + 0.0005 * x;
+        high[i] = base + 0.8;
+        low[i] = base - 0.7;
+        close[i] = base;
+    }
+
+    // Single combo: exercises non-preTR path.
+    let sweep = CkspBatchRange {
+        p: (10, 10, 0),
+        x: (1.0, 1.0, 0.0),
+        q: (9, 9, 0),
+    };
+
+    let cuda = CudaCksp::new(0).expect("CudaCksp::new");
+    let hf: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let lf: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let cf: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+    let (dev_pair, combos) = cuda
+        .cksp_batch_dev(&hf, &lf, &cf, &sweep)
+        .expect("cksp batch dev (single combo)");
+    assert_eq!(combos.len(), 1);
+    assert_eq!(dev_pair.long.rows, 1);
+    assert_eq!(dev_pair.short.rows, 1);
+    assert_eq!(dev_pair.long.cols, n);
+    assert_eq!(dev_pair.short.cols, n);
+    Ok(())
+}

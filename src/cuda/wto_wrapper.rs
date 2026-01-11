@@ -844,45 +844,102 @@ pub mod benches {
 
     struct WtoBatchState {
         cuda: CudaWto,
-        price: Vec<f32>,
-        sweep: WtoBatchRange,
+        d_price: DeviceBuffer<f32>,
+        d_channel: DeviceBuffer<i32>,
+        d_average: DeviceBuffer<i32>,
+        len: i32,
+        n_combos: i32,
+        first_valid: i32,
+        d_wt1: DeviceBuffer<f32>,
+        d_wt2: DeviceBuffer<f32>,
+        d_hist: DeviceBuffer<f32>,
     }
     impl CudaBenchState for WtoBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .wto_batch_dev(&self.price, &self.sweep)
-                .expect("wto batch");
+            self.cuda
+                .wto_batch_device(
+                    &self.d_price,
+                    &self.d_channel,
+                    &self.d_average,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_wt1,
+                    &mut self.d_wt2,
+                    &mut self.d_hist,
+                )
+                .expect("wto batch device");
+            self.cuda.stream.synchronize().expect("wto sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaWto::new(0).expect("cuda wto");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = WtoBatchRange {
-            channel: (10, 10 + PARAM_SWEEP - 1, 1),
-            average: (21, 21, 0),
-        };
-        Box::new(WtoBatchState { cuda, price, sweep })
+        let first_valid = price
+            .iter()
+            .position(|v| v.is_finite())
+            .unwrap_or(ONE_SERIES_LEN) as i32;
+        let channel: Vec<i32> = (10..(10 + PARAM_SWEEP)).map(|p| p as i32).collect();
+        let average: Vec<i32> = std::iter::repeat(21i32).take(PARAM_SWEEP).collect();
+
+        let d_price =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_price");
+        let d_channel =
+            unsafe { DeviceBuffer::from_slice_async(&channel, &cuda.stream) }.expect("d_channel");
+        let d_average =
+            unsafe { DeviceBuffer::from_slice_async(&average, &cuda.stream) }.expect("d_average");
+
+        let out_elems = ONE_SERIES_LEN * PARAM_SWEEP;
+        let d_wt1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_wt1");
+        let d_wt2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_wt2");
+        let d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_hist");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(WtoBatchState {
+            cuda,
+            d_price,
+            d_channel,
+            d_average,
+            len: ONE_SERIES_LEN as i32,
+            n_combos: PARAM_SWEEP as i32,
+            first_valid,
+            d_wt1,
+            d_wt2,
+            d_hist,
+        })
     }
 
     struct WtoManyState {
         cuda: CudaWto,
-        data_tm: Vec<f32>,
+        d_data_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: WtoParams,
+        channel_length: usize,
+        average_length: usize,
+        d_wt1: DeviceBuffer<f32>,
+        d_wt2: DeviceBuffer<f32>,
+        d_hist: DeviceBuffer<f32>,
     }
     impl CudaBenchState for WtoManyState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .wto_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_data_tm,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.channel_length,
+                    self.average_length,
+                    &self.d_first_valids,
+                    &mut self.d_wt1,
+                    &mut self.d_wt2,
+                    &mut self.d_hist,
                 )
-                .expect("wto many-series");
+                .expect("wto many-series kernel");
+            self.cuda.stream.synchronize().expect("wto sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -890,16 +947,39 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        let params = WtoParams {
-            channel_length: Some(10),
-            average_length: Some(21),
-        };
+        let channel_length = 10usize;
+        let average_length = 21usize;
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if data_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_data_tm = DeviceBuffer::from_slice(&data_tm).expect("d_data_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = cols * rows;
+        let d_wt1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_wt1");
+        let d_wt2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_wt2");
+        let d_hist: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_hist");
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(WtoManyState {
             cuda,
-            data_tm,
+            d_data_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
+            channel_length,
+            average_length,
+            d_wt1,
+            d_wt2,
+            d_hist,
         })
     }
 

@@ -265,7 +265,7 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
     let mut out = alloc_with_nan_prefix(high.len(), first + 1);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -344,7 +344,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         x => x,
     };
 
@@ -779,8 +779,8 @@ pub struct SarBatchRange {
 impl Default for SarBatchRange {
     fn default() -> Self {
         Self {
-            acceleration: (0.02, 0.2, 0.02),
-            maximum: (0.2, 0.2, 0.0),
+            acceleration: (0.02, 0.02, 0.0),
+            maximum: (0.2, 0.449, 0.001),
         }
     }
 }

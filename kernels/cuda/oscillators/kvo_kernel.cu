@@ -68,6 +68,25 @@ __device__ __forceinline__ float rcp_nr(float c)
 //  - vf:     precomputed VF stream [len]
 //  - shorts/longs: period arrays [n_combos]
 //  - out:    row-major [combo][t] (n_combos x len)
+
+// Warp-wide inclusive scan over affine transforms (A,B) where:
+//   y = A * y_prev + B
+// Composition is associative:
+//   (A_prev,B_prev) then (A_cur,B_cur) => (A_cur*A_prev, A_cur*B_prev + B_cur)
+__device__ __forceinline__ void warp_inclusive_scan_affine(float &A, float &B, unsigned lane, unsigned mask) {
+#pragma unroll
+    for (int offset = 1; offset < 32; offset <<= 1) {
+        const float A_prev = __shfl_up_sync(mask, A, offset);
+        const float B_prev = __shfl_up_sync(mask, B, offset);
+        if (lane >= static_cast<unsigned>(offset)) {
+            const float A_cur = A;
+            const float B_cur = B;
+            A = A_cur * A_prev;
+            B = __fmaf_rn(A_cur, B_prev, B_cur);
+        }
+    }
+}
+
 extern "C" __global__ void kvo_batch_f32(
     const float* __restrict__ vf,
     int len,
@@ -77,11 +96,17 @@ extern "C" __global__ void kvo_batch_f32(
     int n_combos,
     float* __restrict__ out)
 {
-    // Grid-stride over combos. Compatible with existing launcher chunking
-    // that passes (shorts,longs,out) already offset to the current window.
-    for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
+    if (len <= 0 || n_combos <= 0) return;
+
+    // One warp per combo; warp-level affine scans compute EMA recurrences 32 timesteps at a time.
+    const unsigned mask = 0xffffffffu;
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    const int warps_per_block = blockDim.x >> 5;
+
+    for (int combo = blockIdx.x * warps_per_block + warp_id;
          combo < n_combos;
-         combo += blockDim.x * gridDim.x)
+         combo += gridDim.x * warps_per_block)
     {
         const int s = shorts[combo];
         const int l = longs[combo];
@@ -90,26 +115,44 @@ extern "C" __global__ void kvo_batch_f32(
         const int warm = first_valid + 1; // same scalar warmup
         float* __restrict__ row_out = out + (size_t)combo * (size_t)len;
 
+        const float nanv = f32_nan();
         const int warm_end = (warm < len ? warm : len);
-        for (int t = 0; t < warm_end; ++t) row_out[t] = f32_nan();
+        for (int t = lane; t < warm_end; t += 32) row_out[t] = nanv;
         if (warm >= len) continue;
 
         const float alpha_s = 2.0f / (float)(s + 1);
         const float alpha_l = 2.0f / (float)(l + 1);
+        const float beta_s = 1.0f - alpha_s;
+        const float beta_l = 1.0f - alpha_l;
 
         const float seed = vf[warm];
-        float ema_s = seed;
-        float ema_l = seed;
+        float ema_s_prev = seed;
+        float ema_l_prev = seed;
 
-        row_out[warm] = 0.0f; // first difference defined as zero
+        if (lane == 0) row_out[warm] = 0.0f;
 
-        #pragma unroll 1
-        for (int t = warm + 1; t < len; ++t) {
-            const float vfi = vf[t];
-            // EMA update via FFMA: ema += alpha*(x-ema)
-            ema_s = fmaf(alpha_s, (vfi - ema_s), ema_s);
-            ema_l = fmaf(alpha_l, (vfi - ema_l), ema_l);
-            row_out[t] = ema_s - ema_l;
+        for (int t0 = warm + 1; t0 < len; t0 += 32) {
+            const int t = t0 + lane;
+            float x = 0.0f;
+            if (t < len) x = vf[t];
+
+            float As = beta_s;
+            float Bs = alpha_s * x;
+            float Al = beta_l;
+            float Bl = alpha_l * x;
+
+            warp_inclusive_scan_affine(As, Bs, lane, mask);
+            warp_inclusive_scan_affine(Al, Bl, lane, mask);
+
+            const float ema_s = __fmaf_rn(As, ema_s_prev, Bs);
+            const float ema_l = __fmaf_rn(Al, ema_l_prev, Bl);
+
+            if (t < len) row_out[t] = ema_s - ema_l;
+
+            const int remain = len - 1 - t0;
+            const int last_lane = (remain < 31 ? remain : 31);
+            ema_s_prev = __shfl_sync(mask, ema_s, last_lane);
+            ema_l_prev = __shfl_sync(mask, ema_l, last_lane);
         }
     }
 }
@@ -216,4 +259,3 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
         }
     }
 }
-

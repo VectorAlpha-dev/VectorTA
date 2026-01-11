@@ -201,7 +201,7 @@ fn pnr_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((data, length, percentage, first, chosen))
@@ -875,7 +875,7 @@ pub struct PercentileNearestRankBatchRange {
 impl Default for PercentileNearestRankBatchRange {
     fn default() -> Self {
         Self {
-            length: (15, 100, 5),
+            length: (15, 264, 1),
             percentage: (50.0, 50.0, 0.0),
         }
     }
@@ -1194,7 +1194,7 @@ fn pnr_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(PercentileNearestRankError::AllValuesNaN)?;
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

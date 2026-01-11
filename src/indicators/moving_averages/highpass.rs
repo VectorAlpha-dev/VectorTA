@@ -675,7 +675,7 @@ pub struct HighPassBatchRange {
 impl Default for HighPassBatchRange {
     fn default() -> Self {
         Self {
-            period: (48, 48, 0),
+            period: (48, 297, 1),
         }
     }
 }

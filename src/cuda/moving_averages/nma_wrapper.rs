@@ -792,21 +792,169 @@ impl CudaNma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::nma::NmaParams;
 
-    define_ma_period_benches!(
-        nma_benches,
-        CudaNma,
-        crate::indicators::moving_averages::nma::NmaBatchRange,
-        crate::indicators::moving_averages::nma::NmaParams,
-        nma_batch_dev,
-        nma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::nma::NmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::nma::NmaParams { period: Some(64) },
-        "nma",
-        "nma"
-    );
-    pub use nma_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct NmaBatchDevState {
+        cuda: CudaNma,
+        d_prices: DeviceBuffer<f32>,
+        d_abs_diffs: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for NmaBatchDevState {
+        fn launch(&mut self) {
+            let periods_ptr = self.d_periods.as_device_ptr();
+            let out_ptr = self.d_out.as_device_ptr();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_abs_diffs,
+                    periods_ptr,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_period,
+                    out_ptr,
+                )
+                .expect("nma batch kernel");
+            self.cuda.stream.synchronize().expect("nma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaNma::new(0).expect("cuda nma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = NmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, len, max_period, abs_diffs) =
+            CudaNma::prepare_batch_inputs(&price, &sweep).expect("nma prepare batch inputs");
+        let n_combos = combos.len();
+        cuda.ensure_const_weights(max_period)
+            .expect("nma upload const weights");
+
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_abs_diffs = DeviceBuffer::from_slice(&abs_diffs).expect("d_abs_diffs");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(NmaBatchDevState {
+            cuda,
+            d_prices,
+            d_abs_diffs,
+            d_periods,
+            series_len: len,
+            n_combos,
+            first_valid,
+            max_period,
+            d_out,
+        })
+    }
+
+    struct NmaManyDevState {
+        cuda: CudaNma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_abs_diffs_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for NmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_abs_diffs_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    &mut self.d_out_tm,
+                )
+                .expect("nma many-series kernel");
+            self.cuda.stream.synchronize().expect("nma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaNma::new(0).expect("cuda nma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = NmaParams { period: Some(64) };
+        let (first_valids, abs_diffs_tm, period) =
+            CudaNma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("nma prepare many-series inputs");
+        cuda.ensure_const_weights(period)
+            .expect("nma upload const weights");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_abs_diffs_tm = DeviceBuffer::from_slice(&abs_diffs_tm).expect("d_abs_diffs_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(NmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_abs_diffs_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "nma",
+                "one_series_many_params",
+                "nma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "nma",
+                "many_series_one_param",
+                "nma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

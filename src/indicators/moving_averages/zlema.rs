@@ -339,7 +339,7 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -741,7 +741,7 @@ pub struct ZlemaBatchRange {
 impl Default for ZlemaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 40, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1689,7 +1689,7 @@ pub fn zlema_compute_into(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1732,7 +1732,7 @@ pub fn zlema_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     unsafe {

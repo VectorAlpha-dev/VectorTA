@@ -612,37 +612,55 @@ pub mod benches {
             let off = (0.0031 * x.cos()).abs() + 0.12;
             high[i] = v + off;
             low[i] = v - off;
-            let v = close[i];
-            if v.is_nan() {
-                continue;
-            }
-            let x = i as f32 * 0.0027;
-            let off = (0.0031 * x.cos()).abs() + 0.12;
-            high[i] = v + off;
-            low[i] = v - off;
         }
         (high, low)
     }
 
     struct WadState {
         cuda: CudaWad,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        len: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for WadState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .wad_batch_dev(&self.high, &self.low, &self.close)
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    self.len,
+                    1,
+                    &mut self.d_out,
+                )
                 .expect("wad kernel");
+            self.cuda.stream.synchronize().expect("wad sync");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaWad::new(0).expect("cuda wad");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
-        Box::new(WadState { cuda, high, low, close })
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low =
+            unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(ONE_SERIES_LEN, &cuda.stream) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(WadState {
+            cuda,
+            d_high,
+            d_low,
+            d_close,
+            len: ONE_SERIES_LEN,
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

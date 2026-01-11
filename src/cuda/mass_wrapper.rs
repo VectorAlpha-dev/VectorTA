@@ -664,49 +664,65 @@ fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassErr
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use std::ffi::c_void;
 
     struct MassBatchState {
         cuda: CudaMass,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: MassBatchRange,
+        d_prefix_ratio: DeviceBuffer<F2>,
+        d_prefix_nan: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
     impl CudaBenchState for MassBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .mass_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("mass batch");
-            let _ = self
-                .cuda
-                .mass_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("mass batch");
-        }
-    }
+            let block_x: u32 = 256;
+            let grid_x = ((self.len as u32) + block_x - 1) / block_x;
+            let block: BlockSize = (block_x, 1, 1).into();
+            let stream = &self.cuda.stream;
 
-    struct MassManySeriesState {
-        cuda: CudaMass,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        cols: usize,
-        rows: usize,
-        period: usize,
-    }
-    impl CudaBenchState for MassManySeriesState {
-        fn launch(&mut self) {
-            let p = MassParams {
-                period: Some(self.period),
-            };
-            let _ = self
-                .cuda
-                .mass_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    self.cols,
-                    self.rows,
-                    &p,
-                )
-                .expect("mass many-series");
+            const MAX_GRID_Y: usize = 65_535;
+            let mut launched = 0usize;
+            while launched < self.n_combos {
+                let chunk = (self.n_combos - launched).min(MAX_GRID_Y);
+                let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
+                unsafe {
+                    let func = self
+                        .cuda
+                        .module
+                        .get_function("mass_batch_f32")
+                        .expect("mass_batch_f32");
+                    let mut prefix_ptr = self.d_prefix_ratio.as_device_ptr().as_raw();
+                    let mut nan_ptr = self.d_prefix_nan.as_device_ptr().as_raw();
+                    let mut len_i = self.len as i32;
+                    let mut first_i = self.first_valid as i32;
+                    let mut periods_ptr = self
+                        .d_periods
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                    let mut combos_i = chunk as i32;
+                    let mut out_ptr = self
+                        .d_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add(((launched * self.len) * std::mem::size_of::<f32>()) as u64);
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prefix_ptr as *mut _ as *mut c_void,
+                        &mut nan_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    stream.launch(&func, grid, block, 0, args).expect("launch");
+                }
+                launched += chunk;
+            }
+            self.cuda.stream.synchronize().expect("mass sync");
         }
     }
 
@@ -719,35 +735,35 @@ pub mod benches {
             low[i] = high[i] - (0.5 + (x * 0.0017).cos().abs());
         }
         let sweep = MassBatchRange { period: (2, 32, 2) };
-        Box::new(MassBatchState {
-            cuda: CudaMass::new(0).expect("cuda mass"),
-            high,
-            low,
-            sweep,
-        })
-    }
+        let combos = expand_mass_combos(&sweep).expect("expand_mass_combos");
+        let n_combos = combos.len();
+        let len = high.len();
 
-    fn prep_mass_many_series() -> Box<dyn CudaBenchState> {
-        let cols = 64usize;
-        let rows = 120_000usize;
-        let mut high_tm = vec![f32::NAN; cols * rows];
-        let mut low_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for t in s..rows {
-                let x = (t as f32) + (s as f32) * 0.1;
-                let h = (x * 0.002).sin().abs() + 1.1;
-                let l = h - (0.4 + (x * 0.0013).cos().abs());
-                high_tm[t * cols + s] = h;
-                low_tm[t * cols + s] = l;
-            }
-        }
-        Box::new(MassManySeriesState {
-            cuda: CudaMass::new(0).expect("cuda mass"),
-            high_tm,
-            low_tm,
-            cols,
-            rows,
-            period: 9,
+        let (prefix_ratio_ds, prefix_nan, first_valid) =
+            CudaMass::precompute_ratio_prefix_one_series_ds(&high, &low)
+                .expect("precompute_ratio_prefix_one_series_ds");
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0) as i32)
+            .collect();
+
+        let cuda = CudaMass::new(0).expect("cuda mass");
+        let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds).expect("d_prefix_ratio");
+        let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan).expect("d_prefix_nan");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+        cuda.stream.synchronize().expect("mass prep sync");
+
+        Box::new(MassBatchState {
+            cuda,
+            d_prefix_ratio,
+            d_prefix_nan,
+            d_periods,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
         })
     }
 
@@ -761,30 +777,6 @@ pub mod benches {
                 prep_mass_batch,
             )
             .with_inner_iters(4),
-            CudaBenchScenario::new(
-                "mass",
-                "many_series_one_param",
-                "mass_cuda_many_series_one_param",
-                "64x120k",
-                prep_mass_many_series,
-            )
-            .with_inner_iters(2),
-            CudaBenchScenario::new(
-                "mass",
-                "batch_dev",
-                "mass_cuda_batch_dev",
-                "120k_x_16combos",
-                prep_mass_batch,
-            )
-            .with_inner_iters(4),
-            CudaBenchScenario::new(
-                "mass",
-                "many_series_one_param",
-                "mass_cuda_many_series_one_param",
-                "64x120k",
-                prep_mass_many_series,
-            )
-            .with_inner_iters(2),
         ]
     }
 }

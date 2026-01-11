@@ -11,10 +11,13 @@ function setStatus(msg, kind) {
   el.className = "mono " + (kind || "");
 }
 
-function readCheckedValues(selector) {
-  return Array.from(document.querySelectorAll(selector))
-    .filter((el) => el.checked)
-    .map((el) => Number(el.value));
+function parseMaTypes(id) {
+  const raw = ($(id)?.value || "").trim();
+  if (!raw) return [];
+  return raw
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 }
 
 function pretty(obj) {
@@ -43,10 +46,12 @@ function getRequest() {
     Number($("slowStep").value),
   ];
 
-  const fastMaIds = readCheckedValues("input.fastMa");
-  const slowMaIds = readCheckedValues("input.slowMa");
-  if (fastMaIds.length === 0) throw new Error("Select at least one fast MA type.");
-  if (slowMaIds.length === 0) throw new Error("Select at least one slow MA type.");
+  const fastMaTypes = parseMaTypes("fastMaTypes");
+  const slowMaTypes = parseMaTypes("slowMaTypes");
+  if (fastMaTypes.length === 0) throw new Error("Enter at least one fast MA type.");
+  if (slowMaTypes.length === 0) throw new Error("Enter at least one slow MA type.");
+
+  const maSource = $("maSource").value;
 
   const objective = $("objective").value;
   const mode = $("mode").value;
@@ -64,8 +69,9 @@ function getRequest() {
     data_id: dataId,
     fast_range: fast,
     slow_range: slow,
-    fast_ma_ids: fastMaIds,
-    slow_ma_ids: slowMaIds,
+    fast_ma_types: fastMaTypes,
+    slow_ma_types: slowMaTypes,
+    ma_source: maSource,
     objective,
     mode,
     top_k: topK,

@@ -190,7 +190,7 @@ pub fn emv(input: &EmvInput) -> Result<EmvOutput, EmvError> {
 }
 
 pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, EmvError> {
-    let (high, low, close, volume) = match &input.data {
+    let (high, low, _close, volume) = match &input.data {
         EmvData::Candles { candles } => {
             let high = source_type(candles, "high");
             let low = source_type(candles, "low");
@@ -220,22 +220,22 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
         None => return Err(EmvError::AllValuesNaN),
     };
 
-    let mut valid_count = 0_usize;
-    for i in first..len {
-        if !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()) {
-            valid_count += 1;
-        }
-    }
-    if valid_count < 2 {
+    // We need at least 2 valid points (one warmup midpoint + one computed EMV).
+    // Avoid a full scan by searching only for a second valid point; in the common case
+    // (no NaNs), this is O(1) and keeps error semantics intact.
+    let has_second = (first + 1..len)
+        .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+        .is_some();
+    if !has_second {
         return Err(EmvError::NotEnoughValidData {
             needed: 2,
-            valid: valid_count,
+            valid: 1,
         });
     }
 
     let mut out = alloc_with_nan_prefix(len, first + 1);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -264,7 +264,7 @@ pub fn emv_into(input: &EmvInput, out: &mut [f64]) -> Result<(), EmvError> {
 
 #[inline]
 pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result<(), EmvError> {
-    let (high, low, close, volume) = match &input.data {
+    let (high, low, _close, volume) = match &input.data {
         EmvData::Candles { candles } => {
             let high = source_type(candles, "high");
             let low = source_type(candles, "low");
@@ -301,16 +301,13 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
         None => return Err(EmvError::AllValuesNaN),
     };
 
-    let mut valid_count = 0_usize;
-    for i in first..len {
-        if !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()) {
-            valid_count += 1;
-        }
-    }
-    if valid_count < 2 {
+    let has_second = (first + 1..len)
+        .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
+        .is_some();
+    if !has_second {
         return Err(EmvError::NotEnoughValidData {
             needed: 2,
-            valid: valid_count,
+            valid: 1,
         });
     }
 
@@ -322,7 +319,7 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -972,9 +969,8 @@ pub fn emv_js(
 
     let mut output = vec![0.0; high.len().min(low.len()).min(close.len()).min(volume.len())];
 
-    let kernel = detect_best_kernel();
-
-    emv_into_slice(&mut output, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    emv_into_slice(&mut output, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
@@ -1006,8 +1002,6 @@ pub fn emv_into(
 
         let input = EmvInput::from_slices(high, low, close, volume);
 
-        let kernel = detect_best_kernel();
-
         // Check if output pointer aliases with any input pointer
         if out_ptr == high_ptr as *mut f64
             || out_ptr == low_ptr as *mut f64
@@ -1016,14 +1010,15 @@ pub fn emv_into(
         {
             // Use temp buffer for aliased operation
             let mut temp = vec![0.0; len];
-            emv_into_slice(&mut temp, &input, kernel)
+            emv_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             // Direct write to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            emv_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            emv_into_slice(out, &input, Kernel::Auto)
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
         Ok(())

@@ -48,6 +48,8 @@ pub enum ManySeriesKernelPolicy {
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
     TimeMajor { block_x: u32 },
+    FusedPlain { block_x: u32 },
+    FusedTimeMajor { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -107,6 +109,9 @@ pub struct CudaHalftrend {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
+
+// Must match `HT_FUSED_MAX_AMP` in `kernels/cuda/halftrend_kernel.cu`.
+const HALF_TREND_FUSED_MAX_AMP: usize = 64;
 
 impl CudaHalftrend {
     pub fn new(device_id: usize) -> Result<Self, CudaHalftrendError> {
@@ -383,20 +388,170 @@ impl CudaHalftrend {
             return Err(CudaHalftrendError::InvalidInput("no parameter combinations".into()));
         }
         let rows = combos.len();
-        // Rough VRAM requirement: inputs 3N + helpers 5*rows*N + warms + params + 6*rows*N
-        let req_bytes = (3usize
+
+        let max_amp = combos
+            .iter()
+            .map(|p| p.amplitude.unwrap_or(0))
+            .max()
+            .unwrap_or(0);
+        let use_fused = matches!(self.batch_policy, BatchKernelPolicy::Auto)
+            && max_amp <= HALF_TREND_FUSED_MAX_AMP;
+
+        // Heuristic: prefer time-major layout for larger combo counts and lengths.
+        let use_time_major = match self.batch_policy {
+            BatchKernelPolicy::Auto => (rows >= 16) && (n >= 8192),
+            BatchKernelPolicy::Plain { .. } => false,
+        };
+
+        // Rough VRAM requirement.
+        // - Fused: inputs 3N + params + outputs 6*rows*N
+        // - Legacy: inputs 3N + helpers 5*rows*N + warms/params + outputs 6*rows*N
+        let helpers = if use_fused { 0usize } else { 5usize };
+        let f32_elems = (3usize
             .checked_mul(n)
-            .and_then(|x| x.checked_add(5usize.checked_mul(rows).and_then(|y| y.checked_mul(n))?))
-            .and_then(|x| x.checked_add(rows))
+            .and_then(|x| x.checked_add(helpers.checked_mul(rows).and_then(|y| y.checked_mul(n))?))
             .and_then(|x| x.checked_add(6usize.checked_mul(rows).and_then(|y| y.checked_mul(n))?))
             .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?)
             .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let param_bytes = if use_fused {
+            // amps (i32) + atr_periods (i32) + chdevs (f32)
+            rows.checked_mul(2 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+        } else {
+            // warms (i32) + chdevs (f32)
+            rows.checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
+        }
+        .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+        let req_bytes = f32_elems
+            .checked_add(param_bytes)
             .and_then(|x| x.checked_add(64 * 1024 * 1024))
             .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
         if let Ok((free, _)) = mem_get_info() {
             if !Self::will_fit(req_bytes, 0) {
                 return Err(CudaHalftrendError::OutOfMemory { required: req_bytes, free, headroom: 0 });
             }
+        }
+
+        if use_fused {
+            // ---------------------- FUSED batch path (no host helper matrices) ----------------------
+            let mut amps = Vec::<i32>::with_capacity(rows);
+            let mut atr_periods = Vec::<i32>::with_capacity(rows);
+            let mut chdevs = Vec::<f32>::with_capacity(rows);
+            for prm in &combos {
+                amps.push(prm.amplitude.unwrap_or(2) as i32);
+                atr_periods.push(prm.atr_period.unwrap_or(14) as i32);
+                chdevs.push(prm.channel_deviation.unwrap_or(2.0) as f32);
+            }
+
+            let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..n], &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+            let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..n], &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+            let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..n], &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+            let d_amps = unsafe { DeviceBuffer::from_slice_async(&amps, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+            let d_atr_periods = unsafe { DeviceBuffer::from_slice_async(&atr_periods, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+            let d_chdevs = unsafe { DeviceBuffer::from_slice_async(&chdevs, &self.stream) }
+                .map_err(CudaHalftrendError::from)?;
+
+            let elems = rows
+                .checked_mul(n)
+                .ok_or_else(|| CudaHalftrendError::InvalidInput("size overflow".into()))?;
+            let mut d_ht: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_tr: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_ah: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_al: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_bs: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+            let mut d_ss: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                    .map_err(CudaHalftrendError::from)?;
+
+            let (kernel, selected) = if use_time_major {
+                ("halftrend_batch_fused_time_major_f32", BatchKernelSelected::FusedTimeMajor { block_x: 256 })
+            } else {
+                ("halftrend_batch_fused_f32", BatchKernelSelected::FusedPlain { block_x: 256 })
+            };
+            if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
+                eprintln!(
+                    "[halftrend] batch kernel (fused): kernel={} block_x={} rows={} len={} first_valid={}",
+                    kernel, 256u32, rows, n, first
+                );
+                unsafe { (*(self as *const _ as *mut CudaHalftrend)).debug_batch_logged = true; }
+            }
+            unsafe { (*(self as *const _ as *mut CudaHalftrend)).last_batch = Some(selected); }
+
+            let func = self
+                .module
+                .get_function(kernel)
+                .map_err(|_| CudaHalftrendError::MissingKernelSymbol { name: kernel })?;
+            unsafe {
+                let block_x = 256u32;
+                let grid_x = (((rows as u32) + block_x - 1) / block_x).max(1);
+                self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
+                let grid: GridSize = (grid_x, 1, 1).into();
+                let block: BlockSize = (block_x, 1, 1).into();
+
+                let mut h = d_high.as_device_ptr().as_raw();
+                let mut l = d_low.as_device_ptr().as_raw();
+                let mut c = d_close.as_device_ptr().as_raw();
+                let mut a = d_amps.as_device_ptr().as_raw();
+                let mut ap = d_atr_periods.as_device_ptr().as_raw();
+                let mut cd = d_chdevs.as_device_ptr().as_raw();
+                let mut first_i = first as i32;
+                let mut n_i = n as i32;
+                let mut r_i = rows as i32;
+                let mut oht = d_ht.as_device_ptr().as_raw();
+                let mut otr = d_tr.as_device_ptr().as_raw();
+                let mut oah = d_ah.as_device_ptr().as_raw();
+                let mut oal = d_al.as_device_ptr().as_raw();
+                let mut obs = d_bs.as_device_ptr().as_raw();
+                let mut oss = d_ss.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 15] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut a as *mut _ as *mut c_void,
+                    &mut ap as *mut _ as *mut c_void,
+                    &mut cd as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut r_i as *mut _ as *mut c_void,
+                    &mut oht as *mut _ as *mut c_void,
+                    &mut otr as *mut _ as *mut c_void,
+                    &mut oah as *mut _ as *mut c_void,
+                    &mut oal as *mut _ as *mut c_void,
+                    &mut obs as *mut _ as *mut c_void,
+                    &mut oss as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, &mut args)
+                    .map_err(CudaHalftrendError::from)?;
+            }
+
+            self.stream
+                .synchronize()
+                .map_err(CudaHalftrendError::from)?;
+
+            return Ok(CudaHalftrendBatch {
+                halftrend: DeviceArrayF32 { buf: d_ht, rows, cols: n },
+                trend: DeviceArrayF32 { buf: d_tr, rows, cols: n },
+                atr_high: DeviceArrayF32 { buf: d_ah, rows, cols: n },
+                atr_low: DeviceArrayF32 { buf: d_al, rows, cols: n },
+                buy: DeviceArrayF32 { buf: d_bs, rows, cols: n },
+                sell: DeviceArrayF32 { buf: d_ss, rows, cols: n },
+                combos,
+            });
         }
 
         // Shared precompute on host by unique periods/amplitudes
@@ -449,12 +604,6 @@ impl CudaHalftrend {
                 .values,
             );
         }
-
-        // Heuristic: prefer time-major path for larger combo counts and lengths.
-        let use_time_major = match self.batch_policy {
-            BatchKernelPolicy::Auto => (rows >= 16) && (n >= 8192),
-            BatchKernelPolicy::Plain { .. } => false,
-        };
 
         // Build helper matrices in either row-major (legacy) or time-major (optimized) layout
         use cust::memory::LockedBuffer;
@@ -602,6 +751,10 @@ impl CudaHalftrend {
                 self.stream.launch(&func, grid, block, 0, &mut args)
                     .map_err(CudaHalftrendError::from)?;
             }
+
+            self.stream
+                .synchronize()
+                .map_err(CudaHalftrendError::from)?;
         } else {
             // TIME-MAJOR [n, rows] helper matrices in pinned memory
             let len_tm = rows
@@ -738,11 +891,11 @@ impl CudaHalftrend {
                 self.stream.launch(&func, grid, block, 0, &mut args)
                     .map_err(CudaHalftrendError::from)?;
             }
-        }
 
-        self.stream
-            .synchronize()
-            .map_err(CudaHalftrendError::from)?;
+            self.stream
+                .synchronize()
+                .map_err(CudaHalftrendError::from)?;
+        }
 
         Ok(CudaHalftrendBatch {
             // Keep external shape as [rows, n] to preserve API/tests
@@ -1122,7 +1275,10 @@ impl CudaHalftrend {
         dev.sell.buf.copy_to(out_ss).map_err(CudaHalftrendError::from)?;
 
         // If the last batch used the time-major kernel, transpose back to row-major for host slices
-        let used_time_major = matches!(self.last_batch, Some(BatchKernelSelected::TimeMajor { .. }));
+        let used_time_major = matches!(
+            self.last_batch,
+            Some(BatchKernelSelected::TimeMajor { .. } | BatchKernelSelected::FusedTimeMajor { .. })
+        );
         if used_time_major {
             // Input buffers are laid out time-major [n, rows] on device; we copied raw order.
             // Transpose to row-major [rows, n] for the host outputs.
@@ -1156,6 +1312,7 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use cust::memory::DeviceBuffer;
 
     const LEN_1M: usize = 1_000_000;
     const COLS_256: usize = 256;
@@ -1173,66 +1330,177 @@ pub mod benches {
             let off = (0.002 * x.sin()).abs() + 0.15;
             high[i] = v + off;
             low[i] = v - off;
-            let v = close[i];
-            if v.is_nan() {
-                continue;
-            }
-            let x = i as f32 * 0.0025;
-            let off = (0.002 * x.sin()).abs() + 0.15;
-            high[i] = v + off;
-            low[i] = v - off;
         }
         (high, low)
     }
 
-    struct BatchState {
+    struct BatchDevInplaceState {
         cuda: CudaHalftrend,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: HalfTrendBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_amp: DeviceBuffer<i32>,
+        d_atr: DeviceBuffer<i32>,
+        d_ch: DeviceBuffer<f32>,
+        first: i32,
+        len: usize,
+        rows: usize,
+        block_x: u32,
+        kernel: &'static str,
+        d_ht: DeviceBuffer<f32>,
+        d_tr: DeviceBuffer<f32>,
+        d_ah: DeviceBuffer<f32>,
+        d_al: DeviceBuffer<f32>,
+        d_bs: DeviceBuffer<f32>,
+        d_ss: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevInplaceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .halftrend_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
+                .module
+                .get_function(self.kernel)
+                .expect(self.kernel);
+
+            let rows_u32 = self.rows as u32;
+            let grid_x = ((rows_u32 + self.block_x - 1) / self.block_x).max(1);
+            self.cuda
+                .validate_launch(grid_x, 1, 1, self.block_x, 1, 1)
+                .expect("halftrend validate launch");
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+
+            unsafe {
+                let mut h = self.d_high.as_device_ptr().as_raw();
+                let mut l = self.d_low.as_device_ptr().as_raw();
+                let mut c = self.d_close.as_device_ptr().as_raw();
+                let mut a = self.d_amp.as_device_ptr().as_raw();
+                let mut ap = self.d_atr.as_device_ptr().as_raw();
+                let mut ch = self.d_ch.as_device_ptr().as_raw();
+                let mut first_i = self.first as i32;
+                let mut n_i = self.len as i32;
+                let mut r_i = self.rows as i32;
+                let mut oht = self.d_ht.as_device_ptr().as_raw();
+                let mut otr = self.d_tr.as_device_ptr().as_raw();
+                let mut oah = self.d_ah.as_device_ptr().as_raw();
+                let mut oal = self.d_al.as_device_ptr().as_raw();
+                let mut obs = self.d_bs.as_device_ptr().as_raw();
+                let mut oss = self.d_ss.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 15] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut a as *mut _ as *mut c_void,
+                    &mut ap as *mut _ as *mut c_void,
+                    &mut ch as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut r_i as *mut _ as *mut c_void,
+                    &mut oht as *mut _ as *mut c_void,
+                    &mut otr as *mut _ as *mut c_void,
+                    &mut oah as *mut _ as *mut c_void,
+                    &mut oal as *mut _ as *mut c_void,
+                    &mut obs as *mut _ as *mut c_void,
+                    &mut oss as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, &mut args)
+                    .expect("halftrend launch");
+            }
+            self.cuda.stream.synchronize().expect("halftrend sync");
         }
     }
 
     struct ManyState {
         cuda: CudaHalftrend,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_atr_tm: DeviceBuffer<f32>,
+        d_hma_tm: DeviceBuffer<f32>,
+        d_lma_tm: DeviceBuffer<f32>,
+        d_rhi_tm: DeviceBuffer<f32>,
+        d_rlo_tm: DeviceBuffer<f32>,
+        d_warms: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        amp: usize,
-        ch: f64,
-        atr: usize,
+        ch: f32,
+        block_x: u32,
+        grid_x: u32,
+        d_ht: DeviceBuffer<f32>,
+        d_tr: DeviceBuffer<f32>,
+        d_ah: DeviceBuffer<f32>,
+        d_al: DeviceBuffer<f32>,
+        d_bs: DeviceBuffer<f32>,
+        d_ss: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .halftrend_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    self.amp,
-                    self.ch,
-                    self.atr,
-                )
-                .unwrap();
+                .module
+                .get_function("halftrend_many_series_one_param_time_major_f32")
+                .expect("halftrend_many_series_one_param_time_major_f32");
+            let grid: GridSize = (self.grid_x, 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut h = self.d_high_tm.as_device_ptr().as_raw();
+                let mut l = self.d_low_tm.as_device_ptr().as_raw();
+                let mut c = self.d_close_tm.as_device_ptr().as_raw();
+                let mut a = self.d_atr_tm.as_device_ptr().as_raw();
+                let mut hm = self.d_hma_tm.as_device_ptr().as_raw();
+                let mut lm = self.d_lma_tm.as_device_ptr().as_raw();
+                let mut rh = self.d_rhi_tm.as_device_ptr().as_raw();
+                let mut rl = self.d_rlo_tm.as_device_ptr().as_raw();
+                let mut w = self.d_warms.as_device_ptr().as_raw();
+                let mut ch = self.ch;
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut oht = self.d_ht.as_device_ptr().as_raw();
+                let mut otr = self.d_tr.as_device_ptr().as_raw();
+                let mut oah = self.d_ah.as_device_ptr().as_raw();
+                let mut oal = self.d_al.as_device_ptr().as_raw();
+                let mut obs = self.d_bs.as_device_ptr().as_raw();
+                let mut oss = self.d_ss.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 18] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut a as *mut _ as *mut c_void,
+                    &mut hm as *mut _ as *mut c_void,
+                    &mut lm as *mut _ as *mut c_void,
+                    &mut rh as *mut _ as *mut c_void,
+                    &mut rl as *mut _ as *mut c_void,
+                    &mut w as *mut _ as *mut c_void,
+                    &mut ch as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut oht as *mut _ as *mut c_void,
+                    &mut otr as *mut _ as *mut c_void,
+                    &mut oah as *mut _ as *mut c_void,
+                    &mut oal as *mut _ as *mut c_void,
+                    &mut obs as *mut _ as *mut c_void,
+                    &mut oss as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, &mut args)
+                    .expect("halftrend many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("halftrend sync");
         }
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        // Batch: 1M bars, 32 combos (amp 2..32 step 2, fixed ch=2.0, atr=14)
-        let prep_batch = || -> Box<dyn CudaBenchState> {
+        // Batch: 1M bars, 16 combos (amp 2..32 step 2, fixed ch=2.0, atr=14)
+        let bytes_batch = || -> usize {
+            // Rough (fused default): inputs 3N + params + outputs 6*rows*N + headroom
+            (3 * LEN_1M + 6 * 16 * LEN_1M) * std::mem::size_of::<f32>()
+                + 64 * 1024 * 1024
+        }();
+
+        let prep_batch_dev_inplace = || -> Box<dyn CudaBenchState> {
             let cuda = CudaHalftrend::new(0).expect("cuda halftrend");
             let close = gen_series(LEN_1M);
             let (high, low) = synth_hlc_from_close(&close);
@@ -1241,19 +1509,83 @@ pub mod benches {
                 channel_deviation: (2.0, 2.0, 0.0),
                 atr_period: (14, 14, 0),
             };
-            Box::new(BatchState {
+            let combos = CudaHalftrend::expand_grid(&sweep).expect("halftrend expand grid");
+            let rows = combos.len();
+            let first = CudaHalftrend::first_valid_ohlc_f32(&high, &low, &close)
+                .expect("halftrend first_valid") as i32;
+
+            let mut amp = Vec::<i32>::with_capacity(rows);
+            let mut atr = Vec::<i32>::with_capacity(rows);
+            let mut ch = Vec::<f32>::with_capacity(rows);
+            for p in &combos {
+                amp.push(p.amplitude.unwrap_or(2) as i32);
+                atr.push(p.atr_period.unwrap_or(14) as i32);
+                ch.push(p.channel_deviation.unwrap_or(2.0) as f32);
+            }
+
+            let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }
+                .expect("d_high");
+            let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }
+                .expect("d_low");
+            let d_close = unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }
+                .expect("d_close");
+            let d_amp = unsafe { DeviceBuffer::from_slice_async(&amp, &cuda.stream) }
+                .expect("d_amp");
+            let d_atr = unsafe { DeviceBuffer::from_slice_async(&atr, &cuda.stream) }
+                .expect("d_atr");
+            let d_ch = unsafe { DeviceBuffer::from_slice_async(&ch, &cuda.stream) }
+                .expect("d_ch");
+
+            let elems = rows.checked_mul(LEN_1M).expect("halftrend rows*n overflow");
+            let d_ht: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_ht");
+            let d_tr: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_tr");
+            let d_ah: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_ah");
+            let d_al: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_al");
+            let d_bs: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_bs");
+            let d_ss: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(elems, &cuda.stream) }
+                    .expect("d_ss");
+            cuda.stream.synchronize().expect("halftrend sync");
+
+            // Match wrapper defaults: time-major chosen for rows>=16 && n>=8192.
+            let use_time_major = rows >= 16 && LEN_1M >= 8192;
+            let kernel = if use_time_major {
+                "halftrend_batch_fused_time_major_f32"
+            } else {
+                "halftrend_batch_fused_f32"
+            };
+
+            Box::new(BatchDevInplaceState {
                 cuda,
-                high,
-                low,
-                close,
-                sweep,
+                d_high,
+                d_low,
+                d_close,
+                d_amp,
+                d_atr,
+                d_ch,
+                first,
+                len: LEN_1M,
+                rows,
+                block_x: 256,
+                kernel,
+                d_ht,
+                d_tr,
+                d_ah,
+                d_al,
+                d_bs,
+                d_ss,
             })
         };
-        let bytes_batch = || -> usize {
-            // Rough: inputs 3N + helpers 5*32*N + outputs 6*32*N + headroom
-            (3 * LEN_1M + 5 * 16 * LEN_1M + 6 * 16 * LEN_1M) * std::mem::size_of::<f32>()
-                + 64 * 1024 * 1024
-        }();
 
         // Many-series: 8k x 256
         let prep_many = || -> Box<dyn CudaBenchState> {
@@ -1271,16 +1603,94 @@ pub mod benches {
                 v
             };
             let (high_tm, low_tm) = synth_hlc_from_close(&close_tm);
+
+            // Build warmup rows per series to mirror wrapper semantics.
+            let (amp, atr_period, ch) = (2usize, 14usize, 2.0f32);
+            let mut firsts = vec![rows as i32; cols];
+            for s in 0..cols {
+                for t in 0..rows {
+                    let idx = t * cols + s;
+                    if high_tm[idx].is_finite()
+                        && low_tm[idx].is_finite()
+                        && close_tm[idx].is_finite()
+                    {
+                        firsts[s] = t as i32;
+                        break;
+                    }
+                }
+            }
+            let warm_len = amp.max(atr_period);
+            let mut warms: Vec<i32> = Vec::with_capacity(cols);
+            for s in 0..cols {
+                let fv = firsts[s].max(0) as usize;
+                warms.push((fv + warm_len - 1).min(rows) as i32);
+            }
+
+            // Lightweight synthetic helpers (bench focuses on kernel time).
+            let elems = cols * rows;
+            let mut atr_tm = vec![f32::NAN; elems];
+            let mut hma_tm = vec![f32::NAN; elems];
+            let mut lma_tm = vec![f32::NAN; elems];
+            let mut rhi_tm = vec![f32::NAN; elems];
+            let mut rlo_tm = vec![f32::NAN; elems];
+            for idx in 0..elems {
+                let h = high_tm[idx];
+                let l = low_tm[idx];
+                if h.is_finite() && l.is_finite() {
+                    atr_tm[idx] = (h - l).abs();
+                }
+                hma_tm[idx] = h;
+                lma_tm[idx] = l;
+                rhi_tm[idx] = h;
+                rlo_tm[idx] = l;
+            }
+
+            let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+            let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+            let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+            let d_atr_tm = DeviceBuffer::from_slice(&atr_tm).expect("d_atr_tm");
+            let d_hma_tm = DeviceBuffer::from_slice(&hma_tm).expect("d_hma_tm");
+            let d_lma_tm = DeviceBuffer::from_slice(&lma_tm).expect("d_lma_tm");
+            let d_rhi_tm = DeviceBuffer::from_slice(&rhi_tm).expect("d_rhi_tm");
+            let d_rlo_tm = DeviceBuffer::from_slice(&rlo_tm).expect("d_rlo_tm");
+            let d_warms = DeviceBuffer::from_slice(&warms).expect("d_warms");
+
+            let d_ht: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_ht");
+            let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_tr");
+            let d_ah: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_ah");
+            let d_al: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_al");
+            let d_bs: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_bs");
+            let d_ss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_ss");
+
+            let block_x = match cuda.many_policy {
+                ManySeriesKernelPolicy::Auto => 256,
+                ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+            };
+            let grid_x = (((cols as u32) + block_x - 1) / block_x).max(1);
+            cuda.stream.synchronize().expect("halftrend sync after prep");
+
             Box::new(ManyState {
                 cuda,
-                high_tm,
-                low_tm,
-                close_tm,
+                d_high_tm,
+                d_low_tm,
+                d_close_tm,
+                d_atr_tm,
+                d_hma_tm,
+                d_lma_tm,
+                d_rhi_tm,
+                d_rlo_tm,
+                d_warms,
                 cols,
                 rows,
-                amp: 2,
-                ch: 2.0,
-                atr: 14,
+                ch,
+                block_x,
+                grid_x,
+                d_ht,
+                d_tr,
+                d_ah,
+                d_al,
+                d_bs,
+                d_ss,
             })
         };
         let bytes_many =
@@ -1300,11 +1710,12 @@ pub mod benches {
             CudaBenchScenario::new(
                 "halftrend",
                 "batch",
-                "halftrend_cuda_batch",
+                "halftrend_cuda_batch_dev_inplace",
                 "1m",
-                prep_batch,
+                prep_batch_dev_inplace,
             )
-            .with_mem_required(bytes_batch),
+            .with_mem_required(bytes_batch)
+            .with_sample_size(10),
         ]
     }
 }

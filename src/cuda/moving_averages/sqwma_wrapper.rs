@@ -647,17 +647,30 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct BatchDevState {
         cuda: CudaSqwma,
-        price: Vec<f32>,
-        sweep: SqwmaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .sqwma_batch_dev(&self.price, &self.sweep)
-                .expect("sqwma batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_period,
+                    &mut self.d_out,
+                )
+                .expect("sqwma batch kernel");
+            self.cuda.stream.synchronize().expect("sqwma sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -666,27 +679,51 @@ pub mod benches {
         let sweep = SqwmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(BatchState { cuda, price, sweep })
+        let inputs = CudaSqwma::prepare_batch_inputs(&price, &sweep).expect("sqwma prepare batch");
+        let n_combos = inputs.periods.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(inputs.series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            max_period: inputs.max_period,
+            d_out,
+        })
     }
 
-    struct ManyState {
+    struct ManyDevState {
         cuda: CudaSqwma,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .sqwma_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    self.period,
                     self.cols,
                     self.rows,
-                    self.period,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .expect("sqwma many-series");
+                .expect("sqwma many-series kernel");
+            self.cuda.stream.synchronize().expect("sqwma many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -695,12 +732,24 @@ pub mod benches {
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
         let period = 64;
-        Box::new(ManyState {
+        let inputs =
+            CudaSqwma::prepare_many_series_inputs(&data_tm, cols, rows, period).expect("sqwma prepare many");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
             period,
+            d_out_tm,
         })
     }
 

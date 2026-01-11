@@ -751,8 +751,8 @@ pub struct ChopBatchRange {
 impl Default for ChopBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
-            scalar: (100.0, 100.0, 0.0),
+            period: (14, 14, 0),
+            scalar: (100.0, 124.9, 0.1),
             drift: (1, 1, 0),
         }
     }

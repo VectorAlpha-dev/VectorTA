@@ -114,6 +114,7 @@ impl CudaChandelierExit {
 
     pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
     pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn stream(&self) -> &Stream { &self.stream }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -274,14 +275,7 @@ impl CudaChandelierExit {
         let block_x_env = std::env::var("CE_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
-        let block_x_env = std::env::var("CE_BLOCK_X")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok());
         let block_x = block_x_env
-            .or_else(|| match self.policy_batch {
-                BatchKernelPolicy::Plain { block_x } => Some(block_x),
-                _ => None,
-            })
             .or_else(|| match self.policy_batch {
                 BatchKernelPolicy::Plain { block_x } => Some(block_x),
                 _ => None,
@@ -320,8 +314,6 @@ impl CudaChandelierExit {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)?;
             // Record selection for debug parity
-            (*(self as *const _ as *mut CudaChandelierExit)).last_batch =
-                Some(BatchKernelSelected::Plain { block_x });
             (*(self as *const _ as *mut CudaChandelierExit)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
@@ -437,9 +429,6 @@ impl CudaChandelierExit {
             .module
             .get_function("chandelier_exit_many_series_one_param_time_major_f32")
             .map_err(|_| CudaCeError::MissingKernelSymbol { name: "chandelier_exit_many_series_one_param_time_major_f32" })?;
-        let block_x_env = std::env::var("CE_MANY_BLOCK_X")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok());
         let block_x_env = std::env::var("CE_MANY_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
@@ -647,6 +636,42 @@ impl CudaChandelierExit {
         })
     }
 
+    /// Device-to-device batch launch (no allocations). Output layout is identical
+    /// to `chandelier_exit_batch_dev`: `(2*rows) x len` (row-major).
+    pub fn chandelier_exit_batch_device_inplace(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_periods: &DeviceBuffer<i32>,
+        d_mults: &DeviceBuffer<f32>,
+        rows: usize,
+        use_close: bool,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCeError> {
+        let needed = rows
+            .checked_mul(len)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaCeError::InvalidInput("size overflow".into()))?;
+        if d_out.len() < needed {
+            return Err(CudaCeError::InvalidInput("output buffer too small".into()));
+        }
+        self.launch_batch(
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            d_periods,
+            d_mults,
+            rows,
+            use_close,
+            d_out,
+        )
+    }
+
     // Fast path: many-series, one param (time-major) with device-resident inputs and first_valids
     pub fn chandelier_exit_many_series_one_param_time_major_from_device_dev(
         &self,
@@ -730,51 +755,73 @@ pub mod benches {
         (high, low)
     }
 
-    struct BatchState {
+    struct BatchDevState {
         cuda: CudaChandelierExit,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: CeBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_periods: DeviceBuffer<i32>,
+        d_mults: DeviceBuffer<f32>,
+        rows: usize,
+        use_close: bool,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chandelier_exit_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
+            self.cuda
+                .chandelier_exit_batch_device_inplace(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    self.len,
+                    self.first_valid,
+                    &self.d_periods,
+                    &self.d_mults,
+                    self.rows,
+                    self.use_close,
+                    &mut self.d_out,
+                )
+                .expect("ce batch dev kernel");
+            self.cuda.stream().synchronize().expect("ce sync");
         }
     }
 
     struct ManySeriesState {
         cuda: CudaChandelierExit,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
         mult: f32,
+        use_close: bool,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .chandelier_exit_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
                     self.cols,
                     self.rows,
                     self.period,
                     self.mult,
-                    true,
+                    &self.d_first_valids,
+                    self.use_close,
+                    &mut self.d_out_tm,
                 )
-                .unwrap();
+                .expect("ce many-series kernel");
+            self.cuda.stream().synchronize().expect("ce many-series sync");
         }
     }
 
-    fn prep_batch() -> Box<dyn CudaBenchState> {
+    fn prep_batch_dev() -> Box<dyn CudaBenchState> {
         let cuda = CudaChandelierExit::new(0).expect("cuda ce");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
@@ -783,12 +830,39 @@ pub mod benches {
             mult: (2.0, 3.0, 0.5),
             use_close: (true, true, false),
         };
-        Box::new(BatchState {
+        let combos = CudaChandelierExit::expand_grid(&sweep).expect("ce expand grid");
+        let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let mults_host: Vec<f32> = combos.iter().map(|c| c.mult.unwrap() as f32).collect();
+        let use_close = sweep.use_close.0;
+        let first_valid =
+            CudaChandelierExit::first_valid(use_close, &high, &low, &close).expect("first_valid");
+
+        let rows = periods_host.len();
+        let elems_out = 2usize
+            .checked_mul(rows)
+            .and_then(|x| x.checked_mul(ONE_SERIES_LEN))
+            .expect("size overflow");
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, cuda.stream()) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, cuda.stream()) }.expect("d_low");
+        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, cuda.stream()) }.expect("d_close");
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, cuda.stream()) }.expect("d_periods");
+        let d_mults = unsafe { DeviceBuffer::from_slice_async(&mults_host, cuda.stream()) }.expect("d_mults");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems_out, cuda.stream()) }.expect("d_out");
+        cuda.stream().synchronize().expect("ce sync");
+
+        Box::new(BatchDevState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            d_periods,
+            d_mults,
+            rows,
+            use_close,
+            d_out,
         })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -806,23 +880,55 @@ pub mod benches {
             v
         };
         let (high_tm, low_tm) = synth_hlc_from_close(&close_tm);
+        let use_close = true;
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                let ok = if use_close {
+                    !close_tm[idx].is_nan()
+                } else {
+                    !high_tm[idx].is_nan() && !low_tm[idx].is_nan() && !close_tm[idx].is_nan()
+                };
+                if ok {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems_out = 2usize
+            .checked_mul(cols)
+            .and_then(|x| x.checked_mul(rows))
+            .expect("size overflow");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_out) }.expect("d_out_tm");
+        cuda.stream().synchronize().expect("ce sync after prep");
         Box::new(ManySeriesState {
             cuda,
-            high_tm,
-            low_tm,
-            close_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
             cols,
             rows,
             period: 22,
             mult: 3.0,
+            use_close,
+            d_out_tm,
         })
     }
 
     fn bytes_batch() -> usize {
-        // 3 inputs + params + 2*output + 64MB headroom
-        (3 * ONE_SERIES_LEN + (ONE_SERIES_LEN / 10) + 2 * ONE_SERIES_LEN)
-            * std::mem::size_of::<f32>()
-            + 64 * 1024 * 1024
+        // 3 inputs + params + 2 outputs per combo + 64MB headroom.
+        let combos = 15usize; // period: 10..50 step 10 (5) x mult: 2.0..3.0 step 0.5 (3) x use_close: (true) (1)
+        let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let param_bytes = combos * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = 2 * combos * ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        in_bytes + param_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many() -> usize {
         (3 * COLS_256 * ROWS_8K + COLS_256 + 2 * COLS_256 * ROWS_8K) * std::mem::size_of::<f32>()
@@ -834,10 +940,11 @@ pub mod benches {
             CudaBenchScenario::new(
                 "chandelier_exit",
                 "batch",
-                "ce_cuda_batch",
+                "ce_cuda_batch_dev",
                 "1m",
-                prep_batch,
+                prep_batch_dev,
             )
+            .with_sample_size(10)
             .with_mem_required(bytes_batch()),
             CudaBenchScenario::new(
                 "chandelier_exit",
@@ -846,6 +953,7 @@ pub mod benches {
                 "8k x 256",
                 prep_many,
             )
+            .with_sample_size(10)
             .with_mem_required(bytes_many()),
         ]
     }

@@ -431,26 +431,10 @@ impl CudaEhlersKama {
                 .ok_or(CudaEhlersKamaError::SizeOverflow)?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
-        let d_prices = DeviceBuffer::from_slice(data_f32)?;
-        let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
-
-        // Pre-fill outputs with NaN to guarantee warm-up semantics even if a corner
-        // case causes a block to early-return.
-        if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
-            let total = (n_combos * series_len) as u32;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((total + block_x - 1) / block_x).max(1);
-            unsafe {
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let mut len_i = (n_combos * series_len) as i32;
-                let args: &mut [*mut c_void] = &mut [
-                    &mut out_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
-            }
-        }
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -482,21 +466,6 @@ impl CudaEhlersKama {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersKamaError> {
-        // Pre-fill outputs with NaN to guarantee warm-up semantics.
-        if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
-            let total = (n_combos * series_len) as u32;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((total + block_x - 1) / block_x).max(1);
-            unsafe {
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let mut len_i = (n_combos * series_len) as i32;
-                let args: &mut [*mut c_void] = &mut [
-                    &mut out_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
-            }
-        }
         self.launch_batch_kernel(
             d_prices,
             d_periods,
@@ -533,22 +502,7 @@ impl CudaEhlersKama {
         }
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
-        // Pre-fill outputs with NaN to guarantee warm-up semantics.
-        if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
-            let total = (n_combos * series_len) as u32;
-            let block_x: u32 = 256;
-            let grid_x: u32 = ((total + block_x - 1) / block_x).max(1);
-            unsafe {
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let mut len_i = (n_combos * series_len) as i32;
-                let args: &mut [*mut c_void] = &mut [
-                    &mut out_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
-            }
-        }
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
         self.launch_batch_kernel(
             d_prices,
             &d_periods,
@@ -1032,21 +986,155 @@ impl CudaEhlersKama {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams;
 
-    define_ma_period_benches!(
-        ehlers_kama_benches,
-        CudaEhlersKama,
-        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange,
-        crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams,
-        ehlers_kama_batch_dev,
-        ehlers_kama_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::ehlers_kama::EhlersKamaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::ehlers_kama::EhlersKamaParams { period: Some(64) },
-        "ehlers_kama",
-        "ehlers_kama"
-    );
-    pub use ehlers_kama_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct EhlersKamaBatchDevState {
+        cuda: CudaEhlersKama,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        first_valid: usize,
+        series_len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for EhlersKamaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.first_valid,
+                    self.series_len,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("ehlers_kama batch kernel");
+            self.cuda.stream.synchronize().expect("ehlers_kama sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersKama::new(0).expect("cuda ehlers_kama");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = EhlersKamaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len) =
+            CudaEhlersKama::prepare_batch_inputs(&price, &sweep)
+                .expect("ehlers_kama prepare batch inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EhlersKamaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            first_valid,
+            series_len,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct EhlersKamaManyDevState {
+        cuda: CudaEhlersKama,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for EhlersKamaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("ehlers_kama many-series kernel");
+            self.cuda.stream.synchronize().expect("ehlers_kama sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaEhlersKama::new(0).expect("cuda ehlers_kama");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = EhlersKamaParams { period: Some(64) };
+        let (first_valids, period) =
+            CudaEhlersKama::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("ehlers_kama prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EhlersKamaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "ehlers_kama",
+                "one_series_many_params",
+                "ehlers_kama_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ehlers_kama",
+                "many_series_one_param",
+                "ehlers_kama_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

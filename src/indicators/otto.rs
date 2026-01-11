@@ -1553,7 +1553,7 @@ pub struct OttoBatchRange {
 impl Default for OttoBatchRange {
     fn default() -> Self {
         Self {
-            ott_period: (2, 10, 1),
+            ott_period: (2, 251, 1),
             ott_percent: (0.6, 0.6, 0.0),
             fast_vidya: (10, 10, 0),
             slow_vidya: (25, 25, 0),

@@ -408,7 +408,7 @@ pub fn gaussian_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     let warm = first_valid + period;
@@ -773,8 +773,8 @@ pub struct GaussianBatchRange {
 impl Default for GaussianBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 120, 1),
-            poles: (1, 4, 1),
+            period: (14, 263, 1),
+            poles: (4, 4, 0),
         }
     }
 }
@@ -1036,7 +1036,7 @@ fn gaussian_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -2697,7 +2697,7 @@ fn gaussian_batch_inner_into(
 
     // Determine kernel
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

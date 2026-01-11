@@ -162,6 +162,48 @@ impl CudaSuperSmoother {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSuperSmootherError> {
+        if let Ok(mut func) = self
+            .module
+            .get_function("supersmoother_batch_warp_scan_f32")
+        {
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+            const MAX_GRID_X: usize = 65_535;
+            let block: BlockSize = (32u32, 1, 1).into();
+
+            let mut launched = 0usize;
+            while launched < n_combos {
+                let rows = (n_combos - launched).min(MAX_GRID_X);
+                let grid: GridSize = (rows as u32, 1, 1).into();
+
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
+                    let mut series_len_i = series_len as i32;
+                    let mut combos_i = rows as i32;
+                    let mut first_valid_i = first_valid as i32;
+                    let mut out_ptr = d_out
+                        .as_device_ptr()
+                        .add(launched * series_len)
+                        .as_raw();
+
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut combos_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream.launch(&func, grid, block, 0, args)?;
+                }
+
+                launched += rows;
+            }
+
+            return Ok(());
+        }
+
         let mut func: Function = self
             .module
             .get_function("supersmoother_batch_f32")
@@ -555,21 +597,155 @@ impl CudaSuperSmoother {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::supersmoother::SuperSmootherParams;
 
-    define_ma_period_benches!(
-        supersmoother_benches,
-        CudaSuperSmoother,
-        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange,
-        crate::indicators::moving_averages::supersmoother::SuperSmootherParams,
-        supersmoother_batch_dev,
-        supersmoother_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::supersmoother::SuperSmootherParams { period: Some(64) },
-        "supersmoother",
-        "supersmoother"
-    );
-    pub use supersmoother_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDevState {
+        cuda: CudaSuperSmoother,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for BatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("supersmoother batch kernel");
+            self.cuda.stream.synchronize().expect("supersmoother sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSuperSmoother::new(0).expect("cuda supersmoother");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = crate::indicators::moving_averages::supersmoother::SuperSmootherBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len) =
+            CudaSuperSmoother::prepare_batch_inputs(&price, &sweep)
+                .expect("supersmoother prepare batch");
+        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
+        let n_combos = periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size")) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
+        })
+    }
+
+    struct ManyDevState {
+        cuda: CudaSuperSmoother,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        period: usize,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    &mut self.d_out_tm,
+                )
+                .expect("supersmoother many-series kernel");
+            self.cuda.stream.synchronize().expect("supersmoother sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSuperSmoother::new(0).expect("cuda supersmoother");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = SuperSmootherParams { period: Some(64) };
+        let (first_valids, period) =
+            CudaSuperSmoother::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("supersmoother prepare many");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            period,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "supersmoother",
+                "one_series_many_params",
+                "supersmoother_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "supersmoother",
+                "many_series_one_param",
+                "supersmoother_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

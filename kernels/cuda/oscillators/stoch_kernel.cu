@@ -286,3 +286,39 @@ void pack_row_broadcast_rowmajor_f32(const float* __restrict__ src,
         }
     }
 }
+
+// Utility: 32x32 tiled transpose (time-major -> row-major)
+// Input in_tm: [rows=time][cols=series] (row-major)
+// Output out_rm: [rows=series][cols=time] (row-major)
+extern "C" __global__
+void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
+                            int rows,
+                            int cols,
+                            float* __restrict__ out_rm) {
+    // Match the common "tiled transpose" pattern (avoid shared-memory bank conflicts).
+    // Use 32x8 threads and unroll over 32 rows.
+    __shared__ float tile[32][33];
+
+    const int x0 = blockIdx.x * 32 + threadIdx.x; // col in input
+    const int y0 = blockIdx.y * 32 + threadIdx.y; // row in input
+
+    #pragma unroll
+    for (int j = 0; j < 32; j += 8) {
+        const int y = y0 + j;
+        if (x0 < cols && y < rows) {
+            tile[threadIdx.y + j][threadIdx.x] = in_tm[(size_t)y * (size_t)cols + (size_t)x0];
+        }
+    }
+
+    __syncthreads();
+
+    const int x1 = blockIdx.y * 32 + threadIdx.x; // col in output (time)
+    const int y1 = blockIdx.x * 32 + threadIdx.y; // row in output (series)
+    #pragma unroll
+    for (int j = 0; j < 32; j += 8) {
+        const int y = y1 + j;
+        if (x1 < rows && y < cols) {
+            out_rm[(size_t)y * (size_t)rows + (size_t)x1] = tile[threadIdx.x][threadIdx.y + j];
+        }
+    }
+}

@@ -86,6 +86,260 @@ static __device__ __forceinline__ double clamp_double(double x, double lo, doubl
 
 } // namespace
 
+// Precompute the inverse delta-phase (1/dp) sequence for the MAMA recurrence.
+//
+// dp is derived from the Ehlers Hilbert-transform phase logic and is independent
+// of (fast_limit, slow_limit). In batch mode (one series × many params), we can
+// compute inv_dp once per series and reuse it across all parameter combos.
+extern "C" __global__
+void mama_inv_dp_f32(const float* __restrict__ prices,
+                     int series_len,
+                     int first_valid,
+                     float* __restrict__ out_inv_dp)
+{
+    if (series_len <= 0) return;
+    if (blockIdx.x != 0 || threadIdx.x != 0) return; // one sequential worker
+
+    const float nanf32 = nanf("");
+    int fv = first_valid;
+    if (fv < 0) fv = 0;
+    if (fv >= series_len) {
+        for (int i = 0; i < series_len; ++i) out_inv_dp[i] = nanf32;
+        return;
+    }
+
+    for (int i = 0; i < fv; ++i) out_inv_dp[i] = nanf32;
+
+    double seed_price = static_cast<double>(prices[fv]);
+    double p1 = seed_price, p2 = seed_price, p3 = seed_price;
+
+    Shift8d smooth, detrender, i1r, q1r;
+    smooth.seed(seed_price);
+    detrender.seed(seed_price);
+    i1r.seed(seed_price);
+    q1r.seed(seed_price);
+
+    double prev_mesa_period = 0.0;
+    double prev_i2_sm = 0.0;
+    double prev_q2_sm = 0.0;
+    double prev_re = 0.0;
+    double prev_im = 0.0;
+    double prev_phase = 0.0;
+
+    for (int i = fv; i < series_len; ++i) {
+        double price = static_cast<double>(prices[i]);
+        double s1 = (i >= fv + 1) ? p1 : price;
+        double s2 = (i >= fv + 2) ? p2 : price;
+        double s3 = (i >= fv + 3) ? p3 : price;
+        double smooth_val = 0.1 * fma(4.0, price, fma(3.0, s1, fma(2.0, s2, s3)));
+        p3 = p2; p2 = p1; p1 = price;
+
+        smooth.push(smooth_val);
+        double x0, x2, x4, x6; smooth.taps(x0, x2, x4, x6);
+
+        double mesa_mult = fma(0.075, prev_mesa_period, 0.54);
+        double dt_val = hilbert_fma(x0, x2, x4, x6) * mesa_mult;
+        detrender.push(dt_val);
+
+        double i1_val = detrender.lag3();
+        i1r.push(i1_val);
+
+        double d0, d2, d4, d6; detrender.taps(d0, d2, d4, d6);
+        double q1_val = hilbert_fma(d0, d2, d4, d6) * mesa_mult;
+        q1r.push(q1_val);
+
+        double ii0, ii2, ii4, ii6; i1r.taps(ii0, ii2, ii4, ii6);
+        double qq0, qq2, qq4, qq6; q1r.taps(qq0, qq2, qq4, qq6);
+        double j_i = hilbert_fma(ii0, ii2, ii4, ii6) * mesa_mult;
+        double j_q = hilbert_fma(qq0, qq2, qq4, qq6) * mesa_mult;
+
+        double i2 = i1_val - j_q;
+        double q2 = q1_val + j_i;
+
+        double i2_sm = fma(0.2, i2, 0.8 * prev_i2_sm);
+        double q2_sm = fma(0.2, q2, 0.8 * prev_q2_sm);
+        double re    = fma(0.2, i2_sm * prev_i2_sm + q2_sm * prev_q2_sm, 0.8 * prev_re);
+        double im    = fma(0.2, i2_sm * prev_q2_sm - q2_sm * prev_i2_sm, 0.8 * prev_im);
+        prev_i2_sm = i2_sm; prev_q2_sm = q2_sm; prev_re = re; prev_im = im;
+
+        double mesa_period = prev_mesa_period;
+        if (re != 0.0 && im != 0.0) {
+            double ratio = im / re;
+            double ang = atan_fast_f64(ratio);
+            double candidate = (2.0 * PI_D) / ang;
+            mesa_period = candidate;
+        }
+        double upper = 1.5 * prev_mesa_period;
+        double lower = 0.67 * prev_mesa_period;
+        if (mesa_period > upper) mesa_period = upper;
+        if (mesa_period < lower) mesa_period = lower;
+        if (mesa_period < 6.0)   mesa_period = 6.0;
+        if (mesa_period > 50.0)  mesa_period = 50.0;
+        mesa_period = fma(0.2, mesa_period, 0.8 * prev_mesa_period);
+        prev_mesa_period = mesa_period;
+
+        double phase = prev_phase;
+        if (i1_val != 0.0) {
+            double ratio = q1_val / i1_val;
+            double ang = atan_fast_f64(ratio);
+            phase = ang * RAD2DEG_D;
+        }
+        double dp = prev_phase - phase;
+        if (dp < 1.0) dp = 1.0;
+        prev_phase = phase;
+
+        out_inv_dp[i] = static_cast<float>(1.0 / dp);
+    }
+}
+
+// Batch kernel for one series × many params using precomputed inv_dp.
+// One block per combo; warp 0 performs an affine-scan over time tiles of 32.
+extern "C" __global__
+void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
+                                const float* __restrict__ inv_dp,
+                                const float* __restrict__ fast_limits,
+                                const float* __restrict__ slow_limits,
+                                int series_len,
+                                int n_combos,
+                                int first_valid,
+                                float* __restrict__ out_mama,
+                                float* __restrict__ out_fama)
+{
+    const int combo = static_cast<int>(blockIdx.x);
+    if (combo >= n_combos || series_len <= 0) return;
+
+    const float nanf32 = nanf("");
+    int fv = first_valid;
+    if (fv < 0) fv = 0;
+    if (fv >= series_len) {
+        const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_mama[base + static_cast<size_t>(i)] = nanf32;
+            out_fama[base + static_cast<size_t>(i)] = nanf32;
+        }
+        return;
+    }
+
+    const float fast = fast_limits[combo];
+    const float slow = slow_limits[combo];
+    if (!(fast > 0.0f) || !(slow > 0.0f)) {
+        const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_mama[base + static_cast<size_t>(i)] = nanf32;
+            out_fama[base + static_cast<size_t>(i)] = nanf32;
+        }
+        return;
+    }
+
+    const int warm = fv + 10;
+    const int nan_end = (warm < series_len ? warm : series_len);
+    const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
+
+    // Fill [0, warm) with NaN once per row.
+    for (int i = threadIdx.x; i < nan_end; i += blockDim.x) {
+        out_mama[base + static_cast<size_t>(i)] = nanf32;
+        out_fama[base + static_cast<size_t>(i)] = nanf32;
+    }
+
+    // Compatibility: if launched with < 1 warp, fall back to a sequential scan.
+    if (blockDim.x < 32) {
+        if (threadIdx.x != 0) return;
+        float prev_m = prices[fv];
+        float prev_f = prev_m;
+        for (int i = fv; i < series_len; ++i) {
+            float alpha = fast * inv_dp[i];
+            const float lo = (slow < fast) ? slow : fast;
+            const float hi = (slow < fast) ? fast : slow;
+            if (alpha < lo) alpha = lo;
+            if (alpha > hi) alpha = hi;
+            const float x = prices[i];
+            const float cur_m = __fmaf_rn(alpha, x, (1.0f - alpha) * prev_m);
+            const float half_a = 0.5f * alpha;
+            const float cur_f = __fmaf_rn(half_a, cur_m, (1.0f - half_a) * prev_f);
+            prev_m = cur_m;
+            prev_f = cur_f;
+            if (i >= warm) {
+                out_mama[base + static_cast<size_t>(i)] = cur_m;
+                out_fama[base + static_cast<size_t>(i)] = cur_f;
+            }
+        }
+        return;
+    }
+
+    if (threadIdx.x >= 32) return;
+
+    const unsigned lane = static_cast<unsigned>(threadIdx.x); // 0..31
+    const unsigned mask = 0xffffffffu;
+
+    float prev_m = prices[fv];
+    float prev_f = prev_m;
+
+    for (int t0 = fv; t0 < series_len; t0 += 32) {
+        const int t = t0 + static_cast<int>(lane);
+
+        float alpha = 0.0f;
+        float A_m = 1.0f;
+        float B_m = 0.0f;
+        if (t < series_len) {
+            alpha = fast * inv_dp[t];
+            const float lo = (slow < fast) ? slow : fast;
+            const float hi = (slow < fast) ? fast : slow;
+            if (alpha < lo) alpha = lo;
+            if (alpha > hi) alpha = hi;
+            const float x = prices[t];
+            A_m = 1.0f - alpha;
+            B_m = alpha * x;
+        }
+
+        // Inclusive warp scan: compose transforms (A,B) left-to-right.
+        // Composition: (A1,B1) ∘ (A2,B2) = (A1*A2, A1*B2 + B1).
+        // We want prefix up to lane: T_lane ∘ ... ∘ T_0.
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A_m, offset);
+            const float B_prev = __shfl_up_sync(mask, B_m, offset);
+            if (lane >= static_cast<unsigned>(offset)) {
+                const float A_cur = A_m;
+                const float B_cur = B_m;
+                A_m = A_cur * A_prev;
+                B_m = __fmaf_rn(A_cur, B_prev, B_cur);
+            }
+        }
+
+        const float mama = __fmaf_rn(A_m, prev_m, B_m);
+
+        // FAMA uses MAMA output as its input series with half-alpha.
+        float A_f = 1.0f;
+        float B_f = 0.0f;
+        if (t < series_len) {
+            const float half_a = 0.5f * alpha;
+            A_f = 1.0f - half_a;
+            B_f = half_a * mama;
+        }
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A_f, offset);
+            const float B_prev = __shfl_up_sync(mask, B_f, offset);
+            if (lane >= static_cast<unsigned>(offset)) {
+                const float A_cur = A_f;
+                const float B_cur = B_f;
+                A_f = A_cur * A_prev;
+                B_f = __fmaf_rn(A_cur, B_prev, B_cur);
+            }
+        }
+        const float fama = __fmaf_rn(A_f, prev_f, B_f);
+
+        if (t < series_len && t >= warm) {
+            out_mama[base + static_cast<size_t>(t)] = mama;
+            out_fama[base + static_cast<size_t>(t)] = fama;
+        }
+
+        // Advance to next tile using the last valid lane.
+        const int remaining = series_len - t0;
+        const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
+        prev_m = __shfl_sync(mask, mama, last_lane);
+        prev_f = __shfl_sync(mask, fama, last_lane);
+    }
+}
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void mama_batch_f32(const float* __restrict__ prices,
                     const float* __restrict__ fast_limits,

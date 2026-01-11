@@ -781,7 +781,7 @@ pub struct DiBatchRange {
 impl Default for DiBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

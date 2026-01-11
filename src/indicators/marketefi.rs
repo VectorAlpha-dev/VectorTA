@@ -267,6 +267,27 @@ fn marketefi_compute_into(
     }
 }
 
+#[inline(always)]
+fn marketefi_compute_into_any_valid(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    first: usize,
+    kernel: Kernel,
+    out: &mut [f64],
+) -> bool {
+    unsafe {
+        match kernel {
+            Kernel::Scalar | Kernel::ScalarBatch => marketefi_scalar_any_valid(high, low, volume, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx2 | Kernel::Avx2Batch => marketefi_avx2_any_valid(high, low, volume, first, out),
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 | Kernel::Avx512Batch => marketefi_avx512_any_valid(high, low, volume, first, out),
+            _ => marketefi_scalar_any_valid(high, low, volume, first, out),
+        }
+    }
+}
+
 #[inline]
 pub fn marketefi_into_slice(
     dst: &mut [f64],
@@ -281,20 +302,16 @@ pub fn marketefi_into_slice(
         });
     }
 
-    marketefi_compute_into(h, l, v, first, chosen, dst);
+    let any_valid = marketefi_compute_into_any_valid(h, l, v, first, chosen, dst);
     for x in &mut dst[..first] {
         *x = f64::NAN;
     }
 
-    let valid = dst[first..].iter().any(|x| !x.is_nan());
-    if !valid {
+    if !any_valid {
         return Err(MarketefiError::NotEnoughValidData {
             needed: 1,
             valid: 0,
         });
-    }
-    if dst[first..].iter().all(|&x| x.is_nan()) {
-        return Err(MarketefiError::ZeroOrNaNVolume);
     }
     Ok(())
 }
@@ -305,18 +322,13 @@ pub fn marketefi_with_kernel(
 ) -> Result<MarketefiOutput, MarketefiError> {
     let (h, l, v, first, chosen) = marketefi_prepare(input, kernel)?;
     let mut out = alloc_with_nan_prefix(h.len(), first);
-    marketefi_compute_into(h, l, v, first, chosen, &mut out);
+    let any_valid = marketefi_compute_into_any_valid(h, l, v, first, chosen, &mut out);
 
-    // Validation identical to your current checks
-    let valid = out[first..].iter().any(|x| !x.is_nan());
-    if !valid {
+    if !any_valid {
         return Err(MarketefiError::NotEnoughValidData {
             needed: 1,
             valid: 0,
         });
-    }
-    if out[first..].iter().all(|&x| x.is_nan()) {
-        return Err(MarketefiError::ZeroOrNaNVolume);
     }
 
     Ok(MarketefiOutput { values: out })
@@ -343,20 +355,118 @@ pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), Mar
         *x = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    marketefi_compute_into(h, l, v, first, chosen, out);
+    let any_valid = marketefi_compute_into_any_valid(h, l, v, first, chosen, out);
 
-    // Keep validation semantics identical to the Vec API.
-    let valid = out[first..].iter().any(|x| !x.is_nan());
-    if !valid {
+    if !any_valid {
         return Err(MarketefiError::NotEnoughValidData {
             needed: 1,
             valid: 0,
         });
     }
-    if out[first..].iter().all(|&x| x.is_nan()) {
-        return Err(MarketefiError::ZeroOrNaNVolume);
-    }
     Ok(())
+}
+
+#[inline]
+fn marketefi_scalar_any_valid(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    first_valid: usize,
+    out: &mut [f64],
+) -> bool {
+    let n = high.len();
+    if first_valid >= n {
+        return false;
+    }
+
+    let mut any_valid = false;
+    let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let vp = volume.as_ptr();
+        let op = out.as_mut_ptr();
+
+        let mut i = first_valid;
+        while i + 4 <= n {
+            // 0
+            let v0 = *vp.add(i);
+            if v0 == 0.0 {
+                *op.add(i) = qnan;
+            } else {
+                let res0 = (*hp.add(i) - *lp.add(i)) / v0;
+                if res0.is_nan() {
+                    *op.add(i) = qnan;
+                } else {
+                    *op.add(i) = res0;
+                    any_valid = true;
+                }
+            }
+
+            // 1
+            let v1 = *vp.add(i + 1);
+            if v1 == 0.0 {
+                *op.add(i + 1) = qnan;
+            } else {
+                let res1 = (*hp.add(i + 1) - *lp.add(i + 1)) / v1;
+                if res1.is_nan() {
+                    *op.add(i + 1) = qnan;
+                } else {
+                    *op.add(i + 1) = res1;
+                    any_valid = true;
+                }
+            }
+
+            // 2
+            let v2 = *vp.add(i + 2);
+            if v2 == 0.0 {
+                *op.add(i + 2) = qnan;
+            } else {
+                let res2 = (*hp.add(i + 2) - *lp.add(i + 2)) / v2;
+                if res2.is_nan() {
+                    *op.add(i + 2) = qnan;
+                } else {
+                    *op.add(i + 2) = res2;
+                    any_valid = true;
+                }
+            }
+
+            // 3
+            let v3 = *vp.add(i + 3);
+            if v3 == 0.0 {
+                *op.add(i + 3) = qnan;
+            } else {
+                let res3 = (*hp.add(i + 3) - *lp.add(i + 3)) / v3;
+                if res3.is_nan() {
+                    *op.add(i + 3) = qnan;
+                } else {
+                    *op.add(i + 3) = res3;
+                    any_valid = true;
+                }
+            }
+
+            i += 4;
+        }
+
+        while i < n {
+            let v = *vp.add(i);
+            if v == 0.0 {
+                *op.add(i) = qnan;
+            } else {
+                let res = (*hp.add(i) - *lp.add(i)) / v;
+                if res.is_nan() {
+                    *op.add(i) = qnan;
+                } else {
+                    *op.add(i) = res;
+                    any_valid = true;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    any_valid
 }
 
 #[inline]
@@ -367,16 +477,7 @@ pub fn marketefi_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    for i in first_valid..high.len() {
-        let h = high[i];
-        let l = low[i];
-        let v = volume[i];
-        if h.is_nan() || l.is_nan() || v.is_nan() || v == 0.0 {
-            out[i] = f64::NAN;
-        } else {
-            out[i] = (h - l) / v;
-        }
-    }
+    let _ = marketefi_scalar_any_valid(high, low, volume, first_valid, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -456,6 +557,85 @@ pub fn marketefi_avx512(
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
+fn marketefi_avx512_any_valid(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    first_valid: usize,
+    out: &mut [f64],
+) -> bool {
+    #[target_feature(enable = "avx512f")]
+    unsafe fn avx512_body_any(
+        high: &[f64],
+        low: &[f64],
+        volume: &[f64],
+        first: usize,
+        out: &mut [f64],
+    ) -> bool {
+        let n = high.len();
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let vp = volume.as_ptr();
+        let op = out.as_mut_ptr();
+
+        let mut i = first;
+        let mut any_valid = false;
+        let vnan = _mm512_set1_pd(f64::NAN);
+        let vzero = _mm512_set1_pd(0.0);
+
+        while i + 8 <= n {
+            let h = _mm512_loadu_pd(hp.add(i));
+            let l = _mm512_loadu_pd(lp.add(i));
+            let v = _mm512_loadu_pd(vp.add(i));
+
+            let mh = _mm512_cmp_pd_mask(h, h, _CMP_ORD_Q);
+            let ml = _mm512_cmp_pd_mask(l, l, _CMP_ORD_Q);
+            let mv = _mm512_cmp_pd_mask(v, v, _CMP_ORD_Q);
+            let mnz = _mm512_cmp_pd_mask(v, vzero, _CMP_NEQ_OQ);
+            let mvalid = mh & ml & mv & mnz;
+            if mvalid != 0 {
+                any_valid = true;
+            }
+
+            let diff = _mm512_sub_pd(h, l);
+
+            // Match the existing AVX-512 implementation: reciprocal approximation + 2x NR refinement.
+            let mut y = _mm512_rcp14_pd(v);
+            let two = _mm512_set1_pd(2.0);
+            let t1 = _mm512_mul_pd(v, y);
+            let t2 = _mm512_sub_pd(two, t1);
+            y = _mm512_mul_pd(y, t2);
+            let t1b = _mm512_mul_pd(v, y);
+            let t2b = _mm512_sub_pd(two, t1b);
+            y = _mm512_mul_pd(y, t2b);
+
+            let res = _mm512_mul_pd(diff, y);
+            let outv = _mm512_mask_mov_pd(vnan, mvalid, res);
+            _mm512_storeu_pd(op.add(i), outv);
+            i += 8;
+        }
+
+        while i < n {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let v = *vp.add(i);
+            if v != 0.0 && !(h.is_nan() | l.is_nan() | v.is_nan()) {
+                *op.add(i) = (h - l) / v;
+                any_valid = true;
+            } else {
+                *op.add(i) = f64::NAN;
+            }
+            i += 1;
+        }
+
+        any_valid
+    }
+
+    unsafe { avx512_body_any(high, low, volume, first_valid, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
 pub fn marketefi_avx2(
     high: &[f64],
     low: &[f64],
@@ -508,6 +688,76 @@ pub fn marketefi_avx2(
     }
 
     unsafe { avx2_body(high, low, volume, first_valid, out) }
+}
+
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+#[inline]
+fn marketefi_avx2_any_valid(
+    high: &[f64],
+    low: &[f64],
+    volume: &[f64],
+    first_valid: usize,
+    out: &mut [f64],
+) -> bool {
+    #[target_feature(enable = "avx2")]
+    unsafe fn avx2_body_any(
+        high: &[f64],
+        low: &[f64],
+        volume: &[f64],
+        first: usize,
+        out: &mut [f64],
+    ) -> bool {
+        let n = high.len();
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let vp = volume.as_ptr();
+        let op = out.as_mut_ptr();
+
+        let mut i = first;
+        let mut any_valid = false;
+        let vzero = _mm256_set1_pd(0.0);
+        let vnan = _mm256_set1_pd(f64::NAN);
+
+        while i + 4 <= n {
+            let h = _mm256_loadu_pd(hp.add(i));
+            let l = _mm256_loadu_pd(lp.add(i));
+            let v = _mm256_loadu_pd(vp.add(i));
+
+            let ord_h = _mm256_cmp_pd(h, h, _CMP_ORD_Q);
+            let ord_l = _mm256_cmp_pd(l, l, _CMP_ORD_Q);
+            let ord_v = _mm256_cmp_pd(v, v, _CMP_ORD_Q);
+            let nz_v = _mm256_cmp_pd(v, vzero, _CMP_NEQ_OQ);
+            let valid = _mm256_and_pd(_mm256_and_pd(ord_h, ord_l), _mm256_and_pd(ord_v, nz_v));
+
+            if _mm256_movemask_pd(valid) != 0 {
+                any_valid = true;
+            }
+
+            let diff = _mm256_sub_pd(h, l);
+            let res = _mm256_div_pd(diff, v);
+            let outv = _mm256_blendv_pd(vnan, res, valid);
+
+            _mm256_storeu_pd(op.add(i), outv);
+            i += 4;
+        }
+
+        while i < n {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let v = *vp.add(i);
+            if v != 0.0 && !(h.is_nan() | l.is_nan() | v.is_nan()) {
+                *op.add(i) = (h - l) / v;
+                any_valid = true;
+            } else {
+                *op.add(i) = f64::NAN;
+            }
+            i += 1;
+        }
+
+        any_valid
+    }
+
+    unsafe { avx2_body_any(high, low, volume, first_valid, out) }
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

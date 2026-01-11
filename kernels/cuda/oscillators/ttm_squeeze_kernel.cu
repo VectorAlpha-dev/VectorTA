@@ -99,18 +99,46 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
     if (combo >= n_combos) return;
     const int base = combo * series_len;
 
-    // Prefill NaNs in parallel
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+    const int   L = length_arr[combo];
+    auto fill_all_nan = [&]() {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_momentum[base + i] = TTM_QNAN_F;
+            out_squeeze[base + i]  = TTM_QNAN_F;
+        }
+    };
+
+    if (UNLIKELY(L <= 0 || first_valid < 0 || first_valid >= series_len)) {
+        fill_all_nan();
+        return;
+    }
+    const int warm  = first_valid + L - 1;
+    if (UNLIKELY(warm >= series_len)) {
+        fill_all_nan();
+        return;
+    }
+
+    // Seed finiteness at head (match original). If invalid, the whole row is NaN.
+    __shared__ int seed_ok_i;
+    if (threadIdx.x == 0) {
+        bool seed_ok = true;
+        for (int j = 0; j < L && j < series_len; ++j) {
+            if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { seed_ok = false; break; }
+        }
+        seed_ok_i = seed_ok ? 1 : 0;
+    }
+    __syncthreads();
+    if (UNLIKELY(seed_ok_i == 0)) {
+        fill_all_nan();
+        return;
+    }
+
+    // Prefill only the warmup prefix; the scan below writes every index >= warm.
+    for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out_momentum[base + i] = TTM_QNAN_F;
         out_squeeze[base + i]  = TTM_QNAN_F;
     }
     __syncthreads();
     if (threadIdx.x != 0) return; // one scanning thread per block
-
-    const int   L = length_arr[combo];
-    if (UNLIKELY(L <= 0 || first_valid < 0 || first_valid >= series_len)) return;
-    const int   warm  = first_valid + L - 1;
-    if (warm >= series_len) return;
 
     // Precompute constants for OLS with x = 0..L-1 (all FP32, no FP64)
     const float n    = (float)L;
@@ -136,13 +164,6 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
 
     DequeI dq_max(dq_max_buf, L);
     DequeI dq_min(dq_min_buf, L);
-
-    // Seed finiteness at head (match original)
-    bool seed_ok = true;
-    for (int j = 0; j < L && j < series_len; ++j) {
-        if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { seed_ok = false; break; }
-    }
-    if (UNLIKELY(!seed_ok)) return; // outputs are already NaN
 
     // Build initial window [start..warm]
     const int start0 = warm - L + 1;
@@ -210,6 +231,9 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
         const float intercept = (S0 - slope * sx) * (1.0f / n);
         const float yhat_last = intercept + slope * (n - 1.0f);
         out_momentum[base + warm] = yhat_last;
+    } else {
+        out_squeeze[base + warm]  = TTM_QNAN_F;
+        out_momentum[base + warm] = TTM_QNAN_F;
     }
 
     // Main scan i = warm+1 .. series_len-1
@@ -288,8 +312,10 @@ extern "C" __global__ void ttm_squeeze_batch_f32(
             const float intercept = (S0 - slope * sx) * (1.0f / n);
             const float yhat_last = intercept + slope * (n - 1.0f);
             out_momentum[base + i] = yhat_last;
+        } else {
+            out_squeeze[base + i]  = TTM_QNAN_F;
+            out_momentum[base + i] = TTM_QNAN_F;
         }
-        // else: remain NaN (prefilled)
     }
 }
 
@@ -317,16 +343,30 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     // Output accessors (time-major pointers for series s)
     float* mo = out_momentum_tm + s;
     float* sq = out_squeeze_tm + s;
-    // Prefill entire series with NaN (keeps semantics on seed/stream failures)
-    for (int t = 0; t < series_len; ++t) { mo[t * num_series] = TTM_QNAN_F; sq[t * num_series] = TTM_QNAN_F; }
+    auto fill_all_nan = [&]() {
+        for (int t = 0; t < series_len; ++t) {
+            mo[t * num_series] = TTM_QNAN_F;
+            sq[t * num_series] = TTM_QNAN_F;
+        }
+    };
 
     const int L = length;
     const int fv = first_valids[s];
     if (UNLIKELY(L <= 0 || fv < 0 || fv >= series_len)) {
+        fill_all_nan();
         return;
     }
     const int warm = fv + L - 1;
-    if (warm >= series_len) return;
+    if (UNLIKELY(warm >= series_len)) {
+        fill_all_nan();
+        return;
+    }
+
+    // Prefill only warmup prefix; the scan below writes every index >= warm.
+    for (int t = 0; t < warm; ++t) {
+        mo[t * num_series] = TTM_QNAN_F;
+        sq[t * num_series] = TTM_QNAN_F;
+    }
 
     // Accessors (time-major layout)
     auto H = [&](int t){ return high_tm[(size_t)t * num_series + s]; };
@@ -367,8 +407,7 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
     DequeI dq_max(dq_max_buf, L);
     DequeI dq_min(dq_min_buf, L);
 
-    // Prefill NaNs up to warm
-    // Already prefilled all entries with NaN above; nothing else required before warm.
+    // Prefilled warmup prefix above; nothing else required before warm.
 
     // Seed first L finiteness like original
     bool seed_ok = true;
@@ -377,7 +416,10 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         float ch = H(j), cl = Lw(j), cc = C(j);
         if (!is_finite_f(ch) || !is_finite_f(cl) || !is_finite_f(cc)) { seed_ok = false; break; }
     }
-    if (UNLIKELY(!seed_ok)) return;
+    if (UNLIKELY(!seed_ok)) {
+        fill_all_nan();
+        return;
+    }
 
     // Build initial window at warm
     const int start0 = warm - L + 1;
@@ -437,6 +479,9 @@ extern "C" __global__ void ttm_squeeze_many_series_one_param_f32(
         const float intercept = (S0 - slope * sx) * (1.0f / n);
         const float yhat_last = intercept + slope * (n - 1.0f);
         mo[warm * num_series] = yhat_last;
+    } else {
+        mo[warm * num_series] = TTM_QNAN_F;
+        sq[warm * num_series] = TTM_QNAN_F;
     }
 
     for (int i = warm + 1; i < series_len; ++i) {

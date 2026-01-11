@@ -599,25 +599,170 @@ impl CudaDecOsc {
 // ---------- Benches ----------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    define_ma_period_benches!(
-        dec_osc_benches,
-        crate::cuda::oscillators::CudaDecOsc,
-        crate::indicators::dec_osc::DecOscBatchRange,
-        crate::indicators::dec_osc::DecOscParams,
-        dec_osc_batch_dev,
-        dec_osc_many_series_one_param_time_major_dev,
-        crate::indicators::dec_osc::DecOscBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDeviceState {
+        cuda: CudaDecOsc,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_ks: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+    }
+    impl CudaBenchState for BatchDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_ks,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                    0,
+                    0,
+                )
+                .expect("dec_osc launch_batch_kernel");
+            self.cuda.stream.synchronize().expect("dec_osc sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDecOsc::new(0).expect("cuda dec_osc");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = DecOscBatchRange {
             hp_period: (50, 50 + PARAM_SWEEP - 1, 1),
-            k: (1.0, 1.0, 0.0)
-        },
-        crate::indicators::dec_osc::DecOscParams {
+            k: (1.0, 1.0, 0.0),
+        };
+        let (combos, first_valid, len) =
+            CudaDecOsc::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.hp_period.unwrap() as i32).collect();
+        let ks_f32: Vec<f32> = combos.iter().map(|c| c.k.unwrap() as f32).collect();
+
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_ks = DeviceBuffer::from_slice(&ks_f32).expect("d_ks");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_ks,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
+    }
+
+    struct ManySeriesDeviceState {
+        cuda: CudaDecOsc,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        k: f32,
+    }
+    impl CudaBenchState for ManySeriesDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.k,
+                    &mut self.d_out_tm,
+                )
+                .expect("dec_osc launch_many_series_kernel");
+            self.cuda.stream.synchronize().expect("dec_osc sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDecOsc::new(0).expect("cuda dec_osc");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = DecOscParams {
             hp_period: Some(125),
-            k: Some(1.0)
-        },
-        "dec_osc",
-        "dec_osc"
-    );
-    pub use dec_osc_benches::bench_profiles;
+            k: Some(1.0),
+        };
+
+        let (first_valids, period, k_f32) =
+            CudaDecOsc::prepare_many_series(&data_tm, cols, rows, &params).expect("prepare_many_series");
+
+        let d_prices_tm =
+            unsafe { DeviceBuffer::from_slice_async(&data_tm, &cuda.stream) }.expect("d_prices_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManySeriesDeviceState {
+            cuda,
+            d_prices_tm,
+            d_first,
+            d_out_tm,
+            cols,
+            rows,
+            period,
+            k: k_f32,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "dec_osc",
+                "one_series_many_params",
+                "dec_osc_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "dec_osc",
+                "many_series_one_param",
+                "dec_osc_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

@@ -167,11 +167,24 @@ impl CudaVidya {
     ) -> Result<DeviceArrayF32, CudaVidyaError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
+        let use_prefix = self.module.get_function("vidya_batch_prefix_f32").is_ok();
 
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
         let params_bytes =
             (prepared.short_i32.len() + prepared.long_i32.len()) * std::mem::size_of::<i32>()
                 + prepared.alpha_f32.len() * std::mem::size_of::<f32>();
+        let prefix_bytes = if use_prefix {
+            let elems = prepared
+                .series_len
+                .checked_add(1)
+                .ok_or_else(|| CudaVidyaError::InvalidInput("series_len+1 overflow".into()))?;
+            elems
+                .checked_mul(2)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f64>()))
+                .ok_or_else(|| CudaVidyaError::InvalidInput("prefix bytes overflow".into()))?
+        } else {
+            0
+        };
         let out_elems = n_combos
             .checked_mul(prepared.series_len)
             .ok_or_else(|| CudaVidyaError::InvalidInput("rows*cols overflow".into()))?;
@@ -181,6 +194,7 @@ impl CudaVidya {
         let required = prices_bytes
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(prefix_bytes))
             .ok_or_else(|| CudaVidyaError::InvalidInput("VRAM size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
@@ -213,16 +227,61 @@ impl CudaVidya {
             DeviceBuffer::uninitialized_async(n_combos * prepared.series_len, &self.stream)?
         };
 
-        self.launch_batch_kernel(
-            &d_prices,
-            &d_short,
-            &d_long,
-            &d_alpha,
-            prepared.series_len,
-            prepared.first_valid,
-            n_combos,
-            &mut d_out,
-        )?;
+        let mut d_prefix_sum: Option<DeviceBuffer<f64>> = None;
+        let mut d_prefix_sum2: Option<DeviceBuffer<f64>> = None;
+        if use_prefix {
+            // Host prefix sums of x and x^2 (NaN treated as 0) to enable O(1) rolling stats.
+            let mut prefix_sum: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
+            let mut prefix_sum2: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
+            prefix_sum.push(0.0f64);
+            prefix_sum2.push(0.0f64);
+            let mut acc = 0.0f64;
+            let mut acc2 = 0.0f64;
+            for &v in data_f32 {
+                let x = if v.is_nan() { 0.0f64 } else { v as f64 };
+                acc += x;
+                acc2 += x * x;
+                prefix_sum.push(acc);
+                prefix_sum2.push(acc2);
+            }
+
+            d_prefix_sum = Some(unsafe {
+                DeviceBuffer::from_slice_async(&prefix_sum, &self.stream)?
+            });
+            d_prefix_sum2 = Some(unsafe {
+                DeviceBuffer::from_slice_async(&prefix_sum2, &self.stream)?
+            });
+            let d_prefix_sum_ref = d_prefix_sum.as_ref().ok_or_else(|| {
+                CudaVidyaError::InvalidInput("failed to allocate prefix_sum buffer".into())
+            })?;
+            let d_prefix_sum2_ref = d_prefix_sum2.as_ref().ok_or_else(|| {
+                CudaVidyaError::InvalidInput("failed to allocate prefix_sum2 buffer".into())
+            })?;
+
+            self.launch_batch_prefix_kernel(
+                &d_prices,
+                d_prefix_sum_ref,
+                d_prefix_sum2_ref,
+                &d_short,
+                &d_long,
+                &d_alpha,
+                prepared.series_len,
+                prepared.first_valid,
+                n_combos,
+                &mut d_out,
+            )?;
+        } else {
+            self.launch_batch_kernel(
+                &d_prices,
+                &d_short,
+                &d_long,
+                &d_alpha,
+                prepared.series_len,
+                prepared.first_valid,
+                n_combos,
+                &mut d_out,
+            )?;
+        }
 
         self.synchronize()?;
         Ok(DeviceArrayF32 {
@@ -377,6 +436,70 @@ impl CudaVidya {
                 launch!(
                     func<<<grid, block, 0, stream>>>(
                         d_prices.as_device_ptr(),
+                        short_ptr,
+                        long_ptr,
+                        alpha_ptr,
+                        series_len_i,
+                        first_valid_i,
+                        n_combos_i,
+                        out_ptr
+                    )
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_prefix_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_prefix_sum: &DeviceBuffer<f64>,
+        d_prefix_sum2: &DeviceBuffer<f64>,
+        d_short: &DeviceBuffer<i32>,
+        d_long: &DeviceBuffer<i32>,
+        d_alpha: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVidyaError> {
+        if n_combos == 0 {
+            return Ok(());
+        }
+        let func = self
+            .module
+            .get_function("vidya_batch_prefix_f32")
+            .map_err(|_| CudaVidyaError::MissingKernelSymbol { name: "vidya_batch_prefix_f32" })?;
+
+        // Warp-scan kernel: fixed one-warp block for best utilization.
+        const BLOCK_X: u32 = 32;
+        unsafe {
+            (*(self as *const _ as *mut CudaVidya)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: BLOCK_X });
+        }
+        self.maybe_log_batch_debug();
+
+        let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
+        for (start, len) in Self::grid_chunks(n_combos, cap) {
+            let grid: GridSize = (len as u32, 1u32, 1u32).into();
+            let block: BlockSize = (BLOCK_X, 1u32, 1u32).into();
+
+            let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
+            let short_ptr = unsafe { d_short.as_device_ptr().add(start) };
+            let long_ptr = unsafe { d_long.as_device_ptr().add(start) };
+            let alpha_ptr = unsafe { d_alpha.as_device_ptr().add(start) };
+
+            let series_len_i = series_len as i32;
+            let first_valid_i = first_valid as i32;
+            let n_combos_i = len as i32;
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, 0, stream>>>(
+                        d_prices.as_device_ptr(),
+                        d_prefix_sum.as_device_ptr(),
+                        d_prefix_sum2.as_device_ptr(),
                         short_ptr,
                         long_ptr,
                         alpha_ptr,
@@ -726,8 +849,9 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * 4;
+        let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * 8; // two f64 prefix buffers
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4;
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + prefix_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
@@ -740,6 +864,8 @@ pub mod benches {
         cuda: CudaVidya,
         d_prices: DeviceBuffer<f32>,
         d_out: DeviceBuffer<f32>,
+        d_prefix_sum: DeviceBuffer<f64>,
+        d_prefix_sum2: DeviceBuffer<f64>,
         d_short: DeviceBuffer<i32>,
         d_long: DeviceBuffer<i32>,
         d_alpha: DeviceBuffer<f32>,
@@ -751,8 +877,10 @@ pub mod benches {
     impl CudaBenchState for VidyaBatchState {
         fn launch(&mut self) {
             self.cuda
-                .launch_batch_kernel(
+                .launch_batch_prefix_kernel(
                     &self.d_prices,
+                    &self.d_prefix_sum,
+                    &self.d_prefix_sum2,
                     &self.d_short,
                     &self.d_long,
                     &self.d_alpha,
@@ -779,6 +907,23 @@ pub mod benches {
         let combos = super::expand_grid(&sweep);
         let first_valid = price.iter().position(|&x| !x.is_nan()).unwrap_or(0);
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+
+        // Precompute prefix sums of x and x^2 once for the benchmark state.
+        let mut prefix_sum: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
+        let mut prefix_sum2: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
+        prefix_sum.push(0.0f64);
+        prefix_sum2.push(0.0f64);
+        let mut acc = 0.0f64;
+        let mut acc2 = 0.0f64;
+        for &v in &price {
+            let x = if v.is_nan() { 0.0f64 } else { v as f64 };
+            acc += x;
+            acc2 += x * x;
+            prefix_sum.push(acc);
+            prefix_sum2.push(acc2);
+        }
+        let d_prefix_sum = DeviceBuffer::from_slice(&prefix_sum).expect("d_prefix_sum");
+        let d_prefix_sum2 = DeviceBuffer::from_slice(&prefix_sum2).expect("d_prefix_sum2");
         let short_i32: Vec<i32> = combos
             .iter()
             .map(|p| p.short_period.unwrap() as i32)
@@ -797,6 +942,8 @@ pub mod benches {
             cuda,
             d_prices,
             d_out,
+            d_prefix_sum,
+            d_prefix_sum2,
             d_short,
             d_long,
             d_alpha,

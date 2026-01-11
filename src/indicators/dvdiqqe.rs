@@ -1243,8 +1243,8 @@ pub struct DvdiqqeBatchRange {
 impl Default for DvdiqqeBatchRange {
     fn default() -> Self {
         Self {
-            period: (13, 26, 1),
-            smoothing_period: (6, 12, 1),
+            period: (13, 262, 1),
+            smoothing_period: (6, 6, 0),
             fast_multiplier: (2.618, 2.618, 0.0),
             slow_multiplier: (4.236, 4.236, 0.0),
         }

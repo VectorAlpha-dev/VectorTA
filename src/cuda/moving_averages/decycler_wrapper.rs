@@ -71,6 +71,7 @@ impl Default for CudaDecyclerPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    WarpScan { block_x: u32 },
 }
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
@@ -323,6 +324,60 @@ impl CudaDecycler {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDecyclerError> {
+        if matches!(self.policy.batch, BatchKernelPolicy::Auto) {
+            if let Ok(mut func) = self.module.get_function("decycler_batch_warp_scan_f32") {
+                let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+                const MAX_GRID_X: usize = 65_535;
+                let block: BlockSize = (32u32, 1, 1).into();
+
+                unsafe {
+                    (*(self as *const _ as *mut CudaDecycler)).last_batch =
+                        Some(BatchKernelSelected::WarpScan { block_x: 32 });
+                }
+
+                let mut launched = 0usize;
+                while launched < n_combos {
+                    let rows = (n_combos - launched).min(MAX_GRID_X);
+                    let grid: GridSize = (rows as u32, 1, 1).into();
+
+                    unsafe {
+                        let mut p_ptr = d_prices.as_device_ptr().as_raw();
+                        let mut per_ptr = d_periods.as_device_ptr().add(launched).as_raw();
+                        let mut c_ptr = d_c.as_device_ptr().add(launched).as_raw();
+                        let mut two_ptr = d_two_1m.as_device_ptr().add(launched).as_raw();
+                        let mut neg_ptr = d_neg_oma_sq.as_device_ptr().add(launched).as_raw();
+                        let mut diff_ptr = d_diff.as_device_ptr().as_raw();
+                        let mut len_i = series_len as i32;
+                        let mut n_i = rows as i32;
+                        let mut first_i = first_valid as i32;
+                        let mut out_ptr = d_out
+                            .as_device_ptr()
+                            .add(launched * series_len)
+                            .as_raw();
+                        let mut args: [*mut c_void; 10] = [
+                            &mut p_ptr as *mut _ as *mut c_void,
+                            &mut per_ptr as *mut _ as *mut c_void,
+                            &mut c_ptr as *mut _ as *mut c_void,
+                            &mut two_ptr as *mut _ as *mut c_void,
+                            &mut neg_ptr as *mut _ as *mut c_void,
+                            &mut diff_ptr as *mut _ as *mut c_void,
+                            &mut len_i as *mut _ as *mut c_void,
+                            &mut n_i as *mut _ as *mut c_void,
+                            &mut first_i as *mut _ as *mut c_void,
+                            &mut out_ptr as *mut _ as *mut c_void,
+                        ];
+                        self.stream.launch(&func, grid, block, 0, &mut args)?;
+                    }
+
+                    launched += rows;
+                }
+
+                self.maybe_log_batch_debug();
+                return Ok(());
+            }
+        }
+
         let func = self
             .module
             .get_function("decycler_batch_f32")
@@ -663,26 +718,181 @@ struct PreparedDecyclerMany {
 // ---- Benches ----
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
-    define_ma_period_benches!(
-        decycler_benches,
-        CudaDecycler,
-        crate::indicators::decycler::DecyclerBatchRange,
-        crate::indicators::decycler::DecyclerParams,
-        decycler_batch_dev,
-        decycler_many_series_one_param_time_major_dev,
-        crate::indicators::decycler::DecyclerBatchRange {
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::decycler::DecyclerParams;
+
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct DecyclerBatchDevState {
+        cuda: CudaDecycler,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_c: DeviceBuffer<f32>,
+        d_two_1m: DeviceBuffer<f32>,
+        d_neg_oma_sq: DeviceBuffer<f32>,
+        d_diff: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DecyclerBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_c,
+                    &self.d_two_1m,
+                    &self.d_neg_oma_sq,
+                    &self.d_diff,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("decycler batch kernel");
+            self.cuda.synchronize().expect("decycler sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDecycler::new(0).expect("cuda decycler");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = DecyclerBatchRange {
             hp_period: (10, 10 + PARAM_SWEEP - 1, 1),
-            k: (0.5, 0.5, 0.0)
-        },
-        crate::indicators::decycler::DecyclerParams {
+            k: (0.5, 0.5, 0.0),
+        };
+        let prep =
+            CudaDecycler::prepare_batch_inputs(&price, &sweep).expect("decycler prepare batch");
+        let n_combos = prep.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&prep.periods_i32).expect("d_periods");
+        let d_c = DeviceBuffer::from_slice(&prep.c_vals).expect("d_c");
+        let d_two_1m = DeviceBuffer::from_slice(&prep.two_1m_vals).expect("d_two_1m");
+        let d_neg_oma_sq = DeviceBuffer::from_slice(&prep.neg_oma_sq_vals).expect("d_neg_oma_sq");
+        let d_diff = DeviceBuffer::from_slice(&prep.diff).expect("d_diff");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prep.series_len * n_combos) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(DecyclerBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_c,
+            d_two_1m,
+            d_neg_oma_sq,
+            d_diff,
+            series_len: prep.series_len,
+            n_combos,
+            first_valid: prep.first_valid,
+            d_out,
+        })
+    }
+
+    struct DecyclerManyDevState {
+        cuda: CudaDecycler,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: i32,
+        c: f32,
+        two_1m: f32,
+        neg_oma_sq: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DecyclerManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.period,
+                    self.c,
+                    self.two_1m,
+                    self.neg_oma_sq,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("decycler many-series kernel");
+            self.cuda.synchronize().expect("decycler sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDecycler::new(0).expect("cuda decycler");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = DecyclerParams {
             hp_period: Some(64),
-            k: Some(0.5)
-        },
-        "decycler",
-        "decycler"
-    );
-    pub use decycler_benches::bench_profiles;
+            k: Some(0.5),
+        };
+        let prep = CudaDecycler::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("decycler prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prep.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(DecyclerManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period: prep.period,
+            c: prep.c,
+            two_1m: prep.two_1m,
+            neg_oma_sq: prep.neg_oma_sq,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "decycler",
+                "one_series_many_params",
+                "decycler_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "decycler",
+                "many_series_one_param",
+                "decycler_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 // ---- Utilities ----

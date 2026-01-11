@@ -60,11 +60,15 @@
               </div>
             </div>
             <div style="margin-top: 0.65rem;">
-              <div class="muted">Fast MA types</div>
-              <div class="checks">
-                <label><input class="fastMa" type="checkbox" value="0" checked />SMA</label>
-                <label><input class="fastMa" type="checkbox" value="1" />EMA</label>
-                <label><input class="fastMa" type="checkbox" value="2" />ALMA</label>
+              <label for="fastMaTypes">Fast MA types (comma-separated)</label>
+              <input
+                id="fastMaTypes"
+                type="text"
+                placeholder="sma, ema, alma"
+                value="sma, ema, alma"
+              />
+              <div class="muted" style="margin-top: 0.3rem; font-size: 0.8rem;">
+                Examples: <span class="mono">sma, ema, wma, alma, kama, vwma</span>
               </div>
             </div>
           </div>
@@ -86,13 +90,33 @@
               </div>
             </div>
             <div style="margin-top: 0.65rem;">
-              <div class="muted">Slow MA types</div>
-              <div class="checks">
-                <label><input class="slowMa" type="checkbox" value="0" checked />SMA</label>
-                <label><input class="slowMa" type="checkbox" value="1" />EMA</label>
-                <label><input class="slowMa" type="checkbox" value="2" />ALMA</label>
+              <label for="slowMaTypes">Slow MA types (comma-separated)</label>
+              <input
+                id="slowMaTypes"
+                type="text"
+                placeholder="sma, ema, alma"
+                value="sma, ema, alma"
+              />
+              <div class="muted" style="margin-top: 0.3rem; font-size: 0.8rem;">
+                Examples: <span class="mono">sma, ema, wma, alma, kama, vwma</span>
               </div>
             </div>
+          </div>
+        </div>
+
+        <div class="row" style="margin-top: 0.9rem;">
+          <div>
+            <label for="maSource">MA price source</label>
+            <select id="maSource">
+              <option value="close" selected>close</option>
+              <option value="open">open</option>
+              <option value="high">high</option>
+              <option value="low">low</option>
+              <option value="hl2">hl2</option>
+              <option value="hlc3">hlc3</option>
+              <option value="hlcc">hlcc (hlcc4)</option>
+              <option value="ohlc4">ohlc4</option>
+            </select>
           </div>
         </div>
 

@@ -100,15 +100,26 @@ void wto_batch_f32(const float* __restrict__ prices,
     float* wt2_row  = wt2_out  + (size_t)combo * series_len;
     float* hist_row = hist_out + (size_t)combo * series_len;
 
-    // Backward-compat prefill: keep per-row NaN clear until host adopts wto_fill_nan3_f32
-    fill_nan(wt1_row, series_len);
-    fill_nan(wt2_row, series_len);
-    fill_nan(hist_row, series_len);
+    const float qnan = wto_nan();
 
-    if (chan <= 0 || avg <= 0) {
+    // Invalid parameters -> full NaN row (conservative, keeps host expectations).
+    if (chan <= 0 || avg <= 0 || first_valid < 0 || first_valid >= series_len || series_len <= 0) {
+        for (int t = 0; t < series_len; ++t) {
+            wt1_row[t]  = qnan;
+            wt2_row[t]  = qnan;
+            hist_row[t] = qnan;
+        }
         return;
     }
     const int start_ci = first_valid + chan - 1;
+    if (start_ci >= series_len) {
+        for (int t = 0; t < series_len; ++t) {
+            wt1_row[t]  = qnan;
+            wt2_row[t]  = qnan;
+            hist_row[t] = qnan;
+        }
+        return;
+    }
 
     // EMA coefficients in FP64 for closer parity with CPU
     const double alpha_ch = 2.0 / (double(chan) + 1.0);
@@ -117,36 +128,67 @@ void wto_batch_f32(const float* __restrict__ prices,
     const double beta_av  = 1.0 - alpha_av;
 
     // Recurrence state (FP64 to match CPU scalar tolerance)
-    bool   esa_init = false, d_init = false, wt1_init = false;
+    bool   esa_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    // WT2 via prefix-sum pair: (ps - ps4)/4 in FP64 (matches CPU)
-    double window[4] = {0.0, 0.0, 0.0, 0.0};
-    int    window_count = 0, window_idx = 0;
-    double ps = 0.0, ps4 = 0.0;
+    // WT2 via rolling SMA(4) over WT1 (FP64), matching CPU semantics.
+    double ring[4] = {0.0, 0.0, 0.0, 0.0};
+    double rsum = 0.0;
+    int    rlen = 0;
+    int    rpos = 0;
+
+    // Warp broadcast constants (price is shared across combos at each time step).
+    const unsigned mask   = __activemask();
+    const int      lane   = threadIdx.x & 31;
+    const int      leader = __ffs(mask) - 1;
 
     for (int t = 0; t < series_len; ++t) {
         // One load per warp; broadcast to all active lanes.
-        const float  price_f32  = bcast_price(prices, t);
+        float price_f32 = 0.0f;
+        if (lane == leader) {
+            price_f32 = __ldg(prices + t);
+        }
+        price_f32 = __shfl_sync(mask, price_f32, leader);
         const bool   priceFinite = isfinite(price_f32);
         const double price      = static_cast<double>(price_f32);
 
-        if (t < first_valid) { continue; }
+        // Default outputs are NaN; filled in when valid.
+        float wt1_f  = qnan;
+        float wt2_f  = qnan;
+        float hist_f = qnan;
+
+        if (t < first_valid) {
+            wt1_row[t]  = wt1_f;
+            wt2_row[t]  = wt2_f;
+            hist_row[t] = hist_f;
+            continue;
+        }
 
         if (!esa_init) {
-            if (!priceFinite) { continue; }
+            if (!priceFinite) {
+                wt1_row[t]  = wt1_f;
+                wt2_row[t]  = wt2_f;
+                hist_row[t] = hist_f;
+                continue;
+            }
             esa = price; esa_init = true;
         } else if (priceFinite) {
             esa = fma(beta_ch, esa, alpha_ch * price);
         }
 
-        const double diff     = price - esa;
-        const double abs_diff = fabs(diff);
+        const double diff = price - esa;
+
+        if (t < start_ci) {
+            wt1_row[t]  = wt1_f;
+            wt2_row[t]  = wt2_f;
+            hist_row[t] = hist_f;
+            continue;
+        }
 
         if (t == start_ci) {
             // Seed ESA already updated; seed d, compute ci (0.015*d) and set wt1=ci unconditionally
-            const double absdiff0 = priceFinite ? fabs(price - esa) : __longlong_as_double(0x7ff8000000000000ULL);
-            d = absdiff0; d_init = true;
+            const double absdiff0 = priceFinite ? fabs(diff) : __longlong_as_double(0x7ff8000000000000ULL);
+            d = absdiff0;
             const double denom0 = 0.015 * d;
             double ci0 = 0.0;
             if (denom0 != 0.0 && isfinite(denom0)) {
@@ -155,17 +197,17 @@ void wto_batch_f32(const float* __restrict__ prices,
             } else {
                 ci0 = 0.0;
             }
-            wt1 = ci0; wt1_init = true;
+            wt1 = ci0;
 
-            wt1_row[t] = static_cast<float>(wt1);
-            if (window_count == 4) { ps4 += window[window_idx]; } else { ++window_count; }
-            ps += wt1; window[window_idx] = wt1; window_idx = (window_idx + 1) & 3;
-            if (window_count == 4) {
-                const double wt2d = 0.25 * (ps - ps4);
-                wt2_row[t] = static_cast<float>(wt2d);
-                hist_row[t] = static_cast<float>(wt1 - wt2d);
-            }
+            wt1_f = static_cast<float>(wt1);
+            ring[0] = wt1;
+            rsum = wt1;
+            rlen = 1;
+            // Standard rolling SMA(4) semantics for WT2 (matches batch CPU reference via SMA).
+            // First overwrite should drop ring[0] (oldest) once full.
+            rpos = 0;
         } else if (t > start_ci) {
+            const double abs_diff = fabs(diff);
             if (isfinite(abs_diff)) { d = fma(beta_ch, d, alpha_ch * abs_diff); }
             double ci;
             const double denom = 0.015 * d;
@@ -176,22 +218,27 @@ void wto_batch_f32(const float* __restrict__ prices,
                 ci = __longlong_as_double(0x7ff8000000000000ULL);
             }
             if (isfinite(ci)) { wt1 = fma(beta_av, wt1, alpha_av * ci); }
-            wt1_row[t] = static_cast<float>(wt1);
-            if (window_count == 4) { ps4 += window[window_idx]; } else { ++window_count; }
-            ps += wt1; window[window_idx] = wt1; window_idx = (window_idx + 1) & 3;
-            if (window_count == 4) {
-                const double wt2d  = 0.25 * (ps - ps4);
-                wt2_row[t]  = static_cast<float>(wt2d);
-                hist_row[t] = static_cast<float>(wt1 - wt2d);
+            wt1_f = static_cast<float>(wt1);
+
+            if (rlen < 4) {
+                ring[rlen] = wt1;
+                rsum += wt1;
+                ++rlen;
+            } else {
+                rsum += wt1 - ring[rpos];
+                ring[rpos] = wt1;
+                rpos = (rpos + 1) & 3;
+            }
+            if (rlen == 4) {
+                const double wt2d = 0.25 * rsum;
+                wt2_f  = static_cast<float>(wt2d);
+                hist_f = static_cast<float>(wt1 - wt2d);
             }
         }
-    }
-    // Ensure we leave explicit NaNs where histogram never became valid
-    const float qnan = wto_nan();
-    for (int t = 0; t < series_len; ++t) {
-        if (!isfinite(hist_row[t]) && !isfinite(wt1_row[t])) {
-            hist_row[t] = qnan;
-        }
+
+        wt1_row[t]  = wt1_f;
+        wt2_row[t]  = wt2_f;
+        hist_row[t] = hist_f;
     }
 }
 

@@ -305,7 +305,7 @@ fn supertrend_prepare<'a>(
     let AtrOutput { values: atr_values } = atr(&atr_input)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -962,7 +962,7 @@ pub struct SuperTrendBatchRange {
 impl Default for SuperTrendBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 50, 1),
+            period: (10, 259, 1),
             factor: (3.0, 3.0, 0.0),
         }
     }

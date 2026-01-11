@@ -544,6 +544,7 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use std::ffi::c_void;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_ROWS: usize = 200_000;
@@ -578,34 +579,145 @@ pub mod benches {
 
     struct ObvBatchState {
         cuda: CudaObv,
-        close: Vec<f32>,
-        volume: Vec<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        d_block_sums: DeviceBuffer<FPair>,
+        d_block_offsets: DeviceBuffer<FPair>,
+        series_len: usize,
+        first_valid: usize,
+        tiles: usize,
     }
     impl CudaBenchState for ObvBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let pass1 = self
                 .cuda
-                .obv_batch_dev(&self.close, &self.volume)
-                .expect("obv batch");
+                .module
+                .get_function("obv_batch_f32_pass1_tilescan")
+                .expect("obv_batch_f32_pass1_tilescan");
+            let pass2 = self
+                .cuda
+                .module
+                .get_function("obv_batch_f32_pass2_scan_block_sums")
+                .expect("obv_batch_f32_pass2_scan_block_sums");
+            let pass3 = self
+                .cuda
+                .module
+                .get_function("obv_batch_f32_pass3_add_offsets")
+                .expect("obv_batch_f32_pass3_add_offsets");
+
+            let stream = &self.cuda.stream;
+
+            // Pass 1
+            {
+                let grid: GridSize = (self.tiles as u32, 1, 1).into();
+                let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
+                unsafe {
+                    let mut p_close = self.d_close.as_device_ptr().as_raw();
+                    let mut p_vol = self.d_volume.as_device_ptr().as_raw();
+                    let mut series_len_i = self.series_len as i32;
+                    let mut n_combos_i = 1i32;
+                    let mut fv_i = self.first_valid as i32;
+                    let mut p_out = self.d_out.as_device_ptr().as_raw();
+                    let mut p_sums = self.d_block_sums.as_device_ptr().as_raw();
+                    let mut tiles_i = self.tiles as i32;
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut p_close as *mut _ as *mut c_void,
+                        &mut p_vol as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut fv_i as *mut _ as *mut c_void,
+                        &mut p_out as *mut _ as *mut c_void,
+                        &mut p_sums as *mut _ as *mut c_void,
+                        &mut tiles_i as *mut _ as *mut c_void,
+                    ];
+                    stream.launch(&pass1, grid, block, 0, args).expect("pass1");
+                }
+            }
+
+            // Pass 2
+            {
+                let grid: GridSize = (1, 1, 1).into();
+                let block: BlockSize = (32, 1, 1).into();
+                unsafe {
+                    let mut p_sums = self.d_block_sums.as_device_ptr().as_raw();
+                    let mut tiles_i = self.tiles as i32;
+                    let mut p_offs = self.d_block_offsets.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut p_sums as *mut _ as *mut c_void,
+                        &mut tiles_i as *mut _ as *mut c_void,
+                        &mut p_offs as *mut _ as *mut c_void,
+                    ];
+                    stream.launch(&pass2, grid, block, 0, args).expect("pass2");
+                }
+            }
+
+            // Pass 3
+            {
+                let grid: GridSize = (self.tiles as u32, 1, 1).into();
+                let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
+                unsafe {
+                    let mut series_len_i = self.series_len as i32;
+                    let mut n_combos_i = 1i32;
+                    let mut fv_i = self.first_valid as i32;
+                    let mut p_out = self.d_out.as_device_ptr().as_raw();
+                    let mut p_offs = self.d_block_offsets.as_device_ptr().as_raw();
+                    let mut tiles_i = self.tiles as i32;
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut fv_i as *mut _ as *mut c_void,
+                        &mut p_out as *mut _ as *mut c_void,
+                        &mut p_offs as *mut _ as *mut c_void,
+                        &mut tiles_i as *mut _ as *mut c_void,
+                    ];
+                    stream.launch(&pass3, grid, block, 0, args).expect("pass3");
+                }
+            }
+
+            self.cuda.stream.synchronize().expect("obv sync");
         }
     }
 
     struct ObvManySeriesState {
         cuda: CudaObv,
-        close_tm: Vec<f32>,
-        volume_tm: Vec<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_volume_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        grid: GridSize,
+        block: BlockSize,
     }
     impl CudaBenchState for ObvManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .obv_many_series_one_param_time_major_dev(
-                    &self.close_tm,
-                    &self.volume_tm,
-                    MANY_COLS,
-                    MANY_ROWS,
-                )
-                .expect("obv many-series");
+                .module
+                .get_function("obv_many_series_one_param_time_major_f32")
+                .expect("obv_many_series_one_param_time_major_f32");
+            unsafe {
+                let mut c_ptr = self.d_close_tm.as_device_ptr().as_raw();
+                let mut v_ptr = self.d_volume_tm.as_device_ptr().as_raw();
+                let mut fv_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut out_ptr = self.d_out_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut c_ptr as *mut _ as *mut c_void,
+                    &mut v_ptr as *mut _ as *mut c_void,
+                    &mut fv_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("launch");
+            }
+            self.cuda.stream.synchronize().expect("obv sync");
         }
     }
 
@@ -613,10 +725,29 @@ pub mod benches {
         let cuda = CudaObv::new(0).expect("cuda obv");
         let close = gen_series(ONE_SERIES_LEN);
         let volume = synth_volume_from_price(&close);
+        let first_valid = (0..ONE_SERIES_LEN)
+            .find(|&i| !close[i].is_nan() && !volume[i].is_nan())
+            .unwrap_or(ONE_SERIES_LEN);
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_volume = DeviceBuffer::from_slice(&volume).expect("d_volume");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN) }.expect("d_out");
+        let tiles = ((ONE_SERIES_LEN + OBV_TILE - 1) / OBV_TILE).max(1);
+        let d_block_sums: DeviceBuffer<FPair> =
+            unsafe { DeviceBuffer::uninitialized(tiles) }.expect("d_block_sums");
+        let d_block_offsets: DeviceBuffer<FPair> =
+            unsafe { DeviceBuffer::uninitialized(tiles) }.expect("d_block_offsets");
+        cuda.stream.synchronize().expect("obv prep sync");
         Box::new(ObvBatchState {
             cuda,
-            close,
-            volume,
+            d_close,
+            d_volume,
+            d_out,
+            d_block_sums,
+            d_block_offsets,
+            series_len: ONE_SERIES_LEN,
+            first_valid,
+            tiles,
         })
     }
 
@@ -631,10 +762,34 @@ pub mod benches {
                 volume_tm[t * MANY_COLS + s] = (x * 0.37).cos().abs() * 800.0 + 50.0;
             }
         }
+        let mut first_valids = vec![MANY_ROWS as i32; MANY_COLS];
+        for s in 0..MANY_COLS {
+            for t in 0..MANY_ROWS {
+                let idx = t * MANY_COLS + s;
+                if !close_tm[idx].is_nan() && !volume_tm[idx].is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_volume_tm = DeviceBuffer::from_slice(&volume_tm).expect("d_volume_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(MANY_COLS * MANY_ROWS) }.expect("d_out_tm");
+        let block_x = 256u32;
+        let grid_x = ((MANY_COLS as u32) + block_x - 1) / block_x;
+        cuda.stream.synchronize().expect("obv prep sync");
         Box::new(ObvManySeriesState {
             cuda,
-            close_tm,
-            volume_tm,
+            d_close_tm,
+            d_volume_tm,
+            d_first,
+            d_out_tm,
+            cols: MANY_COLS,
+            rows: MANY_ROWS,
+            grid: (grid_x.max(1), 1, 1).into(),
+            block: (block_x, 1, 1).into(),
         })
     }
 

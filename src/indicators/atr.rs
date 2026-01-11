@@ -289,7 +289,7 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -336,7 +336,7 @@ pub fn atr_into(input: &AtrInput, out: &mut [f64]) -> Result<(), AtrError> {
 
     // Dispatch and compute into the provided buffer
     let chosen = match Kernel::Auto {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     atr_compute_into(high, low, close, length, first, chosen, out);
@@ -910,7 +910,7 @@ pub struct AtrBatchRange {
 impl Default for AtrBatchRange {
     fn default() -> Self {
         Self {
-            length: (14, 30, 1),
+            length: (14, 263, 1),
         }
     }
 }
@@ -2557,7 +2557,7 @@ pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result
     }
 
     let k = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     atr_compute_into(high, low, close, length, first, k, dst);

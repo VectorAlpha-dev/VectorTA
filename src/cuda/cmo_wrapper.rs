@@ -305,7 +305,9 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             }
         };
 
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
+        // Kernel mapping: one warp per combo (block contains block_x/32 combos).
+        let warps_per_block = (block_x / 32).max(1);
+        let grid_x = ((n_combos as u32) + warps_per_block - 1) / warps_per_block;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -565,60 +567,108 @@ pub mod benches {
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaCmo,
-        price: Vec<f32>,
-        sweep: CmoBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cmo_batch_dev(&self.price, &self.sweep)
-                .expect("cmo_batch_dev");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("cmo launch_batch_kernel");
+            self.cuda.synchronize().expect("cmo sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let cuda = CudaCmo::new(0).expect("cuda");
         let price = gen_series(ONE_SERIES_LEN);
         let sweep = CmoBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(BatchState { cuda, price, sweep })
+
+        let (combos, first_valid, len) =
+            CudaCmo::prepare_batch_inputs(&price, &sweep).expect("cmo prepare_batch_inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(14) as i32)
+            .collect();
+
+        let cuda = CudaCmo::new(0).expect("cuda");
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&price, &cuda.stream) }.expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(BatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            len,
+            first_valid,
+            n_combos,
+        })
     }
 
-    struct ManyState {
+    struct ManySeriesDeviceState {
         cuda: CudaCmo,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out_tm: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: CmoParams,
+        period: usize,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .cmo_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.period,
+                    &mut self.d_out_tm,
                 )
-                .expect("cmo_many_series_one_param_time_major_dev");
+                .expect("cmo launch_many_series_kernel");
+            self.cuda.synchronize().expect("cmo sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
-        let cuda = CudaCmo::new(0).expect("cuda");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        let params = CmoParams { period: Some(64) };
-        Box::new(ManyState {
+        let period = 64usize;
+        let first_valids: Vec<i32> = (0..cols).map(|i| i as i32).collect();
+
+        let cuda = CudaCmo::new(0).expect("cuda");
+        let d_prices_tm =
+            unsafe { DeviceBuffer::from_slice_async(&data_tm, &cuda.stream) }.expect("d_prices_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("sync after prep");
+        Box::new(ManySeriesDeviceState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first,
+            d_out_tm,
             cols,
             rows,
-            params,
+            period,
         })
     }
 

@@ -1013,22 +1013,40 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250; // vary periods only; devup/devdn fixed
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let prefix = (ONE_SERIES_LEN + 1)
+            * (2 * std::mem::size_of::<Float2>() + std::mem::size_of::<i32>());
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        prefix + out_bytes + 64 * 1024 * 1024
     }
 
     struct BbwBatchState {
         cuda: CudaBbw,
-        price: Vec<f32>,
-        sweep: BollingerBandsWidthBatchRange,
+        d_ps: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_pn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_uplusd: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BbwBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bbw_batch_dev(&self.price, &self.sweep)
-                .expect("bbw batch");
+            self.cuda
+                .launch_batch_kernel_ptrs(
+                    &self.d_ps,
+                    &self.d_ps2,
+                    &self.d_pn,
+                    self.d_periods.as_device_ptr(),
+                    self.d_uplusd.as_device_ptr(),
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    self.d_out.as_device_ptr(),
+                )
+                .expect("bbw launch");
+            self.cuda.stream.synchronize().expect("bbw sync");
         }
     }
 
@@ -1040,7 +1058,35 @@ pub mod benches {
             devup: (2.0, 2.0, 0.0),
             devdn: (2.0, 2.0, 0.0),
         };
-        Box::new(BbwBatchState { cuda, price, sweep })
+
+        let (combos, first_valid, len) =
+            CudaBbw::prepare_batch_inputs(&price, &sweep).expect("prepare batch");
+        let (ps, ps2, pn) = CudaBbw::build_prefixes(&price);
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let uplusd: Vec<f32> = combos.iter().map(|c| c.u_plus_d).collect();
+
+        let d_ps = DeviceBuffer::from_slice(&ps).expect("ps H2D");
+        let d_ps2 = DeviceBuffer::from_slice(&ps2).expect("ps2 H2D");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("pn H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("periods H2D");
+        let d_uplusd = DeviceBuffer::from_slice(&uplusd).expect("uplusd H2D");
+
+        let elems = combos.len() * len;
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out");
+
+        Box::new(BbwBatchState {
+            cuda,
+            d_ps,
+            d_ps2,
+            d_pn,
+            d_periods,
+            d_uplusd,
+            len,
+            first_valid,
+            n_combos: combos.len(),
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

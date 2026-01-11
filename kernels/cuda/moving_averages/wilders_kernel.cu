@@ -100,6 +100,88 @@ void wilders_batch_f32(const float* __restrict__ prices,
     }
 }
 
+// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
+// per iteration via an inclusive scan over the affine Wilder transform:
+//   y_t = (1-alpha) * y_{t-1} + alpha * x_t
+//
+// - blockDim.x must be exactly 32
+// - output is written once: warmup prefix is NaN, then all t>=warm are computed
+extern "C" __global__
+void wilders_batch_warp_scan_f32(const float* __restrict__ prices,
+                                 const int* __restrict__ periods,
+                                 const float* __restrict__ alphas,
+                                 const int* __restrict__ warm_indices,
+                                 int series_len,
+                                 int first_valid,
+                                 int n_combos,
+                                 float* __restrict__ out) {
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+    if (series_len <= 0 || first_valid < 0 || first_valid >= series_len) return;
+    if (threadIdx.x >= 32) return;
+
+    const int   period = periods[combo];
+    const float alpha  = alphas[combo];
+    const int   warm   = warm_indices[combo];
+    if (period <= 0 || warm >= series_len) return;
+
+    const unsigned mask = 0xffffffffu;
+    const int lane = threadIdx.x & 31;
+    const size_t base = (size_t)combo * (size_t)series_len;
+
+    // Warmup prefix NaNs (indices < warm)
+    for (int t = lane; t < warm; t += 32) {
+        out[base + (size_t)t] = NAN;
+    }
+    if (warm < 0 || warm >= series_len) return;
+
+    // Seed at warm: mean over [first_valid, first_valid+period)
+    float y_prev = 0.0f;
+    if (lane == 0) {
+        float sum = 0.0f;
+        for (int i = 0; i < period; ++i) {
+            sum += prices[first_valid + i];
+        }
+        y_prev = sum / (float)period;
+        out[base + (size_t)warm] = y_prev;
+    }
+    y_prev = __shfl_sync(mask, y_prev, 0);
+
+    int t0 = warm + 1;
+    if (t0 >= series_len) return;
+
+    const float one_m_alpha = 1.0f - alpha;
+
+    for (int tile = t0; tile < series_len; tile += 32) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        float A = valid ? one_m_alpha : 1.0f;
+        float B = valid ? (alpha * prices[t]) : 0.0f;
+
+        // Inclusive scan of composed affine transforms (A, B)
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, A, offset);
+            const float B_prev = __shfl_up_sync(mask, B, offset);
+            if (lane >= offset) {
+                const float A_cur = A;
+                const float B_cur = B;
+                A = A_cur * A_prev;
+                B = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+
+        const float y = fmaf(A, y_prev, B);
+        if (valid) {
+            out[base + (size_t)t] = y;
+        }
+
+        const int remaining = series_len - tile;
+        const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
+        y_prev = __shfl_sync(mask, y, last_lane);
+    }
+}
+
 // Many-series × one-param (time-major) kernel for Wilder's MA.
 //
 // - prices are time-major: prices_tm[t * num_series + series]

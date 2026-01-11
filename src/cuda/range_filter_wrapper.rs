@@ -744,12 +744,60 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    struct RfBatchState {
+    struct RfBatchDeviceState {
         cuda: CudaRangeFilter,
+        d_prices: DeviceBuffer<f32>,
+        d_rs: DeviceBuffer<f32>,
+        d_rp: DeviceBuffer<i32>,
+        d_sf: DeviceBuffer<i32>,
+        d_sp: DeviceBuffer<i32>,
+        d_f: DeviceBuffer<f32>,
+        d_h: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
+        len: usize,
+        rows: usize,
+        first_valid: usize,
+        grid: GridSize,
+        block: BlockSize,
     }
-    impl CudaBenchState for RfBatchState {
+    impl CudaBenchState for RfBatchDeviceState {
         fn launch(&mut self) {
-            let _ = &self.cuda;
+            let func = self
+                .cuda
+                .module
+                .get_function("range_filter_batch_f32")
+                .expect("range_filter_batch_f32");
+            unsafe {
+                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                let mut rs_ptr = self.d_rs.as_device_ptr().as_raw();
+                let mut rp_ptr = self.d_rp.as_device_ptr().as_raw();
+                let mut sf_ptr = self.d_sf.as_device_ptr().as_raw();
+                let mut sp_ptr = self.d_sp.as_device_ptr().as_raw();
+                let mut len_i: i32 = self.len as i32;
+                let mut nrows_i: i32 = self.rows as i32;
+                let mut first_i: i32 = self.first_valid as i32;
+                let mut f_ptr = self.d_f.as_device_ptr().as_raw();
+                let mut h_ptr = self.d_h.as_device_ptr().as_raw();
+                let mut l_ptr = self.d_l.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut rs_ptr as *mut _ as *mut c_void,
+                    &mut rp_ptr as *mut _ as *mut c_void,
+                    &mut sf_ptr as *mut _ as *mut c_void,
+                    &mut sp_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut nrows_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut f_ptr as *mut _ as *mut c_void,
+                    &mut h_ptr as *mut _ as *mut c_void,
+                    &mut l_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("range_filter batch launch");
+            }
+            self.cuda.stream.synchronize().expect("range_filter batch sync");
         }
     }
 
@@ -768,22 +816,115 @@ pub mod benches {
             smooth_period: Some(27),
         };
         let cuda = CudaRangeFilter::new(0).unwrap();
-        let _ = cuda.range_filter_batch_dev(&data, &sweep).unwrap();
-        Box::new(RfBatchState { cuda })
+        let first_valid = data.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let combos = expand_grid(&sweep).expect("expand_grid");
+        let rows = combos.len();
+        let range_sizes_f32: Vec<f32> = combos
+            .iter()
+            .map(|c| c.range_size.unwrap_or(2.618) as f32)
+            .collect();
+        let range_periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.range_period.unwrap_or(14) as i32)
+            .collect();
+        let smooth_flags_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| if c.smooth_range.unwrap_or(true) { 1 } else { 0 })
+            .collect();
+        let smooth_periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.smooth_period.unwrap_or(27) as i32)
+            .collect();
+
+        let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
+        let d_rs = DeviceBuffer::from_slice(&range_sizes_f32).expect("d_rs");
+        let d_rp = DeviceBuffer::from_slice(&range_periods_i32).expect("d_rp");
+        let d_sf = DeviceBuffer::from_slice(&smooth_flags_i32).expect("d_sf");
+        let d_sp = DeviceBuffer::from_slice(&smooth_periods_i32).expect("d_sp");
+        let elems = rows * len;
+        let d_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_f");
+        let d_h: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_h");
+        let d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_l");
+        let (grid, block) = cuda.pick_1d_launch_for_batch(rows).expect("launch cfg");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(RfBatchDeviceState {
+            cuda,
+            d_prices,
+            d_rs,
+            d_rp,
+            d_sf,
+            d_sp,
+            d_f,
+            d_h,
+            d_l,
+            len,
+            rows,
+            first_valid,
+            grid,
+            block,
+        })
     }
 
-    struct RfManySeriesState {
+    struct RfManySeriesDeviceState {
         cuda: CudaRangeFilter,
+        d_data: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_f: DeviceBuffer<f32>,
+        d_h: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        rs: f32,
+        rp: i32,
+        sf: i32,
+        sp: i32,
+        grid: GridSize,
+        block: BlockSize,
     }
-    impl CudaBenchState for RfManySeriesState {
+    impl CudaBenchState for RfManySeriesDeviceState {
         fn launch(&mut self) {
-            let _ = &self.cuda;
+            let func = self
+                .cuda
+                .module
+                .get_function("range_filter_many_series_one_param_f32")
+                .expect("range_filter_many_series_one_param_f32");
+            unsafe {
+                let mut data_ptr = self.d_data.as_device_ptr().as_raw();
+                let mut rs_f = self.rs;
+                let mut rp_i = self.rp;
+                let mut sf_i = self.sf;
+                let mut sp_i = self.sp;
+                let mut cols_i: i32 = self.cols as i32;
+                let mut rows_i: i32 = self.rows as i32;
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut f_ptr = self.d_f.as_device_ptr().as_raw();
+                let mut h_ptr = self.d_h.as_device_ptr().as_raw();
+                let mut l_ptr = self.d_l.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut data_ptr as *mut _ as *mut c_void,
+                    &mut rs_f as *mut _ as *mut c_void,
+                    &mut rp_i as *mut _ as *mut c_void,
+                    &mut sf_i as *mut _ as *mut c_void,
+                    &mut sp_i as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut f_ptr as *mut _ as *mut c_void,
+                    &mut h_ptr as *mut _ as *mut c_void,
+                    &mut l_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("range_filter many launch");
+            }
+            self.cuda.stream.synchronize().expect("range_filter many sync");
         }
     }
 
     fn prep_rf_many_series() -> Box<dyn CudaBenchState> {
         let cols = 256usize; // series
-        let rows = 600_000usize; // time
+        let rows = 200_000usize; // time
         let mut tm = vec![f32::NAN; rows * cols];
         for s in 0..cols {
             for t in s..rows {
@@ -798,27 +939,56 @@ pub mod benches {
             smooth_range: Some(true),
             smooth_period: Some(27),
         };
+        let cuda = CudaRangeFilter::new(0).unwrap();
+        let rs = params.range_size.unwrap_or(2.618) as f32;
+        let rp = params.range_period.unwrap_or(14) as i32;
+        let sf = if params.smooth_range.unwrap_or(true) { 1 } else { 0 };
+        let sp = params.smooth_period.unwrap_or(27) as i32;
+
+        let mut first_valids = vec![cols as i32; cols];
         for s in 0..cols {
-            for t in s..rows {
+            for t in 0..rows {
                 let idx = t * cols + s;
-                let x = t as f32 + s as f32 * 0.01;
-                tm[idx] = (x * 0.0013).sin() + 0.00011 * x;
+                if tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
             }
         }
-        let params = RangeFilterParams {
-            range_size: Some(2.618),
-            range_period: Some(14),
-            smooth_range: Some(true),
-            smooth_period: Some(27),
+
+        let d_data = DeviceBuffer::from_slice(&tm).expect("d_data");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let elems = cols * rows;
+        let d_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_f");
+        let d_h: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_h");
+        let d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_l");
+
+        let block_x = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+            _ => 1,
         };
-        let cuda = CudaRangeFilter::new(0).unwrap();
-        let _ = cuda
-            .range_filter_many_series_one_param_time_major_dev(&tm, cols, rows, &params)
-            .unwrap();
-        let _ = cuda
-            .range_filter_many_series_one_param_time_major_dev(&tm, cols, rows, &params)
-            .unwrap();
-        Box::new(RfManySeriesState { cuda })
+        let grid: GridSize = (cols as u32, 1u32, 1u32).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.validate_launch((cols as u32, 1, 1), (block_x, 1, 1))
+            .expect("launch cfg");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(RfManySeriesDeviceState {
+            cuda,
+            d_data,
+            d_first,
+            d_f,
+            d_h,
+            d_l,
+            cols,
+            rows,
+            rs,
+            rp,
+            sf,
+            sp,
+            grid,
+            block,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
@@ -830,7 +1000,7 @@ pub mod benches {
                 "batch",
                 prep_rf_batch,
             )
-            .with_sample_size(25),
+            .with_sample_size(10),
             CudaBenchScenario::new(
                 "range_filter",
                 "many_series_one_param",
@@ -838,23 +1008,7 @@ pub mod benches {
                 "many_series",
                 prep_rf_many_series,
             )
-            .with_sample_size(15),
-            CudaBenchScenario::new(
-                "range_filter",
-                "one_series_many_params",
-                "cuda/range_filter",
-                "batch",
-                prep_rf_batch,
-            )
-            .with_sample_size(25),
-            CudaBenchScenario::new(
-                "range_filter",
-                "many_series_one_param",
-                "cuda/range_filter",
-                "many_series",
-                prep_rf_many_series,
-            )
-            .with_sample_size(15),
+            .with_sample_size(10),
         ]
     }
 }

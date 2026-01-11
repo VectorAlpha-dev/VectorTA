@@ -657,6 +657,8 @@ pub mod benches {
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 128;
+    const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series_many_params() -> usize {
         let prefix = (ONE_SERIES_LEN + 1)
@@ -665,18 +667,53 @@ pub mod benches {
         prefix + out_bytes + 64 * 1024 * 1024
     }
 
+    fn bytes_many_series_one_param() -> usize {
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_ROWS;
+        let rows_p1 = rows + 1;
+        let prefix_each =
+            2 * std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<i32>();
+        let prefix_bytes = rows_p1 * cols * prefix_each;
+        let fv_bytes = cols * std::mem::size_of::<i32>();
+        let out_bytes = 3 * cols * rows * std::mem::size_of::<f32>();
+        prefix_bytes + fv_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
     struct BbBatchState {
         cuda: CudaBollingerBands,
-        data: Vec<f32>,
-        sweep: BollingerBandsBatchRange,
+        d_ps: DeviceBuffer<[f32; 2]>,
+        d_ps2: DeviceBuffer<[f32; 2]>,
+        d_pn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_devups: DeviceBuffer<f32>,
+        d_devdns: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_up: DeviceBuffer<f32>,
+        d_mid: DeviceBuffer<f32>,
+        d_lo: DeviceBuffer<f32>,
     }
-    
+
     impl CudaBenchState for BbBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .bollinger_bands_batch_dev(&self.data, &self.sweep)
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_ps,
+                    &self.d_ps2,
+                    &self.d_pn,
+                    &self.d_periods,
+                    &self.d_devups,
+                    &self.d_devdns,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_up,
+                    &mut self.d_mid,
+                    &mut self.d_lo,
+                )
                 .unwrap();
+            self.cuda.synchronize().unwrap();
         }
     }
 
@@ -691,51 +728,179 @@ pub mod benches {
             matype: ("sma".to_string(), "sma".to_string(), 0),
             devtype: (0, 0, 0),
         };
-        Box::new(BbBatchState { cuda, data, sweep })
+
+        let (combos, first_valid, len) =
+            CudaBollingerBands::prepare_batch_inputs(&data, &sweep).expect("prepare batch");
+        let (ps, ps2, pn) = CudaBollingerBands::build_prefixes(&data);
+
+        let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
+        let devups: Vec<f32> = combos.iter().map(|c| c.devup).collect();
+        let devdns: Vec<f32> = combos.iter().map(|c| c.devdn).collect();
+
+        let d_ps = DeviceBuffer::from_slice(&ps).expect("ps H2D");
+        let d_ps2 = DeviceBuffer::from_slice(&ps2).expect("ps2 H2D");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("pn H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("periods H2D");
+        let d_devups = DeviceBuffer::from_slice(&devups).expect("devups H2D");
+        let d_devdns = DeviceBuffer::from_slice(&devdns).expect("devdns H2D");
+
+        let elems = combos.len() * len;
+        let d_up = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out up");
+        let d_mid = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out mid");
+        let d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("out lo");
+
+        Box::new(BbBatchState {
+            cuda,
+            d_ps,
+            d_ps2,
+            d_pn,
+            d_periods,
+            d_devups,
+            d_devdns,
+            len,
+            first_valid,
+            n_combos: combos.len(),
+            d_up,
+            d_mid,
+            d_lo,
+        })
     }
 
     struct BbManySeriesState {
         cuda: CudaBollingerBands,
-        tm: Vec<f32>,
+        d_ps: DeviceBuffer<[f32; 2]>,
+        d_ps2: DeviceBuffer<[f32; 2]>,
+        d_pn: DeviceBuffer<i32>,
+        d_fv: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
         devup: f32,
         devdn: f32,
+        d_up_tm: DeviceBuffer<f32>,
+        d_mid_tm: DeviceBuffer<f32>,
+        d_lo_tm: DeviceBuffer<f32>,
     }
     
     impl CudaBenchState for BbManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .bollinger_bands_many_series_one_param_time_major_dev(
-                    &self.tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                    self.devup,
-                    self.devdn,
-                )
-                .unwrap();
+                .module
+                .get_function("bollinger_bands_many_series_one_param_f32")
+                .expect("bollinger_bands_many_series_one_param_f32");
+
+            let block_x: u32 = 256;
+            let grid_x = self.cuda.grid_x_for_len(self.rows, block_x);
+            let grid: GridSize = (grid_x.max(1), self.cols as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut p_ps = self.d_ps.as_device_ptr().as_raw();
+                let mut p_ps2 = self.d_ps2.as_device_ptr().as_raw();
+                let mut p_pn = self.d_pn.as_device_ptr().as_raw();
+                let mut period_i = self.period as i32;
+                let mut devup_f = self.devup as f32;
+                let mut devdn_f = self.devdn as f32;
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut p_fv = self.d_fv.as_device_ptr().as_raw();
+                let mut p_up = self.d_up_tm.as_device_ptr().as_raw();
+                let mut p_md = self.d_mid_tm.as_device_ptr().as_raw();
+                let mut p_lo = self.d_lo_tm.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_ps as *mut _ as *mut c_void,
+                    &mut p_ps2 as *mut _ as *mut c_void,
+                    &mut p_pn as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut devup_f as *mut _ as *mut c_void,
+                    &mut devdn_f as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut p_fv as *mut _ as *mut c_void,
+                    &mut p_up as *mut _ as *mut c_void,
+                    &mut p_md as *mut _ as *mut c_void,
+                    &mut p_lo as *mut _ as *mut c_void,
+                ];
+                CudaBollingerBands::validate_launch(grid, block).expect("bb validate launch");
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("bb many launch");
+            }
+            self.cuda.synchronize().unwrap();
         }
     }
 
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaBollingerBands::new(0).expect("cuda bb");
-        let cols = 250usize;
-        let rows = 1_000_000usize;
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_ROWS;
         let period = 20usize;
         let devup = 2.0f32;
         let devdn = 2.0f32;
         let tm = gen_time_major_prices(cols, rows);
+
+        let rows_p1 = rows + 1;
+        let prefix_elems = rows_p1 * cols;
+        let mut ps = vec![[0.0f32; 2]; prefix_elems];
+        let mut ps2 = vec![[0.0f32; 2]; prefix_elems];
+        let mut pn = vec![0i32; prefix_elems];
+        let mut first_valids = vec![0i32; cols];
+        for s in 0..cols {
+            let (mut s_hi, mut s_lo) = (0.0f32, 0.0f32);
+            let (mut s2_hi, mut s2_lo) = (0.0f32, 0.0f32);
+            let mut an = 0i32;
+            let mut fv: Option<usize> = None;
+            for t in 0..rows {
+                let v = tm[t * cols + s];
+                if v.is_nan() {
+                    an += 1;
+                } else {
+                    CudaBollingerBands::ds_add_inplace(&mut s_hi, &mut s_lo, v, 0.0);
+                    let p = v * v;
+                    let err = v.mul_add(v, -p);
+                    CudaBollingerBands::ds_add_inplace(&mut s2_hi, &mut s2_lo, p, err);
+                    fv.get_or_insert(t);
+                }
+                let idx = (t + 1) * cols + s;
+                ps[idx] = [s_hi, s_lo];
+                ps2[idx] = [s2_hi, s2_lo];
+                pn[idx] = an;
+            }
+            let fv = fv.unwrap_or(0);
+            if rows - fv < period {
+                panic!("bb many-series: series {s} has insufficient valid data");
+            }
+            first_valids[s] = fv as i32;
+        }
+
+        let d_ps: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps).expect("bb d_ps");
+        let d_ps2: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps2).expect("bb d_ps2");
+        let d_pn = DeviceBuffer::from_slice(&pn).expect("bb d_pn");
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("bb d_fv");
+
+        let elems_tm = cols * rows;
+        let d_up_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_tm) }.expect("bb d_up_tm");
+        let d_mid_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_tm) }.expect("bb d_mid_tm");
+        let d_lo_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_tm) }.expect("bb d_lo_tm");
+        cuda.synchronize().expect("bb sync after prep");
         Box::new(BbManySeriesState {
             cuda,
-            tm,
+            d_ps,
+            d_ps2,
+            d_pn,
+            d_fv,
             cols,
             rows,
             period,
             devup,
             devdn,
+            d_up_tm,
+            d_mid_tm,
+            d_lo_tm,
         })
     }
 
@@ -753,10 +918,11 @@ pub mod benches {
                 "bollinger_bands",
                 "many_series_one_param",
                 "bollinger_bands_cuda_many_series_one_param",
-                "250x1m",
+                "128x8k",
                 prep_many_series,
             )
-            .with_inner_iters(3),
+            .with_inner_iters(3)
+            .with_mem_required(bytes_many_series_one_param()),
         ]
     }
 }

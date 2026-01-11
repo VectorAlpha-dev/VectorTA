@@ -414,6 +414,13 @@ impl CudaFvgTs {
             .unwrap_or(0)
             .max(1);
         let want_shmem = max_w <= 64;
+        let max_lb: usize = h_lb
+            .iter()
+            .copied()
+            .map(|v| v as usize)
+            .max()
+            .unwrap_or(0)
+            .max(1);
 
         // Each thread needs 3 * smem_stride floats; we pack per-thread slices back-to-back.
         let smem_stride: usize = if want_shmem { max_w } else { 0 };
@@ -428,9 +435,18 @@ impl CudaFvgTs {
         let mut dynamic_smem_bytes: usize = 0;
 
         if want_shmem && bytes_per_thread > 0 {
+            let shmem_name: &'static str = if max_lb <= 32 {
+                "fvg_trailing_stop_batch_small_shmem_f32"
+            } else {
+                "fvg_trailing_stop_batch_shmem_f32"
+            };
+            let mut shmem_func = self
+                .module
+                .get_function(shmem_name)
+                .map_err(|_| CudaFvgTsError::MissingKernelSymbol { name: shmem_name })?;
             let grid_probe: GridSize = (1, 1, 1).into();
             let block_probe: BlockSize = (block_x, 1, 1).into();
-            let avail_dyn = func
+            let avail_dyn = shmem_func
                 .available_dynamic_shared_memory_per_block(grid_probe, block_probe)
                 .unwrap_or(48 * 1024);
 
@@ -444,7 +460,8 @@ impl CudaFvgTs {
                 block_x = block_x.min(max_threads_by_smem);
                 use_shmem_rings = 1;
                 dynamic_smem_bytes = bytes_per_thread.saturating_mul(block_x as usize);
-                let _ = func.set_cache_config(CacheConfig::PreferShared);
+                let _ = shmem_func.set_cache_config(CacheConfig::PreferShared);
+                func = shmem_func;
             } else {
                 let _ = func.set_cache_config(CacheConfig::PreferL1);
             }
@@ -667,24 +684,90 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use cust::memory::DeviceBuffer;
 
-    struct FvgTsBatchState {
+    const BATCH_DEV_LEN: usize = 200_000;
+    const BATCH_LOOKBACK: (usize, usize, usize) = (3, 10, 1);
+    const BATCH_SMOOTHING_DEV: (usize, usize, usize) = (5, 20, 1);
+
+    struct FvgTsBatchDevInplaceState {
         cuda: CudaFvgTs,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: FvgTsBatchRange,
+        kernel: &'static str,
+        len: usize,
+        block_x: u32,
+        use_shmem_rings: i32,
+        smem_stride: i32,
+        dynamic_smem_bytes: u32,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_lb: DeviceBuffer<i32>,
+        d_sw: DeviceBuffer<i32>,
+        d_rs: DeviceBuffer<i32>,
+        d_upper: DeviceBuffer<f32>,
+        d_lower: DeviceBuffer<f32>,
+        d_upper_ts: DeviceBuffer<f32>,
+        d_lower_ts: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for FvgTsBatchState {
+    impl CudaBenchState for FvgTsBatchDevInplaceState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .fvg_ts_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
+                .module
+                .get_function(self.kernel)
+                .expect(self.kernel);
+
+            let nrows = self.d_sw.len() as u32;
+            let grid_x = ((nrows as u32) + self.block_x - 1) / self.block_x;
+            let grid_x = grid_x.max(1);
+            self.cuda
+                .validate_launch(grid_x, 1, 1, self.block_x, 1, 1)
+                .expect("fvg_ts validate launch");
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut p_hi = self.d_high.as_device_ptr().as_raw();
+                let mut p_lo = self.d_low.as_device_ptr().as_raw();
+                let mut p_cl = self.d_close.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut p_lb = self.d_lb.as_device_ptr().as_raw();
+                let mut p_sw = self.d_sw.as_device_ptr().as_raw();
+                let mut p_rs = self.d_rs.as_device_ptr().as_raw();
+                let mut n_i = nrows as i32;
+                let mut p_u = self.d_upper.as_device_ptr().as_raw();
+                let mut p_l = self.d_lower.as_device_ptr().as_raw();
+                let mut p_ut = self.d_upper_ts.as_device_ptr().as_raw();
+                let mut p_lt = self.d_lower_ts.as_device_ptr().as_raw();
+                let mut use_shmem_i = self.use_shmem_rings as i32;
+                let mut smem_stride_i = self.smem_stride as i32;
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_hi as *mut _ as *mut c_void,
+                    &mut p_lo as *mut _ as *mut c_void,
+                    &mut p_cl as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut p_lb as *mut _ as *mut c_void,
+                    &mut p_sw as *mut _ as *mut c_void,
+                    &mut p_rs as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut p_u as *mut _ as *mut c_void,
+                    &mut p_l as *mut _ as *mut c_void,
+                    &mut p_ut as *mut _ as *mut c_void,
+                    &mut p_lt as *mut _ as *mut c_void,
+                    &mut use_shmem_i as *mut _ as *mut c_void,
+                    &mut smem_stride_i as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, self.dynamic_smem_bytes, args)
+                    .expect("fvg_ts launch");
+            }
+            self.cuda.stream.synchronize().expect("fvg_ts sync");
         }
     }
-    fn prep_batch() -> Box<dyn CudaBenchState> {
-        let len = 1_000_000usize;
+
+    fn prep_batch_dev_inplace() -> Box<dyn CudaBenchState> {
+        let cuda = CudaFvgTs::new(0).expect("CudaFvgTs::new");
+        let len = BATCH_DEV_LEN;
         let close = gen_series(len);
         let mut high = close.clone();
         let mut low = close.clone();
@@ -699,41 +782,182 @@ pub mod benches {
             low[i] = v - off;
         }
         let sweep = FvgTsBatchRange {
-            lookback: (3, 10, 1),
-            smoothing: (5, 20, 5),
+            lookback: BATCH_LOOKBACK,
+            smoothing: BATCH_SMOOTHING_DEV,
             reset_on_cross: (true, true),
         };
-        Box::new(FvgTsBatchState {
-            cuda: CudaFvgTs::new(0).unwrap(),
-            high,
-            low,
-            close,
-            sweep,
+        let combos = CudaFvgTs::expand_grid(&sweep).expect("fvg_ts expand grid");
+        let nrows = combos.len();
+        let rows_cols = nrows.checked_mul(len).expect("fvg_ts rows*cols overflow");
+
+        let mut h_lb: Vec<i32> = Vec::with_capacity(nrows);
+        let mut h_sw: Vec<i32> = Vec::with_capacity(nrows);
+        let mut h_rs: Vec<i32> = Vec::with_capacity(nrows);
+        for p in &combos {
+            h_lb.push(p.unmitigated_fvg_lookback.unwrap_or(5) as i32);
+            h_sw.push(p.smoothing_length.unwrap_or(9) as i32);
+            h_rs.push(if p.reset_on_cross.unwrap_or(false) {
+                1
+            } else {
+                0
+            });
+        }
+
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_lb = unsafe { DeviceBuffer::from_slice_async(&h_lb, &cuda.stream) }.expect("d_lb");
+        let d_sw = unsafe { DeviceBuffer::from_slice_async(&h_sw, &cuda.stream) }.expect("d_sw");
+        let d_rs = unsafe { DeviceBuffer::from_slice_async(&h_rs, &cuda.stream) }.expect("d_rs");
+        let d_upper: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_cols, &cuda.stream) }.expect("d_upper");
+        let d_lower: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_cols, &cuda.stream) }.expect("d_lower");
+        let d_upper_ts: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_cols, &cuda.stream) }.expect("d_upper_ts");
+        let d_lower_ts: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows_cols, &cuda.stream) }.expect("d_lower_ts");
+        cuda.stream.synchronize().expect("fvg_ts sync");
+
+        // Match wrapper launch defaults/heuristics: prefer shared rings for max(w) <= 64.
+        let max_w: usize = h_sw
+            .iter()
+            .copied()
+            .map(|v| v as usize)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let max_lb: usize = h_lb
+            .iter()
+            .copied()
+            .map(|v| v as usize)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let want_shmem = max_w <= 64;
+        let bytes_per_thread: usize = 3usize
+            .checked_mul(max_w)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .unwrap_or(0);
+
+        let mut block_x: u32 = 128;
+        let mut kernel: &'static str = "fvg_trailing_stop_batch_f32";
+        let mut use_shmem_rings: i32 = 0;
+        let mut smem_stride: i32 = 0;
+        let mut dynamic_smem_bytes: u32 = 0;
+
+        if want_shmem && bytes_per_thread > 0 {
+            kernel = if max_lb <= 32 {
+                "fvg_trailing_stop_batch_small_shmem_f32"
+            } else {
+                "fvg_trailing_stop_batch_shmem_f32"
+            };
+            let func = cuda.module.get_function(kernel).expect(kernel);
+            let grid_probe: GridSize = (1, 1, 1).into();
+            let block_probe: BlockSize = (block_x, 1, 1).into();
+            let avail_dyn = func
+                .available_dynamic_shared_memory_per_block(grid_probe, block_probe)
+                .unwrap_or(48 * 1024);
+            let max_threads_by_smem = (avail_dyn as usize / bytes_per_thread) as u32;
+            if max_threads_by_smem >= 32 {
+                block_x = block_x.min(max_threads_by_smem);
+                use_shmem_rings = 1;
+                smem_stride = max_w as i32;
+                dynamic_smem_bytes = (bytes_per_thread.saturating_mul(block_x as usize)) as u32;
+            } else {
+                kernel = "fvg_trailing_stop_batch_f32";
+            }
+        }
+
+        Box::new(FvgTsBatchDevInplaceState {
+            cuda,
+            kernel,
+            len,
+            block_x,
+            use_shmem_rings,
+            smem_stride,
+            dynamic_smem_bytes,
+            d_high,
+            d_low,
+            d_close,
+            d_lb,
+            d_sw,
+            d_rs,
+            d_upper,
+            d_lower,
+            d_upper_ts,
+            d_lower_ts,
         })
     }
 
     struct FvgTsManySeriesState {
         cuda: CudaFvgTs,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
         cols: usize,
         rows: usize,
-        params: FvgTrailingStopParams,
+        lb: i32,
+        w: i32,
+        rst: i32,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_upper: DeviceBuffer<f32>,
+        d_lower: DeviceBuffer<f32>,
+        d_upper_ts: DeviceBuffer<f32>,
+        d_lower_ts: DeviceBuffer<f32>,
     }
     impl CudaBenchState for FvgTsManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let mut func = self
                 .cuda
-                .fvg_ts_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .unwrap();
+                .module
+                .get_function("fvg_trailing_stop_many_series_one_param_f32")
+                .expect("fvg_trailing_stop_many_series_one_param_f32");
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+            let block_x = match self.cuda.policy.many_series {
+                ManySeriesKernelPolicy::OneD { block_x } => block_x,
+                _ => 128,
+            };
+            let grid_x = ((self.cols as u32) + block_x - 1) / block_x;
+            let grid_x = grid_x.max(1);
+            self.cuda
+                .validate_launch(grid_x, 1, 1, block_x, 1, 1)
+                .expect("fvg_ts validate launch");
+            let grid: GridSize = (grid_x, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut p_hi = self.d_high_tm.as_device_ptr().as_raw();
+                let mut p_lo = self.d_low_tm.as_device_ptr().as_raw();
+                let mut p_cl = self.d_close_tm.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut lb_i = self.lb as i32;
+                let mut w_i = self.w as i32;
+                let mut rst_i = self.rst as i32;
+                let mut p_u = self.d_upper.as_device_ptr().as_raw();
+                let mut p_l = self.d_lower.as_device_ptr().as_raw();
+                let mut p_ut = self.d_upper_ts.as_device_ptr().as_raw();
+                let mut p_lt = self.d_lower_ts.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut p_hi as *mut _ as *mut c_void,
+                    &mut p_lo as *mut _ as *mut c_void,
+                    &mut p_cl as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut lb_i as *mut _ as *mut c_void,
+                    &mut w_i as *mut _ as *mut c_void,
+                    &mut rst_i as *mut _ as *mut c_void,
+                    &mut p_u as *mut _ as *mut c_void,
+                    &mut p_l as *mut _ as *mut c_void,
+                    &mut p_ut as *mut _ as *mut c_void,
+                    &mut p_lt as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, args)
+                    .expect("fvg_ts many launch");
+            }
+            self.cuda.stream.synchronize().expect("fvg_ts many sync");
         }
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
@@ -761,14 +985,37 @@ pub mod benches {
             smoothing_length: Some(9),
             reset_on_cross: Some(false),
         };
+        let lb = params.unmitigated_fvg_lookback.unwrap_or(5) as i32;
+        let w = params.smoothing_length.unwrap_or(9) as i32;
+        let rst = if params.reset_on_cross.unwrap_or(false) {
+            1i32
+        } else {
+            0i32
+        };
+
+        let cuda = CudaFvgTs::new(0).unwrap();
+        let d_high_tm = DeviceBuffer::from_slice(&high).unwrap();
+        let d_low_tm = DeviceBuffer::from_slice(&low).unwrap();
+        let d_close_tm = DeviceBuffer::from_slice(&close).unwrap();
+        let d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.unwrap();
+        let d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.unwrap();
+        let d_upper_ts: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.unwrap();
+        let d_lower_ts: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.unwrap();
+        cuda.stream.synchronize().unwrap();
         Box::new(FvgTsManySeriesState {
-            cuda: CudaFvgTs::new(0).unwrap(),
-            high_tm: high,
-            low_tm: low,
-            close_tm: close,
+            cuda,
             cols,
             rows,
-            params,
+            lb,
+            w,
+            rst,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_upper,
+            d_lower,
+            d_upper_ts,
+            d_lower_ts,
         })
     }
 
@@ -776,12 +1023,21 @@ pub mod benches {
         vec![
             CudaBenchScenario::new(
                 "fvg_trailing_stop",
+                "batch_dev_inplace",
+                "fvg_trailing_stop_cuda_batch_dev_inplace",
+                "200k_x_256",
+                prep_batch_dev_inplace,
+            )
+            .with_sample_size(10),
+            CudaBenchScenario::new(
+                "fvg_trailing_stop",
                 "many_series_one_param",
                 "fvg_trailing_stop_cuda_many_series_one_param_dev",
                 "128x8k",
                 prep_many_series,
             )
-            .with_inner_iters(3),
+            .with_inner_iters(3)
+            .with_mem_required((7 * 1_000_000usize) * std::mem::size_of::<f32>() + 32 * 1024 * 1024),
         ]
     }
 }

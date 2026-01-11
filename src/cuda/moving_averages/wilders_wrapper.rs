@@ -14,6 +14,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
@@ -53,7 +54,7 @@ pub struct CudaWilders {
     debug_batch_logged: bool,
     debug_many_logged: bool,
     // CHANGE: cache param buffers to avoid re-copying identical sweeps
-    param_cache: Option<ParamCache>,
+    param_cache: RefCell<Option<ParamCache>>,
 }
 
 // CHANGE: small cache for batch parameter buffers
@@ -114,7 +115,7 @@ impl CudaWilders {
             last_many: None,
             debug_batch_logged: false,
             debug_many_logged: false,
-            param_cache: None,
+            param_cache: RefCell::new(None),
         })
     }
 
@@ -177,35 +178,33 @@ impl CudaWilders {
         prepared.warm_indices.hash(&mut hasher);
         let params_hash = hasher.finish();
 
-        // SAFETY: we only mutate param_cache field; borrowing controlled
-        let (d_periods, d_alphas, d_warm) = unsafe {
-            match &mut (*(self as *const _ as *mut CudaWilders)).param_cache {
-                Some(cache)
-                    if cache.hash == params_hash
-                        && cache.periods.len() == prepared.periods_i32.len()
-                        && cache.alphas.len() == prepared.alphas_f32.len()
-                        && cache.warm.len() == prepared.warm_indices.len() =>
-                {
-                    (&cache.periods, &cache.alphas, &cache.warm)
-                }
-                _ => {
-                    let periods = DeviceBuffer::from_slice(&prepared.periods_i32).map_err(CudaWildersError::from)?;
-                    let alphas = DeviceBuffer::from_slice(&prepared.alphas_f32).map_err(CudaWildersError::from)?;
-                    let warm = DeviceBuffer::from_slice(&prepared.warm_indices).map_err(CudaWildersError::from)?;
-                    (*(self as *const _ as *mut CudaWilders)).param_cache = Some(ParamCache {
-                        hash: params_hash,
-                        periods,
-                        alphas,
-                        warm,
-                    });
-                    let cache = (*(self as *const _ as *mut CudaWilders))
-                        .param_cache
-                        .as_ref()
-                        .unwrap();
-                    (&cache.periods, &cache.alphas, &cache.warm)
-                }
+        let mut cache_guard = self.param_cache.borrow_mut();
+        let cache_hit = match cache_guard.as_ref() {
+            Some(cache) => {
+                cache.hash == params_hash
+                    && cache.periods.len() == prepared.periods_i32.len()
+                    && cache.alphas.len() == prepared.alphas_f32.len()
+                    && cache.warm.len() == prepared.warm_indices.len()
             }
+            None => false,
         };
+        if !cache_hit {
+            let periods =
+                DeviceBuffer::from_slice(&prepared.periods_i32).map_err(CudaWildersError::from)?;
+            let alphas =
+                DeviceBuffer::from_slice(&prepared.alphas_f32).map_err(CudaWildersError::from)?;
+            let warm =
+                DeviceBuffer::from_slice(&prepared.warm_indices).map_err(CudaWildersError::from)?;
+            *cache_guard = Some(ParamCache {
+                hash: params_hash,
+                periods,
+                alphas,
+                warm,
+            });
+        }
+        let cache = cache_guard
+            .as_ref()
+            .ok_or_else(|| CudaWildersError::InvalidInput("failed to populate param cache".into()))?;
         let total = prepared
             .series_len
             .checked_mul(n_combos)
@@ -214,9 +213,9 @@ impl CudaWilders {
 
         self.launch_batch_kernel(
             &d_prices,
-            &d_periods,
-            &d_alphas,
-            &d_warm,
+            &cache.periods,
+            &cache.alphas,
+            &cache.warm,
             prepared.series_len,
             prepared.first_valid,
             n_combos,
@@ -417,7 +416,49 @@ impl CudaWilders {
             return Ok(());
         }
 
-        // CHANGE: prefer L1 cache and align block size to warp multiples
+        if matches!(self.policy.batch, BatchKernelPolicy::Auto) {
+            if let Ok(mut func) = self.module.get_function("wilders_batch_warp_scan_f32") {
+                let _ = func.set_cache_config(CacheConfig::PreferL1);
+
+                let block_threads = 32u32;
+                unsafe {
+                    (*(self as *const _ as *mut CudaWilders)).last_batch =
+                        Some(BatchKernelSelected::WarpScan {
+                            block_x: block_threads,
+                        });
+                }
+                self.maybe_log_batch_debug();
+
+                let grid: GridSize = (n_combos as u32, 1, 1).into();
+                let block: BlockSize = (block_threads, 1, 1).into();
+
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                    let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
+                    let mut warm_ptr = d_warm.as_device_ptr().as_raw();
+                    let mut series_len_i = series_len as i32;
+                    let mut first_valid_i = first_valid as i32;
+                    let mut n_combos_i = n_combos as i32;
+                    let mut out_ptr = d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut alphas_ptr as *mut _ as *mut c_void,
+                        &mut warm_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut first_valid_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    self.stream.launch(&func, grid, block, 0, args)?;
+                }
+
+                return Ok(());
+            }
+        }
+
+        // Fallback: original plain kernel (cooperative NaN fill + block-reduced warm sum)
         let mut func = self
             .module
             .get_function("wilders_batch_f32")
@@ -688,23 +729,166 @@ impl CudaWilders {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::wilders::WildersParams;
 
-    define_ma_period_benches!(
-        wilders_benches,
-        CudaWilders,
-        crate::indicators::moving_averages::wilders::WildersBatchRange,
-        crate::indicators::moving_averages::wilders::WildersParams,
-        wilders_batch_dev,
-        wilders_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::wilders::WildersBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::wilders::WildersParams { period: Some(64) },
-        "wilders",
-        "wilders"
-    );
-    pub use wilders_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let param_bytes = PARAM_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + param_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct WildersBatchDevState {
+        cuda: CudaWilders,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_alphas: DeviceBuffer<f32>,
+        d_warm: DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for WildersBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_alphas,
+                    &self.d_warm,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("wilders batch kernel");
+            self.cuda.stream.synchronize().expect("wilders sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWilders::new(0).expect("cuda wilders");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = WildersBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let prep =
+            CudaWilders::prepare_batch_inputs(&price, &sweep).expect("wilders prepare batch");
+        let n_combos = prep.periods_i32.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&prep.periods_i32).expect("d_periods");
+        let d_alphas = DeviceBuffer::from_slice(&prep.alphas_f32).expect("d_alphas");
+        let d_warm = DeviceBuffer::from_slice(&prep.warm_indices).expect("d_warm");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prep.series_len * n_combos) }.expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(WildersBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_alphas,
+            d_warm,
+            series_len: prep.series_len,
+            first_valid: prep.first_valid,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct WildersManyDevState {
+        cuda: CudaWilders,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: i32,
+        alpha: f32,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for WildersManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.period,
+                    self.alpha,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("wilders many-series kernel");
+            self.cuda.stream.synchronize().expect("wilders sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaWilders::new(0).expect("cuda wilders");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = WildersParams { period: Some(64) };
+        let (first_valids, period, alpha) =
+            CudaWilders::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("wilders prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(WildersManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period: period as i32,
+            alpha,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "wilders",
+                "one_series_many_params",
+                "wilders_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "wilders",
+                "many_series_one_param",
+                "wilders_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
@@ -776,6 +960,7 @@ pub struct CudaWildersPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    WarpScan { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]

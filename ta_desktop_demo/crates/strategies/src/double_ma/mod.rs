@@ -1,18 +1,18 @@
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-use my_project::indicators::moving_averages::{
-    alma::{alma, AlmaInput, AlmaParams},
-    ema::{ema, EmaInput, EmaParams},
-    sma::{sma, SmaInput, SmaParams},
-};
+use my_project::indicators::moving_averages::ma::{ma, MaData};
+use my_project::indicators::moving_averages::ma_batch::ma_batch;
 use my_project::utilities::data_loader::{source_type, Candles};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DoubleMaParams {
     pub fast_len: u16,
     pub slow_len: u16,
+    /// Index into `DoubleMaBatchRange.fast_ma_types`.
     pub fast_ma_id: u16,
+    /// Index into `DoubleMaBatchRange.slow_ma_types`.
     pub slow_ma_id: u16,
 }
 
@@ -20,8 +20,8 @@ pub struct DoubleMaParams {
 pub struct DoubleMaBatchRange {
     pub fast_len: (u16, u16, u16),
     pub slow_len: (u16, u16, u16),
-    pub fast_ma_ids: Vec<u16>,
-    pub slow_ma_ids: Vec<u16>,
+    pub fast_ma_types: Vec<String>,
+    pub slow_ma_types: Vec<String>,
 }
 
 impl Default for DoubleMaBatchRange {
@@ -29,8 +29,8 @@ impl Default for DoubleMaBatchRange {
         Self {
             fast_len: (9, 9, 0),
             slow_len: (21, 21, 0),
-            fast_ma_ids: vec![0],
-            slow_ma_ids: vec![0],
+            fast_ma_types: vec!["sma".to_string()],
+            slow_ma_types: vec!["sma".to_string()],
         }
     }
 }
@@ -42,37 +42,17 @@ pub struct Metrics {
     pub max_dd: f64,
 }
 
-/// Simple MA catalog: 0 = SMA, 1 = EMA, 2 = ALMA.
-fn compute_ma_series(candles: &Candles, len: usize, ma_id: u16) -> Vec<f64> {
-    let close = source_type(candles, "close");
-    match ma_id {
-        0 => {
-            let params = SmaParams { period: Some(len) };
-            let input = SmaInput::from_slice(close, params);
-            sma(&input)
-                .map(|o| o.values)
-                .unwrap_or_else(|_| vec![f64::NAN; close.len()])
-        }
-        1 => {
-            let params = EmaParams { period: Some(len) };
-            let input = EmaInput::from_slice(close, params);
-            ema(&input)
-                .map(|o| o.values)
-                .unwrap_or_else(|_| vec![f64::NAN; close.len()])
-        }
-        2 => {
-            let params = AlmaParams {
-                period: Some(len),
-                offset: None,
-                sigma: None,
-            };
-            let input = AlmaInput::from_slice(close, params);
-            alma(&input)
-                .map(|o| o.values)
-                .unwrap_or_else(|_| vec![f64::NAN; close.len()])
-        }
-        _ => vec![f64::NAN; close.len()],
-    }
+fn compute_ma_series(candles: &Candles, len: usize, ma_type: &str, source: &str) -> Vec<f64> {
+    let n = candles.close.len();
+    ma(
+        ma_type,
+        MaData::Candles {
+            candles,
+            source,
+        },
+        len,
+    )
+    .unwrap_or_else(|_| vec![f64::NAN; n])
 }
 
 pub fn expand_grid(range: &DoubleMaBatchRange) -> Vec<DoubleMaParams> {
@@ -123,8 +103,18 @@ pub fn expand_grid(range: &DoubleMaBatchRange) -> Vec<DoubleMaParams> {
             if fast_len >= slow_len {
                 continue;
             }
-            for &fast_ma_id in &range.fast_ma_ids {
-                for &slow_ma_id in &range.slow_ma_ids {
+            let max_fast: u16 = if range.fast_ma_types.len() > u16::MAX as usize {
+                u16::MAX
+            } else {
+                range.fast_ma_types.len() as u16
+            };
+            let max_slow: u16 = if range.slow_ma_types.len() > u16::MAX as usize {
+                u16::MAX
+            } else {
+                range.slow_ma_types.len() as u16
+            };
+            for fast_ma_id in 0..max_fast {
+                for slow_ma_id in 0..max_slow {
                     combos.push(DoubleMaParams {
                         fast_len,
                         slow_len,
@@ -161,13 +151,13 @@ impl DoubleMaBatchBuilder {
         self
     }
 
-    pub fn fast_ma_ids(mut self, ids: Vec<u16>) -> Self {
-        self.range.fast_ma_ids = ids;
+    pub fn fast_ma_types(mut self, types: Vec<String>) -> Self {
+        self.range.fast_ma_types = types;
         self
     }
 
-    pub fn slow_ma_ids(mut self, ids: Vec<u16>) -> Self {
-        self.range.slow_ma_ids = ids;
+    pub fn slow_ma_types(mut self, types: Vec<String>) -> Self {
+        self.range.slow_ma_types = types;
         self
     }
 
@@ -185,7 +175,13 @@ impl DoubleMaBatchBuilder {
 
     pub fn run_cpu(&self, candles: &Candles) -> Vec<Metrics> {
         let combos = self.combos();
-        double_ma_batch_cpu(candles, &combos)
+        double_ma_batch_cpu(
+            candles,
+            &combos,
+            &self.range.fast_ma_types,
+            &self.range.slow_ma_types,
+            "close",
+        )
     }
 }
 
@@ -200,8 +196,33 @@ pub fn eval_double_ma_one(candles: &Candles, params: &DoubleMaParams) -> Metrics
         };
     }
 
-    let fast = compute_ma_series(candles, params.fast_len as usize, params.fast_ma_id);
-    let slow = compute_ma_series(candles, params.slow_len as usize, params.slow_ma_id);
+    // Backwards-compat: treat ids as a minimal catalog.
+    // Prefer `eval_double_ma_one_with_types` for selector-based MA dispatch.
+    let fast = match params.fast_ma_id {
+        0 => compute_ma_series(candles, params.fast_len as usize, "sma", "close"),
+        1 => compute_ma_series(candles, params.fast_len as usize, "ema", "close"),
+        2 => compute_ma_series(candles, params.fast_len as usize, "alma", "close"),
+        _ => vec![f64::NAN; n],
+    };
+    let slow = match params.slow_ma_id {
+        0 => compute_ma_series(candles, params.slow_len as usize, "sma", "close"),
+        1 => compute_ma_series(candles, params.slow_len as usize, "ema", "close"),
+        2 => compute_ma_series(candles, params.slow_len as usize, "alma", "close"),
+        _ => vec![f64::NAN; n],
+    };
+
+    eval_double_ma_from_series(prices, &fast, &slow)
+}
+
+fn eval_double_ma_from_series(prices: &[f64], fast: &[f64], slow: &[f64]) -> Metrics {
+    let n = prices.len();
+    if n < 2 || fast.len() != n || slow.len() != n {
+        return Metrics {
+            pnl: 0.0,
+            sharpe: 0.0,
+            max_dd: 0.0,
+        };
+    }
 
     let mut equity = 1.0_f64;
     let mut peak = 1.0_f64;
@@ -268,11 +289,240 @@ pub fn eval_double_ma_one(candles: &Candles, params: &DoubleMaParams) -> Metrics
     Metrics { pnl, sharpe, max_dd }
 }
 
-pub fn double_ma_batch_cpu(candles: &Candles, combos: &[DoubleMaParams]) -> Vec<Metrics> {
+pub fn eval_double_ma_one_with_types(
+    candles: &Candles,
+    params: &DoubleMaParams,
+    fast_ma_types: &[String],
+    slow_ma_types: &[String],
+) -> Metrics {
+    let prices = source_type(candles, "close");
+    if prices.len() < 2 {
+        return Metrics {
+            pnl: 0.0,
+            sharpe: 0.0,
+            max_dd: 0.0,
+        };
+    }
+
+    let fast_type = fast_ma_types
+        .get(params.fast_ma_id as usize)
+        .map(|s| s.as_str());
+    let slow_type = slow_ma_types
+        .get(params.slow_ma_id as usize)
+        .map(|s| s.as_str());
+    let (Some(fast_type), Some(slow_type)) = (fast_type, slow_type) else {
+        return Metrics {
+            pnl: 0.0,
+            sharpe: 0.0,
+            max_dd: 0.0,
+        };
+    };
+
+    let fast = compute_ma_series(candles, params.fast_len as usize, fast_type, "close");
+    let slow = compute_ma_series(candles, params.slow_len as usize, slow_type, "close");
+
+    eval_double_ma_from_series(prices, &fast, &slow)
+}
+
+pub fn double_ma_batch_cpu(
+    candles: &Candles,
+    combos: &[DoubleMaParams],
+    fast_ma_types: &[String],
+    slow_ma_types: &[String],
+    ma_source: &str,
+) -> Vec<Metrics> {
+    if combos.is_empty() {
+        return Vec::new();
+    }
+
+    let prices = source_type(candles, "close");
+    let n = prices.len();
+    if n < 2 {
+        return combos
+            .iter()
+            .map(|_| Metrics {
+                pnl: 0.0,
+                sharpe: 0.0,
+                max_dd: 0.0,
+            })
+            .collect();
+    }
+
+    let matrices = build_ma_matrices_cpu(candles, combos, fast_ma_types, slow_ma_types, n, ma_source);
+    let nan_row: Vec<f64> = vec![f64::NAN; n];
+
     combos
         .par_iter()
-        .map(|p| eval_double_ma_one(candles, p))
+        .map(|p| {
+            let fast_type = fast_ma_types
+                .get(p.fast_ma_id as usize)
+                .map(|s| s.as_str());
+            let slow_type = slow_ma_types
+                .get(p.slow_ma_id as usize)
+                .map(|s| s.as_str());
+
+            let (Some(fast_type), Some(slow_type)) = (fast_type, slow_type) else {
+                return Metrics {
+                    pnl: 0.0,
+                    sharpe: 0.0,
+                    max_dd: 0.0,
+                };
+            };
+
+            let fast = matrices
+                .get(fast_type)
+                .and_then(|m| m.row(p.fast_len, n))
+                .unwrap_or(&nan_row);
+            let slow = matrices
+                .get(slow_type)
+                .and_then(|m| m.row(p.slow_len, n))
+                .unwrap_or(&nan_row);
+
+            eval_double_ma_from_series(prices, fast, slow)
+        })
         .collect()
+}
+
+#[derive(Clone, Debug)]
+struct PeriodMatrixF64 {
+    period_start: u16,
+    period_end: u16,
+    values: Vec<f64>, // row-major: period-major rows, time-major cols
+}
+
+impl PeriodMatrixF64 {
+    fn row(&self, period: u16, cols: usize) -> Option<&[f64]> {
+        if period < self.period_start || period > self.period_end {
+            return None;
+        }
+        let row = (period - self.period_start) as usize;
+        let offset = row.checked_mul(cols)?;
+        let end = offset.checked_add(cols)?;
+        self.values.get(offset..end)
+    }
+}
+
+fn update_minmax<'a>(map: &mut HashMap<&'a str, (u16, u16)>, ma_type: &'a str, period: u16) {
+    let entry = map.entry(ma_type).or_insert((period, period));
+    if period < entry.0 {
+        entry.0 = period;
+    }
+    if period > entry.1 {
+        entry.1 = period;
+    }
+}
+
+fn build_ma_matrices_cpu<'a>(
+    candles: &'a Candles,
+    combos: &[DoubleMaParams],
+    fast_ma_types: &'a [String],
+    slow_ma_types: &'a [String],
+    series_len: usize,
+    ma_source: &str,
+) -> HashMap<&'a str, PeriodMatrixF64> {
+    let max_period_supported: u16 = if series_len >= u16::MAX as usize {
+        u16::MAX
+    } else {
+        series_len as u16
+    };
+
+    let mut minmax: HashMap<&str, (u16, u16)> = HashMap::new();
+    for p in combos {
+        if p.fast_len > 0 {
+            if let Some(t) = fast_ma_types.get(p.fast_ma_id as usize) {
+                update_minmax(&mut minmax, t.as_str(), p.fast_len);
+            }
+        }
+        if p.slow_len > 0 {
+            if let Some(t) = slow_ma_types.get(p.slow_ma_id as usize) {
+                update_minmax(&mut minmax, t.as_str(), p.slow_len);
+            }
+        }
+    }
+
+    let mut out: HashMap<&str, PeriodMatrixF64> = HashMap::new();
+    for (&ma_type, &(min_p, max_p)) in &minmax {
+        if min_p == 0 || max_p == 0 {
+            continue;
+        }
+
+        let start = min_p;
+        let end = max_p.min(max_period_supported);
+        if start > end {
+            continue;
+        }
+
+        let n_periods = (end as u32)
+            .saturating_sub(start as u32)
+            .saturating_add(1) as usize;
+        let expected_len = match n_periods.checked_mul(series_len) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let mut values: Vec<f64> = vec![f64::NAN; expected_len];
+
+        // Prefer the batch dispatcher (SIMD + scalar batch kernels). If unsupported, fall back
+        // to per-period `ma()` calls but still cache results per MA type.
+        let batch = ma_batch(
+            ma_type,
+            MaData::Candles {
+                candles,
+                source: ma_source,
+            },
+            (start as usize, end as usize, 1),
+        );
+        match batch {
+            Ok(b) if b.cols == series_len => {
+                for (src_row, &period) in b.periods.iter().enumerate() {
+                    if period < start as usize || period > end as usize {
+                        continue;
+                    }
+                    let dst_row = period - start as usize;
+                    let dst_off = match dst_row.checked_mul(series_len) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    let src_off = match src_row.checked_mul(b.cols) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    if src_off + series_len > b.values.len() || dst_off + series_len > values.len() {
+                        continue;
+                    }
+                    values[dst_off..dst_off + series_len]
+                        .copy_from_slice(&b.values[src_off..src_off + series_len]);
+                }
+            }
+            _ => {
+                for (row, period) in (start..=end).enumerate() {
+                    let series = compute_ma_series(candles, period as usize, ma_type, ma_source);
+                    if series.len() != series_len {
+                        continue;
+                    }
+                    let off = match row.checked_mul(series_len) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    if off + series_len > values.len() {
+                        continue;
+                    }
+                    values[off..off + series_len].copy_from_slice(&series);
+                }
+            }
+        }
+
+        out.insert(
+            ma_type,
+            PeriodMatrixF64 {
+                period_start: start,
+                period_end: end,
+                values,
+            },
+        );
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -306,8 +556,8 @@ mod tests {
         let range = DoubleMaBatchRange {
             fast_len: (5, 10, 5),
             slow_len: (8, 12, 2),
-            fast_ma_ids: vec![0],
-            slow_ma_ids: vec![0],
+            fast_ma_types: vec!["sma".to_string()],
+            slow_ma_types: vec!["sma".to_string()],
         };
         let combos = expand_grid(&range);
         assert!(!combos.is_empty());
@@ -322,8 +572,8 @@ mod tests {
         let builder = DoubleMaBatchBuilder::new()
             .fast_len_range(5, 5, 0)
             .slow_len_range(20, 20, 0)
-            .fast_ma_ids(vec![0])
-            .slow_ma_ids(vec![0]);
+            .fast_ma_types(vec!["sma".to_string()])
+            .slow_ma_types(vec!["sma".to_string()]);
 
         let metrics = builder.run_cpu(&candles);
         assert_eq!(metrics.len(), 1);

@@ -362,7 +362,7 @@ impl CudaMsw {
         shared_bytes: usize,
         func: &Function,
     ) -> Result<(), CudaMswError> {
-        // Batch kernel currently advances one output per thread (tile = block_x)
+        // Batch kernel advances one output per thread (tile = block_x)
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
@@ -660,42 +660,94 @@ pub mod benches {
             let x = i as f32;
             v[i] = (x * 0.00123).sin() + 0.0001 * x;
         }
-        for i in 64..n {
-            let x = i as f32;
-            v[i] = (x * 0.00123).sin() + 0.0001 * x;
-        }
         v
     }
 
     struct BatchState {
         cuda: CudaMsw,
-        prices: Vec<f32>,
-        sweep: MswBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        rows: usize,
+        block_x: u32,
+        shared_bytes: usize,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self.cuda.msw_batch_dev(&self.prices, &self.sweep).unwrap();
+            let func = self
+                .cuda
+                .module
+                .get_function("msw_batch_f32")
+                .expect("msw_batch_f32");
+            let mut base = 0usize;
+            const MAX_Y: usize = 65_535;
+            while base < self.rows {
+                let take = (self.rows - base).min(MAX_Y);
+                self.cuda
+                    .launch_batch_chunk(
+                        &self.d_prices,
+                        &self.d_periods,
+                        self.series_len,
+                        self.first_valid,
+                        take,
+                        base,
+                        &mut self.d_out,
+                        self.block_x,
+                        self.shared_bytes,
+                        &func,
+                    )
+                    .expect("msw launch_batch_chunk");
+                base += take;
+            }
+            let _ = self.cuda.stream.synchronize();
         }
     }
 
     struct ManyState {
         cuda: CudaMsw,
-        prices_tm: Vec<f32>,
+        d_prices: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: MswParams,
+        period: usize,
+        block_x: u32,
+        shared_bytes: usize,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .msw_many_series_one_param_time_major_dev(
-                    &self.prices_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .unwrap();
+                .module
+                .get_function("msw_many_series_one_param_time_major_f32")
+                .expect("msw_many_series_one_param_time_major_f32");
+            let t_per_block = self.block_x * MSW_CHUNK_PER_THREAD;
+            let grid_x = ((self.rows as u32) + t_per_block - 1) / t_per_block;
+            let grid: GridSize = (grid_x.max(1), self.cols as u32, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                let mut period_i = self.period as i32;
+                let mut num_series_i = self.cols as i32;
+                let mut series_len_i = self.rows as i32;
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut num_series_i as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, self.shared_bytes as u32, args)
+                    .expect("launch msw_many_series_one_param_time_major_f32");
+            }
+            let _ = self.cuda.stream.synchronize();
         }
     }
 
@@ -705,10 +757,40 @@ pub mod benches {
         let sweep = MswBatchRange {
             period: (8, 8 + PARAM_SWEEP - 1, 1),
         };
+        let first_valid = CudaMsw::first_valid_f32(&prices).expect("first_valid_f32");
+        let combos = CudaMsw::expand_grid(&sweep).expect("expand_grid");
+        let mut periods_i32 = Vec::with_capacity(combos.len());
+        let mut max_p = 0usize;
+        for prm in &combos {
+            let p = prm.period.unwrap_or(0);
+            max_p = max_p.max(p);
+            periods_i32.push(p as i32);
+        }
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let out_elems = 2 * combos.len() * ONE_SERIES_LEN;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let func = cuda
+            .module
+            .get_function("msw_batch_f32")
+            .expect("msw_batch_f32");
+        let pinned = match cuda.policy_batch {
+            BatchKernelPolicy::Plain { block_x } => Some(block_x),
+            _ => None,
+        };
+        let (block_x, shared_bytes) =
+            cuda.try_pick_block_x(&func, max_p, pinned).expect("try_pick_block_x");
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(BatchState {
             cuda,
-            prices,
-            sweep,
+            d_prices,
+            d_periods,
+            d_out,
+            series_len: ONE_SERIES_LEN,
+            first_valid,
+            rows: combos.len(),
+            block_x,
+            shared_bytes,
         })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -722,13 +804,34 @@ pub mod benches {
                 tm[t * cols + s] = (0.002 * x).sin() + 0.0003 * x;
             }
         }
-        let params = MswParams { period: Some(32) };
+        let period = 32usize;
+        let first_valids: Vec<i32> = (0..cols).map(|s| s as i32).collect();
+        let d_prices = DeviceBuffer::from_slice(&tm).expect("d_prices");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let out_elems = rows * 2 * cols;
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let func = cuda
+            .module
+            .get_function("msw_many_series_one_param_time_major_f32")
+            .expect("msw_many_series_one_param_time_major_f32");
+        let pinned = match cuda.policy_many {
+            ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+            _ => None,
+        };
+        let (block_x, shared_bytes) =
+            cuda.try_pick_block_x(&func, period, pinned).expect("try_pick_block_x");
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(ManyState {
             cuda,
-            prices_tm: tm,
+            d_prices,
+            d_first,
+            d_out,
             cols,
             rows,
-            params,
+            period,
+            block_x,
+            shared_bytes,
         })
     }
 

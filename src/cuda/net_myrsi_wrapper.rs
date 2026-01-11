@@ -12,7 +12,7 @@
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::net_myrsi::{NetMyrsiBatchRange, NetMyrsiParams};
-use cust::context::{CacheConfig, Context};
+use cust::context::{CacheConfig, Context, SharedMemoryConfig};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
@@ -74,6 +74,9 @@ impl Default for CudaNetMyrsiPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     OneD { block_x: u32 },
+    OneDSharedFast { block_x: u32, max_period: u32, shmem_bytes: u32 },
+    OneDSharedDbl { block_x: u32, max_period: u32, shmem_bytes: u32 },
+    WarpSharedDbl { block_x: u32, max_period: u32, shmem_bytes: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -328,7 +331,7 @@ impl CudaNetMyrsi {
         data_f32: &[f32],
         sweep: &NetMyrsiBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<NetMyrsiParams>), CudaNetMyrsiError> {
-        let (combos, first_valid, series_len, _max_p) =
+        let (combos, first_valid, series_len, max_p) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
 
         let prices_bytes = series_len
@@ -371,48 +374,86 @@ impl CudaNetMyrsi {
             DeviceBuffer::uninitialized_async(out_elems, &self.stream)?
         };
 
-        // Launch
-        let mut block_x = match self.policy.batch {
+        // Launch (warp-per-combo):
+        // - One warp computes one combo (period), parallelizing NET's O(period) update loop.
+        // - Shared-memory FP64 rings (diffs + myr) for parity; use 8-byte shared banks.
+        let desired_block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 32,
         };
-        if block_x == 0 { block_x = 32; }
-        block_x = Self::round_up_32(block_x);
-        let grid_x = Self::div_up_u32(combos.len() as u32, block_x);
-        let mut func: Function = self
-            .module
-            .get_function("net_myrsi_batch_f32")
-            .map_err(|_| CudaNetMyrsiError::MissingKernelSymbol { name: "net_myrsi_batch_f32" })?;
-        // Prefer L1 for small per-thread working sets
-        let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let gx = grid_x.max(1);
-        let gy = 1;
-        let gz = 1;
-        let bx = block_x;
-        let by = 1;
-        let bz = 1;
-        Self::validate_launch(gx, gy, gz, bx, by, bz)?;
-        let grid: GridSize = (gx, gy, gz).into();
-        let block: BlockSize = (bx, by, bz).into();
+        let desired_block_x = if desired_block_x == 0 { 32 } else { desired_block_x };
+        let desired_block_x = Self::round_up_32(desired_block_x).min(1024).max(32);
+
+        let max_dyn_default: usize = 48 * 1024;
+        let per_warp_bytes = max_p
+            .checked_mul(2 * core::mem::size_of::<f64>())
+            .ok_or_else(|| CudaNetMyrsiError::InvalidInput("shared bytes overflow".into()))?;
+        if per_warp_bytes == 0 {
+            return Err(CudaNetMyrsiError::InvalidInput(
+                "invalid max_period".into(),
+            ));
+        }
+        let max_warps_by_smem = (max_dyn_default / per_warp_bytes).max(1) as u32;
+
+        let desired_warps = (desired_block_x / 32).max(1);
+        let warps_per_block = desired_warps
+            .min(max_warps_by_smem)
+            .min(combos.len().max(1) as u32);
+        let block_x = warps_per_block * 32;
+        let shmem_bytes = (warps_per_block as usize).saturating_mul(per_warp_bytes);
+        if shmem_bytes > max_dyn_default {
+            return Err(CudaNetMyrsiError::InvalidPolicy(
+                "net_myrsi warp_dbl requires >48KiB dynamic shared memory",
+            ));
+        }
+
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
             let mut per_ptr = d_periods.as_device_ptr().as_raw();
             let mut len_i = series_len as i32;
             let mut rows_i = combos.len() as i32;
             let mut fv_i = first_valid as i32;
+            let mut max_p_i = max_p as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
-            let mut args: [*mut c_void; 6] = [
+
+            let gx = Self::div_up_u32(combos.len() as u32, warps_per_block).max(1);
+            Self::validate_launch(gx, 1, 1, block_x, 1, 1)?;
+            let grid: GridSize = (gx, 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            let mut func: Function = self
+                .module
+                .get_function("net_myrsi_batch_f32_warp_dbl")
+                .map_err(|_| CudaNetMyrsiError::MissingKernelSymbol {
+                    name: "net_myrsi_batch_f32_warp_dbl",
+                })?;
+            let _ = func.set_cache_config(CacheConfig::PreferShared);
+            let _ = func.set_shared_memory_config(SharedMemoryConfig::EightByteBankSize);
+
+            let mut args: [*mut c_void; 7] = [
                 &mut p_ptr as *mut _ as *mut c_void,
                 &mut per_ptr as *mut _ as *mut c_void,
                 &mut len_i as *mut _ as *mut c_void,
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut fv_i as *mut _ as *mut c_void,
+                &mut max_p_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)
-                ?;
+            self.stream.launch(
+                &func,
+                grid,
+                block,
+                shmem_bytes as u32,
+                &mut args,
+            )?;
+            (*(self as *const _ as *mut CudaNetMyrsi)).last_batch =
+                Some(BatchKernelSelected::WarpSharedDbl {
+                    block_x,
+                    max_period: max_p as u32,
+                    shmem_bytes: shmem_bytes as u32,
+                });
         }
+
         self.synchronize()?;
 
         Ok((
@@ -531,8 +572,6 @@ pub mod benches {
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     const LEN_1M: usize = 1_000_000;
-    const ROWS_1M: usize = 1_000_000;
-    const COLS_256: usize = 256;
 
     fn gen_prices(len: usize) -> Vec<f32> {
         let mut v = vec![f32::NAN; len];
@@ -542,61 +581,99 @@ pub mod benches {
         v
     }
 
-    struct BatchState {
+    struct BatchDeviceState {
         cuda: CudaNetMyrsi,
-        data: Vec<f32>,
-    }
-    impl CudaBenchState for BatchState {
-        fn launch(&mut self) {
-            let sweep = NetMyrsiBatchRange {
-                period: (8, 128, 8),
-            };
-            let _ = self.cuda.net_myrsi_batch_dev(&self.data, &sweep).unwrap();
-        }
-    }
-
-    struct ManyState {
-        cuda: CudaNetMyrsi,
-        data_tm: Vec<f32>,
-        cols: usize,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
         rows: usize,
-        params: NetMyrsiParams,
+        first_valid: usize,
+        max_p: usize,
+        grid: GridSize,
+        block: BlockSize,
+        shmem_bytes: u32,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
+            let mut func: Function = self
                 .cuda
-                .net_myrsi_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .unwrap();
+                .module
+                .get_function("net_myrsi_batch_f32_warp_dbl")
+                .expect("net_myrsi_batch_f32_warp_dbl");
+            let _ = func.set_cache_config(CacheConfig::PreferShared);
+            let _ = func.set_shared_memory_config(SharedMemoryConfig::EightByteBankSize);
+
+            unsafe {
+                let mut p_ptr = self.d_prices.as_device_ptr().as_raw();
+                let mut per_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut len_i = self.series_len as i32;
+                let mut rows_i = self.rows as i32;
+                let mut fv_i = self.first_valid as i32;
+                let mut max_p_i = self.max_p as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 7] = [
+                    &mut p_ptr as *mut _ as *mut c_void,
+                    &mut per_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut fv_i as *mut _ as *mut c_void,
+                    &mut max_p_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, self.shmem_bytes, &mut args)
+                    .expect("net_myrsi batch launch");
+            }
+            self.cuda.synchronize().expect("net_myrsi sync");
         }
     }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
-        Box::new(BatchState {
-            cuda: CudaNetMyrsi::new(0).expect("cuda"),
-            data: gen_prices(LEN_1M),
-        })
-    }
-    fn prep_many_series() -> Box<dyn CudaBenchState> {
-        let cols = COLS_256;
-        let rows = ROWS_1M / COLS_256;
-        let mut data_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for r in s..rows {
-                data_tm[r * cols + s] = (r as f32 * 0.0013 + s as f32 * 0.01).sin();
-            }
-        }
-        Box::new(ManyState {
-            cuda: CudaNetMyrsi::new(0).expect("cuda"),
-            data_tm,
-            cols,
+        let cuda = CudaNetMyrsi::new(0).expect("cuda");
+        let data = gen_prices(LEN_1M);
+        let sweep = NetMyrsiBatchRange {
+            period: (8, 128, 8),
+        };
+        let (combos, first_valid, series_len, max_p) =
+            CudaNetMyrsi::prepare_batch_inputs(&data, &sweep).expect("prep");
+        let rows = combos.len();
+        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+
+        let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * series_len) }.expect("d_out");
+
+        let max_dyn_default: usize = 48 * 1024;
+        let per_warp_bytes = max_p
+            .checked_mul(2 * core::mem::size_of::<f64>())
+            .expect("per_warp_bytes overflow");
+        let max_warps_by_smem = (max_dyn_default / per_warp_bytes).max(1) as u32;
+        let warps_per_block = 1u32.min(max_warps_by_smem).min(rows.max(1) as u32);
+        let block_x = warps_per_block * 32;
+        let shmem_bytes = (warps_per_block as usize).saturating_mul(per_warp_bytes);
+        let gx = CudaNetMyrsi::div_up_u32(rows as u32, warps_per_block).max(1);
+        CudaNetMyrsi::validate_launch(gx, 1, 1, block_x, 1, 1)
+            .expect("validate launch");
+        let grid: GridSize = (gx, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        cuda.synchronize().expect("sync after prep");
+
+        Box::new(BatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_out,
+            series_len,
             rows,
-            params: NetMyrsiParams { period: Some(64) },
+            first_valid,
+            max_p,
+            grid,
+            block,
+            shmem_bytes: shmem_bytes as u32,
         })
     }
 
@@ -608,13 +685,6 @@ pub mod benches {
                 "net_myrsi_cuda_batch_dev",
                 "1m_x_128",
                 prep_batch,
-            ),
-            CudaBenchScenario::new(
-                "net_myrsi",
-                "many_series_one_param",
-                "net_myrsi_cuda_many_series_one_param",
-                "256x4k",
-                prep_many_series,
             ),
         ]
     }

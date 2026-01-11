@@ -668,7 +668,7 @@ pub struct MediumAdBatchRange {
 
 impl Default for MediumAdBatchRange {
     fn default() -> Self {
-        Self { period: (5, 50, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

@@ -398,11 +398,14 @@ impl CudaDamianiVolatmeter {
             .get_function("damiani_volatmeter_batch_f32")
             .map_err(|_| CudaDamianiError::MissingKernelSymbol { name: "damiani_volatmeter_batch_f32" })?;
         let block_x_env = std::env::var("DAMIANI_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok());
-        // 1 thread per block by default (thread 0 does the scan); overrideable via policy/env
+        // Default to 1 thread per block (sequential scan per combo); overrideable via policy/env.
+        // Note: larger blocks increase parallelism but can severely degrade memory coalescing
+        // for the row-major output layout.
         let block_x = block_x_env
             .or_else(|| match self.policy_batch { BatchKernelPolicy::Plain { block_x } => Some(block_x), _ => None })
             .unwrap_or(1).max(1);
-        let grid: GridSize = (n_combos as u32, 1, 1).into();
+        let gx = ((n_combos + (block_x as usize) - 1) / (block_x as usize)).max(1) as u32;
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut p: u64 = 0; // kernel ignores prices; pass null device ptr
@@ -606,7 +609,8 @@ impl CudaDamianiVolatmeter {
         let block_x = block_x_env
             .or_else(|| match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })
             .unwrap_or(1).max(1);
-        let grid: GridSize = (cols as u32, 1, 1).into();
+        let gx = ((cols + (block_x as usize) - 1) / (block_x as usize)).max(1) as u32;
+        let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut h = d_high_tm.as_device_ptr().as_raw();
@@ -834,63 +838,142 @@ pub mod benches {
         (high, low)
     }
 
-    struct BatchState {
+    struct BatchDevState {
         cuda: CudaDamianiVolatmeter,
-        close: Vec<f32>,
-        sweep: DamianiVolatmeterBatchRange,
+        series_len: usize,
+        first_valid: usize,
+        d_va: DeviceBuffer<i32>,
+        d_vs: DeviceBuffer<i32>,
+        d_sa: DeviceBuffer<i32>,
+        d_ss_: DeviceBuffer<i32>,
+        d_th: DeviceBuffer<f32>,
+        rows: usize,
+        d_s: DeviceBuffer<Float2>,
+        d_ss: DeviceBuffer<Float2>,
+        d_tr: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .damiani_volatmeter_batch_dev(&self.close, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch(
+                    self.series_len,
+                    self.first_valid,
+                    &self.d_va,
+                    &self.d_vs,
+                    &self.d_sa,
+                    &self.d_ss_,
+                    &self.d_th,
+                    self.rows,
+                    &self.d_s,
+                    &self.d_ss,
+                    &self.d_tr,
+                    &mut self.d_out,
+                )
+                .expect("damiani batch kernel");
+            self.cuda.stream.synchronize().expect("damiani sync");
         }
     }
 
     struct ManySeriesState {
         cuda: CudaDamianiVolatmeter,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_s_tm: DeviceBuffer<Float2>,
+        d_ss_tm: DeviceBuffer<Float2>,
         cols: usize,
         rows: usize,
-        params: DamianiVolatmeterParams,
+        vis_atr: usize,
+        vis_std: usize,
+        sed_atr: usize,
+        sed_std: usize,
+        threshold: f32,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .damiani_volatmeter_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.vis_atr,
+                    self.vis_std,
+                    self.sed_atr,
+                    self.sed_std,
+                    self.threshold,
+                    &self.d_first_valids,
+                    &self.d_s_tm,
+                    &self.d_ss_tm,
+                    &mut self.d_out_tm,
                 )
-                .unwrap();
+                .expect("damiani many-series kernel");
+            self.cuda.stream.synchronize().expect("damiani sync");
         }
     }
 
-    fn prep_batch() -> Box<dyn CudaBenchState> {
+    fn prep_batch_dev() -> Box<dyn CudaBenchState> {
         let cuda = CudaDamianiVolatmeter::new(0).expect("cuda damiani");
         let close = synth_close(ONE_SERIES_LEN);
         let sweep = DamianiVolatmeterBatchRange {
-            vis_atr: (13, 40, 1),
-            vis_std: (20, 40, 1),
+            vis_atr: (13, 40, 2),
+            vis_std: (20, 40, 2),
             sed_atr: (40, 40, 0),
             sed_std: (100, 100, 0),
             threshold: (1.4, 1.4, 0.0),
         };
-        let sweep = DamianiVolatmeterBatchRange {
-            vis_atr: (13, 40, 1),
-            vis_std: (20, 40, 1),
-            sed_atr: (40, 40, 0),
-            sed_std: (100, 100, 0),
-            threshold: (1.4, 1.4, 0.0),
-        };
-        Box::new(BatchState { cuda, close, sweep })
+        let combos = CudaDamianiVolatmeter::expand_grid(&sweep).expect("damiani expand grid");
+        let first_valid = CudaDamianiVolatmeter::first_valid_close(&close).expect("damiani first_valid");
+
+        // Precomputes (host) once for kernel-only timing.
+        let tr = CudaDamianiVolatmeter::compute_tr_close_only(&close, first_valid);
+        let (s_prefix_f64, ss_prefix_f64) = CudaDamianiVolatmeter::compute_prefix_sums(&close, first_valid);
+        let s_prefix: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_prefix_f64);
+        let ss_prefix: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&ss_prefix_f64);
+
+        let rows = combos.len();
+        let vis_atr: Vec<i32> = combos.iter().map(|p| p.vis_atr.unwrap() as i32).collect();
+        let vis_std: Vec<i32> = combos.iter().map(|p| p.vis_std.unwrap() as i32).collect();
+        let sed_atr: Vec<i32> = combos.iter().map(|p| p.sed_atr.unwrap() as i32).collect();
+        let sed_std: Vec<i32> = combos.iter().map(|p| p.sed_std.unwrap() as i32).collect();
+        let thresh: Vec<f32> = combos.iter().map(|p| p.threshold.unwrap() as f32).collect();
+
+        let d_va = unsafe { DeviceBuffer::from_slice_async(&vis_atr, &cuda.stream) }.expect("d_va");
+        let d_vs = unsafe { DeviceBuffer::from_slice_async(&vis_std, &cuda.stream) }.expect("d_vs");
+        let d_sa = unsafe { DeviceBuffer::from_slice_async(&sed_atr, &cuda.stream) }.expect("d_sa");
+        let d_ss_ = unsafe { DeviceBuffer::from_slice_async(&sed_std, &cuda.stream) }.expect("d_ss");
+        let d_th = unsafe { DeviceBuffer::from_slice_async(&thresh, &cuda.stream) }.expect("d_th");
+        let d_s = unsafe { DeviceBuffer::from_slice_async(&s_prefix, &cuda.stream) }.expect("d_s");
+        let d_ss = unsafe { DeviceBuffer::from_slice_async(&ss_prefix, &cuda.stream) }.expect("d_ss2");
+        let d_tr = unsafe { DeviceBuffer::from_slice_async(&tr, &cuda.stream) }.expect("d_tr");
+
+        let len_out = (2usize)
+            .checked_mul(rows)
+            .and_then(|x| x.checked_mul(ONE_SERIES_LEN))
+            .expect("damiani out size overflow");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len_out, &cuda.stream) }.expect("d_out");
+        cuda.stream.synchronize().expect("damiani sync");
+
+        Box::new(BatchDevState {
+            cuda,
+            series_len: ONE_SERIES_LEN,
+            first_valid,
+            d_va,
+            d_vs,
+            d_sa,
+            d_ss_,
+            d_th,
+            rows,
+            d_s,
+            d_ss,
+            d_tr,
+            d_out,
+        })
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaDamianiVolatmeter::new(0).expect("cuda damiani");
@@ -907,29 +990,60 @@ pub mod benches {
             v
         };
         let (high_tm, low_tm) = synth_hlc_from_close(&close_tm);
-        let params = DamianiVolatmeterParams {
-            vis_atr: Some(13),
-            vis_std: Some(20),
-            sed_atr: Some(40),
-            sed_std: Some(100),
-            threshold: Some(1.4),
-        };
+        let (vis_atr, vis_std, sed_atr, sed_std, threshold) = (13usize, 20usize, 40usize, 100usize, 1.4f32);
+        let mut first_valids = vec![-1i32; cols];
+        for series in 0..cols {
+            let mut fv = None;
+            for t in 0..rows {
+                let idx = t * cols + series;
+                if close_tm[idx].is_finite() {
+                    fv = Some(t as i32);
+                    break;
+                }
+            }
+            first_valids[series] = fv.expect("series all NaN");
+        }
+        let (s_tm_f64, ss_tm_f64) =
+            CudaDamianiVolatmeter::compute_prefix_sums_time_major(&close_tm, cols, rows, &first_valids);
+        let s_tm: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_tm_f64);
+        let ss_tm: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&ss_tm_f64);
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_s_tm = DeviceBuffer::from_slice(&s_tm).expect("d_s_tm");
+        let d_ss_tm = DeviceBuffer::from_slice(&ss_tm).expect("d_ss_tm");
+        let elems = cols * rows;
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems * 2) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(ManySeriesState {
             cuda,
-            high_tm,
-            low_tm,
-            close_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
+            d_s_tm,
+            d_ss_tm,
             cols,
             rows,
-            params,
+            vis_atr,
+            vis_std,
+            sed_atr,
+            sed_std,
+            threshold,
+            d_out_tm,
         })
     }
 
     fn bytes_batch() -> usize {
-        (1 * ONE_SERIES_LEN * std::mem::size_of::<f32>()         // TR only (no prices upload)
-            + 2 * ONE_SERIES_LEN * std::mem::size_of::<Float2>() // prefixes as Float2
-            + 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>()    // outputs (2 rows)
-            + 64 * 1024 * 1024) // headroom
+        let combos = 154usize; // vis_atr: 13..40 step2 (14) x vis_std: 20..40 step2 (11)
+        let param_bytes = combos * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let prefix_bytes = ONE_SERIES_LEN * (2 * std::mem::size_of::<Float2>());
+        let tr_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = combos * ONE_SERIES_LEN * (2 * std::mem::size_of::<f32>());
+        param_bytes + prefix_bytes + tr_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many() -> usize {
         (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()     // H,L,C
@@ -944,10 +1058,11 @@ pub mod benches {
             CudaBenchScenario::new(
                 "damiani_volatmeter",
                 "batch",
-                "damiani_cuda_batch",
-                "1m",
-                prep_batch,
+                "damiani_cuda_batch_dev",
+                "1m_x_154",
+                prep_batch_dev,
             )
+            .with_sample_size(10)
             .with_mem_required(bytes_batch()),
             CudaBenchScenario::new(
                 "damiani_volatmeter",
@@ -956,22 +1071,7 @@ pub mod benches {
                 "8k x 256",
                 prep_many,
             )
-            .with_mem_required(bytes_many()),
-            CudaBenchScenario::new(
-                "damiani_volatmeter",
-                "batch",
-                "damiani_cuda_batch",
-                "1m",
-                prep_batch,
-            )
-            .with_mem_required(bytes_batch()),
-            CudaBenchScenario::new(
-                "damiani_volatmeter",
-                "many_series_one_param",
-                "damiani_cuda_many_series",
-                "8k x 256",
-                prep_many,
-            )
+            .with_sample_size(10)
             .with_mem_required(bytes_many()),
         ]
     }

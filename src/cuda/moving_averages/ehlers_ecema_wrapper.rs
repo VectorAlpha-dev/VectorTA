@@ -1210,18 +1210,51 @@ pub mod benches {
         }
     }
 
-    struct EcemaBatchState {
+    struct EcemaBatchDevState {
         cuda: CudaEhlersEcema,
-        price: Vec<f32>,
-        sweep: EhlersEcemaBatchRange,
-        params: EhlersEcemaParams,
+        use_thread_per_combo: bool,
+        d_prices: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_gain_limits: DeviceBuffer<i32>,
+        d_pine_flags: DeviceBuffer<u8>,
+        d_confirmed_flags: DeviceBuffer<u8>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for EcemaBatchState {
+    impl CudaBenchState for EcemaBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ehlers_ecema_batch_dev(&self.price, &self.sweep, &self.params)
-                .expect("ecema batch launch");
+            if self.use_thread_per_combo {
+                self.cuda
+                    .launch_batch_thread_per_combo(
+                        &self.d_prices,
+                        &self.d_lengths,
+                        &self.d_gain_limits,
+                        &self.d_pine_flags,
+                        &self.d_confirmed_flags,
+                        self.series_len,
+                        self.n_combos,
+                        self.first_valid,
+                        &mut self.d_out,
+                    )
+                    .expect("ecema batch thread-per-combo");
+            } else {
+                self.cuda
+                    .launch_batch_plain(
+                        &self.d_prices,
+                        &self.d_lengths,
+                        &self.d_gain_limits,
+                        &self.d_pine_flags,
+                        &self.d_confirmed_flags,
+                        self.series_len,
+                        self.n_combos,
+                        self.first_valid,
+                        &mut self.d_out,
+                    )
+                    .expect("ecema batch plain");
+            }
+            self.cuda.stream.synchronize().expect("ecema sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1231,32 +1264,100 @@ pub mod benches {
             length: (10, 10 + PARAM_SWEEP - 1, 1),
             gain_limit: (50, 50, 0),
         };
-        Box::new(EcemaBatchState {
+        let params = default_params();
+        let pine_mode = params.pine_compatible.unwrap_or(false);
+        let confirmed = params.confirmed_only.unwrap_or(false);
+        let (combos, first_valid, series_len) =
+            CudaEhlersEcema::prepare_batch_inputs(&price, &sweep, pine_mode, confirmed)
+                .expect("ecema prepare batch");
+        let n_combos = combos.len();
+        let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap() as i32).collect();
+        let gain_i32: Vec<i32> = combos.iter().map(|p| p.gain_limit.unwrap() as i32).collect();
+        let pine_flags: Vec<u8> = combos
+            .iter()
+            .map(|p| if p.pine_compatible.unwrap_or(false) { 1 } else { 0 })
+            .collect();
+        let confirmed_flags: Vec<u8> = combos
+            .iter()
+            .map(|p| if p.confirmed_only.unwrap_or(false) { 1 } else { 0 })
+            .collect();
+
+        // Mirror the default selection logic used by the wrapper batch path.
+        let have_thread_per_combo = cuda
+            .module
+            .get_function("ehlers_ecema_batch_thread_per_combo_f32")
+            .is_ok();
+        let force_plain = CudaEhlersEcema::env_bool("ECEMA_FORCE_PLAIN").unwrap_or(false);
+        let force_tiled = CudaEhlersEcema::env_bool("ECEMA_FORCE_TILED").unwrap_or(false);
+        let use_thread_per_combo = match cuda.policy.batch {
+            BatchKernelPolicy::Auto => {
+                if force_plain {
+                    false
+                } else if force_tiled {
+                    true
+                } else {
+                    have_thread_per_combo
+                }
+            }
+            BatchKernelPolicy::Plain { .. } => false,
+            BatchKernelPolicy::Tiled { .. } => true,
+        };
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).expect("d_lengths");
+        let d_gain_limits = DeviceBuffer::from_slice(&gain_i32).expect("d_gain_limits");
+        let d_pine_flags = DeviceBuffer::from_slice(&pine_flags).expect("d_pine_flags");
+        let d_confirmed_flags =
+            DeviceBuffer::from_slice(&confirmed_flags).expect("d_confirmed_flags");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EcemaBatchDevState {
             cuda,
-            price,
-            sweep,
-            params: default_params(),
+            use_thread_per_combo,
+            d_prices,
+            d_lengths,
+            d_gain_limits,
+            d_pine_flags,
+            d_confirmed_flags,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
         })
     }
 
-    struct EcemaManyState {
+    struct EcemaManyDevState {
         cuda: CudaEhlersEcema,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: EhlersEcemaParams,
+        length: usize,
+        gain_limit: usize,
+        pine_mode: bool,
+        confirmed: bool,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for EcemaManyState {
+    impl CudaBenchState for EcemaManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ehlers_ecema_many_series_one_param_time_major_dev(
-                    &self.data_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.length,
+                    self.gain_limit,
+                    self.pine_mode,
+                    self.confirmed,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .expect("ecema many-series launch");
+                .expect("ecema many-series kernel");
+            self.cuda.stream.synchronize().expect("ecema many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1264,12 +1365,29 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        Box::new(EcemaManyState {
+        let params = default_params();
+        let (first_valids, length, gain_limit, pine_mode, confirmed) =
+            CudaEhlersEcema::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("ecema prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(EcemaManyDevState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
-            params: default_params(),
+            length,
+            gain_limit,
+            pine_mode,
+            confirmed,
+            d_out_tm,
         })
     }
 

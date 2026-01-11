@@ -65,17 +65,26 @@ void aroonosc_batch_f32(const float* __restrict__ high,
 
     const int base = combo * series_len;
 
-    // Initialize this row to NaN in parallel.
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out[base + i] = CUDART_NAN_F;
-    }
-    __syncthreads(); // avoid races with later writes to [warm..)
-
     const int L = lengths[combo];
-    if (L <= 0) return;
+    if (L <= 0 || first_valid < 0 || first_valid >= series_len) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out[base + i] = CUDART_NAN_F;
+        }
+        return;
+    }
 
     const int warm = first_valid + L;        // window [t-L .. t] has L+1 elems
-    if (warm >= series_len) return;
+    if (warm >= series_len) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out[base + i] = CUDART_NAN_F;
+        }
+        return;
+    }
+
+    // Warmup region only; everything >= warm is overwritten by the main loop.
+    for (int i = threadIdx.x; i < warm; i += blockDim.x) {
+        out[base + i] = CUDART_NAN_F;
+    }
 
     const float scale = 100.0f / (float)L;
 
@@ -130,17 +139,26 @@ void aroonosc_many_series_one_param_f32(const float* __restrict__ high_tm,
     const int s = blockIdx.x; // one block per series
     if (s >= num_series || series_len <= 0) return;
 
-    // Initialize this series to NaN in parallel.
-    for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
-        out_tm[t * num_series + s] = CUDART_NAN_F;
+    if (length <= 0) {
+        for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
+            out_tm[t * num_series + s] = CUDART_NAN_F;
+        }
+        return;
     }
-    __syncthreads();
-
-    if (length <= 0) return;
 
     const int fv   = first_valids[s] < 0 ? 0 : first_valids[s];
     const int warm = fv + length;
-    if (warm >= series_len) return;
+    if (warm >= series_len) {
+        for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
+            out_tm[t * num_series + s] = CUDART_NAN_F;
+        }
+        return;
+    }
+
+    // Warmup region only; everything >= warm is overwritten by the main loop.
+    for (int t = threadIdx.x; t < warm; t += blockDim.x) {
+        out_tm[t * num_series + s] = CUDART_NAN_F;
+    }
 
     const float scale  = 100.0f / (float)length;
     const int   stride = num_series;

@@ -66,8 +66,10 @@ void aroon_batch_f32(const float* __restrict__ high,   // single price series
     if (threadIdx.x != 0) return;
 
     // Deque heads/tails using [head, tail) index ranges.
-    int h_head = 0, h_tail = 0;  // max(high) ring [head, tail)
-    int l_head = 0, l_tail = 0;  // min(low)  ring [head, tail)
+    int h_head = 0, h_tail = 0;          // max(high) ring [head, tail)
+    int h_head_idx = 0, h_tail_idx = 0;  // == (head|tail) % W
+    int l_head = 0, l_tail = 0;          // min(low)  ring [head, tail)
+    int l_head_idx = 0, l_tail_idx = 0;  // == (head|tail) % W
 
     const float scale = 100.0f / (float)length;
     int last_bad = -0x3fffffff;  // last index with !both_finite
@@ -76,8 +78,14 @@ void aroon_batch_f32(const float* __restrict__ high,   // single price series
     for (int t = 0; t < series_len; ++t) {
         const int start = t - length;
         // Evict indices that fall left of the window from deque fronts.
-        while (h_tail > h_head && dq_max[h_head % W] < start) ++h_head;
-        while (l_tail > l_head && dq_min[l_head % W] < start) ++l_head;
+        while (h_tail > h_head && dq_max[h_head_idx] < start) {
+            ++h_head;
+            h_head_idx = (h_head_idx + 1 == W) ? 0 : (h_head_idx + 1);
+        }
+        while (l_tail > l_head && dq_min[l_head_idx] < start) {
+            ++l_head;
+            l_head_idx = (l_head_idx + 1 == W) ? 0 : (l_head_idx + 1);
+        }
 
         const float h = high[t];
         const float l = low[t];
@@ -88,16 +96,32 @@ void aroon_batch_f32(const float* __restrict__ high,   // single price series
         } else {
             // Push t into MAX deque for highs: pop strictly smaller to keep earliest on ties.
             while (h_tail > h_head) {
-                const int idx = dq_max[(h_tail - 1) % W];
-                if (high[idx] < h) --h_tail; else break;
+                const int last_slot = (h_tail_idx == 0) ? (W - 1) : (h_tail_idx - 1);
+                const int idx = dq_max[last_slot];
+                if (high[idx] < h) {
+                    --h_tail;
+                    h_tail_idx = last_slot;
+                } else {
+                    break;
+                }
             }
-            dq_max[h_tail % W] = t; ++h_tail;
+            dq_max[h_tail_idx] = t;
+            ++h_tail;
+            h_tail_idx = (h_tail_idx + 1 == W) ? 0 : (h_tail_idx + 1);
             // Push t into MIN deque for lows: pop strictly larger to keep earliest on ties.
             while (l_tail > l_head) {
-                const int idx = dq_min[(l_tail - 1) % W];
-                if (low[idx] > l) --l_tail; else break;
+                const int last_slot = (l_tail_idx == 0) ? (W - 1) : (l_tail_idx - 1);
+                const int idx = dq_min[last_slot];
+                if (low[idx] > l) {
+                    --l_tail;
+                    l_tail_idx = last_slot;
+                } else {
+                    break;
+                }
             }
-            dq_min[l_tail % W] = t; ++l_tail;
+            dq_min[l_tail_idx] = t;
+            ++l_tail;
+            l_tail_idx = (l_tail_idx + 1 == W) ? 0 : (l_tail_idx + 1);
         }
 
         if (t >= warm) {
@@ -105,8 +129,8 @@ void aroon_batch_f32(const float* __restrict__ high,   // single price series
                 out_up  [base + t] = NAN;
                 out_down[base + t] = NAN;
             } else {
-                const int idx_hi = (h_tail > h_head) ? dq_max[h_head % W] : -1;
-                const int idx_lo = (l_tail > l_head) ? dq_min[l_head % W] : -1;
+                const int idx_hi = (h_tail > h_head) ? dq_max[h_head_idx] : -1;
+                const int idx_lo = (l_tail > l_head) ? dq_min[l_head_idx] : -1;
                 if (idx_hi < 0 || idx_lo < 0) {
                     out_up  [base + t] = NAN;
                     out_down[base + t] = NAN;
@@ -169,15 +193,23 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,   // [t]
     int* __restrict__ dq_max = s_deques;      // capacity == W (ring)
     int* __restrict__ dq_min = s_deques + W;  // capacity == W (ring)
 
-    int h_head = 0, h_tail = 0; // [head, tail)
-    int l_head = 0, l_tail = 0; // [head, tail)
+    int h_head = 0, h_tail = 0;          // [head, tail)
+    int h_head_idx = 0, h_tail_idx = 0;  // == (head|tail) % W
+    int l_head = 0, l_tail = 0;          // [head, tail)
+    int l_head_idx = 0, l_tail_idx = 0;  // == (head|tail) % W
     const float scale = 100.0f / (float)length;
     int last_bad = -0x3fffffff;
 
     for (int t = 0; t < series_len; ++t) {
         const int start = t - length;
-        while (h_tail > h_head && dq_max[h_head % W] < start) ++h_head;
-        while (l_tail > l_head && dq_min[l_head % W] < start) ++l_head;
+        while (h_tail > h_head && dq_max[h_head_idx] < start) {
+            ++h_head;
+            h_head_idx = (h_head_idx + 1 == W) ? 0 : (h_head_idx + 1);
+        }
+        while (l_tail > l_head && dq_min[l_head_idx] < start) {
+            ++l_head;
+            l_head_idx = (l_head_idx + 1 == W) ? 0 : (l_head_idx + 1);
+        }
 
         const float h = high_tm[t * stride + s];
         const float l = low_tm [t * stride + s];
@@ -187,16 +219,32 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,   // [t]
         } else {
             // Push into max/min deques (strict inequalities to keep earlier ties).
             while (h_tail > h_head) {
-                const int idx = dq_max[(h_tail - 1) % W];
-                if (high_tm[idx * stride + s] < h) --h_tail; else break;
+                const int last_slot = (h_tail_idx == 0) ? (W - 1) : (h_tail_idx - 1);
+                const int idx = dq_max[last_slot];
+                if (high_tm[idx * stride + s] < h) {
+                    --h_tail;
+                    h_tail_idx = last_slot;
+                } else {
+                    break;
+                }
             }
-            dq_max[h_tail % W] = t; ++h_tail;
+            dq_max[h_tail_idx] = t;
+            ++h_tail;
+            h_tail_idx = (h_tail_idx + 1 == W) ? 0 : (h_tail_idx + 1);
 
             while (l_tail > l_head) {
-                const int idx = dq_min[(l_tail - 1) % W];
-                if (low_tm[idx * stride + s] > l) --l_tail; else break;
+                const int last_slot = (l_tail_idx == 0) ? (W - 1) : (l_tail_idx - 1);
+                const int idx = dq_min[last_slot];
+                if (low_tm[idx * stride + s] > l) {
+                    --l_tail;
+                    l_tail_idx = last_slot;
+                } else {
+                    break;
+                }
             }
-            dq_min[l_tail % W] = t; ++l_tail;
+            dq_min[l_tail_idx] = t;
+            ++l_tail;
+            l_tail_idx = (l_tail_idx + 1 == W) ? 0 : (l_tail_idx + 1);
         }
 
         if (t >= warm) {
@@ -204,8 +252,8 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,   // [t]
                 out_up_tm  [t * stride + s] = NAN;
                 out_down_tm[t * stride + s] = NAN;
             } else {
-                const int idx_hi = (h_tail > h_head) ? dq_max[h_head % W] : -1;
-                const int idx_lo = (l_tail > l_head) ? dq_min[l_head % W] : -1;
+                const int idx_hi = (h_tail > h_head) ? dq_max[h_head_idx] : -1;
+                const int idx_lo = (l_tail > l_head) ? dq_min[l_head_idx] : -1;
                 if (idx_hi < 0 || idx_lo < 0) {
                     out_up_tm  [t * stride + s] = NAN;
                     out_down_tm[t * stride + s] = NAN;

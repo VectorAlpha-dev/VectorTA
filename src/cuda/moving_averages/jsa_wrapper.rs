@@ -962,23 +962,160 @@ impl CudaJsa {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::jsa::JsaBatchRange;
+    use crate::indicators::moving_averages::jsa::JsaParams;
 
-    define_ma_period_benches!(
-        jsa_benches,
-        CudaJsa,
-        crate::indicators::moving_averages::jsa::JsaBatchRange,
-        crate::indicators::moving_averages::jsa::JsaParams,
-        jsa_batch_dev,
-        jsa_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::jsa::JsaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::jsa::JsaParams { period: Some(64) },
-        "jsa",
-        "jsa"
-    );
-    pub use jsa_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct JsaBatchDevState {
+        cuda: CudaJsa,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warm: DeviceBuffer<i32>,
+        first_valid: usize,
+        series_len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for JsaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .jsa_batch_device(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_warm,
+                    self.series_len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("jsa batch kernel");
+            self.cuda.stream.synchronize().expect("jsa sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaJsa::new(0).expect("cuda jsa");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = JsaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let prepared = CudaJsa::prepare_batch_inputs(&price, &sweep).expect("jsa prepare batch");
+        let n_combos = prepared.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32).expect("d_periods");
+        let d_warm = DeviceBuffer::from_slice(&prepared.warm_indices).expect("d_warm");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(JsaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_warm,
+            first_valid: prepared.first_valid,
+            series_len: prepared.series_len,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct JsaManyDevState {
+        cuda: CudaJsa,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_warm: DeviceBuffer<i32>,
+        period: i32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for JsaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .jsa_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    &self.d_warm,
+                    self.period,
+                    self.cols,
+                    self.rows,
+                    &mut self.d_out_tm,
+                )
+                .expect("jsa many-series kernel");
+            self.cuda.stream.synchronize().expect("jsa sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaJsa::new(0).expect("cuda jsa");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = JsaParams { period: Some(64) };
+        let prepared = CudaJsa::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("jsa prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first");
+        let d_warm = DeviceBuffer::from_slice(&prepared.warm_indices).expect("d_warm");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(JsaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            d_warm,
+            period: prepared.period,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "jsa",
+                "one_series_many_params",
+                "jsa_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "jsa",
+                "many_series_one_param",
+                "jsa_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_periods(range: &JsaBatchRange) -> Result<Vec<JsaParams>, CudaJsaError> {

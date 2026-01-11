@@ -53,92 +53,111 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
                                                int series_len,
                                                int n_combos,
                                                int first_valid,
-                                               float* __restrict__ ssf_buf,
+                                               int max_period,
                                                float* __restrict__ out) {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
 
-    // Validate early to avoid useless memory traffic or prefix writes
     if (series_len <= 0 || period <= 0 || period >= series_len) return;
     if (first_valid < 0 || first_valid >= series_len) return;
-
-    const int base = combo * series_len;
-    float* __restrict__ row_out = out     + base;
-    float* __restrict__ row_ssf = ssf_buf + base; // used as rolling ring/scratch
+    if (max_period <= 0 || period > max_period) return;
 
     const int tail_len = series_len - first_valid;
     if (tail_len < period) return;
-
-    // Super-smoother coefficients for ss_period = round(period/2)
-    const float PI    = 3.14159265358979323846f;
-    const float ROOT2 = 1.41421356237f;
 
     int ss_period = (int)trendflex_round_half(0.5f * (float)period);
     if (ss_period < 1) ss_period = 1;
     if (tail_len < ss_period) return;
 
-    // Compute coefficients in double for closer parity with CPU scalar path
+    // Coefficients and recurrence in FP64 to stay within the CPU-parity tolerances.
+    const double PI    = 3.1415926535897932384626433832795;
+    const double ROOT2 = 1.4142135623730951;
+
     const double inv_ss = 1.0 / (double)ss_period;
-    const double a_d    = exp(-ROOT2 * PI * inv_ss);
-    const double a_sq_d = a_d * a_d;
-    const double b_d    = 2.0 * a_d * cos(ROOT2 * PI * inv_ss);
-    const double c_d    = 0.5 * (1.0 + a_sq_d - b_d);
+    const double k      = ROOT2 * PI * inv_ss;
+    const double a      = exp(-k);
+    const double a_sq   = a * a;
+    const double b      = 2.0 * a * cos(k);
+    const double c      = 0.5 * (1.0 + a_sq - b);
 
-    // Warm index and prefix NaNs
     const int warm = first_valid + period;
-    // Clear output and scratch (match original behavior for determinism)
-    for (int i = 0; i < series_len; ++i) {
-        row_out[i] = TRENDFLEX_NAN;
-        row_ssf[i] = 0.0f;
-    }
+    const int warm_clamped = (warm < series_len) ? warm : series_len;
 
+    const size_t base = (size_t)combo * (size_t)series_len;
+    float* __restrict__ row_out = out + base;
+
+#if !TRENDFLEX_ASSUME_OUT_PREFILLED
+    for (int i = 0; i < warm_clamped; ++i) {
+        row_out[i] = TRENDFLEX_NAN;
+    }
+#endif
     if (warm >= series_len) return;
 
-    // Build super smoother sequence in scratch buffer (aligned with output row)
-    const int first_idx = first_valid;
-    double prev2 = (double)prices[first_idx];
-    row_ssf[first_idx] = (float)prev2;
+    // Shared per-thread ring: [threadIdx.x][max_period]
+    extern __shared__ __align__(16) unsigned char shraw[];
+    float* __restrict__ sh = reinterpret_cast<float*>(shraw);
+    float* __restrict__ ring = sh + (size_t)threadIdx.x * (size_t)max_period;
+
+    const int fidx = first_valid;
+
+    // Seed SSF ring for the first `period` points starting at `first_valid`.
+    double prev2 = (double)prices[fidx];
+    ring[0] = (float)prev2;
+    double rolling_sum = (double)ring[0];
+
     double prev1 = prev2;
-    if (tail_len > 1) {
-        prev1 = (double)prices[first_idx + 1];
-        row_ssf[first_idx + 1] = (float)prev1;
+    double prev_price = prev2;
+    if (period >= 2) {
+        const double p1 = (double)prices[fidx + 1];
+        prev1 = p1;
+        prev_price = p1;
+        ring[1] = (float)p1;
+        rolling_sum += (double)ring[1];
     }
 
-    for (int t = 2; t < tail_len; ++t) {
-        const int idx = first_idx + t;
-        const double cur_price = (double)prices[idx];
-        const double prev_price = (double)prices[idx - 1];
-        const double ss = c_d * (cur_price + prev_price) + b_d * prev1 - a_sq_d * prev2;
-        row_ssf[idx] = (float)ss;
-        prev2 = prev1;
-        prev1 = ss;
+    for (int t = 2; t < period; ++t) {
+        const double cur_price = (double)prices[fidx + t];
+        const double ss = fma(c, (cur_price + prev_price),
+                              fma(b, prev1, -a_sq * prev2));
+        const float ss_f = (float)ss;
+        ring[t] = ss_f;
+        rolling_sum += (double)ss_f;
+        prev2      = prev1;
+        prev1      = ss;
+        prev_price = cur_price;
     }
 
-    double rolling_sum = 0.0;
-    for (int t = 0; t < period; ++t) {
-        rolling_sum += (double)row_ssf[first_idx + t];
-    }
-
-    const double tp_f = (double)period;
+    const double tp_f   = (double)period;
     const double inv_tp = 1.0 / tp_f;
     double ms_prev = 0.0;
 
-    for (int idx = warm; idx < series_len; ++idx) {
-        const double ss = (double)row_ssf[idx];
-        const double my_sum = (tp_f * ss - rolling_sum) * inv_tp;
-        const double ms_current = 0.04 * my_sum * my_sum + 0.96 * ms_prev;
+    for (int row = warm; row < series_len; ++row) {
+        const double cur_price = (double)prices[row];
+        const double ss = fma(c, (cur_price + prev_price),
+                              fma(b, prev1, -a_sq * prev2));
+
+        const float ss_f = (float)ss;
+        const double ss_q = (double)ss_f;
+        const double my_sum  = (tp_f * ss_q - rolling_sum) * inv_tp;
+        const double ms_current = fma(0.04, my_sum * my_sum, 0.96 * ms_prev);
         ms_prev = ms_current;
 
         float out_val = 0.0f;
         if (ms_current > 0.0) {
             out_val = (float)(my_sum / sqrt(ms_current));
         }
-        row_out[idx] = out_val;
+        row_out[row] = out_val;
 
-        const double ss_old = (double)row_ssf[idx - period];
-        rolling_sum += ss - ss_old;
+        const int pos = (row - fidx) % period;
+        const double ss_old = (double)ring[pos];
+        ring[pos] = ss_f;
+        rolling_sum += ss_q - ss_old;
+
+        prev2      = prev1;
+        prev1      = ss;
+        prev_price = cur_price;
     }
 }
 

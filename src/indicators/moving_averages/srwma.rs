@@ -502,7 +502,7 @@ pub struct SrwmaBatchRange {
 impl Default for SrwmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1999,6 +1999,15 @@ mod tests {
             })
             .unwrap();
 
+        Ok(())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_srwma_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
         Ok(())
     }
 

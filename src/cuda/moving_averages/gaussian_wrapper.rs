@@ -760,27 +760,180 @@ impl CudaGaussian {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::gaussian::GaussianParams;
 
-    define_ma_period_benches!(
-        gaussian_benches,
-        CudaGaussian,
-        crate::indicators::moving_averages::gaussian::GaussianBatchRange,
-        crate::indicators::moving_averages::gaussian::GaussianParams,
-        gaussian_batch_dev,
-        gaussian_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::gaussian::GaussianBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let coeff_bytes = PARAM_SWEEP * COEFF_STRIDE * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * (2 * std::mem::size_of::<i32>());
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + coeff_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let coeff_bytes = COEFF_STRIDE * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + coeff_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct BatchDevState {
+        cuda: CudaGaussian,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_poles: DeviceBuffer<i32>,
+        d_coeffs: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for BatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_poles,
+                    &self.d_coeffs,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("gaussian batch kernel");
+            self.cuda.stream.synchronize().expect("gaussian sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaGaussian::new(0).expect("cuda gaussian");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = crate::indicators::moving_averages::gaussian::GaussianBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
-            poles: (4, 4, 0)
-        },
-        crate::indicators::moving_averages::gaussian::GaussianParams {
+            poles: (4, 4, 0),
+        };
+        let inputs = CudaGaussian::prepare_batch_inputs(&price, &sweep).expect("gaussian prepare batch");
+        let n_combos = inputs.periods.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods).expect("d_periods");
+        let d_poles = DeviceBuffer::from_slice(&inputs.poles).expect("d_poles");
+        let d_coeffs = DeviceBuffer::from_slice(&inputs.coeffs).expect("d_coeffs");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(inputs.series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_poles,
+            d_coeffs,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            d_out,
+        })
+    }
+
+    struct ManyDevState {
+        cuda: CudaGaussian,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_coeffs: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        poles: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for ManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_coeffs,
+                    self.period,
+                    self.poles,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("gaussian many-series kernel");
+            self.cuda.stream.synchronize().expect("gaussian sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaGaussian::new(0).expect("cuda gaussian");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = GaussianParams {
             period: Some(64),
-            poles: Some(4)
-        },
-        "gaussian",
-        "gaussian"
-    );
-    pub use gaussian_benches::bench_profiles;
+            poles: Some(4),
+        };
+        let prepared =
+            CudaGaussian::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("gaussian prepare many");
+        let period = params.period.unwrap_or(64);
+        let poles = params.poles.unwrap_or(4);
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_coeffs = DeviceBuffer::from_slice(&prepared.coeffs).expect("d_coeffs");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
+            cuda,
+            d_prices_tm,
+            d_coeffs,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            poles,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "gaussian",
+                "one_series_many_params",
+                "gaussian_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "gaussian",
+                "many_series_one_param",
+                "gaussian_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 struct BatchInputs {

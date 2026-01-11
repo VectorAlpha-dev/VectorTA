@@ -762,13 +762,204 @@ fn compute_first_valids_time_major(data_tm: &[f32], cols: usize, rows: usize) ->
     v
 }
 
-// ---- Minimal benches registration to integrate with cuda_bench.rs ----
+// ---- Bench profiles (wrapper-owned) ----
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
+
+        // Device-resident benches (prep uploads/allocs once; launch is kernel + sync).
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "one_series_many_params",
+                "cg",
+                "cg_batch/1x-many",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        d_prices: DeviceBuffer<f32>,
+                        d_periods: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
+                        len: usize,
+                        first_valid: usize,
+                        n_combos: usize,
+                    }
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let mut func = self
+                                .cuda
+                                .module
+                                .get_function("cg_batch_f32")
+                                .expect("cg_batch_f32");
+                            let _ = func.set_cache_config(CacheConfig::PreferL1);
+                            let (suggested_block_x, _min_grid) = func
+                                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                                .unwrap_or((256, 0));
+                            let mut block_x = match self.cuda.policy.batch {
+                                BatchKernelPolicy::Auto => suggested_block_x.clamp(32, 1024),
+                                BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+                            };
+                            if let Ok(max_tpb) =
+                                func.get_attribute(FunctionAttribute::MaxThreadsPerBlock)
+                            {
+                                block_x = block_x.min(max_tpb as u32);
+                            }
+                            let grid_x = ((self.n_combos as u32) + block_x - 1) / block_x;
+                            unsafe {
+                                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                                let mut len_i = self.len as i32;
+                                let mut combos_i = self.n_combos as i32;
+                                let mut first_i = self.first_valid as i32;
+                                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                                let args: &mut [*mut c_void] = &mut [
+                                    &mut prices_ptr as *mut _ as *mut c_void,
+                                    &mut periods_ptr as *mut _ as *mut c_void,
+                                    &mut len_i as *mut _ as *mut c_void,
+                                    &mut combos_i as *mut _ as *mut c_void,
+                                    &mut first_i as *mut _ as *mut c_void,
+                                    &mut out_ptr as *mut _ as *mut c_void,
+                                ];
+                                self.cuda
+                                    .validate_launch(grid_x, 1, 1, block_x, 1, 1)
+                                    .expect("launch dims");
+                                self.cuda
+                                    .stream
+                                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
+                                    .expect("launch cg_batch_f32");
+                            }
+                            let _ = self.cuda.stream.synchronize();
+                        }
+                    }
+
+                    let prices = (0..100_000).map(|i| (i as f32).sin()).collect::<Vec<_>>();
+                    let sweep = CgBatchRange { period: (10, 40, 10) };
+                    let combos = expand_grid_cg(&sweep).expect("expand_grid_cg");
+                    let periods: Vec<i32> =
+                        combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
+                    let first_valid = prices.iter().position(|x| !x.is_nan()).unwrap_or(0);
+                    let len = prices.len();
+                    let n_combos = periods.len();
+
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+                    let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+                    let d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
+                    Box::new(St {
+                        cuda,
+                        d_prices,
+                        d_periods,
+                        d_out,
+                        len,
+                        first_valid,
+                        n_combos,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
+
+        v.push(
+            CudaBenchScenario::new(
+                "cg",
+                "many_series_one_param",
+                "cg",
+                "cg_many/series-major",
+                || {
+                    struct St {
+                        cuda: CudaCg,
+                        d_tm: DeviceBuffer<f32>,
+                        d_first: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
+                        cols: usize,
+                        rows: usize,
+                        period: usize,
+                    }
+                    impl CudaBenchState for St {
+                        fn launch(&mut self) {
+                            let mut func = self
+                                .cuda
+                                .module
+                                .get_function("cg_many_series_one_param_f32")
+                                .expect("cg_many_series_one_param_f32");
+                            let _ = func.set_cache_config(CacheConfig::PreferL1);
+                            let (suggested_block_x, _min_grid) = func
+                                .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
+                                .unwrap_or((256, 0));
+                            let mut block_x = match self.cuda.policy.many_series {
+                                ManySeriesKernelPolicy::Auto => suggested_block_x.clamp(32, 1024),
+                                ManySeriesKernelPolicy::OneD { block_x } => {
+                                    block_x.max(32).min(1024)
+                                }
+                            };
+                            if let Ok(max_tpb) =
+                                func.get_attribute(FunctionAttribute::MaxThreadsPerBlock)
+                            {
+                                block_x = block_x.min(max_tpb as u32);
+                            }
+                            let grid_x = ((self.cols as u32) + block_x - 1) / block_x;
+                            unsafe {
+                                let mut tm_ptr = self.d_tm.as_device_ptr().as_raw();
+                                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                                let mut cols_i = self.cols as i32;
+                                let mut rows_i = self.rows as i32;
+                                let mut period_i = self.period as i32;
+                                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                                let args: &mut [*mut c_void] = &mut [
+                                    &mut tm_ptr as *mut _ as *mut c_void,
+                                    &mut first_ptr as *mut _ as *mut c_void,
+                                    &mut cols_i as *mut _ as *mut c_void,
+                                    &mut rows_i as *mut _ as *mut c_void,
+                                    &mut period_i as *mut _ as *mut c_void,
+                                    &mut out_ptr as *mut _ as *mut c_void,
+                                ];
+                                self.cuda
+                                    .validate_launch(grid_x, 1, 1, block_x, 1, 1)
+                                    .expect("launch dims");
+                                self.cuda
+                                    .stream
+                                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)
+                                    .expect("launch cg_many_series_one_param_f32");
+                            }
+                            let _ = self.cuda.stream.synchronize();
+                        }
+                    }
+
+                    let cols = 512usize;
+                    let rows = 8_192usize;
+                    let mut tm = vec![f32::NAN; cols * rows];
+                    for r in 0..rows {
+                        for c in 0..cols {
+                            tm[r * cols + c] = ((r as f32) * 0.001 + (c as f32) * 0.0001).sin();
+                        }
+                    }
+                    let first_valids = compute_first_valids_time_major(&tm, cols, rows);
+                    let cuda = CudaCg::new(0).expect("cuda cg");
+                    let d_tm = DeviceBuffer::from_slice(&tm).expect("d_tm");
+                    let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+                    let d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+                    Box::new(St {
+                        cuda,
+                        d_tm,
+                        d_first,
+                        d_out,
+                        cols,
+                        rows,
+                        period: 20,
+                    })
+                },
+            )
+            .with_sample_size(20)
+            .with_inner_iters(1),
+        );
+        #[cfg(any())]
+        {
         // Batch: one series × many params
         v.push(
             CudaBenchScenario::new(
@@ -934,6 +1125,7 @@ pub mod benches {
             .with_sample_size(20)
             .with_inner_iters(1),
         );
+        }
         v
     }
 }

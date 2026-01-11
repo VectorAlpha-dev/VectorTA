@@ -337,7 +337,7 @@ fn nama_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     // Extra OHLC for TR if input is Candles
@@ -1135,7 +1135,7 @@ pub struct NamaBatchRange {
 impl Default for NamaBatchRange {
     fn default() -> Self {
         Self {
-            period: (30, 240, 1),
+            period: (30, 279, 1),
         }
     }
 }
@@ -1544,7 +1544,7 @@ pub fn nama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = NamaInput::from_slice(data, params);
     let mut output = vec![0.0; data.len()];
-    nama_into_slice(&mut output, &input, detect_best_kernel())
+    nama_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
@@ -1623,12 +1623,12 @@ pub fn nama_into(
         let input = NamaInput::from_slice(data, params);
         if in_ptr == out_ptr {
             let mut tmp = vec![0.0; len];
-            nama_into_slice(&mut tmp, &input, detect_best_kernel())
+            nama_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            nama_into_slice(out, &input, detect_best_kernel())
+            nama_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())

@@ -123,48 +123,25 @@ extern "C" __global__ void stochf_batch_f32(
 
     __syncthreads(); // ensure K is fully written before building D
 
-    // -------- %D (SMA only) with FP32 Kahan and NaN-correct semantics --------
+    // -------- %D (SMA only) --------
+    // Parallelize D across time (fast_d is typically small, e.g. 3 in the bench).
+    // Semantics: D is finite iff the last `fd` K values are all finite; otherwise NaN.
     if (mt == 0) {
         if (fd == 1) {
             // D == K when fd==1
             for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x)
                 out_d[base + t] = out_k[base + t];
-        } else if (threadIdx.x == 0) {
-            // One-lane linear pass is typically cheap (fd small, e.g., 3)
-            // Kahan compensated running sum for accuracy in FP32.
-            auto kahan_add = [](float &sum, float x, float &c) {
-                float y = x - c;
-                float t = sum + y;
-                c = (t - sum) - y;
-                sum = t;
-            };
-
-            float sum = 0.0f, comp = 0.0f;
-            int consec = 0; // consecutive finite K's seen in current run
-
-            for (int t = k_warm; t < series_len; ++t) {
-                const float kv = out_k[base + t];
-                if (kv == kv) { // finite
-                    kahan_add(sum, kv, comp);
-                    ++consec;
-
-                    if (consec < fd) {
-                        out_d[base + t] = STOCHF_QNAN;
-                    } else if (consec == fd) {
-                        // first complete valid window in this run
-                        out_d[base + t] = sum / (float)fd;
-                    } else {
-                        // sliding window over a fully finite run
-                        const float oldk = out_k[base + (t - fd)];
-                        // oldk is guaranteed finite within a "consec" >= fd run
-                        kahan_add(sum, -oldk, comp);
-                        out_d[base + t] = sum / (float)fd;
-                    }
-                } else {
-                    // reset on NaN, D remains NaN at this t
-                    out_d[base + t] = STOCHF_QNAN;
-                    sum = 0.0f; comp = 0.0f; consec = 0;
+        } else {
+            for (int t = d_warm + threadIdx.x; t < series_len; t += blockDim.x) {
+                float sum = 0.0f;
+                bool ok = true;
+                const int start = t - fd + 1;
+                for (int j = start; j <= t; ++j) {
+                    const float kv = out_k[base + j];
+                    if (UNLIKELY(!(kv == kv))) { ok = false; break; }
+                    sum += kv;
                 }
+                out_d[base + t] = ok ? (sum / (float)fd) : STOCHF_QNAN;
             }
         }
     } else {
@@ -261,4 +238,3 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
         }
     }
 }
-

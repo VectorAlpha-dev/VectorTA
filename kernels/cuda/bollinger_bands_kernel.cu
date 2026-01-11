@@ -114,25 +114,24 @@ extern "C" __global__ void bollinger_bands_sma_prefix_f32(
                 const int t1 = t + 1;
                 const int s = t1 - period;
 
-                // Double-single windowed sums via float2 prefix differences
-                const dsf sum_ds  = ds_sub(load_dsf(prefix_sum,    t1), load_dsf(prefix_sum,    s));
-                const dsf sum2_ds = ds_sub(load_dsf(prefix_sum_sq, t1), load_dsf(prefix_sum_sq, s));
+                // Window sums from DS prefix hi/lo diffs; evaluate moments in FP32.
+                const float2 ps_e  = prefix_sum[t1];
+                const float2 ps_s  = prefix_sum[s];
+                const float2 ps2_e = prefix_sum_sq[t1];
+                const float2 ps2_s = prefix_sum_sq[s];
 
-                const dsf mean_ds = ds_mul_f(sum_ds, invP);
-                const dsf ex2_ds  = ds_mul_f(sum2_ds, invP); // E[x^2]
-                const dsf msq_ds  = ds_mul(mean_ds, mean_ds);
-                const dsf var_ds  = ds_sub(ex2_ds, msq_ds);
+                const float sum  = (ps_e.x  - ps_s.x)  + (ps_e.y  - ps_s.y);
+                const float sum2 = (ps2_e.x - ps2_s.x) + (ps2_e.y - ps2_s.y);
 
-                float var_f = ds_to_f(var_ds);
-                if (var_f < 0.0f) var_f = 0.0f;
-                // Improve sqrt accuracy by evaluating sqrt in FP64 from ds components.
-                const double var_d = (double)var_ds.hi + (double)var_ds.lo;
-                const float sd = (float)sqrt(var_d);
+                const float mean = sum * invP;
+                const float ex2  = sum2 * invP;
+                float var = fmaf(-mean, mean, ex2);
+                if (var < 0.0f) var = 0.0f;
+                const float sd = sqrtf(var);
 
-                const float mean_f = ds_to_f(mean_ds);
-                m = mean_f;
-                u = mean_f + devups[combo] * sd;
-                l = mean_f - devdns[combo] * sd;
+                m = mean;
+                u = mean + devup * sd;
+                l = mean - devdn * sd;
             }
         }
         out_upper[row_off + t]  = u;

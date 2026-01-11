@@ -768,7 +768,7 @@ pub struct DecyclerBatchRange {
 impl Default for DecyclerBatchRange {
     fn default() -> Self {
         Self {
-            hp_period: (125, 125, 0),
+            hp_period: (125, 374, 1),
             k: (0.707, 0.707, 0.0),
         }
     }

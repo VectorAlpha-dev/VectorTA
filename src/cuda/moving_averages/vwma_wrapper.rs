@@ -760,29 +760,45 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>(); // price + volume
+        // prefix sums are uploaded as f64 buffers (pv_prefix, vol_prefix)
+        let prefix_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f64>();
+        let periods_bytes = PARAM_SWEEP * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        prefix_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
-        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
+        // prefix sums are uploaded as f64 buffers (pv_prefix_tm, vol_prefix_tm)
+        let prefix_bytes = 2 * elems * std::mem::size_of::<f64>();
+        let first_valid_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
         let out_bytes = elems * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        prefix_bytes + first_valid_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct VwmaBatchState {
+    struct VwmaBatchDevState {
         cuda: CudaVwma,
-        price: Vec<f32>,
-        volume: Vec<f32>,
-        sweep: VwmaBatchRange,
+        d_pv_prefix: DeviceBuffer<f64>,
+        d_vol_prefix: DeviceBuffer<f64>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for VwmaBatchState {
+    impl CudaBenchState for VwmaBatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .vwma_batch_dev(&self.price, &self.volume, &self.sweep)
-                .expect("vwma batch launch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_pv_prefix,
+                    &self.d_vol_prefix,
+                    &self.d_periods,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("vwma batch kernel");
+            self.cuda.stream.synchronize().expect("vwma sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -801,34 +817,57 @@ pub mod benches {
         let sweep = VwmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(VwmaBatchState {
+        let inputs =
+            CudaVwma::prepare_batch_inputs(&price, &volume, &sweep).expect("vwma prepare batch");
+        let n_combos = inputs.periods.len();
+        let (pv_prefix, vol_prefix) =
+            compute_prefix_sums(&price, &volume, inputs.first_valid, inputs.series_len);
+
+        let d_pv_prefix = DeviceBuffer::from_slice(&pv_prefix).expect("d_pv_prefix");
+        let d_vol_prefix = DeviceBuffer::from_slice(&vol_prefix).expect("d_vol_prefix");
+        let d_periods = DeviceBuffer::from_slice(&inputs.periods).expect("d_periods");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(inputs.series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(VwmaBatchDevState {
             cuda,
-            price,
-            volume,
-            sweep,
+            d_pv_prefix,
+            d_vol_prefix,
+            d_periods,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            d_out,
         })
     }
 
-    struct VwmaManyState {
+    struct VwmaManyDevState {
         cuda: CudaVwma,
-        price_tm: Vec<f32>,
-        vol_tm: Vec<f32>,
+        d_pv_prefix_tm: DeviceBuffer<f64>,
+        d_vol_prefix_tm: DeviceBuffer<f64>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for VwmaManyState {
+    impl CudaBenchState for VwmaManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .vwma_many_series_one_param_time_major_dev(
-                    &self.price_tm,
-                    &self.vol_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_pv_prefix_tm,
+                    &self.d_vol_prefix_tm,
+                    self.period,
                     self.cols,
                     self.rows,
-                    self.period,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .expect("vwma many-series launch");
+                .expect("vwma many-series kernel");
+            self.cuda.stream.synchronize().expect("vwma many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -837,13 +876,27 @@ pub mod benches {
         let rows = MANY_SERIES_LEN;
         let price_tm = gen_time_major_prices(cols, rows);
         let vol_tm = gen_time_major_volumes(cols, rows);
-        Box::new(VwmaManyState {
+        let period = 64usize;
+        let prepared = CudaVwma::prepare_many_series_inputs(&price_tm, &vol_tm, cols, rows, period)
+            .expect("vwma prepare many-series");
+
+        let d_pv_prefix_tm = DeviceBuffer::from_slice(&prepared.pv_prefix_tm).expect("d_pv_prefix_tm");
+        let d_vol_prefix_tm = DeviceBuffer::from_slice(&prepared.vol_prefix_tm).expect("d_vol_prefix_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(VwmaManyDevState {
             cuda,
-            price_tm,
-            vol_tm,
+            d_pv_prefix_tm,
+            d_vol_prefix_tm,
+            d_first_valids,
             cols,
             rows,
-            period: 64,
+            period,
+            d_out_tm,
         })
     }
 

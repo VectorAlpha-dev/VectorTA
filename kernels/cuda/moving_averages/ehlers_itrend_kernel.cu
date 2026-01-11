@@ -61,23 +61,23 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
 
     const int row_offset = combo * series_len;
 
-    // --- Per-combo state (mostly FP64 for parity on numerically sensitive paths) ---
-    float  fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
-    double det_buf[7] = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double i1_buf[7]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double q1_buf[7]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double prev_i2 = 0.0, prev_q2 = 0.0;
-    double prev_re = 0.0, prev_im = 0.0;
-    double prev_mesa = 0.0, prev_smooth = 0.0;
-    double prev_it1 = 0.0, prev_it2 = 0.0, prev_it3 = 0.0;
+    // --- Per-combo state (FP32 hot path) ---
+    float fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float det_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float i1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float q1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float prev_i2 = 0.0f, prev_q2 = 0.0f;
+    float prev_re = 0.0f, prev_im = 0.0f;
+    float prev_mesa = 0.0f, prev_smooth = 0.0f;
+    float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
 
-    int ring_ptr = 0;   // for the 7-element rings
-    int pidx = 0;       // prefix ring cursor [0, cap)
-    double pcur = 0.0;  // running prefix sum (FP64 to reduce drift)
+    int ring_ptr = 0;  // for the 7-element rings
+    int pidx = 0;      // prefix ring cursor [0, cap)
+    float pcur = 0.0f; // running prefix sum
 
     const int warm_threshold = first_valid + warmup;
-    const double c0962 = 0.0962;
-    const double c5769 = 0.5769;
+    const float c0962 = 0.0962f;
+    const float c5769 = 0.5769f;
 
     for (int i = 0; i < series_len; ++i) {
         const float x0 = prices[i];
@@ -85,8 +85,7 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float x2 = (i >= 2) ? prices[i - 2] : 0.0f;
         const float x3 = (i >= 3) ? prices[i - 3] : 0.0f;
 
-        const double fir_val_d = (4.0 * (double)x0 + 3.0 * (double)x1 + 2.0 * (double)x2 + (double)x3) / 10.0;
-        const float  fir_val   = (float)fir_val_d;
+        const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
         fir_buf[ring_ptr] = fir_val;
 
         // modulo-free indices for a ring of size 7
@@ -96,92 +95,92 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const int c6 = (c >= 6) ? (c - 6) : (c + 1);
         const int c3 = (c >= 3) ? (c - 3) : (c + 4);
 
-        const double fir_0 = (double)fir_buf[c];
-        const double fir_2 = (double)fir_buf[c2];
-        const double fir_4 = (double)fir_buf[c4];
-        const double fir_6 = (double)fir_buf[c6];
+        const float fir_0 = fir_buf[c];
+        const float fir_2 = fir_buf[c2];
+        const float fir_4 = fir_buf[c4];
+        const float fir_6 = fir_buf[c6];
 
-        const double period_mult = 0.075 * prev_mesa + 0.54;
-        const double h_in = c0962 * fir_0 + c5769 * fir_2 - c5769 * fir_4 - c0962 * fir_6;
+        const float period_mult = 0.075f * prev_mesa + 0.54f;
+        const float h_in = c0962 * fir_0 + c5769 * fir_2 - c5769 * fir_4 - c0962 * fir_6;
 
-        const double det_val = h_in * period_mult;
+        const float det_val = h_in * period_mult;
         det_buf[c] = det_val;
 
-        const double i1_val = det_buf[c3];
+        const float i1_val = det_buf[c3];
         i1_buf[c] = i1_val;
 
-        const double det_0 = det_buf[c];
-        const double det_2 = det_buf[c2];
-        const double det_4 = det_buf[c4];
-        const double det_6 = det_buf[c6];
+        const float det_0 = det_buf[c];
+        const float det_2 = det_buf[c2];
+        const float det_4 = det_buf[c4];
+        const float det_6 = det_buf[c6];
 
-        const double h_in_q1 = c0962 * det_0 + c5769 * det_2 - c5769 * det_4 - c0962 * det_6;
-        const double q1_val = h_in_q1 * period_mult;
+        const float h_in_q1 = c0962 * det_0 + c5769 * det_2 - c5769 * det_4 - c0962 * det_6;
+        const float q1_val = h_in_q1 * period_mult;
         q1_buf[c] = q1_val;
 
-        const double i1_0 = i1_buf[c];
-        const double i1_2 = i1_buf[c2];
-        const double i1_4 = i1_buf[c4];
-        const double i1_6 = i1_buf[c6];
-        const double j_i_val = (c0962 * i1_0 + c5769 * i1_2 - c5769 * i1_4 - c0962 * i1_6) * period_mult;
+        const float i1_0 = i1_buf[c];
+        const float i1_2 = i1_buf[c2];
+        const float i1_4 = i1_buf[c4];
+        const float i1_6 = i1_buf[c6];
+        const float j_i_val = (c0962 * i1_0 + c5769 * i1_2 - c5769 * i1_4 - c0962 * i1_6) * period_mult;
 
-        const double q1_0 = q1_buf[c];
-        const double q1_2 = q1_buf[c2];
-        const double q1_4 = q1_buf[c4];
-        const double q1_6 = q1_buf[c6];
-        const double j_q_val = (c0962 * q1_0 + c5769 * q1_2 - c5769 * q1_4 - c0962 * q1_6) * period_mult;
+        const float q1_0 = q1_buf[c];
+        const float q1_2 = q1_buf[c2];
+        const float q1_4 = q1_buf[c4];
+        const float q1_6 = q1_buf[c6];
+        const float j_q_val = (c0962 * q1_0 + c5769 * q1_2 - c5769 * q1_4 - c0962 * q1_6) * period_mult;
 
-        const double i2_cur = 0.2 * (i1_val - j_q_val) + 0.8 * prev_i2;
-        const double q2_cur = 0.2 * (q1_val + j_i_val) + 0.8 * prev_q2;
+        const float i2_cur = 0.2f * (i1_val - j_q_val) + 0.8f * prev_i2;
+        const float q2_cur = 0.2f * (q1_val + j_i_val) + 0.8f * prev_q2;
 
-        const double re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
-        const double im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
+        const float re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
+        const float im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
         prev_i2 = i2_cur;
         prev_q2 = q2_cur;
 
-        const double re_smooth = prev_re + 0.2 * (re_val - prev_re);
-        const double im_smooth = prev_im + 0.2 * (im_val - prev_im);
+        const float re_smooth = prev_re + 0.2f * (re_val - prev_re);
+        const float im_smooth = prev_im + 0.2f * (im_val - prev_im);
         prev_re = re_smooth;
         prev_im = im_smooth;
 
-        double new_mesa = 0.0;
-        if (re_smooth != 0.0 || im_smooth != 0.0) {
-            const double phase = atan2(im_smooth, re_smooth);
-            if (phase != 0.0) new_mesa = 2.0 * M_PI / phase;
+        float new_mesa = 0.0f;
+        if (re_smooth != 0.0f || im_smooth != 0.0f) {
+            const float phase = atan2f(im_smooth, re_smooth);
+            if (phase != 0.0f) new_mesa = (2.0f * CUDART_PI_F) / phase;
         }
         // limit and smooth period
-        const double up_lim  = 1.5 * prev_mesa;
-        const double low_lim = 0.67 * prev_mesa;
+        const float up_lim  = 1.5f * prev_mesa;
+        const float low_lim = 0.67f * prev_mesa;
         new_mesa = clampT(new_mesa, low_lim, up_lim);
-        new_mesa = clampT(new_mesa, 6.0, 50.0);
-        const double final_mesa = prev_mesa + 0.2 * (new_mesa - prev_mesa);
+        new_mesa = clampT(new_mesa, 6.0f, 50.0f);
+        const float final_mesa = prev_mesa + 0.2f * (new_mesa - prev_mesa);
         prev_mesa = final_mesa;
-        const double sp_val = prev_smooth + 0.33 * (final_mesa - prev_smooth);
+        const float sp_val = prev_smooth + 0.33f * (final_mesa - prev_smooth);
         prev_smooth = sp_val;
 
-        int dcp = __float2int_rn((float)sp_val);
+        int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
         // ---- O(1) variable-window average via prefix-sum ring (cap=max_dc) ----
         // Use an "old" snapshot to handle the alias when dcp == cap (avoids +1 shmem).
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
-        pcur += (double)x0;
+        pcur += x0;
         int pback = pidx - dcp; if (pback < 0) pback += cap;
-        const double prev_prefix = (pback == pidx) ? (double)old : (double)pfx[pback];
-        const double sum_src = pcur - prev_prefix;
-        pfx[pidx] = (float)pcur;
-        const double it_val  = sum_src / (double)dcp;
+        const float prev_prefix = (pback == pidx) ? old : pfx[pback];
+        const float sum_src = pcur - prev_prefix;
+        pfx[pidx] = pcur;
+        const float it_val  = sum_src / (float)dcp;
 
-        const double eit_val = (i < warmup)
-            ? (double)x0
-            : (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0;
+        const float eit_val = (i < warmup)
+            ? x0
+            : (4.0f * it_val + 3.0f * prev_it1 + 2.0f * prev_it2 + prev_it3) * 0.1f;
 
         prev_it3 = prev_it2;
         prev_it2 = prev_it1;
         prev_it1 = it_val;
 
-        out[row_offset + i] = (i >= warm_threshold) ? (float)eit_val : CUDART_NAN_F;
+        out[row_offset + i] = (i >= warm_threshold) ? eit_val : CUDART_NAN_F;
 
         ring_ptr = (c == 6) ? 0 : (c + 1);
     }
@@ -211,22 +210,22 @@ void ehlers_itrend_many_series_one_param_f32(
     const int cap = max_dc;
     for (int i = 0; i < cap; ++i) pfx[i] = 0.0f;
 
-    float  fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
-    double det_buf[7] = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double i1_buf[7]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double q1_buf[7]  = {0.0,0.0,0.0,0.0,0.0,0.0,0.0};
-    double prev_i2 = 0.0, prev_q2 = 0.0;
-    double prev_re = 0.0, prev_im = 0.0;
-    double prev_mesa = 0.0, prev_smooth = 0.0;
-    double prev_it1 = 0.0, prev_it2 = 0.0, prev_it3 = 0.0;
+    float fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float det_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float i1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float q1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
+    float prev_i2 = 0.0f, prev_q2 = 0.0f;
+    float prev_re = 0.0f, prev_im = 0.0f;
+    float prev_mesa = 0.0f, prev_smooth = 0.0f;
+    float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
     int ring_ptr = 0;
     int pidx = 0;      // prefix ring cursor [0, cap)
-    double pcur = 0.0; // running prefix sum (FP64)
+    float pcur = 0.0f; // running prefix sum
 
     const int first_valid = first_valids[series_idx];
     const int warm_threshold = first_valid + warmup;
-    const double c0962 = 0.0962;
-    const double c5769 = 0.5769;
+    const float c0962 = 0.0962f;
+    const float c5769 = 0.5769f;
 
     for (int t = 0; t < series_len; ++t) {
         const int idx = t * stride + series_idx;
@@ -235,8 +234,7 @@ void ehlers_itrend_many_series_one_param_f32(
         const float x2 = (t >= 2) ? prices_tm[(t - 2) * stride + series_idx] : 0.0f;
         const float x3 = (t >= 3) ? prices_tm[(t - 3) * stride + series_idx] : 0.0f;
 
-        const double fir_val_d = (4.0 * (double)x0 + 3.0 * (double)x1 + 2.0 * (double)x2 + (double)x3) / 10.0;
-        const float  fir_val   = (float)fir_val_d;
+        const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
         fir_buf[ring_ptr] = fir_val;
 
         const int c  = ring_ptr;
@@ -245,90 +243,90 @@ void ehlers_itrend_many_series_one_param_f32(
         const int c6 = (c >= 6) ? (c - 6) : (c + 1);
         const int c3 = (c >= 3) ? (c - 3) : (c + 4);
 
-        const double fir_0 = (double)fir_buf[c];
-        const double fir_2 = (double)fir_buf[c2];
-        const double fir_4 = (double)fir_buf[c4];
-        const double fir_6 = (double)fir_buf[c6];
+        const float fir_0 = fir_buf[c];
+        const float fir_2 = fir_buf[c2];
+        const float fir_4 = fir_buf[c4];
+        const float fir_6 = fir_buf[c6];
 
-        const double period_mult = 0.075 * prev_mesa + 0.54;
-        const double h_in = c0962 * fir_0 + c5769 * fir_2 - c5769 * fir_4 - c0962 * fir_6;
+        const float period_mult = 0.075f * prev_mesa + 0.54f;
+        const float h_in = c0962 * fir_0 + c5769 * fir_2 - c5769 * fir_4 - c0962 * fir_6;
 
-        const double det_val = h_in * period_mult;
+        const float det_val = h_in * period_mult;
         det_buf[c] = det_val;
 
-        const double i1_val = det_buf[c3];
+        const float i1_val = det_buf[c3];
         i1_buf[c] = i1_val;
 
-        const double det_0 = det_buf[c];
-        const double det_2 = det_buf[c2];
-        const double det_4 = det_buf[c4];
-        const double det_6 = det_buf[c6];
+        const float det_0 = det_buf[c];
+        const float det_2 = det_buf[c2];
+        const float det_4 = det_buf[c4];
+        const float det_6 = det_buf[c6];
 
-        const double h_in_q1 = c0962 * det_0 + c5769 * det_2 - c5769 * det_4 - c0962 * det_6;
-        const double q1_val = h_in_q1 * period_mult;
+        const float h_in_q1 = c0962 * det_0 + c5769 * det_2 - c5769 * det_4 - c0962 * det_6;
+        const float q1_val = h_in_q1 * period_mult;
         q1_buf[c] = q1_val;
 
-        const double i1_0 = i1_buf[c];
-        const double i1_2 = i1_buf[c2];
-        const double i1_4 = i1_buf[c4];
-        const double i1_6 = i1_buf[c6];
-        const double j_i_val = (c0962 * i1_0 + c5769 * i1_2 - c5769 * i1_4 - c0962 * i1_6) * period_mult;
+        const float i1_0 = i1_buf[c];
+        const float i1_2 = i1_buf[c2];
+        const float i1_4 = i1_buf[c4];
+        const float i1_6 = i1_buf[c6];
+        const float j_i_val = (c0962 * i1_0 + c5769 * i1_2 - c5769 * i1_4 - c0962 * i1_6) * period_mult;
 
-        const double q1_0 = q1_buf[c];
-        const double q1_2 = q1_buf[c2];
-        const double q1_4 = q1_buf[c4];
-        const double q1_6 = q1_buf[c6];
-        const double j_q_val = (c0962 * q1_0 + c5769 * q1_2 - c5769 * q1_4 - c0962 * q1_6) * period_mult;
+        const float q1_0 = q1_buf[c];
+        const float q1_2 = q1_buf[c2];
+        const float q1_4 = q1_buf[c4];
+        const float q1_6 = q1_buf[c6];
+        const float j_q_val = (c0962 * q1_0 + c5769 * q1_2 - c5769 * q1_4 - c0962 * q1_6) * period_mult;
 
-        const double i2_cur = 0.2 * (i1_val - j_q_val) + 0.8 * prev_i2;
-        const double q2_cur = 0.2 * (q1_val + j_i_val) + 0.8 * prev_q2;
+        const float i2_cur = 0.2f * (i1_val - j_q_val) + 0.8f * prev_i2;
+        const float q2_cur = 0.2f * (q1_val + j_i_val) + 0.8f * prev_q2;
 
-        const double re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
-        const double im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
+        const float re_val = i2_cur * prev_i2 + q2_cur * prev_q2;
+        const float im_val = i2_cur * prev_q2 - q2_cur * prev_i2;
         prev_i2 = i2_cur;
         prev_q2 = q2_cur;
 
-        const double re_smooth = prev_re + 0.2 * (re_val - prev_re);
-        const double im_smooth = prev_im + 0.2 * (im_val - prev_im);
+        const float re_smooth = prev_re + 0.2f * (re_val - prev_re);
+        const float im_smooth = prev_im + 0.2f * (im_val - prev_im);
         prev_re = re_smooth;
         prev_im = im_smooth;
 
-        double new_mesa = 0.0;
-        if (re_smooth != 0.0 || im_smooth != 0.0) {
-            const double phase = atan2(im_smooth, re_smooth);
-            if (phase != 0.0) new_mesa = 2.0 * M_PI / phase;
+        float new_mesa = 0.0f;
+        if (re_smooth != 0.0f || im_smooth != 0.0f) {
+            const float phase = atan2f(im_smooth, re_smooth);
+            if (phase != 0.0f) new_mesa = (2.0f * CUDART_PI_F) / phase;
         }
-        const double up_lim  = 1.5 * prev_mesa;
-        const double low_lim = 0.67 * prev_mesa;
+        const float up_lim  = 1.5f * prev_mesa;
+        const float low_lim = 0.67f * prev_mesa;
         new_mesa = clampT(new_mesa, low_lim, up_lim);
-        new_mesa = clampT(new_mesa, 6.0, 50.0);
-        const double final_mesa = prev_mesa + 0.2 * (new_mesa - prev_mesa);
+        new_mesa = clampT(new_mesa, 6.0f, 50.0f);
+        const float final_mesa = prev_mesa + 0.2f * (new_mesa - prev_mesa);
         prev_mesa = final_mesa;
-        const double sp_val = prev_smooth + 0.33 * (final_mesa - prev_smooth);
+        const float sp_val = prev_smooth + 0.33f * (final_mesa - prev_smooth);
         prev_smooth = sp_val;
 
-        int dcp = __float2int_rn((float)sp_val);
+        int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
         // ---- O(1) variable-window average via prefix-sum ring (cap=max_dc) ----
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
-        pcur += (double)x0;
+        pcur += x0;
         int pback = pidx - dcp; if (pback < 0) pback += cap;
-        const double prev_prefix = (pback == pidx) ? (double)old : (double)pfx[pback];
-        const double sum_src = pcur - prev_prefix;
-        pfx[pidx] = (float)pcur;
-        const double it_val  = sum_src / (double)dcp;
+        const float prev_prefix = (pback == pidx) ? old : pfx[pback];
+        const float sum_src = pcur - prev_prefix;
+        pfx[pidx] = pcur;
+        const float it_val  = sum_src / (float)dcp;
 
-        const double eit_val = (t < warmup)
-            ? (double)x0
-            : (4.0 * it_val + 3.0 * prev_it1 + 2.0 * prev_it2 + prev_it3) / 10.0;
+        const float eit_val = (t < warmup)
+            ? x0
+            : (4.0f * it_val + 3.0f * prev_it1 + 2.0f * prev_it2 + prev_it3) * 0.1f;
 
         prev_it3 = prev_it2;
         prev_it2 = prev_it1;
         prev_it1 = it_val;
 
-        out_tm[idx] = (t >= warm_threshold) ? (float)eit_val : CUDART_NAN_F;
+        out_tm[idx] = (t >= warm_threshold) ? eit_val : CUDART_NAN_F;
 
         ring_ptr = (c == 6) ? 0 : (c + 1);
     }

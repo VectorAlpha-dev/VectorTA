@@ -212,6 +212,8 @@ impl CudaTradjema {
     #[inline]
     fn smem_bytes_for_len(length: usize) -> usize {
         // Matches CUDA kernel shared layout:
+        // Batch uses f32 shared arrays; many-series uses f64.
+        // Size for f64 is a safe upper bound for both.
         // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
         length
             * (2 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
@@ -389,7 +391,7 @@ impl CudaTradjema {
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|&bx| bx >= 1 && bx <= 1024)
-                .unwrap_or(256),
+                .unwrap_or(32),
             BatchKernelPolicy::OneD { block_x } => block_x.clamp(1, 1024),
         }
     }
@@ -444,12 +446,12 @@ impl CudaTradjema {
 
         // Favor occupancy-based suggestion; fall back to policy/env
         let fallback_bx = self.choose_batch_block_x();
-        let _ = func.set_shared_memory_config(SharedMemoryConfig::EightByteBankSize);
+        let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
         let block_x: u32 = func
             .suggested_launch_configuration(shared_bytes, BlockSize::xyz(0, 0, 0))
             .map(|(_, bx)| bx)
             .unwrap_or(fallback_bx)
-            .max(64)
+            .max(32)
             .min(1024);
         // Record selection for introspection/logging
         unsafe {
@@ -1060,19 +1062,36 @@ pub mod benches {
         (high, low)
     }
 
-    struct BatchState {
+    struct BatchDevState {
         cuda: CudaTradjema,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: TradjemaBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        d_mults: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_length: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for BatchState {
+    impl CudaBenchState for BatchDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .tradjema_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("tradjema batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_lengths,
+                    &self.d_mults,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_length,
+                    &mut self.d_out,
+                )
+                .expect("tradjema batch kernel");
+            self.cuda.stream.synchronize().expect("tradjema sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -1083,37 +1102,67 @@ pub mod benches {
             length: (16, 16 + PARAM_SWEEP - 1, 1),
             mult: (8.0, 8.0, 0.0),
         };
-        Box::new(BatchState {
+        let (combos, first_valid, series_len, max_length) =
+            CudaTradjema::prepare_batch_inputs(&high, &low, &close, &sweep)
+                .expect("tradjema prepare batch");
+        let n_combos = combos.len();
+        let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap_or(0) as i32).collect();
+        let mults_f32: Vec<f32> = combos.iter().map(|p| p.mult.unwrap_or(0.0) as f32).collect();
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).expect("d_lengths");
+        let d_mults = DeviceBuffer::from_slice(&mults_f32).expect("d_mults");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchDevState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_high,
+            d_low,
+            d_close,
+            d_lengths,
+            d_mults,
+            series_len,
+            n_combos,
+            first_valid,
+            max_length,
+            d_out,
         })
     }
 
-    struct ManyState {
+    struct ManyDevState {
         cuda: CudaTradjema,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
-        params: TradjemaParams,
+        length: usize,
+        mult: f32,
+        d_out_tm: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for ManyState {
+    impl CudaBenchState for ManyDevState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .tradjema_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
                     self.cols,
                     self.rows,
-                    &self.params,
+                    self.length,
+                    self.mult,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .expect("tradjema many-series");
+                .expect("tradjema many-series kernel");
+            self.cuda.stream.synchronize().expect("tradjema many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1126,14 +1175,30 @@ pub mod benches {
             length: Some(64),
             mult: Some(8.0),
         };
-        Box::new(ManyState {
+        let (first_valids, length, mult) =
+            CudaTradjema::prepare_many_series_inputs(&high_tm, &low_tm, &close_tm, cols, rows, &params)
+                .expect("tradjema prepare many");
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
+                .expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(ManyDevState {
             cuda,
-            high_tm,
-            low_tm,
-            close_tm,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
             cols,
             rows,
-            params,
+            length,
+            mult,
+            d_out_tm,
         })
     }
 

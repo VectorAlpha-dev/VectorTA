@@ -786,19 +786,38 @@ pub mod benches {
         (high, low)
     }
 
-    struct WillrBatchState {
+    struct WillrBatchDeviceState {
         cuda: CudaWillr,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: WillrBatchRange,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_log2: DeviceBuffer<i32>,
+        d_offsets: DeviceBuffer<i32>,
+        d_st_max: DeviceBuffer<f32>,
+        d_st_min: DeviceBuffer<f32>,
+        d_nan_psum: DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for WillrBatchState {
+    impl CudaBenchState for WillrBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .willr_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .expect("willr batch");
+            self.cuda
+                .willr_batch_device(
+                    &self.d_close,
+                    &self.d_periods,
+                    &self.d_log2,
+                    &self.d_offsets,
+                    &self.d_st_max,
+                    &self.d_st_min,
+                    &self.d_nan_psum,
+                    self.series_len as i32,
+                    self.first_valid as i32,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                )
+                .expect("willr launch");
+            self.cuda.stream.synchronize().expect("willr sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -808,12 +827,43 @@ pub mod benches {
         let sweep = WillrBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(WillrBatchState {
+
+        let prepared =
+            CudaWillr::prepare_batch_inputs(&high, &low, &close, &sweep).expect("prepare inputs");
+        let n_combos = prepared.combos.len();
+        let periods: Vec<i32> = prepared
+            .combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
+
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close H2D");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods H2D");
+        let d_log2 = DeviceBuffer::from_slice(&prepared.tables.log2).expect("d_log2 H2D");
+        let d_offsets =
+            DeviceBuffer::from_slice(&prepared.tables.level_offsets).expect("d_offsets H2D");
+        let d_st_max = DeviceBuffer::from_slice(&prepared.tables.st_max).expect("d_st_max H2D");
+        let d_st_min = DeviceBuffer::from_slice(&prepared.tables.st_min).expect("d_st_min H2D");
+        let d_nan_psum =
+            DeviceBuffer::from_slice(&prepared.tables.nan_psum).expect("d_nan_psum H2D");
+
+        let elems = prepared.series_len * n_combos;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("out");
+        cuda.stream.synchronize().expect("willr prep sync");
+
+        Box::new(WillrBatchDeviceState {
             cuda,
-            high,
-            low,
-            close,
-            sweep,
+            d_close,
+            d_periods,
+            d_log2,
+            d_offsets,
+            d_st_max,
+            d_st_min,
+            d_nan_psum,
+            series_len: prepared.series_len,
+            first_valid: prepared.first_valid,
+            n_combos,
+            d_out,
         })
     }
 

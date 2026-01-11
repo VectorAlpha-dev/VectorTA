@@ -448,10 +448,13 @@ impl CudaStddev {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
+        // The kernel tiles a small group of combos per block in grid.y (4 per group).
+        const TILE: u32 = 4;
         let mut launched = 0usize;
         while launched < combos {
             let chunk = (combos - launched).min(65_535);
-            let grid: GridSize = (grid_base.x, chunk as u32, 1).into();
+            let grid_y_groups = (((chunk as u32) + TILE - 1) / TILE).max(1);
+            let grid: GridSize = (grid_base.x, grid_y_groups, 1).into();
             unsafe {
                 let mut ps1 = d_ps1.as_device_ptr().as_raw();
                 let mut ps2 = d_ps2.as_device_ptr().as_raw();
@@ -762,15 +765,32 @@ pub mod benches {
 
     struct StddevBatchState {
         cuda: CudaStddev,
-        price: Vec<f32>,
-        sweep: StdDevBatchRange,
+        d_ps1: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_psn: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_nbdevs: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for StddevBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .stddev_batch_dev(&self.price, &self.sweep)
+            self.cuda
+                .launch_batch(
+                    &self.d_ps1,
+                    &self.d_ps2,
+                    &self.d_psn,
+                    self.len,
+                    self.first_valid,
+                    &self.d_periods,
+                    &self.d_nbdevs,
+                    self.combos,
+                    &mut self.d_out,
+                )
                 .expect("stddev batch");
+            self.cuda.stream.synchronize().expect("stddev sync");
         }
     }
 
@@ -781,7 +801,39 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             nbdev: (2.0, 2.0, 0.0),
         };
-        Box::new(StddevBatchState { cuda, price, sweep })
+        let (combos, first_valid, len) =
+            CudaStddev::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let periods: Vec<i32> = combos.iter().map(|c| c.0 as i32).collect();
+        let nbdevs: Vec<f32> = combos.iter().map(|c| c.1).collect();
+        let (h_ps1, h_ps2, h_psn) = CudaStddev::build_prefixes_ds_locked(&price).expect("prefixes");
+
+        let d_ps1 = unsafe { DeviceBuffer::from_slice_async(h_ps1.as_slice(), &cuda.stream) }
+            .expect("d_ps1");
+        let d_ps2 = unsafe { DeviceBuffer::from_slice_async(h_ps2.as_slice(), &cuda.stream) }
+            .expect("d_ps2");
+        let d_psn = unsafe { DeviceBuffer::from_slice_async(h_psn.as_slice(), &cuda.stream) }
+            .expect("d_psn");
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &cuda.stream) }
+            .expect("d_periods");
+        let d_nbdevs = unsafe { DeviceBuffer::from_slice_async(&nbdevs, &cuda.stream) }
+            .expect("d_nbdevs");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(StddevBatchState {
+            cuda,
+            d_ps1,
+            d_ps2,
+            d_psn,
+            d_periods,
+            d_nbdevs,
+            len,
+            first_valid,
+            combos: combos.len(),
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

@@ -589,9 +589,8 @@ pub mod benches {
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let mut v = Vec::new();
-        // Batch: 100k samples, 256 combos
-        v.push(
+        vec![
+            // Batch: 100k samples, 256 combos (device-resident)
             CudaBenchScenario::new(
                 "rocp",
                 "one_series_many_params",
@@ -600,12 +599,28 @@ pub mod benches {
                 || {
                     struct State {
                         cuda: CudaRocp,
-                        data: Vec<f32>,
-                        sweep: RocpBatchRange,
+                        d_data: DeviceBuffer<f32>,
+                        d_inv: DeviceBuffer<f32>,
+                        d_periods: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
+                        len: usize,
+                        rows: usize,
+                        first_valid: usize,
                     }
                     impl CudaBenchState for State {
                         fn launch(&mut self) {
-                            let _ = self.cuda.rocp_batch_dev(&self.data, &self.sweep);
+                            self.cuda
+                                .launch_batch(
+                                    &self.d_data,
+                                    &self.d_inv,
+                                    &self.d_periods,
+                                    self.len,
+                                    self.rows,
+                                    self.first_valid,
+                                    &mut self.d_out,
+                                )
+                                .expect("rocp launch_batch");
+                            let _ = self.cuda.stream.synchronize();
                         }
                     }
                     let n = 100_000usize;
@@ -617,53 +632,31 @@ pub mod benches {
                     let sweep = RocpBatchRange {
                         period: (4, 4 + 255, 1),
                     };
+                    let (combos, first_valid, len) =
+                        CudaRocp::prepare_batch(&data, &sweep).expect("prepare_batch");
+                    let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+                    let inv_host = CudaRocp::build_reciprocals(&data);
+                    let rows = combos.len();
+                    let cuda = CudaRocp::new(0).unwrap();
+                    let d_data = DeviceBuffer::from_slice(&data).expect("d_data");
+                    let d_inv = DeviceBuffer::from_slice(&inv_host).expect("d_inv");
+                    let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+                    let d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
                     Box::new(State {
-                        cuda: CudaRocp::new(0).unwrap(),
-                        data,
-                        sweep,
+                        cuda,
+                        d_data,
+                        d_inv,
+                        d_periods,
+                        d_out,
+                        len,
+                        rows,
+                        first_valid,
                     })
                 },
             )
             .with_sample_size(20),
-        );
-        v.push(
-            CudaBenchScenario::new(
-                "rocp",
-                "one_series_many_params",
-                "rocp/batch",
-                "100k x 256",
-                || {
-                    struct State {
-                        cuda: CudaRocp,
-                        data: Vec<f32>,
-                        sweep: RocpBatchRange,
-                    }
-                    impl CudaBenchState for State {
-                        fn launch(&mut self) {
-                            let _ = self.cuda.rocp_batch_dev(&self.data, &self.sweep);
-                        }
-                    }
-                    let n = 100_000usize;
-                    let mut data = vec![f32::NAN; n];
-                    for i in 500..n {
-                        let x = i as f32;
-                        data[i] = (x * 0.00123).sin() + 0.0002 * x;
-                    }
-                    let sweep = RocpBatchRange {
-                        period: (4, 4 + 255, 1),
-                    };
-                    Box::new(State {
-                        cuda: CudaRocp::new(0).unwrap(),
-                        data,
-                        sweep,
-                    })
-                },
-            )
-            .with_sample_size(20),
-        );
-
-        // Many-series: 1024 rows, 512 columns
-        v.push(
+            // Many-series: 1024 rows, 512 columns (device-resident)
             CudaBenchScenario::new(
                 "rocp",
                 "many_series_one_param",
@@ -672,19 +665,26 @@ pub mod benches {
                 || {
                     struct State {
                         cuda: CudaRocp,
-                        data_tm: Vec<f32>,
+                        d_data: DeviceBuffer<f32>,
+                        d_firsts: DeviceBuffer<i32>,
+                        d_out: DeviceBuffer<f32>,
                         cols: usize,
                         rows: usize,
-                        p: usize,
+                        period: usize,
                     }
                     impl CudaBenchState for State {
                         fn launch(&mut self) {
-                            let _ = self.cuda.rocp_many_series_one_param_time_major_dev(
-                                &self.data_tm,
-                                self.cols,
-                                self.rows,
-                                self.p,
-                            );
+                            self.cuda
+                                .launch_many_series(
+                                    &self.d_data,
+                                    &self.d_firsts,
+                                    self.cols,
+                                    self.rows,
+                                    self.period,
+                                    &mut self.d_out,
+                                )
+                                .expect("rocp launch_many_series");
+                            let _ = self.cuda.stream.synchronize();
                         }
                     }
                     let cols = 512usize;
@@ -696,17 +696,34 @@ pub mod benches {
                             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
                         }
                     }
+                    let mut firsts = vec![rows as i32; cols];
+                    for s in 0..cols {
+                        for t in 0..rows {
+                            let v = tm[t * cols + s];
+                            if !v.is_nan() {
+                                firsts[s] = t as i32;
+                                break;
+                            }
+                        }
+                    }
+                    let period = 14usize;
+                    let cuda = CudaRocp::new(0).unwrap();
+                    let d_data = DeviceBuffer::from_slice(&tm).expect("d_data");
+                    let d_firsts = DeviceBuffer::from_slice(&firsts).expect("d_firsts");
+                    let d_out: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
                     Box::new(State {
-                        cuda: CudaRocp::new(0).unwrap(),
-                        data_tm: tm,
+                        cuda,
+                        d_data,
+                        d_firsts,
+                        d_out,
                         cols,
                         rows,
-                        p: 14,
+                        period,
                     })
                 },
             )
             .with_sample_size(20),
-        );
-        v
+        ]
     }
 }

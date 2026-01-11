@@ -724,7 +724,7 @@ pub struct CviBatchRange {
 impl Default for CviBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 20, 1),
+            period: (10, 259, 1),
         }
     }
 }
@@ -2311,14 +2311,7 @@ pub fn cvi_into_slice(
         Kernel::Avx2 => unsafe { cvi_avx2(high, low, period, first_valid_idx, output) },
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => unsafe { cvi_avx512(high, low, period, first_valid_idx, output) },
-        Kernel::Auto => match detect_best_kernel() {
-            Kernel::Scalar => cvi_scalar(high, low, period, first_valid_idx, output),
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 => unsafe { cvi_avx2(high, low, period, first_valid_idx, output) },
-            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 => unsafe { cvi_avx512(high, low, period, first_valid_idx, output) },
-            _ => cvi_scalar(high, low, period, first_valid_idx, output),
-        },
+        Kernel::Auto => cvi_scalar(high, low, period, first_valid_idx, output),
         _ => return Err(CviError::InvalidKernelForBatch(kernel)),
     }
 

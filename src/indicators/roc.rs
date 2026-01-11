@@ -668,7 +668,7 @@ pub struct RocBatchRange {
 impl Default for RocBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 240, 1),
+            period: (9, 258, 1),
         }
     }
 }

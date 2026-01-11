@@ -317,7 +317,7 @@ pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput,
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1195,7 +1195,7 @@ pub struct SrsiBatchRange {
 impl Default for SrsiBatchRange {
     fn default() -> Self {
         Self {
-            rsi_period: (14, 14, 0),
+            rsi_period: (14, 263, 1),
             stoch_period: (14, 14, 0),
             k: (3, 3, 0),
             d: (3, 3, 0),

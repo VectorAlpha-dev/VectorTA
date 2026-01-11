@@ -303,9 +303,6 @@ impl CudaTtmTrend {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
-        // Pre-zero outputs once (kernel writes only t >= warm)
-        unsafe { d_out.set_zero_async(&self.stream) }?;
-
         // Launch tiled kernel (2-D grid over (time, params))
         let mut func = self
             .module
@@ -507,16 +504,47 @@ pub mod benches {
 
     struct TtmBatchState {
         cuda: CudaTtmTrend,
-        src: Vec<f32>,
-        close: Vec<f32>,
-        sweep: TtmTrendBatchRange,
+        d_prefix: DeviceBuffer<[f32; 2]>,
+        d_close: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warms: DeviceBuffer<i32>,
+        len: usize,
+        n_combos: usize,
+        grid: GridSize,
+        block: BlockSize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for TtmBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let mut func = self
                 .cuda
-                .ttm_trend_batch_dev(&self.src, &self.close, &self.sweep)
-                .unwrap();
+                .module
+                .get_function("ttm_trend_batch_prefix_ff2_tiled")
+                .expect("ttm_trend_batch_prefix_ff2_tiled");
+            let _ = func.set_cache_config(CacheConfig::PreferL1);
+            unsafe {
+                let mut pref_ptr = self.d_prefix.as_device_ptr().as_raw();
+                let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut per_ptr = self.d_periods.as_device_ptr().as_raw();
+                let mut warm_ptr = self.d_warms.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut ncomb_i = self.n_combos as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut pref_ptr as *mut _ as *mut c_void,
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut per_ptr as *mut _ as *mut c_void,
+                    &mut warm_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut ncomb_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("ttm_trend batch launch");
+            }
+            self.cuda.stream.synchronize().expect("ttm_trend batch sync");
         }
     }
 
@@ -533,11 +561,43 @@ pub mod benches {
         let sweep = TtmTrendBatchRange {
             period: (5, 254, 1),
         };
+
+        let (combos, first, len) = CudaTtmTrend::prepare_batch_inputs(&src, &close, &sweep)
+            .expect("prepare_batch_inputs");
+        let n_combos = combos.len();
+        let prefix_ff2 = CudaTtmTrend::build_prefix_source_ff2(&src, first);
+
+        let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2).expect("d_prefix");
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
+        let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_warms = DeviceBuffer::from_slice(&warms).expect("d_warms");
+        let out_elems = n_combos.checked_mul(len).expect("rows*cols overflow");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+
+        // Keep host constants in sync with .cu defaults
+        const TTM_TILE_TIME: u32 = 256;
+        const TTM_TILE_PARAMS: u32 = 4;
+        let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
+        let grid_y: u32 = ((n_combos as u32) + TTM_TILE_PARAMS - 1) / TTM_TILE_PARAMS;
+        let gx = grid_x.max(1);
+        let gy = grid_y.max(1);
+        let grid: GridSize = (gx, gy, 1).into();
+        let block: BlockSize = (TTM_TILE_TIME, TTM_TILE_PARAMS, 1).into();
+
+        cuda.stream.synchronize().expect("ttm_trend prep sync");
         Box::new(TtmBatchState {
             cuda,
-            src,
-            close,
-            sweep,
+            d_prefix,
+            d_close,
+            d_periods,
+            d_warms,
+            len,
+            n_combos,
+            grid,
+            block,
+            d_out,
         })
     }
 

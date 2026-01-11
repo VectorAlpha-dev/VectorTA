@@ -859,7 +859,7 @@ pub struct VwapBatchRange {
 impl Default for VwapBatchRange {
     fn default() -> Self {
         Self {
-            anchor: ("1d".to_string(), "1d".to_string(), 0),
+            anchor: ("1d".to_string(), "250d".to_string(), 1),
         }
     }
 }

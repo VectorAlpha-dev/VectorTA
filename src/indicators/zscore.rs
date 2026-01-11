@@ -866,7 +866,7 @@ pub struct ZscoreBatchRange {
 impl Default for ZscoreBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
             ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
             nbdev: (1.0, 1.0, 0.0),
             devtype: (0, 0, 0),

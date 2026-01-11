@@ -243,7 +243,7 @@ pub fn linearreg_intercept_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -378,7 +378,7 @@ pub fn linearreg_intercept_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -675,7 +675,7 @@ pub struct LinearRegInterceptBatchRange {
 impl Default for LinearRegInterceptBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 200, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -885,7 +885,7 @@ fn linearreg_intercept_batch_inner_into(
     let cols = data.len();
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -981,7 +981,7 @@ fn linearreg_intercept_batch_inner(
     };
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

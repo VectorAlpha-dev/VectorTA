@@ -830,7 +830,7 @@ pub struct AdxrBatchRange {
 impl Default for AdxrBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }

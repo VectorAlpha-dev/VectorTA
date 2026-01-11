@@ -660,7 +660,7 @@ pub struct TrixBatchRange {
 impl Default for TrixBatchRange {
     fn default() -> Self {
         Self {
-            period: (18, 100, 1),
+            period: (18, 267, 1),
         }
     }
 }

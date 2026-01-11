@@ -285,8 +285,8 @@ pub struct RangeFilterBatchRange {
 impl Default for RangeFilterBatchRange {
     fn default() -> Self {
         Self {
-            range_size: (2.618, 2.618, 0.1),
-            range_period: (14, 14, 1),
+            range_size: (2.618, 2.867, 0.001),
+            range_period: (14, 14, 0),
             smooth_range: Some(true),
             smooth_period: Some(27),
         }
@@ -580,7 +580,7 @@ fn range_filter_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 

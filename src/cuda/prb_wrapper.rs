@@ -474,6 +474,7 @@ impl CudaPrb {
             } else {
                 data_f32.to_vec()
             };
+            let has_nan_after_first = source[first_valid..].iter().any(|v| v.is_nan());
             let contig = if smooth_data {
                 Self::contig_valid(&source)
             } else {
@@ -523,15 +524,33 @@ impl CudaPrb {
             let d_rowmap = DeviceBuffer::from_slice(&row_map)?;
 
             // Launch kernel: grid.y chunking to <= 65535
-            let func = self
-                .module
-                .get_function("prb_batch_f32")
-                .map_err(|_| CudaPrbError::MissingKernelSymbol { name: "prb_batch_f32" })?;
-            let block_x: u32 = match self.policy.batch {
-                BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-                _ => 1,
+            const PRB_BATCH_CHUNK_LEN: usize = 4096;
+            let use_chunked = matches!(self.policy.batch, BatchKernelPolicy::Auto) && !has_nan_after_first;
+            let (func, block_x, grid_x): (Function, u32, u32) = if use_chunked {
+                let f = self.module.get_function("prb_batch_chunked_f32").map_err(|_| {
+                    CudaPrbError::MissingKernelSymbol {
+                        name: "prb_batch_chunked_f32",
+                    }
+                })?;
+                let bx = 32u32;
+                let chunks = len.div_ceil(PRB_BATCH_CHUNK_LEN);
+                let gx = chunks.div_ceil(bx as usize) as u32;
+                (f, bx, gx.max(1))
+            } else {
+                if let BatchKernelPolicy::Plain { block_x } = self.policy.batch {
+                    if block_x != 1 {
+                        return Err(CudaPrbError::InvalidPolicy(
+                            "prb_batch_f32 requires block_x=1 (serial row kernel)",
+                        ));
+                    }
+                }
+                let f = self.module.get_function("prb_batch_f32").map_err(|_| {
+                    CudaPrbError::MissingKernelSymbol {
+                        name: "prb_batch_f32",
+                    }
+                })?;
+                (f, 1u32, 1u32)
             };
-            let grid_x: u32 = 1;
             let block: BlockSize = (block_x, 1, 1).into();
             let dev = Device::get_device(self.device_id)?;
             let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
@@ -854,15 +873,77 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaPrb,
-        price: Vec<f32>,
-        sweep: PrbBatchRange,
+        d_src: DeviceBuffer<f32>,
+        d_contig: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        d_orders: DeviceBuffer<i32>,
+        d_offsets: DeviceBuffer<i32>,
+        d_ainv: DeviceBuffer<f32>,
+        d_rowmap: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        rows: usize,
+        grid: GridSize,
+        block: BlockSize,
+        use_chunked: bool,
+        d_main: DeviceBuffer<f32>,
+        d_up: DeviceBuffer<f32>,
+        d_lo: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self
+            let func_name = if self.use_chunked {
+                "prb_batch_chunked_f32"
+            } else {
+                "prb_batch_f32"
+            };
+            let func = self
                 .cuda
-                .prb_batch_dev(&self.price, &self.sweep, false)
-                .expect("prb batch");
+                .module
+                .get_function(func_name)
+                .expect("prb batch kernel");
+
+            unsafe {
+                let mut p_src = self.d_src.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first_valid as i32;
+                let mut p_per = self.d_periods.as_device_ptr().as_raw();
+                let mut p_ord = self.d_orders.as_device_ptr().as_raw();
+                let mut p_off = self.d_offsets.as_device_ptr().as_raw();
+                let mut combos_i = self.rows as i32;
+                let mut max_m_i = 8i32;
+                let mut p_ainv = self.d_ainv.as_device_ptr().as_raw();
+                let mut stride_i = (8 * 8) as i32;
+                let mut p_contig = self.d_contig.as_device_ptr().as_raw();
+                let mut ndev_f = 2.0f32;
+                let mut p_rowmap = self.d_rowmap.as_device_ptr().as_raw();
+                let mut p_out_m = self.d_main.as_device_ptr().as_raw();
+                let mut p_out_u = self.d_up.as_device_ptr().as_raw();
+                let mut p_out_l = self.d_lo.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 16] = [
+                    &mut p_src as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut p_per as *mut _ as *mut c_void,
+                    &mut p_ord as *mut _ as *mut c_void,
+                    &mut p_off as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut max_m_i as *mut _ as *mut c_void,
+                    &mut p_ainv as *mut _ as *mut c_void,
+                    &mut stride_i as *mut _ as *mut c_void,
+                    &mut p_contig as *mut _ as *mut c_void,
+                    &mut ndev_f as *mut _ as *mut c_void,
+                    &mut p_rowmap as *mut _ as *mut c_void,
+                    &mut p_out_m as *mut _ as *mut c_void,
+                    &mut p_out_u as *mut _ as *mut c_void,
+                    &mut p_out_l as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, &mut args)
+                    .expect("prb batch launch");
+            }
+            self.cuda.stream.synchronize().expect("prb batch sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -874,27 +955,145 @@ pub mod benches {
             polynomial_order: (2, 2, 0),
             regression_offset: (0, 0, 0),
         };
-        Box::new(BatchState { cuda, price, sweep })
+
+        let len = price.len();
+        let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
+        let combos = CudaPrb::expand_grid(&sweep, false).expect("prb expand_grid");
+        let rows = combos.len();
+        let contig = CudaPrb::contig_valid(&price);
+
+        let mut periods: Vec<i32> = Vec::with_capacity(rows);
+        let mut orders: Vec<i32> = Vec::with_capacity(rows);
+        let mut offsets: Vec<i32> = Vec::with_capacity(rows);
+        let mut a_invs: Vec<f32> = Vec::with_capacity(rows * 64);
+        let mut row_map: Vec<i32> = Vec::with_capacity(rows);
+        for (row, c) in combos.iter().enumerate() {
+            let n = c.regression_period.unwrap();
+            let k = c.polynomial_order.unwrap();
+            let off = c.regression_offset.unwrap_or(0);
+            periods.push(n as i32);
+            orders.push(k as i32);
+            offsets.push(off as i32);
+            a_invs.extend_from_slice(&CudaPrb::build_a_inv(n, k));
+            row_map.push(row as i32);
+        }
+
+        let use_chunked = price[first_valid..].iter().all(|v| !v.is_nan());
+        let (block_x, grid_x) = if use_chunked {
+            const PRB_BATCH_CHUNK_LEN: usize = 4096;
+            let bx = 32u32;
+            let chunks = len.div_ceil(PRB_BATCH_CHUNK_LEN);
+            let gx = chunks.div_ceil(bx as usize) as u32;
+            (bx, gx.max(1))
+        } else {
+            (1u32, 1u32)
+        };
+
+        let d_src = DeviceBuffer::from_slice(&price).expect("d_src");
+        let d_contig = DeviceBuffer::from_slice(&contig).expect("d_contig");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let d_orders = DeviceBuffer::from_slice(&orders).expect("d_orders");
+        let d_offsets = DeviceBuffer::from_slice(&offsets).expect("d_offsets");
+        let d_ainv = DeviceBuffer::from_slice(&a_invs).expect("d_ainv");
+        let d_rowmap = DeviceBuffer::from_slice(&row_map).expect("d_rowmap");
+
+        let total_elems = rows.checked_mul(len).expect("rows*len overflow");
+        let d_main: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }.expect("d_main");
+        let d_up: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }.expect("d_up");
+        let d_lo: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }.expect("d_lo");
+
+        let grid: GridSize = (grid_x, (rows as u32).max(1), 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("prb prep sync");
+
+        Box::new(BatchState {
+            cuda,
+            d_src,
+            d_contig,
+            d_periods,
+            d_orders,
+            d_offsets,
+            d_ainv,
+            d_rowmap,
+            len,
+            first_valid,
+            rows,
+            grid,
+            block,
+            use_chunked,
+            d_main,
+            d_up,
+            d_lo,
+        })
     }
 
     struct ManyState {
         cuda: CudaPrb,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_contig_tm: DeviceBuffer<i32>,
+        d_firsts: DeviceBuffer<i32>,
+        d_ainv: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: PrbParams,
+        period: i32,
+        order: i32,
+        offset: i32,
+        grid: GridSize,
+        block: BlockSize,
+        ndev: f32,
+        d_m: DeviceBuffer<f32>,
+        d_u: DeviceBuffer<f32>,
+        d_l: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManyState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .prb_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
-                )
-                .expect("prb many");
+                .module
+                .get_function("prb_many_series_one_param_f32")
+                .expect("prb_many_series_one_param_f32");
+            unsafe {
+                let mut p_tm = self.d_prices_tm.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut period_i = self.period;
+                let mut order_i = self.order;
+                let mut off_i = self.offset;
+                let mut max_m_i = 8i32;
+                let mut stride_i = (8 * 8) as i32;
+                let mut p_ainv = self.d_ainv.as_device_ptr().as_raw();
+                let mut p_contig_tm = self.d_contig_tm.as_device_ptr().as_raw();
+                let mut p_firsts = self.d_firsts.as_device_ptr().as_raw();
+                let mut ndev_f = self.ndev;
+                let mut p_m = self.d_m.as_device_ptr().as_raw();
+                let mut p_u = self.d_u.as_device_ptr().as_raw();
+                let mut p_l = self.d_l.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 15] = [
+                    &mut p_tm as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut period_i as *mut _ as *mut c_void,
+                    &mut order_i as *mut _ as *mut c_void,
+                    &mut off_i as *mut _ as *mut c_void,
+                    &mut max_m_i as *mut _ as *mut c_void,
+                    &mut p_ainv as *mut _ as *mut c_void,
+                    &mut stride_i as *mut _ as *mut c_void,
+                    &mut p_contig_tm as *mut _ as *mut c_void,
+                    &mut p_firsts as *mut _ as *mut c_void,
+                    &mut ndev_f as *mut _ as *mut c_void,
+                    &mut p_m as *mut _ as *mut c_void,
+                    &mut p_u as *mut _ as *mut c_void,
+                    &mut p_l as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, &mut args)
+                    .expect("prb many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("prb many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -911,12 +1110,78 @@ pub mod benches {
             ndev: Some(2.0),
             equ_from: Some(0),
         };
+        let n = params.regression_period.unwrap_or(100);
+        let k = params.polynomial_order.unwrap_or(2);
+        let off = params.regression_offset.unwrap_or(0);
+        let ndev = params.ndev.unwrap_or(2.0) as f32;
+
+        // Per-column first_valid and contig (no smoothing in this bench).
+        let elems = cols.checked_mul(rows).expect("cols*rows overflow");
+        let mut firsts = vec![0i32; cols];
+        for s in 0..cols {
+            let mut fv = -1i32;
+            for t in 0..rows {
+                let v = data_tm[t * cols + s];
+                if !v.is_nan() {
+                    fv = t as i32;
+                    break;
+                }
+            }
+            firsts[s] = fv;
+        }
+        let contig_tm = {
+            let mut v = vec![0i32; elems];
+            for s in 0..cols {
+                let mut c = 0i32;
+                for t in 0..rows {
+                    let y = data_tm[t * cols + s];
+                    if y.is_nan() {
+                        c = 0;
+                    } else {
+                        c += 1;
+                    }
+                    v[t * cols + s] = c;
+                }
+            }
+            v
+        };
+        let ainv = CudaPrb::build_a_inv(n, k);
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_contig_tm = DeviceBuffer::from_slice(&contig_tm).expect("d_contig_tm");
+        let d_firsts = DeviceBuffer::from_slice(&firsts).expect("d_firsts");
+        let d_ainv = DeviceBuffer::from_slice(&ainv).expect("d_ainv");
+
+        let d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_m");
+        let d_u: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_u");
+        let d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_l");
+
+        let block_x: u32 = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 256,
+        };
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("prb prep sync");
+
         Box::new(ManyState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_contig_tm,
+            d_firsts,
+            d_ainv,
             cols,
             rows,
-            params,
+            period: n as i32,
+            order: k as i32,
+            offset: off as i32,
+            grid,
+            block,
+            ndev,
+            d_m,
+            d_u,
+            d_l,
         })
     }
 

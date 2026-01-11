@@ -751,7 +751,7 @@ fn ce_prepare<'a>(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((h, l, c, period, mult, use_close, first, chosen))
@@ -1469,7 +1469,7 @@ pub struct CeBatchRange {
 impl Default for CeBatchRange {
     fn default() -> Self {
         Self {
-            period: (22, 22, 0),
+            period: (22, 271, 1),
             mult: (3.0, 3.0, 0.0),
             use_close: (true, true, false),
         }
@@ -2419,7 +2419,7 @@ pub fn ce_js(
         use_close: Some(use_close),
     };
     let i = ChandelierExitInput::from_slices(high, low, close, p);
-    let out = chandelier_exit_with_kernel(&i, detect_best_kernel())
+    let out = chandelier_exit_with_kernel(&i, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = 2usize;
     let cols = close.len();
@@ -2600,7 +2600,7 @@ pub fn ce_into(
                 use_close: Some(use_close),
             };
             let input = ChandelierExitInput::from_slices(h, l, c, params);
-            let result = chandelier_exit_with_kernel(&input, detect_best_kernel())
+            let result = chandelier_exit_with_kernel(&input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             tmp[..len].copy_from_slice(&result.long_stop);
             tmp[len..].copy_from_slice(&result.short_stop);
@@ -2616,7 +2616,7 @@ pub fn ce_into(
         };
         let input = ChandelierExitInput::from_slices(h, l, c, params);
         let (long_stop, short_stop) =
-            match chandelier_exit_with_kernel(&input, detect_best_kernel()) {
+            match chandelier_exit_with_kernel(&input, Kernel::Auto) {
                 Ok(o) => (o.long_stop, o.short_stop),
                 Err(e) => return Err(JsValue::from_str(&e.to_string())),
             };
@@ -2747,7 +2747,7 @@ pub fn chandelier_exit_wasm(
         use_close: Some(u),
     };
     let input = ChandelierExitInput::from_slices(high, low, close, params);
-    let out = chandelier_exit_with_kernel(&input, detect_best_kernel())
+    let out = chandelier_exit_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Return in the old format expected by tests

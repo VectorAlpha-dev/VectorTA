@@ -535,27 +535,76 @@ pub mod benches {
         prefix_bytes + periods_bytes + out_bytes + 64 * 1024 * 1024
     }
 
-    struct AoBatchState {
+    struct AoBatchDeviceState {
         cuda: CudaAo,
-        hl2: Vec<f32>,
-        sweep: AoBatchRange,
+        d_prefix: DeviceBuffer<super::Float2>,
+        d_shorts: DeviceBuffer<i32>,
+        d_longs: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for AoBatchState {
+    impl CudaBenchState for AoBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .ao_batch_dev(&self.hl2, &self.sweep)
-                .expect("ao batch");
+            self.cuda
+                .launch_batch_into(
+                    &self.d_prefix,
+                    self.len,
+                    self.first_valid,
+                    &self.d_shorts,
+                    &self.d_longs,
+                    self.n_combos,
+                    &self.d_out,
+                    0,
+                )
+                .expect("ao launch");
+            self.cuda.stream.synchronize().expect("ao sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaAo::new(0).expect("cuda ao");
         let hl2 = gen_series(ONE_SERIES_LEN);
         let sweep = AoBatchRange {
-            short_period: (4, 4 + PARAM_SWEEP / 5, 1),
-            long_period: (20, 20 + PARAM_SWEEP, 2),
+            // Keep output surface O(PARAM_SWEEP * len). Sweeping both short+long
+            // multiplies combinations and can exceed VRAM / overflow indices.
+            short_period: (5, 5, 0),
+            long_period: (20, 20 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(AoBatchState { cuda, hl2, sweep })
+
+        let len = hl2.len();
+        let first_valid = hl2
+            .iter()
+            .position(|v| !v.is_nan())
+            .unwrap_or(len);
+        let combos = expand_grid_checked_cuda(&sweep).expect("expand_grid");
+        let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
+        let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
+        for prm in &combos {
+            shorts.push(prm.short_period.unwrap_or(0) as i32);
+            longs.push(prm.long_period.unwrap_or(0) as i32);
+        }
+        let n_combos = combos.len();
+
+        let prefix: Vec<super::Float2> = build_prefix_ds(&hl2, first_valid);
+        let d_prefix: DeviceBuffer<super::Float2> =
+            DeviceBuffer::from_slice(&prefix).expect("d_prefix H2D");
+        let d_shorts = DeviceBuffer::from_slice(&shorts).expect("d_shorts H2D");
+        let d_longs = DeviceBuffer::from_slice(&longs).expect("d_longs H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len * n_combos) }.expect("d_out alloc");
+        cuda.stream.synchronize().expect("ao prep sync");
+
+        Box::new(AoBatchDeviceState {
+            cuda,
+            d_prefix,
+            d_shorts,
+            d_longs,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

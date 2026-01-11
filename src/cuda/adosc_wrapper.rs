@@ -410,35 +410,54 @@ impl CudaAdosc {
             .module
             .get_function("adosc_batch_from_adl_f32")
             .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_batch_from_adl_f32" })?;
-        // Throughput mapping: many threads grid‑stride over combos
-        let block_x: u32 = match self.policy.batch {
+        // Throughput mapping: warp-per-combo (see `adosc_batch_from_adl_f32`).
+        let mut block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
             BatchKernelPolicy::Auto => 256,
         };
-        let max_grid = self.device_max_grid_x().unwrap_or(65_535);
-        let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
-        let grid: GridSize = (grid_x.max(1).min(max_grid), 1, 1).into();
-        let block: BlockSize = (block_x, 1, 1).into();
+        block_x = block_x.max(32).min(1024);
+        block_x -= block_x % 32;
+        let warps_per_block = (block_x / 32).max(1);
+        let max_grid = self.device_max_grid_x().unwrap_or(65_535).max(1);
+        let combos_per_launch: usize = (warps_per_block as usize) * (max_grid as usize);
         unsafe {
             (*(self as *const _ as *mut CudaAdosc)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
-        unsafe {
-            let mut adl = d_adl.as_device_ptr().as_raw();
-            let mut sp = d_shorts.as_device_ptr().as_raw();
-            let mut lp = d_longs.as_device_ptr().as_raw();
-            let mut n = series_len as i32;
-            let mut combos = n_combos as i32;
-            let mut out = d_out.as_device_ptr().as_raw();
-            let args: &mut [*mut c_void] = &mut [
-                &mut adl as *mut _ as *mut c_void,
-                &mut sp as *mut _ as *mut c_void,
-                &mut lp as *mut _ as *mut c_void,
-                &mut n as *mut _ as *mut c_void,
-                &mut combos as *mut _ as *mut c_void,
-                &mut out as *mut _ as *mut c_void,
-            ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let this_chunk = (n_combos - launched).min(combos_per_launch);
+            let grid_x = ((this_chunk as u32) + warps_per_block - 1) / warps_per_block;
+            let grid: GridSize = (grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            unsafe {
+                let mut adl = d_adl.as_device_ptr().as_raw();
+                let mut sp = d_shorts
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut lp = d_longs
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut n = series_len as i32;
+                let mut combos = this_chunk as i32;
+                let mut out = d_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add(((launched * series_len) * std::mem::size_of::<f32>()) as u64);
+                let args: &mut [*mut c_void] = &mut [
+                    &mut adl as *mut _ as *mut c_void,
+                    &mut sp as *mut _ as *mut c_void,
+                    &mut lp as *mut _ as *mut c_void,
+                    &mut n as *mut _ as *mut c_void,
+                    &mut combos as *mut _ as *mut c_void,
+                    &mut out as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)?;
+            }
+            launched += this_chunk;
         }
         Ok(())
     }
@@ -618,26 +637,28 @@ pub mod benches {
         (high, low)
     }
 
-    struct AdoscBatchState {
+    struct AdoscBatchDeviceState {
         cuda: CudaAdosc,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        volume: Vec<f32>,
-        sweep: AdoscBatchRange,
+        d_adl: DeviceBuffer<f32>,
+        d_shorts: DeviceBuffer<i32>,
+        d_longs: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for AdoscBatchState {
+    impl CudaBenchState for AdoscBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .adosc_batch_dev(
-                    &self.high,
-                    &self.low,
-                    &self.close,
-                    &self.volume,
-                    &self.sweep,
+            self.cuda
+                .launch_batch_from_adl(
+                    &self.d_adl,
+                    &self.d_shorts,
+                    &self.d_longs,
+                    self.series_len,
+                    self.n_combos,
+                    &mut self.d_out,
                 )
-                .expect("adosc batch");
+                .expect("adosc launch");
+            self.cuda.stream.synchronize().expect("adosc sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -650,16 +671,50 @@ pub mod benches {
             volume[i] = (x.cos().abs() + 0.4) * 1000.0;
         }
         let sweep = AdoscBatchRange {
-            short_period: (3, 3 + PARAM_SWEEP / 5, 1),
-            long_period: (10, 10 + PARAM_SWEEP, 2),
+            // Keep output surface O(PARAM_SWEEP * len). Sweeping both short+long
+            // multiplies combinations and can exceed VRAM / overflow indices.
+            short_period: (3, 3, 0),
+            long_period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        Box::new(AdoscBatchState {
+
+        let combos = expand_grid_checked_cuda(&sweep).expect("expand_grid");
+        let series_len = close.len();
+        let n_combos = combos.len();
+        let mut shorts: Vec<i32> = Vec::with_capacity(n_combos);
+        let mut longs: Vec<i32> = Vec::with_capacity(n_combos);
+        for prm in &combos {
+            shorts.push(prm.short_period.unwrap_or(0) as i32);
+            longs.push(prm.long_period.unwrap_or(0) as i32);
+        }
+
+        // Upload inputs once and precompute ADL once (params-independent).
+        //
+        // Note: use synchronous H2D transfers for bench prep so that if an allocation fails
+        // (e.g., due to fragmentation) we don't unwind with in-flight async copies/kernels.
+        let d_high = DeviceBuffer::from_slice(&high).expect("H2D");
+        let d_low = DeviceBuffer::from_slice(&low).expect("H2D");
+        let d_close = DeviceBuffer::from_slice(&close).expect("H2D");
+        let d_volume = DeviceBuffer::from_slice(&volume).expect("H2D");
+
+        let mut d_adl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len) }.expect("adl alloc");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }.expect("out alloc");
+        let d_shorts = DeviceBuffer::from_slice(&shorts).expect("shorts H2D");
+        let d_longs = DeviceBuffer::from_slice(&longs).expect("longs H2D");
+
+        cuda.launch_adl(&d_high, &d_low, &d_close, &d_volume, series_len, &mut d_adl)
+            .expect("adl kernel");
+        cuda.stream.synchronize().expect("adosc prep sync");
+
+        Box::new(AdoscBatchDeviceState {
             cuda,
-            high,
-            low,
-            close,
-            volume,
-            sweep,
+            d_adl,
+            d_shorts,
+            d_longs,
+            series_len,
+            n_combos,
+            d_out,
         })
     }
 

@@ -342,7 +342,7 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
 
     // Dispatch to the existing compute kernels
     let chosen = match Kernel::Auto {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     let initial = input.get_initial_value();
@@ -725,7 +725,7 @@ pub struct PviBatchRange {
 impl Default for PviBatchRange {
     fn default() -> Self {
         Self {
-            initial_value: (1000.0, 1000.0, 0.0),
+            initial_value: (1000.0, 1249.0, 1.0),
         }
     }
 }

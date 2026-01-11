@@ -175,7 +175,7 @@ pub fn obv_with_kernel(input: &ObvInput, kernel: Kernel) -> Result<ObvOutput, Ob
     let mut out = alloc_with_nan_prefix(close.len(), first);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -1191,7 +1191,7 @@ pub fn obv_into_slice(
         .ok_or(ObvError::AllValuesNaN)?;
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

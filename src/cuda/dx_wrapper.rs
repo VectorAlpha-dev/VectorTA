@@ -118,18 +118,6 @@ impl CudaDx {
     pub fn synchronize(&self) -> Result<(), CudaDxError> { self.stream.synchronize().map_err(Into::into) }
 
     #[inline]
-    fn memset_nan32_async(&self, buf: &mut DeviceBuffer<f32>, stream: &Stream) -> Result<(), CudaDxError> {
-        // Fill f32 buffer with quiet NaN using cuMemsetD32Async for O(N) device-side init.
-        use cust::sys as cu;
-        let nan_bits: u32 = f32::NAN.to_bits();
-        let ptr: cu::CUdeviceptr = buf.as_device_ptr().as_raw() as cu::CUdeviceptr;
-        let n: usize = buf.len();
-        let res = unsafe { cu::cuMemsetD32Async(ptr, nan_bits, n, stream.as_inner()) };
-        if res != cu::CUresult::CUDA_SUCCESS { return Err(cust::error::CudaError::UnknownError.into()); }
-        Ok(())
-    }
-
-    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -357,8 +345,6 @@ impl CudaDx {
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(rows * len, &self.stream) }?;
-        // Device-side NaN prefill
-        self.memset_nan32_async(&mut d_out, &self.stream)?;
 
         // Launch appropriate symbol
         self.launch_batch_symbol(
@@ -408,7 +394,17 @@ impl CudaDx {
             .module
             .get_function(symbol)
             .map_err(|_| CudaDxError::MissingKernelSymbol { name: match symbol { s => s } })?;
-        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain { block_x } => block_x.max(32) };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => {
+                // Keep block_x as a warp-multiple and prefer enough blocks to utilize the GPU
+                // even when the sweep has a modest number of rows (combos).
+                const TARGET_BLOCKS: u32 = 64;
+                let mut bx = ((n_combos as u32 + TARGET_BLOCKS - 1) / TARGET_BLOCKS).max(32);
+                bx = ((bx + 31) / 32) * 32;
+                bx.min(256)
+            }
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
             eprintln!("[dx] batch kernel ({}): block_x={} rows={} len={}", symbol, block_x, n_combos, series_len);
             unsafe { (*(self as *const _ as *mut CudaDx)).debug_batch_logged = true; }
@@ -511,8 +507,6 @@ impl CudaDx {
             .checked_mul(rows)
             .ok_or(CudaDxError::ArithmeticOverflow { what: "cols * rows" })?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
-        // Device-side NaN prefill for time-major output
-        self.memset_nan32_async(&mut d_out, &self.stream)?;
 
         // Heuristic: prefer fast kernel only for larger matrices to preserve unit-test parity
         let use_fast = match self.policy.many_series { ManySeriesKernelPolicy::OneD { .. } => false, ManySeriesKernelPolicy::Auto => rows >= 8192 && cols >= 64 };
@@ -631,42 +625,64 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaDx,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        close: Vec<f32>,
-        sweep: DxBatchRange,
+        d_pdm: DeviceBuffer<f64>,
+        d_mdm: DeviceBuffer<f64>,
+        d_tr: DeviceBuffer<f64>,
+        d_carry: DeviceBuffer<u8>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dx_batch_dev(&self.high, &self.low, &self.close, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_symbol(
+                    "dx_batch_f32_fast",
+                    &self.d_pdm,
+                    &self.d_mdm,
+                    &self.d_tr,
+                    &self.d_carry,
+                    &self.d_periods,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("dx batch kernel");
+            self.cuda.stream.synchronize().expect("dx sync");
         }
     }
 
     struct ManySeriesState {
         cuda: CudaDx,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
-        close_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_close_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
+        symbol: &'static str,
+        d_out_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dx_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    &self.close_tm,
+            self.cuda
+                .launch_many_series_symbol(
+                    self.symbol,
+                    &self.d_high_tm,
+                    &self.d_low_tm,
+                    &self.d_close_tm,
                     self.cols,
                     self.rows,
                     self.period,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
                 )
-                .unwrap();
+                .expect("dx many-series kernel");
+            self.cuda.stream.synchronize().expect("dx sync");
         }
     }
 
@@ -675,7 +691,38 @@ pub mod benches {
         let close = gen_series(LEN_1M);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = DxBatchRange { period: (8, 64, 8) };
-        Box::new(BatchState { cuda, high, low, close, sweep })
+        let (combos, first_valid, len) =
+            CudaDx::prepare_batch(&high, &low, &close, &sweep).expect("prepare_batch");
+        let n_combos = combos.len();
+        let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+        let (pdm, mdm, carry) = CudaDx::precompute_dm_and_carry(&high, &low, &close);
+
+        let d_pdm = unsafe { DeviceBuffer::from_slice_async(&pdm, &cuda.stream) }.expect("d_pdm");
+        let d_mdm = unsafe { DeviceBuffer::from_slice_async(&mdm, &cuda.stream) }.expect("d_mdm");
+        let d_tr: DeviceBuffer<f64> =
+            unsafe { DeviceBuffer::uninitialized_async(1, &cuda.stream) }.expect("d_tr");
+        let d_carry =
+            unsafe { DeviceBuffer::from_slice_async(&carry, &cuda.stream) }.expect("d_carry");
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&periods_host, &cuda.stream) }
+                .expect("d_periods");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }
+                .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(BatchState {
+            cuda,
+            d_pdm,
+            d_mdm,
+            d_tr,
+            d_carry,
+            d_periods,
+            len,
+            first_valid,
+            n_combos,
+            d_out,
+        })
     }
 
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -694,7 +741,48 @@ pub mod benches {
         };
         let (high_tm, low_tm) = synth_hlc_from_close(&close_tm);
         let period = 14usize;
-        Box::new(ManySeriesState { cuda, high_tm, low_tm, close_tm, cols, rows, period })
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if !high_tm[idx].is_nan()
+                    && !low_tm[idx].is_nan()
+                    && !close_tm[idx].is_nan()
+                {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems_out = cols * rows;
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems_out) }.expect("d_out_tm");
+        let use_fast = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::OneD { .. } => false,
+            ManySeriesKernelPolicy::Auto => rows >= 8192 && cols >= 64,
+        };
+        let symbol = if use_fast {
+            "dx_many_series_one_param_time_major_f32_fast"
+        } else {
+            "dx_many_series_one_param_time_major_f32"
+        };
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(ManySeriesState {
+            cuda,
+            d_high_tm,
+            d_low_tm,
+            d_close_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            symbol,
+            d_out_tm,
+        })
     }
 
     fn bytes_batch() -> usize {

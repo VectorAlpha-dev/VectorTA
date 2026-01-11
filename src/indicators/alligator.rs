@@ -368,7 +368,8 @@ pub fn alligator_with_kernel(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        // Scalar is the "best" kernel for Alligator single-series (see SIMD_SCALAR_SELECTION_TRACKER.md).
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -853,7 +854,7 @@ pub struct AlligatorBatchRange {
 impl Default for AlligatorBatchRange {
     fn default() -> Self {
         Self {
-            jaw_period: (13, 13, 0),
+            jaw_period: (13, 262, 1),
             jaw_offset: (8, 8, 0),
             teeth_period: (8, 8, 0),
             teeth_offset: (5, 5, 0),
@@ -1703,11 +1704,14 @@ mod tests {
 
         // Generate realistic parameter ranges for the three SMMA lines
         let strat = (6usize..=50).prop_flat_map(|max_period| {
+            // Offsets are validated against the full input length, so ensure the generated
+            // series is always long enough for the maximum offset we generate below.
+            let min_len = max_period + 10;
             (
                 // Data vector with length sufficient for the largest period
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    max_period..400,
+                    min_len..400,
                 ),
                 // Jaw parameters (typically the slowest/longest)
                 ((max_period / 2).max(2)..=max_period), // jaw_period
@@ -3269,7 +3273,8 @@ pub fn alligator_into_slices(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        // Scalar is the "best" kernel for Alligator single-series (see SIMD_SCALAR_SELECTION_TRACKER.md).
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -3334,7 +3339,7 @@ pub fn alligator_js(
         lips_offset: Some(lips_offset),
     };
     let input = AlligatorInput::from_slice(data, params);
-    let out = alligator_with_kernel(&input, detect_best_kernel())
+    let out = alligator_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     // Return flattened array: [jaw, teeth, lips]
@@ -3418,7 +3423,7 @@ pub fn alligator_into(
                 &mut temp_teeth,
                 &mut temp_lips,
                 &input,
-                detect_best_kernel(),
+                Kernel::Auto,
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -3436,7 +3441,7 @@ pub fn alligator_into(
             let teeth_out = std::slice::from_raw_parts_mut(teeth_ptr, len);
             let lips_out = std::slice::from_raw_parts_mut(lips_ptr, len);
 
-            alligator_into_slices(jaw_out, teeth_out, lips_out, &input, detect_best_kernel())
+            alligator_into_slices(jaw_out, teeth_out, lips_out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 

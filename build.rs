@@ -3,13 +3,24 @@ use std::process::Command;
 use std::path::PathBuf;
 
 fn main() {
-    // Only compile CUDA PTX when the crate feature `cuda` is enabled.
-    // Cargo exposes active features to build.rs via env vars like CARGO_FEATURE_CUDA.
+    // Avoid Cargo's default "rerun if any file in the package changes" behavior,
+    // which requires scanning the entire repo and can fail on Windows if any
+    // directory/file is ACL-restricted (os error 5). Keep rebuild triggers narrow.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=kernels/cuda");
+    println!("cargo:rerun-if-changed=kernels/ptx");
+
+    // When the crate feature `cuda` is enabled, stage prebuilt PTX into OUT_DIR so
+    // dependents don't need nvcc/CUDA Toolkit installed just to build the crate.
+    //
+    // Maintainers can opt-in to nvcc compilation by enabling `cuda-build-ptx`.
+    // Cargo exposes active features to build.rs via env vars like CARGO_FEATURE_*.
     if env::var("CARGO_FEATURE_CUDA").is_ok() {
-        compile_cuda_kernels();
-    } else {
-        // Keep a single, quiet note for clarity in verbose logs.
-        println!("cargo:warning=feature `cuda` not enabled; skipping PTX build");
+        if env::var("CARGO_FEATURE_CUDA_BUILD_PTX").is_ok() {
+            compile_cuda_kernels();
+        } else {
+            stage_prebuilt_ptx();
+        }
     }
 
     // Detect whether we're running on a nightly toolchain and expose a cfg flag.
@@ -31,6 +42,61 @@ fn is_nightly() -> bool {
     false
 }
 
+fn stage_prebuilt_ptx() {
+    println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILT_PTX_DIR");
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+
+    let ptx_dir = if let Ok(dir) = env::var("VECTOR_TA_PREBUILT_PTX_DIR") {
+        PathBuf::from(dir)
+    } else {
+        manifest_dir.join("kernels/ptx/compute_89")
+    };
+
+    if !ptx_dir.is_dir() {
+        panic!(
+            "Prebuilt PTX directory not found: {}. \
+Enable `--features cuda-build-ptx` to compile PTX with nvcc, or set VECTOR_TA_PREBUILT_PTX_DIR to a directory containing *.ptx files.",
+            ptx_dir.display()
+        );
+    }
+
+    let mut ptx_files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&ptx_dir).expect("read prebuilt PTX dir") {
+        let entry = entry.expect("read prebuilt PTX dir entry");
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("ptx") {
+            ptx_files.push(path);
+        }
+    }
+
+    if ptx_files.is_empty() {
+        panic!(
+            "No prebuilt PTX files (*.ptx) found in {}. \
+Enable `--features cuda-build-ptx` to compile PTX with nvcc.",
+            ptx_dir.display()
+        );
+    }
+
+    for src in ptx_files {
+        println!("cargo:rerun-if-changed={}", src.display());
+        let file_name = src
+            .file_name()
+            .expect("PTX file name")
+            .to_string_lossy()
+            .to_string();
+        let dst = out_dir.join(&file_name);
+        std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!(
+                "Failed copying prebuilt PTX {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+}
+
 fn compile_cuda_kernels() {
     println!("cargo:rerun-if-changed=kernels/cuda");
     // Re-run on environment changes that affect CUDA build behavior
@@ -42,6 +108,7 @@ fn compile_cuda_kernels() {
     println!("cargo:rerun-if-env-changed=NVCC_ARGS");
     println!("cargo:rerun-if-env-changed=CUDA_DEBUG");
     println!("cargo:rerun-if-env-changed=CUDA_FAST_MATH");
+    println!("cargo:rerun-if-env-changed=VECTOR_TA_PREBUILD_PTX_DIR");
     // Placeholder PTX on fail is disabled for focused CUDA development.
 
     let cuda_path = find_cuda_path();
@@ -1270,6 +1337,21 @@ fn compile_kernel(cuda_path: &str, rel_src: &str, ptx_name: &str) {
         src_path,
         ptx_path.display()
     );
+
+    // Optional: copy compiled PTX into a committed "prebuilt" directory in the repo.
+    // This is intended for maintainers, not for normal builds.
+    if let Ok(prebuild_dir) = env::var("VECTOR_TA_PREBUILD_PTX_DIR") {
+        let prebuild_dir = PathBuf::from(prebuild_dir);
+        std::fs::create_dir_all(&prebuild_dir).expect("create VECTOR_TA_PREBUILD_PTX_DIR");
+        let dst = prebuild_dir.join(ptx_name);
+        std::fs::copy(&ptx_path, &dst).unwrap_or_else(|e| {
+            panic!(
+                "Failed copying compiled PTX {} -> {}: {e}",
+                ptx_path.display(),
+                dst.display()
+            )
+        });
+    }
 }
 
 #[cfg(target_os = "windows")]

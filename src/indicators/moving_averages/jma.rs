@@ -277,7 +277,7 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -349,7 +349,7 @@ pub fn jma_with_kernel_into(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -851,7 +851,7 @@ pub struct JmaBatchRange {
 impl Default for JmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (7, 240, 1),
+            period: (7, 256, 1),
             phase: (50.0, 50.0, 0.0),
             power: (2, 2, 0),
         }

@@ -122,6 +122,149 @@ void highpass2_batch_f32(const float* __restrict__ prices,          // [series_l
     }
 }
 
+// Batch warp-scan kernel: one warp computes one combo (row) and emits 32 timesteps
+// per iteration via an inclusive scan over the 2x2 affine state update:
+//
+//   y_t = a1*y_{t-1} + a2*y_{t-2} + u_t
+//   u_t = c*x_t + cm2*x_{t-1} + c*x_{t-2}
+//
+// State is s_t = [y_t, y_{t-1}] and:
+//   s_t = M*s_{t-1} + [u_t, 0]
+//   M = [[a1, a2],
+//        [ 1,  0]]
+//
+// - blockDim.x must be exactly 32
+// - outputs:
+//   - [0, first_valid) = NaN
+//   - y[first_valid] = x[first_valid], y[first_valid+1] = x[first_valid+1]
+//   - t >= first_valid+2 computed by recurrence
+extern "C" __global__
+void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
+                                   const int*   __restrict__ periods,         // unused (ABI)
+                                   const float* __restrict__ c_vals,
+                                   const float* __restrict__ cm2_vals,
+                                   const float* __restrict__ two_1m_vals,
+                                   const float* __restrict__ neg_oma_sq_vals,
+                                   int series_len,
+                                   int n_combos,
+                                   int first_valid,
+                                   float* __restrict__ out) {
+    (void)periods;
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+    if (series_len <= 0) return;
+    if (threadIdx.x >= 32) return;
+
+    const int lane = threadIdx.x & 31;
+    const unsigned mask = 0xffffffffu;
+
+    float* __restrict__ out_row = out + (size_t)combo * (size_t)series_len;
+
+    if (first_valid < 0 || first_valid >= series_len) {
+        for (int t = lane; t < series_len; t += 32) out_row[t] = CUDART_NAN_F;
+        return;
+    }
+
+    // Prefix NaNs only where needed
+    for (int t = lane; t < first_valid; t += 32) out_row[t] = CUDART_NAN_F;
+
+    // Seed two points = raw inputs
+    if (lane == 0) {
+        out_row[first_valid] = prices[first_valid];
+        if (first_valid + 1 < series_len) {
+            out_row[first_valid + 1] = prices[first_valid + 1];
+        }
+    }
+    if (first_valid + 1 >= series_len) return;
+
+    const float c      = c_vals[combo];
+    const float cm2    = cm2_vals[combo];
+    const float a1     = two_1m_vals[combo];
+    const float a2     = neg_oma_sq_vals[combo];
+
+    // Previous state at t0-1 = first_valid+1
+    float s0_prev = 0.0f;
+    float s1_prev = 0.0f;
+    if (lane == 0) {
+        s1_prev = prices[first_valid];     // y_{t0-2}
+        s0_prev = prices[first_valid + 1]; // y_{t0-1}
+    }
+    s0_prev = __shfl_sync(mask, s0_prev, 0);
+    s1_prev = __shfl_sync(mask, s1_prev, 0);
+
+    // Constant state-transition matrix M
+    const float m00 = a1;
+    const float m01 = a2;
+    const float m10 = 1.0f;
+    const float m11 = 0.0f;
+
+    int t0 = first_valid + 2;
+    if (t0 >= series_len) return;
+
+    for (int tile = t0; tile < series_len; tile += 32) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        // Per-step u_t term (scalar)
+        float u = 0.0f;
+        if (valid) {
+            const float x0  = prices[t];
+            const float x1  = prices[t - 1];
+            const float x2  = prices[t - 2];
+            // u = c*x0 + cm2*x1 + c*x2
+            u = fmaf(c, x2, fmaf(cm2, x1, c * x0));
+        }
+
+        // Each lane starts with its step transform: (P, v), where
+        // P = M and v = [u, 0]. For inactive lanes, use identity.
+        float p00 = valid ? m00 : 1.0f;
+        float p01 = valid ? m01 : 0.0f;
+        float p10 = valid ? m10 : 0.0f;
+        float p11 = valid ? m11 : 1.0f;
+        float v0  = valid ? u   : 0.0f;
+        float v1  = 0.0f;
+
+        // Inclusive scan over composed transforms: (P_cur, v_cur) ∘ (P_prev, v_prev)
+        #pragma unroll
+        for (int offset = 1; offset < 32; offset <<= 1) {
+            const float p00_prev = __shfl_up_sync(mask, p00, offset);
+            const float p01_prev = __shfl_up_sync(mask, p01, offset);
+            const float p10_prev = __shfl_up_sync(mask, p10, offset);
+            const float p11_prev = __shfl_up_sync(mask, p11, offset);
+            const float v0_prev  = __shfl_up_sync(mask, v0,  offset);
+            const float v1_prev  = __shfl_up_sync(mask, v1,  offset);
+            if (lane >= offset) {
+                const float c00 = p00, c01 = p01, c10 = p10, c11 = p11;
+                const float cv0 = v0,  cv1 = v1;
+
+                const float n00 = fmaf(c00, p00_prev, c01 * p10_prev);
+                const float n01 = fmaf(c00, p01_prev, c01 * p11_prev);
+                const float n10 = fmaf(c10, p00_prev, c11 * p10_prev);
+                const float n11 = fmaf(c10, p01_prev, c11 * p11_prev);
+
+                const float nv0 = fmaf(c00, v0_prev, fmaf(c01, v1_prev, cv0));
+                const float nv1 = fmaf(c10, v0_prev, fmaf(c11, v1_prev, cv1));
+
+                p00 = n00; p01 = n01; p10 = n10; p11 = n11;
+                v0  = nv0; v1  = nv1;
+            }
+        }
+
+        // Apply prefix transform to previous state s_prev
+        const float s0 = fmaf(p00, s0_prev, fmaf(p01, s1_prev, v0));
+        const float s1 = fmaf(p10, s0_prev, fmaf(p11, s1_prev, v1));
+
+        if (valid) {
+            out_row[t] = s0;
+        }
+
+        const int remaining = series_len - tile;
+        const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
+        s0_prev = __shfl_sync(mask, s0, last_lane);
+        s1_prev = __shfl_sync(mask, s1, last_lane);
+    }
+}
+
 // ---------- many series × one parameter ----------
 extern "C" __global__
 void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,  // [series_len * num_series], time-major

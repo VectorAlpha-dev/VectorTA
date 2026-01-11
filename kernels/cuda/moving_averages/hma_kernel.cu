@@ -21,9 +21,10 @@
 
 // ---- TUNABLE MACROS ---------------------------------------------------------
 // If 1, the kernel assumes 'out' is already filled with NaNs by the host
-// (via cuMemsetD32Async / cudaMemsetD32Async). If 0, the kernel fills NaNs.
+// (via cuMemsetD32Async / cudaMemsetD32Async). If 0, the kernel writes the
+// warmup NaN prefix in-kernel (and fills full-row NaN on invalid inputs).
 #ifndef HMA_ASSUME_OUT_PREFILLED
-#define HMA_ASSUME_OUT_PREFILLED 1
+#define HMA_ASSUME_OUT_PREFILLED 0
 #endif
 
 // If 1, put per-thread ring buffers in dynamic shared memory.
@@ -61,25 +62,54 @@ void hma_batch_f32(const float* __restrict__ prices,
     const int stride = blockDim.x * gridDim.x;
     for (int combo = blockIdx.x * blockDim.x + threadIdx.x; combo < n_combos; combo += stride) {
 
+        const int base = combo * series_len;
+
         const int period = periods[combo];
         const int half   = period >> 1;
+#if !HMA_ASSUME_OUT_PREFILLED
+        if (period < 2 || half < 1) {
+            for (int i = 0; i < series_len; ++i) { out[base + i] = HMA_NAN; }
+            continue;
+        }
+#else
         if (period < 2 || half < 1) { continue; }
+#endif
 
         int sqrt_len = (int)sqrtf((float)period);
         if (sqrt_len < 1) sqrt_len = 1;
-        if (sqrt_len > max_sqrt_len) { continue; }
-
-        const int base = combo * series_len;
-
 #if !HMA_ASSUME_OUT_PREFILLED
-        // Fill NaN only if not prefilled by host
-        for (int i = 0; i < series_len; ++i) { out[base + i] = HMA_NAN; }
+        if (sqrt_len > max_sqrt_len) {
+            for (int i = 0; i < series_len; ++i) { out[base + i] = HMA_NAN; }
+            continue;
+        }
+#else
+        if (sqrt_len > max_sqrt_len) { continue; }
 #endif
 
+#if !HMA_ASSUME_OUT_PREFILLED
+        if ((unsigned)first_valid >= (unsigned)series_len) {
+            for (int i = 0; i < series_len; ++i) { out[base + i] = HMA_NAN; }
+            continue;
+        }
+#else
         if ((unsigned)first_valid >= (unsigned)series_len) { continue; }
+#endif
 
         const int tail_len = series_len - first_valid;
+#if !HMA_ASSUME_OUT_PREFILLED
+        if (tail_len < period + sqrt_len - 1) {
+            for (int i = 0; i < series_len; ++i) { out[base + i] = HMA_NAN; }
+            continue;
+        }
+
+        // Fill warmup NaN prefix in-kernel (avoid full output memset).
+        // Earliest output index is: first_valid + (period - 1) + (sqrt_len - 1).
+        int warmup_end = first_valid + period + sqrt_len - 2;
+        if (warmup_end > series_len) warmup_end = series_len;
+        for (int i = 0; i < warmup_end; ++i) { out[base + i] = HMA_NAN; }
+#else
         if (tail_len < period + sqrt_len - 1) { continue; }
+#endif
 
         // Precompute denominators and reciprocals
         const float f_half   = (float)half;
@@ -211,17 +241,35 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     for (int series = blockIdx.x * blockDim.x + threadIdx.x; series < num_series; series += stride) {
 
+        const int first_valid = first_valids[series];
 #if !HMA_ASSUME_OUT_PREFILLED
-        for (int row = 0; row < series_len; ++row) {
-            out_tm[row * num_series + series] = HMA_NAN;
+        if ((unsigned)first_valid >= (unsigned)series_len) {
+            for (int row = 0; row < series_len; ++row) {
+                out_tm[row * num_series + series] = HMA_NAN;
+            }
+            continue;
         }
+#else
+        if ((unsigned)first_valid >= (unsigned)series_len) { continue; }
 #endif
 
-        const int first_valid = first_valids[series];
-        if ((unsigned)first_valid >= (unsigned)series_len) { continue; }
-
         const int tail_len = series_len - first_valid;
+#if !HMA_ASSUME_OUT_PREFILLED
+        if (tail_len < period + sqrt_len - 1) {
+            for (int row = 0; row < series_len; ++row) {
+                out_tm[row * num_series + series] = HMA_NAN;
+            }
+            continue;
+        }
+
+        int warmup_end = first_valid + period + sqrt_len - 2;
+        if (warmup_end > series_len) warmup_end = series_len;
+        for (int row = 0; row < warmup_end; ++row) {
+            out_tm[row * num_series + series] = HMA_NAN;
+        }
+#else
         if (tail_len < period + sqrt_len - 1) { continue; }
+#endif
 
         // Running state
         float sum_half = 0.0f, wsum_half = 0.0f;

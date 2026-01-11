@@ -22,6 +22,96 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
+// ----------------------------------------------------------------------------
+// Optimized batch path (one series x many params)
+//
+// The legacy implementation maps 1 CUDA thread per combo and scans the full
+// series sequentially. That has two major drawbacks:
+//  1) Very low parallelism (n_combos threads total)
+//  2) Strided global writes across combos (poor coalescing)
+//
+// New approach:
+//  - Compute an exclusive prefix sum P of the (FP32) price series into FP64:
+//      P[0] = 0
+//      P[t+1] = P[t] + prices[t]  (with [0, first_valid) treated as 0)
+//  - Compute each SMA output independently via a 2D launch (grid.y = combos):
+//      out[t] = (P[t+1] - P[t+1-period]) / period, for t >= warm
+//
+// FP64 prefixes avoid catastrophic cancellation when subtracting large prefix
+// sums (long series, small period).
+// ----------------------------------------------------------------------------
+
+extern "C" __global__ void sma_exclusive_prefix_f64(
+    const float* __restrict__ prices,
+    int series_len,
+    int first_valid,
+    double* __restrict__ prefix // length = series_len + 1
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0) return;
+
+    if (first_valid < 0) first_valid = 0;
+    if (first_valid > series_len) first_valid = series_len;
+
+    prefix[0] = 0.0;
+    double acc = 0.0;
+    for (int t = 0; t < series_len; ++t) {
+        const double x = (t < first_valid) ? 0.0 : static_cast<double>(prices[t]);
+        acc += x;
+        prefix[t + 1] = acc;
+    }
+}
+
+extern "C" __global__ void sma_batch_from_prefix_f64(
+    const double* __restrict__ prefix, // length = series_len + 1
+    const int* __restrict__ periods,   // [n_combos]
+    int series_len,
+    int n_combos,
+    int first_valid,
+    float* __restrict__ out            // [n_combos * series_len]
+) {
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const int row_off = combo * series_len;
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    if (UNLIKELY(series_len <= 0)) return;
+    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+        while (t < series_len) {
+            out[row_off + t] = SMA_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    if (UNLIKELY(period <= 0 || period > series_len || (series_len - first_valid) < period)) {
+        while (t < series_len) {
+            out[row_off + t] = SMA_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+    const double inv_p = 1.0 / static_cast<double>(period);
+
+    while (t < series_len) {
+        if (t < warm) {
+            out[row_off + t] = SMA_NAN;
+        } else {
+            const int t1 = t + 1;
+            const int start = t1 - period;
+            const double sum = prefix[t1] - prefix[start];
+            out[row_off + t] = static_cast<float>(sum * inv_p);
+        }
+        t += stride;
+    }
+}
+
 extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
                                          const int*   __restrict__ periods,
                                          int series_len,

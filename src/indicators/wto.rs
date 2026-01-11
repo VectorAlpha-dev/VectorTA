@@ -1315,7 +1315,7 @@ impl Default for WtoBatchRange {
     fn default() -> Self {
         Self {
             channel: (10, 10, 0),
-            average: (21, 21, 0),
+            average: (21, 270, 1),
         }
     }
 }
@@ -1353,7 +1353,7 @@ impl Default for WtoBatchBuilder {
     fn default() -> Self {
         Self {
             channel_range: (10, 10, 0),
-            average_range: (21, 21, 0),
+            average_range: (21, 270, 1),
             kernel: Kernel::Auto,
         }
     }
@@ -1507,7 +1507,7 @@ fn wto_fill_wt1_grouped(
     }
 
     let kernel = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other.to_non_batch(),
     };
 
@@ -2169,7 +2169,7 @@ pub fn wto_batch_all_outputs_with_kernel(
 
     // Get kernel
     let kern = match k {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         x => x,
     };
 

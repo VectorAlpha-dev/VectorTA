@@ -400,22 +400,107 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
 
     const int base = combo * series_len;
 
-    // Parallel prefill with NaNs
-    for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
-        out_sq[base + i] = SMI_QNAN_F;
-        out_mo[base + i] = SMI_QNAN_F;
-        out_si[base + i] = SMI_QNAN_F;
+    auto fill_all_nan = [&]() {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out_sq[base + i] = SMI_QNAN_F;
+            out_mo[base + i] = SMI_QNAN_F;
+            out_si[base + i] = SMI_QNAN_F;
+        }
+    };
+
+    __shared__ int sh_valid;
+    __shared__ int sh_lbb;
+    __shared__ int sh_lkc;
+    __shared__ int sh_start_bb;
+    __shared__ int sh_start_kc;
+    __shared__ int sh_pref_sq;
+    __shared__ int sh_pref_mo;
+    __shared__ int sh_pref_si;
+    __shared__ float sh_mbb;
+    __shared__ float sh_mkc;
+    __shared__ int sh_bb_seed_ok;
+
+    if (threadIdx.x == 0) {
+        sh_valid = 1;
+        if (first_valid < 0 || first_valid >= series_len) sh_valid = 0;
+
+        sh_lbb = lbb_arr[combo];
+        sh_mbb = mbb_arr[combo];
+        sh_lkc = lkc_arr[combo];
+        sh_mkc = mkc_arr[combo];
+
+        if (sh_lbb <= 0 || sh_lkc <= 0 || sh_lbb > series_len || sh_lkc > series_len) {
+            sh_valid = 0;
+        }
+
+        sh_start_bb = 0;
+        sh_start_kc = 0;
+        sh_bb_seed_ok = 0;
+        if (sh_valid) {
+            sh_start_bb = first_valid + sh_lbb - 1;
+            sh_start_kc = first_valid + sh_lkc - 1;
+            if (sh_start_bb >= series_len || sh_start_kc >= series_len) {
+                sh_valid = 0;
+            }
+        }
+
+        // Seed-window finiteness: if KC seed is invalid, all outputs remain NaN.
+        if (sh_valid) {
+            bool bb_ok = true;
+            for (int j = 0; j < sh_lbb && j < series_len; ++j) {
+                if (!is_finite_f(close[j])) { bb_ok = false; break; }
+            }
+            bool kc_ok = true;
+            for (int j = 0; j < sh_lkc && j < series_len; ++j) {
+                if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { kc_ok = false; break; }
+            }
+            sh_bb_seed_ok = bb_ok ? 1 : 0;
+            if (!kc_ok) sh_valid = 0;
+        }
+
+        // Prefix NaNs: cover all indices that will not be written by the scan.
+        sh_pref_sq = 0;
+        sh_pref_mo = 0;
+        sh_pref_si = 0;
+        if (sh_valid) {
+            const int warm_sq = max(sh_lbb, sh_lkc) - 1;
+            const int warm_si = sh_lkc; // (lkc - 1) + 1
+
+            int pref_sq = sh_start_bb;
+            if (sh_start_kc > pref_sq) pref_sq = sh_start_kc;
+            if (warm_sq > pref_sq) pref_sq = warm_sq;
+            sh_pref_sq = pref_sq;
+
+            sh_pref_mo = sh_start_kc;
+
+            int pref_si = warm_si;
+            if (sh_start_kc > pref_si) pref_si = sh_start_kc;
+            sh_pref_si = pref_si;
+        }
     }
     __syncthreads();
+
+    if (!sh_valid) {
+        fill_all_nan();
+        return;
+    }
+
+    // Prefill only warmup prefixes; the scan below writes every index >= prefix.
+    for (int i = threadIdx.x; i < sh_pref_sq; i += blockDim.x) out_sq[base + i] = SMI_QNAN_F;
+    for (int i = threadIdx.x; i < sh_pref_mo; i += blockDim.x) out_mo[base + i] = SMI_QNAN_F;
+    for (int i = threadIdx.x; i < sh_pref_si; i += blockDim.x) out_si[base + i] = SMI_QNAN_F;
+    __syncthreads();
+
     if (threadIdx.x != 0) return;
 
-    if (first_valid < 0 || first_valid >= series_len) return;
-
-    const int   lbb = lbb_arr[combo];
-    const float mbb = mbb_arr[combo];
-    const int   lkc = lkc_arr[combo];
-    const float mkc = mkc_arr[combo];
-    if (lbb <= 0 || lkc <= 0) return;
+    const int   lbb = sh_lbb;
+    const float mbb = sh_mbb;
+    const int   lkc = sh_lkc;
+    const float mkc = sh_mkc;
+    const int   start_bb = sh_start_bb;
+    const int   start_kc = sh_start_kc;
+    const bool  bb_seed_ok = (sh_bb_seed_ok != 0);
+    const bool  kc_seed_ok = true;
 
     const int N = series_len;
     const int warm_sq = max(lbb, lkc) - 1;
@@ -430,12 +515,6 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
     const float denom   = fmaf(p, sum_x2, -sum_x * sum_x);
     const float inv_den = 1.0f / denom;
     const float x_last_minus_xbar = p - sum_x * inv_lkc;
-
-    const int start_bb = first_valid + lbb - 1;
-    const int start_kc = first_valid + lkc - 1;
-
-    bool bb_seed_ok = true; for (int j = 0; j < lbb && j < N; ++j) { if (!is_finite_f(close[j])) { bb_seed_ok = false; break; } }
-    bool kc_seed_ok = true; for (int j = 0; j < lkc && j < N; ++j) { if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { kc_seed_ok = false; break; } }
 
     extern __shared__ float s_ring[]; // size >= max(lkc)
     float* raw_ring = s_ring;

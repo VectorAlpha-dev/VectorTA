@@ -1117,7 +1117,7 @@ pub struct AlmaBatchRange {
 impl Default for AlmaBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 250, 1),
+            period: (9, 258, 1),
             offset: (0.85, 0.85, 0.0),
             sigma: (6.0, 6.0, 0.0),
         }

@@ -350,19 +350,91 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
 
 #[inline(always)]
 pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    // Safe scalar reference: sliding window SMA + shifted price.
-    let back = period / 2 + 1;
-    let mut sum = 0.0f64;
-    let scale = 1.0f64 / (period as f64);
+    // Fast scalar implementation: mirror Tulip's sliding-sum structure but keep the exact
+    // warmup/shift semantics of this crate (including `first_val` and `back`).
     let len = data.len();
-    for i in first_val..len {
-        sum += data[i];
-        if i >= first_val + period {
-            sum -= data[i - period];
+    if len == 0 {
+        return;
+    }
+
+    let back = period / 2 + 1;
+    let scale = 1.0f64 / (period as f64);
+
+    unsafe {
+        let base = first_val;
+        let ptr_d = data.as_ptr();
+        let ptr_o = out.as_mut_ptr();
+
+        // Seed rolling sum for the first full window ending at `base + period - 1`.
+        let mut sum = 0.0f64;
+        let mut k = 0usize;
+        while k < period {
+            sum += *ptr_d.add(base + k);
+            k += 1;
         }
-        if i >= first_val + period - 1 && i >= back {
-            let p = data[i - back];
-            out[i] = (-scale).mul_add(sum, p);
+
+        // i tracks the current window end index.
+        let mut i = base + period - 1;
+
+        // Warm to the first index where the back-shift is valid (i >= back).
+        if i < back {
+            let stop = back.min(len.saturating_sub(1));
+            while i < stop {
+                let next = i + 1;
+                sum += *ptr_d.add(next);
+                sum -= *ptr_d.add(next - period);
+                i = next;
+            }
+        }
+
+        // Unrolled steady-state loop.
+        while i + 3 < len {
+            // i
+            let p0 = *ptr_d.add(i - back);
+            *ptr_o.add(i) = sum.mul_add(-scale, p0);
+
+            // i+1
+            let a1 = *ptr_d.add(i + 1);
+            let r1 = *ptr_d.add(i + 1 - period);
+            let s1 = (sum + a1) - r1;
+            let p1 = *ptr_d.add(i + 1 - back);
+            *ptr_o.add(i + 1) = s1.mul_add(-scale, p1);
+
+            // i+2
+            let a2 = *ptr_d.add(i + 2);
+            let r2 = *ptr_d.add(i + 2 - period);
+            let s2 = (s1 + a2) - r2;
+            let p2 = *ptr_d.add(i + 2 - back);
+            *ptr_o.add(i + 2) = s2.mul_add(-scale, p2);
+
+            // i+3
+            let a3 = *ptr_d.add(i + 3);
+            let r3 = *ptr_d.add(i + 3 - period);
+            let s3 = (s2 + a3) - r3;
+            let p3 = *ptr_d.add(i + 3 - back);
+            *ptr_o.add(i + 3) = s3.mul_add(-scale, p3);
+
+            // Advance to i+4 and update sum for that new window end (if it exists).
+            i += 4;
+            if i >= len {
+                return;
+            }
+            sum = s3 + *ptr_d.add(i);
+            sum -= *ptr_d.add(i - period);
+        }
+
+        // Tail.
+        while i < len {
+            if i >= back {
+                let p = *ptr_d.add(i - back);
+                *ptr_o.add(i) = sum.mul_add(-scale, p);
+            }
+            if i + 1 < len {
+                let next = i + 1;
+                sum += *ptr_d.add(next);
+                sum -= *ptr_d.add(next - period);
+            }
+            i += 1;
         }
     }
 }
@@ -569,7 +641,7 @@ pub struct DpoBatchRange {
 
 impl Default for DpoBatchRange {
     fn default() -> Self {
-        Self { period: (5, 60, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 

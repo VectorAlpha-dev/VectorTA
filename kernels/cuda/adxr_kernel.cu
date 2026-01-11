@@ -285,32 +285,37 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     if (first_valid < 0 || first_valid >= series_len || n_periods <= 0) return;
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= n_periods) return;
+    const bool active = (tid < n_periods);
 
-    const int period = periods[tid];
-    if (period <= 0) return;
+    int period = 0;
+    if (active) {
+        period = periods[tid];
+    }
+    const bool valid = active && (period > 0);
 
-    const int row_base  = tid * series_len;
-    const int ring_base = tid * ring_pitch;
+    // Per-thread row base and ring base (only for valid combos)
+    const int row_base  = valid ? (tid * series_len) : 0;
+    const int ring_base = valid ? (tid * ring_pitch) : 0;
 
-    // Fill this row with NaNs once per row
-    if (threadIdx.x == 0) {
-        for (int t = 0; t < series_len; ++t) {
+    float inv_p = 0.0f;
+    float one_minus = 0.0f;
+    float pm1 = 0.0f;
+    int warmup_start = 0;
+    if (valid) {
+        const float p = (float)period;
+        inv_p = 1.0f / p;
+        one_minus = 1.0f - inv_p;
+        pm1 = p - 1.0f;
+        warmup_start = first_valid + 2 * period;
+    }
+
+    // Fill only the warmup prefix with NaNs (the main loop writes all i >= warmup_start).
+    if (valid) {
+        const int warm_end = min(warmup_start, series_len);
+        for (int t = 0; t < warm_end; ++t) {
             out[row_base + t] = NAN;
         }
     }
-
-    // Initialize ring slots this period will use
-    for (int k = 0; k < period; ++k) {
-        adx_ring[ring_base + k] = NAN;
-    }
-    __syncthreads();
-
-    const float p         = (float)period;
-    const float inv_p     = 1.0f / p;
-    const float one_minus = 1.0f - inv_p;
-    const float pm1       = p - 1.0f;
-    const int   warmup_start = first_valid + 2 * period;
 
     // Bootstrap sums (period-dependent) over [first_valid+1 .. first_valid+period]
     const int init_i0 = first_valid + 1;
@@ -340,6 +345,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     bool  have_adx = false;
 
     int head = 0; // ring head for this period
+    int ring_filled = 0;
 
     // Tiled pass over time using dynamic shared memory
     extern __shared__ float smem[];
@@ -370,7 +376,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         for (int j = 0; j < count; ++j) {
             const int i = tile_start + j;
 
-            if (i <= first_valid + period) {
+            if (!valid || i <= first_valid + period) {
                 // still within bootstrap window; skip
             } else {
                 // Wilder updates
@@ -386,21 +392,23 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
                     if (dx_count == period) {
                         adx_last = dx_sum.sum * inv_p;
                         have_adx = true;
-                        float prev = adx_ring[ring_base + head];
+                        float prev = (ring_filled >= period) ? adx_ring[ring_base + head] : NAN;
                         adx_ring[ring_base + head] = adx_last;
+                        if (ring_filled < period) ring_filled += 1;
                         head += 1; if (head == period) head = 0;
-                        if (i >= warmup_start && !isnan(prev)) {
-                            out[row_base + i] = 0.5f * (adx_last + prev);
+                        if (i >= warmup_start) {
+                            out[row_base + i] = isfinite(prev) ? 0.5f * (adx_last + prev) : NAN;
                         }
                     }
                 } else if (have_adx) {
                     const float adx_curr = (adx_last * pm1 + dx) * inv_p;
                     adx_last = adx_curr;
-                    float prev = adx_ring[ring_base + head];
+                    float prev = (ring_filled >= period) ? adx_ring[ring_base + head] : NAN;
                     adx_ring[ring_base + head] = adx_curr;
+                    if (ring_filled < period) ring_filled += 1;
                     head += 1; if (head == period) head = 0;
-                    if (i >= warmup_start && !isnan(prev)) {
-                        out[row_base + i] = 0.5f * (adx_curr + prev);
+                    if (i >= warmup_start) {
+                        out[row_base + i] = isfinite(prev) ? 0.5f * (adx_curr + prev) : NAN;
                     }
                 }
             }

@@ -257,7 +257,7 @@ fn trima_prepare<'a>(
     let m2 = period - m1 + 1;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1035,7 +1035,7 @@ pub struct TrimaBatchRange {
 impl Default for TrimaBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 100, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1868,14 +1868,14 @@ pub fn trima_into(
             // compute into a temp result buffer, then copy
             let mut temp = vec![0.0; len];
             let input = TrimaInput::from_slice(data, params);
-            trima_into_slice(&mut temp, &input, detect_best_kernel())
+            trima_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let input = TrimaInput::from_slice(data, params);
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            trima_into_slice(out, &input, detect_best_kernel())
+            trima_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())
@@ -1955,7 +1955,7 @@ impl TrimaContext {
             m1,
             m2,
             first: 0,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Auto,
         })
     }
 

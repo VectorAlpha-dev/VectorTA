@@ -23,6 +23,133 @@
 #define LINREG_LAUNCH_BOUNDS 256, 2
 #endif
 
+// ----------------------------------------------------------------------------
+// Prefix helpers for batch LINREG
+//
+// The legacy batch kernel runs 1 thread per combo, scanning the whole series.
+// That severely underutilizes the GPU when n_combos is small (e.g., 250) and
+// makes the kernel dominated by sequential DP math.
+//
+// Here we compute two FP64 exclusive prefixes once per input series:
+//   prefix_y[t+1]  = Σ_{i<=t} y_i
+//   prefix_yi[t+1] = Σ_{i<=t} (y_i * i)  (i is 0-based absolute index)
+//
+// For a window ending at time t with length n (x = 1..n), we can compute:
+//   sum_y  = Σ y_i
+//   sum_yi = Σ (y_i * i)
+//   xy_sum = Σ (y_i * x_i) = sum_yi + (n - t) * sum_y
+//
+// This lets us compute each output independently with a 2D launch:
+//   grid.y = combos, grid.x tiles time.
+// ----------------------------------------------------------------------------
+
+extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
+    const float* __restrict__ prices,
+    int series_len,
+    int first_valid,
+    double* __restrict__ prefix_y,   // length = series_len + 1
+    double* __restrict__ prefix_yi   // length = series_len + 1
+) {
+    if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0) return;
+
+    if (first_valid < 0) first_valid = 0;
+    if (first_valid > series_len) first_valid = series_len;
+
+    prefix_y[0]  = 0.0;
+    prefix_yi[0] = 0.0;
+
+    double acc_y  = 0.0;
+    double acc_yi = 0.0;
+    for (int t = 0; t < series_len; ++t) {
+        const double v = (t < first_valid) ? 0.0 : static_cast<double>(prices[t]);
+        acc_y  += v;
+        acc_yi  = fma(v, static_cast<double>(t), acc_yi);
+        prefix_y[t + 1]  = acc_y;
+        prefix_yi[t + 1] = acc_yi;
+    }
+}
+
+extern "C" __global__
+__launch_bounds__(LINREG_LAUNCH_BOUNDS)
+void linreg_batch_from_prefix_f64(
+    const double* __restrict__ prefix_y,  // length = series_len + 1
+    const double* __restrict__ prefix_yi, // length = series_len + 1
+    const int*   __restrict__ periods,    // [n_combos]
+    const float* __restrict__ x_sums,     // [n_combos]
+    const float* __restrict__ denom_invs, // [n_combos]
+    const float* __restrict__ inv_periods,// [n_combos]
+    int series_len,
+    int n_combos,
+    int first_valid,
+    float* __restrict__ out               // [n_combos * series_len]
+) {
+    const int combo = static_cast<int>(blockIdx.y);
+    if (combo >= n_combos) return;
+
+    const int period  = periods[combo];
+    const int row_off = combo * series_len;
+
+    int t = static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x) + static_cast<int>(threadIdx.x);
+    const int stride = static_cast<int>(gridDim.x) * static_cast<int>(blockDim.x);
+
+    if (series_len <= 0) return;
+
+    if (first_valid < 0 || first_valid >= series_len) {
+        while (t < series_len) {
+            out[row_off + t] = LINREG_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    if (period <= 0 || period > series_len || (series_len - first_valid) < period) {
+        while (t < series_len) {
+            out[row_off + t] = LINREG_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+
+    // period == 1: output is the input itself from first_valid forward.
+    if (period == 1) {
+        while (t < series_len) {
+            if (t < warm) {
+                out[row_off + t] = LINREG_NAN;
+            } else {
+                out[row_off + t] = static_cast<float>(prefix_y[t + 1] - prefix_y[t]);
+            }
+            t += stride;
+        }
+        return;
+    }
+
+    const double period_f   = static_cast<double>(period);
+    const double x_sum      = static_cast<double>(x_sums[combo]);
+    const double denom_inv  = static_cast<double>(denom_invs[combo]);
+    const double inv_period = static_cast<double>(inv_periods[combo]);
+
+    while (t < series_len) {
+        if (t < warm) {
+            out[row_off + t] = LINREG_NAN;
+        } else {
+            const int t1    = t + 1;
+            const int start = t1 - period;
+            const double sum_y  = prefix_y[t1]  - prefix_y[start];
+            const double sum_yi = prefix_yi[t1] - prefix_yi[start];
+            const double xy_sum = fma((period_f - static_cast<double>(t)), sum_y, sum_yi);
+
+            const double b_num = fma(period_f, xy_sum, -x_sum * sum_y);
+            const double b     = b_num * denom_inv;
+            const double a     = (sum_y - b * x_sum) * inv_period;
+            out[row_off + t]   = static_cast<float>(a + b * period_f);
+        }
+        t += stride;
+    }
+}
+
 // -------------------------- Batch kernel (many parameter combos over one series) --------------------------
 
 extern "C" __global__

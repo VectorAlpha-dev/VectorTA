@@ -45,8 +45,12 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    /// One combo per block, sequential scan over time.
+    /// Legacy: full phase computation per combo (slow). Thread-per-combo mapping.
     Plain {
+        block_x: u32,
+    },
+    /// One combo per block, warp-cooperative affine scan (requires precomputed inv_dp).
+    WarpScan {
         block_x: u32,
     },
 }
@@ -80,6 +84,7 @@ impl Default for CudaMamaPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
+    WarpScan { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -204,13 +209,141 @@ impl CudaMama {
         self.last_many
     }
 
+    /// Synchronize the internal CUDA stream (useful for benchmarking).
+    pub fn synchronize(&self) -> Result<(), CudaMamaError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    /// Precompute the inverse delta-phase (1/dp) sequence for a single price series.
+    ///
+    /// This is independent of (fast_limit, slow_limit) and can be reused across
+    /// multiple parameter sweeps over the same input series.
+    pub fn mama_inv_dp_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_out_inv_dp: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaMamaError> {
+        if series_len == 0 {
+            return Err(CudaMamaError::InvalidInput("series_len must be positive".into()));
+        }
+        if series_len > i32::MAX as usize || first_valid > i32::MAX as usize {
+            return Err(CudaMamaError::InvalidInput(
+                "arguments exceed kernel limits".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("mama_inv_dp_f32")
+            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_inv_dp_f32" })?;
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out_inv_dp.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            let grid: GridSize = (1u32, 1u32, 1u32).into();
+            let block: BlockSize = (1u32, 1u32, 1u32).into();
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    /// Run the batch MAMA kernel using a precomputed inv_dp buffer.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mama_batch_from_inv_dp_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_inv_dp: &DeviceBuffer<f32>,
+        d_fast_limits: &DeviceBuffer<f32>,
+        d_slow_limits: &DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out_mama: &mut DeviceBuffer<f32>,
+        d_out_fama: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaMamaError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaMamaError::InvalidInput(
+                "series_len and n_combos must be positive".into(),
+            ));
+        }
+        if series_len > i32::MAX as usize
+            || n_combos > i32::MAX as usize
+            || first_valid > i32::MAX as usize
+        {
+            return Err(CudaMamaError::InvalidInput(
+                "arguments exceed kernel limits".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("mama_batch_from_inv_dp_f32")
+            .map_err(|_| {
+                CudaMamaError::MissingKernelSymbol { name: "mama_batch_from_inv_dp_f32" }
+            })?;
+
+        let env_block_x: u32 = env::var("MAMA_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(32);
+        let user_block_x = match self.policy.batch {
+            BatchKernelPolicy::WarpScan { block_x } => Some(block_x.max(1)),
+            _ => None,
+        };
+        let block_x = user_block_x.unwrap_or(env_block_x).clamp(32, 256);
+        let grid: GridSize = ((n_combos as u32).max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let this = self as *const _ as *mut CudaMama;
+            (*this).last_batch = Some(BatchKernelSelected::WarpScan { block_x });
+        }
+        self.maybe_log_batch_debug();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut inv_dp_ptr = d_inv_dp.as_device_ptr().as_raw();
+            let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw();
+            let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_m_ptr = d_out_mama.as_device_ptr().as_raw();
+            let mut out_f_ptr = d_out_fama.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut inv_dp_ptr as *mut _ as *mut c_void,
+                &mut fast_ptr as *mut _ as *mut c_void,
+                &mut slow_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_m_ptr as *mut _ as *mut c_void,
+                &mut out_f_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     #[inline]
     fn pick_launch_1d(
         &self,
         n_items: usize,
         policy_block_x: Option<u32>,
     ) -> (GridSize, BlockSize, u32) {
-        let block_x = policy_block_x.unwrap_or(256).clamp(64, 1024);
+        // Both legacy batch and many-series kernels are compiled with __launch_bounds__(256,...).
+        let block_x = policy_block_x.unwrap_or(256).clamp(64, 256);
         let blocks = ((n_items + block_x as usize - 1) / block_x as usize).min(65_535) as u32;
         let grid: GridSize = (blocks, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -446,7 +579,9 @@ impl CudaMama {
         let out_bytes = out_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMamaError::InvalidInput("bytes overflow".into()))?;
-        let required = prices_bytes + fast_bytes + slow_bytes + (out_bytes * 2);
+        // One-series-many-params uses a precomputed inv_dp buffer (series_len * f32).
+        let inv_dp_bytes = prices_bytes;
+        let required = prices_bytes + inv_dp_bytes + fast_bytes + slow_bytes + (out_bytes * 2);
         let headroom = 64 * 1024 * 1024; // ~64MB safety margin
 
         if !Self::will_fit(required, headroom) {
@@ -560,35 +695,109 @@ impl CudaMama {
         d_out_mama: &mut DeviceBuffer<f32>,
         d_out_fama: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMamaError> {
-        let func = self
-            .module
-            .get_function("mama_batch_f32")
-            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_batch_f32" })?;
+        // Preserve the strict single-combo behavior: the kernel contains a byte-for-byte
+        // compatible path for n_combos==1 which we keep for correctness.
+        let force_plain = matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) || n_combos == 1;
 
-        let user_block = match self.policy.batch {
-            BatchKernelPolicy::Auto => None,
-            BatchKernelPolicy::Plain { block_x } => Some(block_x.max(1)),
+        if force_plain {
+            let func = self
+                .module
+                .get_function("mama_batch_f32")
+                .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_batch_f32" })?;
+
+            let user_block = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => Some(block_x.max(1)),
+                _ => None,
+            };
+            let (grid, block, picked_block_x) = self.pick_launch_1d(n_combos, user_block);
+            unsafe {
+                let this = self as *const _ as *mut CudaMama;
+                (*this).last_batch = Some(BatchKernelSelected::Plain {
+                    block_x: picked_block_x,
+                });
+            }
+            self.maybe_log_batch_debug();
+
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw();
+                let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw();
+                let mut series_len_i = series_len as i32;
+                let mut combos_i = n_combos as i32;
+                let mut first_valid_i = first_valid as i32;
+                let mut out_m_ptr = d_out_mama.as_device_ptr().as_raw();
+                let mut out_f_ptr = d_out_fama.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut fast_ptr as *mut _ as *mut c_void,
+                    &mut slow_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut combos_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut out_m_ptr as *mut _ as *mut c_void,
+                    &mut out_f_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, 0, args)?;
+            }
+            return Ok(());
+        }
+
+        // Default batch path for many combos: precompute inv_dp once and use the warp-scan kernel.
+        let inv_dp_func = self
+            .module
+            .get_function("mama_inv_dp_f32")
+            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_inv_dp_f32" })?;
+        let batch_func = self
+            .module
+            .get_function("mama_batch_from_inv_dp_f32")
+            .map_err(|_| CudaMamaError::MissingKernelSymbol { name: "mama_batch_from_inv_dp_f32" })?;
+
+        let mut d_inv_dp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
+
+        // Use env var as a convenient tuning knob for benchmarks.
+        let env_block_x: u32 = env::var("MAMA_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(32);
+        let user_block_x = match self.policy.batch {
+            BatchKernelPolicy::WarpScan { block_x } => Some(block_x.max(1)),
+            _ => None,
         };
-        let (grid, block, picked_block_x) = self.pick_launch_1d(n_combos, user_block);
+        let block_x = user_block_x.unwrap_or(env_block_x).clamp(32, 256);
+        let grid: GridSize = ((n_combos as u32).max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let this = self as *const _ as *mut CudaMama;
-            (*this).last_batch = Some(BatchKernelSelected::Plain {
-                block_x: picked_block_x,
-            });
+            (*this).last_batch = Some(BatchKernelSelected::WarpScan { block_x });
         }
         self.maybe_log_batch_debug();
 
         unsafe {
+            // (1) inv_dp precompute
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut inv_dp_ptr = d_inv_dp.as_device_ptr().as_raw();
+            let prep_args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut inv_dp_ptr as *mut _ as *mut c_void,
+            ];
+            let prep_grid: GridSize = (1u32, 1u32, 1u32).into();
+            let prep_block: BlockSize = (1u32, 1u32, 1u32).into();
+            self.stream
+                .launch(&inv_dp_func, prep_grid, prep_block, 0, prep_args)?;
+
+            // (2) batch scan
             let mut fast_ptr = d_fast_limits.as_device_ptr().as_raw();
             let mut slow_ptr = d_slow_limits.as_device_ptr().as_raw();
-            let mut series_len_i = series_len as i32;
             let mut combos_i = n_combos as i32;
-            let mut first_valid_i = first_valid as i32;
             let mut out_m_ptr = d_out_mama.as_device_ptr().as_raw();
             let mut out_f_ptr = d_out_fama.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
+                &mut inv_dp_ptr as *mut _ as *mut c_void,
                 &mut fast_ptr as *mut _ as *mut c_void,
                 &mut slow_ptr as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
@@ -597,8 +806,9 @@ impl CudaMama {
                 &mut out_m_ptr as *mut _ as *mut c_void,
                 &mut out_f_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.stream.launch(&batch_func, grid, block, 0, args)?;
         }
+
         Ok(())
     }
 
@@ -787,59 +997,122 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let inv_dp_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let param_bytes = 2 * PARAM_SWEEP * std::mem::size_of::<f32>();
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes + inv_dp_bytes + param_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
         let in_bytes = elems * std::mem::size_of::<f32>();
         let out_bytes = 2 * elems * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        in_bytes
+            + out_bytes
+            + MANY_SERIES_COLS * std::mem::size_of::<i32>()
+            + 64 * 1024 * 1024
     }
 
-    struct MamaBatchState {
+    // Preallocated, device-resident batch state to avoid per-iteration allocs/copies.
+    struct MamaBatchDeviceState {
         cuda: CudaMama,
-        price: Vec<f32>,
-        sweep: MamaBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_inv_dp: DeviceBuffer<f32>,
+        d_fast_limits: DeviceBuffer<f32>,
+        d_slow_limits: DeviceBuffer<f32>,
+        d_out_m: DeviceBuffer<f32>,
+        d_out_f: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
     }
-    impl CudaBenchState for MamaBatchState {
+    impl CudaBenchState for MamaBatchDeviceState {
         fn launch(&mut self) {
-            let _pair = self
-                .cuda
-                .mama_batch_dev(&self.price, &self.sweep)
+            self.cuda
+                .mama_batch_from_inv_dp_device(
+                    &self.d_prices,
+                    &self.d_inv_dp,
+                    &self.d_fast_limits,
+                    &self.d_slow_limits,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out_m,
+                    &mut self.d_out_f,
+                )
                 .expect("mama batch launch");
+            self.cuda.synchronize().expect("sync");
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaMama::new(0).expect("cuda mama");
         let price = gen_series(ONE_SERIES_LEN);
-        let sweep = MamaBatchRange {
-            fast_limit: (0.5, 0.5 + (PARAM_SWEEP as f64 - 1.0) * 0.001, 0.001),
-            slow_limit: (0.05, 0.05, 0.0),
-        };
-        Box::new(MamaBatchState { cuda, price, sweep })
+
+        let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
+        let series_len = ONE_SERIES_LEN;
+        let n_combos = PARAM_SWEEP;
+        let out_elems = series_len * n_combos;
+
+        // Fast/slow grid (250 combos): fast sweeps; slow fixed.
+        let mut fast_limits = Vec::with_capacity(n_combos);
+        for i in 0..n_combos {
+            fast_limits.push(0.5f32 + (i as f32) * 0.001f32);
+        }
+        let slow_limits = vec![0.05f32; n_combos];
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("upload prices");
+        let d_fast_limits = DeviceBuffer::from_slice(&fast_limits).expect("upload fast_limits");
+        let d_slow_limits = DeviceBuffer::from_slice(&slow_limits).expect("upload slow_limits");
+        let mut d_inv_dp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }
+            .expect("alloc inv_dp");
+        let mut d_out_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
+            .expect("alloc out_m");
+        let mut d_out_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
+            .expect("alloc out_f");
+
+        cuda.mama_inv_dp_device(&d_prices, series_len, first_valid, &mut d_inv_dp)
+            .expect("precompute inv_dp");
+        cuda.synchronize().expect("sync");
+
+        Box::new(MamaBatchDeviceState {
+            cuda,
+            d_prices,
+            d_inv_dp,
+            d_fast_limits,
+            d_slow_limits,
+            d_out_m,
+            d_out_f,
+            series_len,
+            n_combos,
+            first_valid,
+        })
     }
 
     struct MamaManyState {
         cuda: CudaMama,
-        data_tm: Vec<f32>,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         fast_limit: f32,
         slow_limit: f32,
+        d_out_m: DeviceBuffer<f32>,
+        d_out_f: DeviceBuffer<f32>,
     }
     impl CudaBenchState for MamaManyState {
         fn launch(&mut self) {
-            let _pair = self
-                .cuda
-                .mama_many_series_one_param_time_major_dev(
-                    &self.data_tm,
-                    self.cols,
-                    self.rows,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
                     self.fast_limit,
                     self.slow_limit,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_m,
+                    &mut self.d_out_f,
                 )
                 .expect("mama many-series launch");
+            self.cuda.synchronize().expect("mama many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -847,13 +1120,30 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
+        let fast_limit = 0.5f32;
+        let slow_limit = 0.05f32;
+        let prepared =
+            CudaMama::prepare_many_series_inputs(&data_tm, cols, rows, fast_limit, slow_limit)
+                .expect("mama prepare many-series inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
+            .expect("d_first_valids");
+        let elems = cols * rows;
+        let d_out_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .expect("d_out_m");
+        let d_out_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
+            .expect("d_out_f");
+        cuda.synchronize().expect("mama many prep sync");
         Box::new(MamaManyState {
             cuda,
-            data_tm,
+            d_prices_tm,
+            d_first_valids,
             cols,
             rows,
-            fast_limit: 0.5,
-            slow_limit: 0.05,
+            fast_limit,
+            slow_limit,
+            d_out_m,
+            d_out_f,
         })
     }
 

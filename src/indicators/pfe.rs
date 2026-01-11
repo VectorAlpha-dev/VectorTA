@@ -459,8 +459,8 @@ pub struct PfeBatchRange {
 impl Default for PfeBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 40, 1),
-            smoothing: (5, 10, 1),
+            period: (10, 259, 1),
+            smoothing: (5, 5, 0),
         }
     }
 }

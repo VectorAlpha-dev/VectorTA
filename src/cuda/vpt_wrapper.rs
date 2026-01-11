@@ -271,6 +271,8 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use cust::function::{BlockSize, GridSize};
+    use std::ffi::c_void;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 512;
@@ -289,15 +291,38 @@ pub mod benches {
 
     struct OneSeriesState {
         cuda: CudaVpt,
-        price: Vec<f32>,
-        volume: Vec<f32>,
+        d_price: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first: usize,
     }
     impl CudaBenchState for OneSeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .vpt_batch_dev(&self.price, &self.volume)
-                .expect("vpt one-series");
+                .module
+                .get_function("vpt_batch_f32")
+                .expect("vpt_batch_f32");
+            let stream = &self.cuda.stream;
+            let grid: GridSize = (1, 1, 1).into();
+            let block: BlockSize = (1, 1, 1).into();
+            unsafe {
+                let mut price_ptr = self.d_price.as_device_ptr().as_raw();
+                let mut vol_ptr = self.d_volume.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut price_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                stream.launch(&func, grid, block, 0, args).expect("launch");
+            }
+            self.cuda.stream.synchronize().expect("vpt sync");
         }
     }
 
@@ -311,29 +336,61 @@ pub mod benches {
             price[1] = 100.1;
             volume[1] = 500.0;
         }
+        let first = CudaVpt::first_valid_pair(&price, &volume).expect("first_valid_pair");
+        let d_price = DeviceBuffer::from_slice(&price).expect("d_price");
+        let d_volume = DeviceBuffer::from_slice(&volume).expect("d_volume");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN) }.expect("d_out");
+        cuda.stream.synchronize().expect("vpt prep sync");
         Box::new(OneSeriesState {
             cuda,
-            price,
-            volume,
+            d_price,
+            d_volume,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first,
         })
     }
 
     struct ManySeriesState {
         cuda: CudaVpt,
-        price_tm: Vec<f32>,
-        volume_tm: Vec<f32>,
+        d_price: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        cols: usize,
+        rows: usize,
+        grid: GridSize,
+        block: BlockSize,
     }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .vpt_many_series_one_param_time_major_dev(
-                    &self.price_tm,
-                    &self.volume_tm,
-                    MANY_SERIES_COLS,
-                    MANY_SERIES_ROWS,
-                )
-                .expect("vpt many-series");
+                .module
+                .get_function("vpt_many_series_one_param_f32")
+                .expect("vpt_many_series_one_param_f32");
+            let stream = &self.cuda.stream;
+            unsafe {
+                let mut price_ptr = self.d_price.as_device_ptr().as_raw();
+                let mut vol_ptr = self.d_volume.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut price_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("launch");
+            }
+            self.cuda.stream.synchronize().expect("vpt sync");
         }
     }
 
@@ -349,10 +406,42 @@ pub mod benches {
                 volume_tm[t * MANY_SERIES_COLS + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
             }
         }
+        let (cols, rows) = (MANY_SERIES_COLS, MANY_SERIES_ROWS);
+        let mut first_valids = vec![rows as i32; cols];
+        for s in 0..cols {
+            for t in 1..rows {
+                let p0 = price_tm[(t - 1) * cols + s];
+                let p1 = price_tm[t * cols + s];
+                let v1 = volume_tm[t * cols + s];
+                if p0.is_finite() && p0 != 0.0 && p1.is_finite() && v1.is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_price = DeviceBuffer::from_slice(&price_tm).expect("d_price_tm");
+        let d_volume = DeviceBuffer::from_slice(&volume_tm).expect("d_volume_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        let block_x = cuda.block_x;
+        let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
+        let max_blocks = cuda.sm_count.saturating_mul(16);
+        if grid_x > max_blocks {
+            grid_x = max_blocks.max(1);
+        }
+        cuda.stream.synchronize().expect("vpt prep sync");
         Box::new(ManySeriesState {
             cuda,
-            price_tm,
-            volume_tm,
+            d_price,
+            d_volume,
+            d_first,
+            d_out,
+            cols,
+            rows,
+            grid: (grid_x, 1, 1).into(),
+            block: (block_x, 1, 1).into(),
         })
     }
 

@@ -574,16 +574,26 @@ pub mod benches {
 
     struct LrsiBatchState {
         cuda: CudaLrsi,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: LrsiBatchRange,
+        d_prices: DeviceBuffer<f32>,
+        d_alphas: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
     impl CudaBenchState for LrsiBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .lrsi_batch_dev(&self.high, &self.low, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    &self.d_alphas,
+                    self.len,
+                    self.first_valid,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("lrsi launch_batch_kernel");
+            let _ = self.cuda.synchronize();
         }
     }
     fn prep_batch() -> Box<dyn CudaBenchState> {
@@ -606,7 +616,26 @@ pub mod benches {
         let sweep = LrsiBatchRange {
             alpha: (0.05, 0.80, (0.80 - 0.05) / (ROWS as f64 - 1.0)),
         };
-        Box::new(LrsiBatchState { cuda, high, low, sweep })
+        let combos = expand_grid(&sweep).expect("expand_grid");
+        let alphas: Vec<f32> = combos.iter().map(|c| c.alpha.unwrap() as f32).collect();
+        let mut prices = vec![f32::NAN; LEN];
+        for i in 0..LEN {
+            prices[i] = 0.5f32 * (high[i] + low[i]);
+        }
+        let first_valid = prices.iter().position(|v| v.is_finite()).unwrap_or(0);
+        let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_alphas = DeviceBuffer::from_slice(&alphas).expect("d_alphas");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * LEN) }.expect("d_out");
+        Box::new(LrsiBatchState {
+            cuda,
+            d_prices,
+            d_alphas,
+            d_out,
+            len: LEN,
+            first_valid,
+            n_combos: combos.len(),
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

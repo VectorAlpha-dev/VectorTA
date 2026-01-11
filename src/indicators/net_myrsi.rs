@@ -246,7 +246,7 @@ fn net_myrsi_compute_into(
         Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx512,
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
     };
 
     // Dispatch to best available implementation (cover all Kernel variants)
@@ -944,7 +944,7 @@ pub struct NetMyrsiBatchRange {
 impl Default for NetMyrsiBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
         }
     }
 }

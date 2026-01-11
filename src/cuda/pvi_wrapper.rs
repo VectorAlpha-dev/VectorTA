@@ -188,6 +188,8 @@ impl CudaPvi {
         let first = Self::first_valid_pair(close, volume)?;
         let len = close.len();
         let rows = initial_values.len();
+        let has_nan_after_first = close[first..].iter().any(|&v| v.is_nan())
+            || volume[first..].iter().any(|&v| v.is_nan());
         if rows == 0 {
             return Err(CudaPviError::InvalidInput(
                 "no initial values provided".into(),
@@ -228,12 +230,25 @@ impl CudaPvi {
             // Build scale then apply across rows for large batches
             let mut d_scale: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized(len) }?;
-            let build = self
-                .module
-                .get_function("pvi_build_scale_f32")
-                .map_err(|_| CudaPviError::MissingKernelSymbol {
-                    name: "pvi_build_scale_f32",
-                })?;
+            let (build, block_x): (Function, u32) = if has_nan_after_first {
+                (
+                    self.module
+                        .get_function("pvi_build_scale_f32")
+                        .map_err(|_| CudaPviError::MissingKernelSymbol {
+                            name: "pvi_build_scale_f32",
+                        })?,
+                    1,
+                )
+            } else {
+                (
+                    self.module
+                        .get_function("pvi_build_scale_warp16_f32")
+                        .map_err(|_| CudaPviError::MissingKernelSymbol {
+                            name: "pvi_build_scale_warp16_f32",
+                        })?,
+                    16,
+                )
+            };
             unsafe {
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut vol_ptr = d_volume.as_device_ptr().as_raw();
@@ -248,8 +263,8 @@ impl CudaPvi {
                     &mut scale_ptr as *mut _ as *mut c_void,
                 ];
                 let grid: GridSize = (1, 1, 1).into();
-                let block: BlockSize = (1, 1, 1).into();
-                self.validate_launch_dims((1, 1, 1), (1, 1, 1))?;
+                let block: BlockSize = (block_x, 1, 1).into();
+                self.validate_launch_dims((1, 1, 1), (block_x, 1, 1))?;
                 self.stream.launch(&build, grid, block, 0, args)?;
             }
 
@@ -267,23 +282,43 @@ impl CudaPvi {
                 let mut scale_ptr = d_scale.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first as i32;
-                let mut inits_ptr = d_inits.as_device_ptr().as_raw();
-                let mut rows_i = rows as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut scale_ptr as *mut _ as *mut c_void,
-                    &mut len_i as *mut _ as *mut c_void,
-                    &mut first_i as *mut _ as *mut c_void,
-                    &mut inits_ptr as *mut _ as *mut c_void,
-                    &mut rows_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
                 let block_x: u32 = 256;
+                let block_y: u32 = 4;
                 let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
-                let grid: GridSize = (grid_x.max(1), 1, 1).into();
-                let block: BlockSize = (block_x, 1, 1).into();
-                self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
-                self.stream.launch(&apply, grid, block, 0, args)?;
+                let block: BlockSize = (block_x, block_y, 1).into();
+
+                const MAX_GRID_Y: usize = 65_535; // y/z limited to 65,535
+                let mut start_row = 0usize;
+                while start_row < rows {
+                    let chunk = (rows - start_row).min(MAX_GRID_Y);
+                    let grid_y: u32 = ((chunk as u32) + block_y - 1) / block_y;
+                    let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+
+                    let mut inits_ptr = d_inits
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start_row * std::mem::size_of::<f32>()) as u64);
+                    let mut rows_i = chunk as i32;
+                    let mut out_ptr = d_out
+                        .as_device_ptr()
+                        .as_raw()
+                        .wrapping_add((start_row * len * std::mem::size_of::<f32>()) as u64);
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut scale_ptr as *mut _ as *mut c_void,
+                        &mut len_i as *mut _ as *mut c_void,
+                        &mut first_i as *mut _ as *mut c_void,
+                        &mut inits_ptr as *mut _ as *mut c_void,
+                        &mut rows_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+
+                    self.validate_launch_dims(
+                        (grid_x.max(1), grid_y.max(1), 1),
+                        (block_x, block_y, 1),
+                    )?;
+                    self.stream.launch(&apply, grid, block, 0, args)?;
+                    start_row += chunk;
+                }
             }
         }
 
@@ -419,16 +454,78 @@ pub mod benches {
 
     struct PviOneSeriesState {
         cuda: CudaPvi,
-        close: Vec<f32>,
-        volume: Vec<f32>,
-        inits: Vec<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        d_inits: DeviceBuffer<f32>,
+        d_scale: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first: usize,
+        rows: usize,
+        build_block_x: u32,
+        apply_grid: GridSize,
+        apply_block: BlockSize,
     }
     impl CudaBenchState for PviOneSeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let build_name = if self.build_block_x == 1 {
+                "pvi_build_scale_f32"
+            } else {
+                "pvi_build_scale_warp16_f32"
+            };
+            let build = self
                 .cuda
-                .pvi_batch_dev(&self.close, &self.volume, &self.inits)
-                .expect("pvi one-series");
+                .module
+                .get_function(build_name)
+                .expect("pvi build_scale");
+            unsafe {
+                let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut vol_ptr = self.d_volume.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first as i32;
+                let mut scale_ptr = self.d_scale.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut scale_ptr as *mut _ as *mut c_void,
+                ];
+                let grid: GridSize = (1, 1, 1).into();
+                let block: BlockSize = (self.build_block_x, 1, 1).into();
+                self.cuda
+                    .stream
+                    .launch(&build, grid, block, 0, args)
+                    .expect("pvi build launch");
+            }
+
+            let apply = self
+                .cuda
+                .module
+                .get_function("pvi_apply_scale_batch_f32")
+                .expect("pvi_apply_scale_batch_f32");
+            unsafe {
+                let mut scale_ptr = self.d_scale.as_device_ptr().as_raw();
+                let mut len_i = self.len as i32;
+                let mut first_i = self.first as i32;
+                let mut inits_ptr = self.d_inits.as_device_ptr().as_raw();
+                let mut rows_i = self.rows as i32;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut scale_ptr as *mut _ as *mut c_void,
+                    &mut len_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut inits_ptr as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&apply, self.apply_grid, self.apply_block, 0, args)
+                    .expect("pvi apply launch");
+            }
+
+            self.cuda.stream.synchronize().expect("pvi one-series sync");
         }
     }
 
@@ -446,31 +543,87 @@ pub mod benches {
         for i in 0..inits.len() {
             inits[i] = 500.0 + (i as f32) * 25.0;
         }
+        let first = CudaPvi::first_valid_pair(&close, &volume).expect("first_valid_pair");
+        let has_nan_after_first = close[first..].iter().any(|&v| v.is_nan())
+            || volume[first..].iter().any(|&v| v.is_nan());
+
+        let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
+        let d_volume = DeviceBuffer::from_slice(&volume).expect("d_volume");
+        let d_inits = DeviceBuffer::from_slice(&inits).expect("d_inits");
+        let d_scale: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ONE_SERIES_LEN) }.expect("d_scale");
+        let out_elems = inits
+            .len()
+            .checked_mul(ONE_SERIES_LEN)
+            .expect("rows*len overflow");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+
+        let build_block_x: u32 = if has_nan_after_first { 1 } else { 16 };
+        let block_x: u32 = 256;
+        let block_y: u32 = 4;
+        let grid_x: u32 = ((ONE_SERIES_LEN as u32) + block_x - 1) / block_x;
+        let grid_y: u32 = ((inits.len() as u32) + block_y - 1) / block_y;
+        let apply_grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let apply_block: BlockSize = (block_x, block_y, 1).into();
+        cuda.stream.synchronize().expect("pvi prep sync");
         Box::new(PviOneSeriesState {
             cuda,
-            close,
-            volume,
-            inits,
+            d_close,
+            d_volume,
+            d_inits,
+            d_scale,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first,
+            rows: inits.len(),
+            build_block_x,
+            apply_grid,
+            apply_block,
         })
     }
 
     struct PviManySeriesState {
         cuda: CudaPvi,
-        close_tm: Vec<f32>,
-        volume_tm: Vec<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_volume: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        init: f32,
+        grid: GridSize,
+        block: BlockSize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for PviManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .pvi_many_series_one_param_time_major_dev(
-                    &self.close_tm,
-                    &self.volume_tm,
-                    MANY_SERIES_COLS,
-                    MANY_SERIES_ROWS,
-                    1000.0,
-                )
-                .expect("pvi many-series");
+                .module
+                .get_function("pvi_many_series_one_param_f32")
+                .expect("pvi_many_series_one_param_f32");
+            unsafe {
+                let mut close_ptr = self.d_close.as_device_ptr().as_raw();
+                let mut vol_ptr = self.d_volume.as_device_ptr().as_raw();
+                let mut cols_i = self.cols as i32;
+                let mut rows_i = self.rows as i32;
+                let mut first_ptr = self.d_first.as_device_ptr().as_raw();
+                let mut init_f = self.init;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut close_ptr as *mut _ as *mut c_void,
+                    &mut vol_ptr as *mut _ as *mut c_void,
+                    &mut cols_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut first_ptr as *mut _ as *mut c_void,
+                    &mut init_f as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, 0, args)
+                    .expect("pvi many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("pvi many-series sync");
         }
     }
 
@@ -486,10 +639,38 @@ pub mod benches {
                 volume_tm[t * MANY_SERIES_COLS + s] = (x * 0.0017).cos().abs() * 500.0 + 100.0;
             }
         }
+        let mut first_valids = vec![MANY_SERIES_ROWS as i32; MANY_SERIES_COLS];
+        for s in 0..MANY_SERIES_COLS {
+            for t in 0..MANY_SERIES_ROWS {
+                let c = close_tm[t * MANY_SERIES_COLS + s];
+                let v = volume_tm[t * MANY_SERIES_COLS + s];
+                if !c.is_nan() && !v.is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_close = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");
+        let d_volume = DeviceBuffer::from_slice(&volume_tm).expect("d_volume_tm");
+        let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
+        let init = 1000.0f32;
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_out_tm");
+        let block_x: u32 = 256;
+        let grid_x: u32 = ((MANY_SERIES_COLS as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        cuda.stream.synchronize().expect("pvi prep sync");
         Box::new(PviManySeriesState {
             cuda,
-            close_tm,
-            volume_tm,
+            d_close,
+            d_volume,
+            d_first,
+            cols: MANY_SERIES_COLS,
+            rows: MANY_SERIES_ROWS,
+            init,
+            grid,
+            block,
+            d_out,
         })
     }
 

@@ -521,7 +521,7 @@ pub struct TemaBatchRange {
 impl Default for TemaBatchRange {
     fn default() -> Self {
         Self {
-            period: (9, 240, 1),
+            period: (9, 258, 1),
         }
     }
 }
@@ -1574,7 +1574,7 @@ fn tema_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

@@ -136,8 +136,8 @@ extern "C" __global__ void ift_rsi_batch_f32(
             const float wp_f = (float)wp;
             const float denom_rcp = 2.0f / (wp_f * (wp_f + 1.0f));
             int head = 0, filled = 0;
-            KahanF32 S1; S1.init(0.f);
-            KahanF32 S2; S2.init(0.f);
+            float S1 = 0.0f;
+            float S2 = 0.0f;
 
             // initialize streaming prev to avoid 2nd load per step
             float prev = data[first_valid + rp];
@@ -162,13 +162,13 @@ extern "C" __global__ void ift_rsi_batch_f32(
                 float x   = 0.1f * (rsi - 50.f);
 
                 if (filled < wp) {
-                    S1.add(x);
-                    S2.add((float)(filled + 1) * x);
+                    S1 += x;
+                    S2 += (float)(filled + 1) * x;
                     ring[head] = x;
                     head = (head + 1 == wp) ? 0 : head + 1;
                     filled += 1;
                     if (filled == wp) {
-                        float wma = S2.sum * denom_rcp;
+                        float wma = S2 * denom_rcp;
                         const int abs_t = first_valid + i;
                         out_values[base + abs_t] = tanhf(wma);
                     }
@@ -177,16 +177,11 @@ extern "C" __global__ void ift_rsi_batch_f32(
                     ring[head]  = x;
                     head = (head + 1 == wp) ? 0 : head + 1;
 
-                    float S1_prev = S1.sum;
-                    // S1' = S1 + x - x_old    (compensated)
-                    S1.add(x);
-                    S1.add(-x_old);
+                    float S1_prev = S1;
+                    S1 = (S1 + x) - x_old;
+                    S2 = (S2 - S1_prev) + (wp_f * x);
 
-                    // S2' = S2 - S1_prev + wp*x   (compensated)
-                    S2.add(-S1_prev);
-                    S2.add(wp_f * x);
-
-                    float wma = S2.sum * denom_rcp;
+                    float wma = S2 * denom_rcp;
                     const int abs_t = first_valid + i;
                     out_values[base + abs_t] = tanhf(wma);
                 }

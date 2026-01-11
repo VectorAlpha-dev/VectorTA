@@ -549,7 +549,7 @@ fn buff_averages_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1520,7 +1520,7 @@ impl Default for BuffAveragesBatchRange {
     fn default() -> Self {
         Self {
             fast_period: (5, 5, 0),
-            slow_period: (20, 20, 0),
+            slow_period: (20, 269, 1),
         }
     }
 }
@@ -2223,7 +2223,7 @@ pub fn buff_averages_unified_js(
     let values = unsafe {
         let flat = core::slice::from_raw_parts_mut(mat.as_mut_ptr() as *mut f64, mat.len());
         let (fast_out, slow_out) = flat.split_at_mut(len);
-        buff_averages_into_slices(fast_out, slow_out, &input, detect_best_kernel())
+        buff_averages_into_slices(fast_out, slow_out, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let ptr = mat.as_mut_ptr() as *mut f64;
         let len = mat.len();
@@ -2269,7 +2269,7 @@ pub fn buff_averages_js(
     let values = unsafe {
         let flat = core::slice::from_raw_parts_mut(mat.as_mut_ptr() as *mut f64, mat.len());
         let (fast_out, slow_out) = flat.split_at_mut(len);
-        buff_averages_into_slices(fast_out, slow_out, &input, detect_best_kernel())
+        buff_averages_into_slices(fast_out, slow_out, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         let ptr = mat.as_mut_ptr() as *mut f64;
         let len = mat.len();
@@ -2309,7 +2309,7 @@ pub fn buff_averages_into(
         };
         let input = BuffAveragesInput::from_slices(price, volume, params);
 
-        buff_averages_into_slices(fast_out, slow_out, &input, detect_best_kernel())
+        buff_averages_into_slices(fast_out, slow_out, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
@@ -2474,7 +2474,7 @@ impl BuffAveragesContext {
         Ok(BuffAveragesContext {
             fast_period,
             slow_period,
-            kernel: detect_best_kernel(),
+            kernel: Kernel::Auto,
         })
     }
 

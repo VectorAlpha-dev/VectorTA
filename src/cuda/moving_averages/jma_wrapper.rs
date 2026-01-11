@@ -215,7 +215,15 @@ impl CudaJma {
                 {
                     return v.clamp(32, 1024);
                 }
-                Self::choose_block_x_auto(needed)
+                // JMA batch kernel is 1 thread per combo with long sequential work.
+                // Avoid picking a block size >= n_combos (which would collapse to a
+                // single block and underutilize the GPU) for common sweep sizes like 250.
+                let bx = Self::choose_block_x_auto(needed);
+                if needed > 32 && (bx as usize) >= needed {
+                    32
+                } else {
+                    bx
+                }
             }
         }
     }
@@ -915,29 +923,175 @@ impl CudaJma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::jma::{JmaBatchRange, JmaParams};
 
-    define_ma_period_benches!(
-        jma_benches,
-        CudaJma,
-        crate::indicators::moving_averages::jma::JmaBatchRange,
-        crate::indicators::moving_averages::jma::JmaParams,
-        jma_batch_dev,
-        jma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::jma::JmaBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct JmaBatchDevState {
+        cuda: CudaJma,
+        d_prices: DeviceBuffer<f32>,
+        d_alphas: DeviceBuffer<f32>,
+        d_one_minus_betas: DeviceBuffer<f32>,
+        d_phase_ratios: DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for JmaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .jma_batch_device(
+                    &self.d_prices,
+                    &self.d_alphas,
+                    &self.d_one_minus_betas,
+                    &self.d_phase_ratios,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_out,
+                )
+                .expect("jma batch kernel");
+            self.cuda.stream.synchronize().expect("jma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaJma::new(0).expect("cuda jma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = JmaBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             phase: (50.0, 50.0, 0.0),
-            power: (2, 2, 0)
-        },
-        crate::indicators::moving_averages::jma::JmaParams {
+            power: (2, 2, 0),
+        };
+
+        let inputs = CudaJma::prepare_batch_inputs(&price, &sweep).expect("jma prepare batch");
+        let n_combos = inputs.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_alphas = DeviceBuffer::from_slice(&inputs.alphas).expect("d_alphas");
+        let d_one_minus_betas =
+            DeviceBuffer::from_slice(&inputs.one_minus_betas).expect("d_one_minus_betas");
+        let d_phase_ratios = DeviceBuffer::from_slice(&inputs.phase_ratios).expect("d_phase_ratios");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(inputs.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(JmaBatchDevState {
+            cuda,
+            d_prices,
+            d_alphas,
+            d_one_minus_betas,
+            d_phase_ratios,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            d_out,
+        })
+    }
+
+    struct JmaManyDevState {
+        cuda: CudaJma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        alpha: f32,
+        one_minus_beta: f32,
+        phase_ratio: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for JmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .jma_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    self.alpha,
+                    self.one_minus_beta,
+                    self.phase_ratio,
+                    self.cols,
+                    self.rows,
+                    &self.d_first_valids,
+                    &mut self.d_out_tm,
+                )
+                .expect("jma many-series kernel");
+            self.cuda.stream.synchronize().expect("jma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaJma::new(0).expect("cuda jma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = JmaParams {
             period: Some(64),
             phase: Some(50.0),
-            power: Some(2)
-        },
-        "jma",
-        "jma"
-    );
-    pub use jma_benches::bench_profiles;
+            power: Some(2),
+        };
+
+        let prepared = CudaJma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("jma prepare many-series");
+        let consts = CudaJma::compute_params_consts(&params).expect("jma compute consts");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(JmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            alpha: consts.alpha,
+            one_minus_beta: consts.one_minus_beta,
+            phase_ratio: consts.phase_ratio,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "jma",
+                "one_series_many_params",
+                "jma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "jma",
+                "many_series_one_param",
+                "jma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 struct BatchInputs {

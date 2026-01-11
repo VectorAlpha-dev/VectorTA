@@ -668,7 +668,7 @@ pub struct EdcfBatchRange {
 impl Default for EdcfBatchRange {
     fn default() -> Self {
         Self {
-            period: (15, 50, 1),
+            period: (15, 264, 1),
         }
     }
 }

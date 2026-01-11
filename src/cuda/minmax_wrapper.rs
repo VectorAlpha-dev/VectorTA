@@ -778,9 +778,13 @@ pub mod benches {
 
     struct MinmaxBatchState {
         cuda: CudaMinmax,
-        d_h: DeviceBuffer<f32>,
-        d_l: DeviceBuffer<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
         d_orders: DeviceBuffer<i32>,
+        st_low_min: DeviceBuffer<f32>,
+        st_high_max: DeviceBuffer<f32>,
+        st_valid_low: DeviceBuffer<u8>,
+        st_valid_high: DeviceBuffer<u8>,
         d_is_min: DeviceBuffer<f32>,
         d_is_max: DeviceBuffer<f32>,
         d_last_min: DeviceBuffer<f32>,
@@ -791,8 +795,80 @@ pub mod benches {
     }
     impl CudaBenchState for MinmaxBatchState {
         fn launch(&mut self) {
-            // single kernel launch via wrapper path for simplicity
-            let _ = &self.cuda; /* no-op: state-oriented bench, we prelaunch below using the public API */
+            let mut series_len_i = self.len as i32;
+            let mut first_valid_i = self.first_valid;
+            let mut rows_i = self.rows as i32;
+
+            // RMQ kernel over prebuilt sparse tables + parallel forward-fill.
+            let f_rmq = self
+                .cuda
+                .module
+                .get_function("minmax_batch_rmq_f32")
+                .expect("minmax_batch_rmq_f32");
+            let f_ff = self
+                .cuda
+                .module
+                .get_function("forward_fill_two_streams_f32")
+                .expect("forward_fill_two_streams_f32");
+
+            let block_x = 256u32;
+            let grid_x = ((self.len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x.max(1), self.rows as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+
+            unsafe {
+                let mut high_ptr = self.d_high.as_device_ptr().as_raw();
+                let mut low_ptr = self.d_low.as_device_ptr().as_raw();
+                let mut orders_ptr = self.d_orders.as_device_ptr().as_raw();
+                let mut nrows_i = rows_i;
+                let mut low_min_ptr = self.st_low_min.as_device_ptr().as_raw();
+                let mut high_max_ptr = self.st_high_max.as_device_ptr().as_raw();
+                let mut vlow_ptr = self.st_valid_low.as_device_ptr().as_raw();
+                let mut vhigh_ptr = self.st_valid_high.as_device_ptr().as_raw();
+                let mut is_min_ptr = self.d_is_min.as_device_ptr().as_raw();
+                let mut is_max_ptr = self.d_is_max.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut high_ptr as *mut _ as *mut c_void,
+                    &mut low_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut first_valid_i as *mut _ as *mut c_void,
+                    &mut orders_ptr as *mut _ as *mut c_void,
+                    &mut nrows_i as *mut _ as *mut c_void,
+                    &mut low_min_ptr as *mut _ as *mut c_void,
+                    &mut high_max_ptr as *mut _ as *mut c_void,
+                    &mut vlow_ptr as *mut _ as *mut c_void,
+                    &mut vhigh_ptr as *mut _ as *mut c_void,
+                    &mut is_min_ptr as *mut _ as *mut c_void,
+                    &mut is_max_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&f_rmq, grid, block, 0, args)
+                    .expect("minmax rmq launch");
+            }
+
+            let ff_grid: GridSize = (self.rows as u32, 1, 1).into();
+            let ff_block: BlockSize = (256u32, 1, 1).into();
+            unsafe {
+                let mut is_min_ptr = self.d_is_min.as_device_ptr().as_raw();
+                let mut is_max_ptr = self.d_is_max.as_device_ptr().as_raw();
+                let mut last_min_ptr = self.d_last_min.as_device_ptr().as_raw();
+                let mut last_max_ptr = self.d_last_max.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut is_min_ptr as *mut _ as *mut c_void,
+                    &mut is_max_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut last_min_ptr as *mut _ as *mut c_void,
+                    &mut last_max_ptr as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&f_ff, ff_grid, ff_block, 0, args)
+                    .expect("minmax forward fill launch");
+            }
+
+            self.cuda.synchronize().expect("minmax sync");
         }
     }
 
@@ -809,73 +885,118 @@ pub mod benches {
             h[i] = b * (1.0 + s);
         }
         let sweep = MinmaxBatchRange { order: (3, 51, 4) };
+        let combos = expand_grid(&sweep).expect("minmax combos");
+        let orders_i32: Vec<i32> = combos.iter().map(|c| c.order.unwrap_or(3) as i32).collect();
+        let rows = orders_i32.len();
+        let first_valid = 3i32;
+
         let cuda = CudaMinmax::new(0).expect("cuda minmax");
-        let _ = cuda.minmax_batch_dev(&h, &l, &sweep).expect("launch");
-        Box::new(MinmaxBatchState {
-            cuda,
-            d_h: DeviceBuffer::from_slice(&h).unwrap(),
-            d_l: DeviceBuffer::from_slice(&l).unwrap(),
-            d_orders: DeviceBuffer::from_slice(&vec![3i32]).unwrap(),
-            d_is_min: unsafe { DeviceBuffer::uninitialized(len) }.unwrap(),
-            d_is_max: unsafe { DeviceBuffer::uninitialized(len) }.unwrap(),
-            d_last_min: unsafe { DeviceBuffer::uninitialized(len) }.unwrap(),
-            d_last_max: unsafe { DeviceBuffer::uninitialized(len) }.unwrap(),
-            len,
-            rows: 1,
-            first_valid: 3,
-        })
-    }
 
-    struct MinmaxManySeriesState {
-        cuda: CudaMinmax,
-        cols: usize,
-        rows: usize,
-        order: usize,
-        d_is_min: DeviceBuffer<f32>,
-        d_is_max: DeviceBuffer<f32>,
-        d_last_min: DeviceBuffer<f32>,
-        d_last_max: DeviceBuffer<f32>,
-    }
-    impl CudaBenchState for MinmaxManySeriesState {
-        fn launch(&mut self) {
-            let _ = &self.cuda; /* no-op placeholder; public API path used in prep */
+        let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&l).expect("d_low");
+        let d_orders = DeviceBuffer::from_slice(&orders_i32).expect("d_orders");
+
+        let k_levels = sparse_table_levels(len);
+        let st_elems = k_levels * len;
+        let mut st_low_min: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(st_elems) }.expect("st_low_min");
+        let mut st_high_max: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(st_elems) }.expect("st_high_max");
+        let mut st_valid_low: DeviceBuffer<u8> =
+            unsafe { DeviceBuffer::uninitialized(st_elems) }.expect("st_valid_low");
+        let mut st_valid_high: DeviceBuffer<u8> =
+            unsafe { DeviceBuffer::uninitialized(st_elems) }.expect("st_valid_high");
+
+        // Build sparse tables once for this fixed input series.
+        let f_init = cuda
+            .module
+            .get_function("st_init_level0_minmax_valid_f32")
+            .expect("st_init_level0_minmax_valid_f32");
+        let f_build = cuda
+            .module
+            .get_function("st_build_level_k_minmax_valid_f32")
+            .expect("st_build_level_k_minmax_valid_f32");
+        let block_x = 256u32;
+        let grid_x = ((len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+        let mut series_len_i = len as i32;
+        unsafe {
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut high_ptr = d_high.as_device_ptr().as_raw();
+            let mut low_min_ptr = st_low_min.as_device_ptr().as_raw();
+            let mut high_max_ptr = st_high_max.as_device_ptr().as_raw();
+            let mut vlow_ptr = st_valid_low.as_device_ptr().as_raw();
+            let mut vhigh_ptr = st_valid_high.as_device_ptr().as_raw();
+            let args: &mut [*mut c_void] = &mut [
+                &mut low_ptr as *mut _ as *mut c_void,
+                &mut high_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut low_min_ptr as *mut _ as *mut c_void,
+                &mut high_max_ptr as *mut _ as *mut c_void,
+                &mut vlow_ptr as *mut _ as *mut c_void,
+                &mut vhigh_ptr as *mut _ as *mut c_void,
+            ];
+            cuda.stream
+                .launch(&f_init, grid, block, 0, args)
+                .expect("st_init launch");
         }
-    }
 
-    fn prep_minmax_many_series() -> Box<dyn CudaBenchState> {
-        let cols = 250usize;
-        let rows = 1_000_000usize;
-        let mut h_tm = vec![f32::NAN; cols * rows];
-        let mut l_tm = vec![f32::NAN; cols * rows];
-        for s in 0..cols {
-            for t in s..rows {
-                let idx = t * cols + s;
-                let x = t as f32 + s as f32 * 0.2;
-                let base = (x * 0.003).sin() + 0.0002 * x;
-                let spread = (x * 0.0013).cos().abs() * 0.18 + 0.18;
-                l_tm[idx] = base;
-                h_tm[idx] = base * (1.0 + spread);
+        for k in 1..k_levels {
+            let span = 1usize << k;
+            if len < span {
+                break;
+            }
+            let valid_pos = len - span + 1;
+            let grid_kx = ((valid_pos as u32) + block_x - 1) / block_x;
+            let gridk: GridSize = (grid_kx.max(1), 1, 1).into();
+            unsafe {
+                let mut k_i = k as i32;
+                let mut low_min_ptr = st_low_min.as_device_ptr().as_raw();
+                let mut high_max_ptr = st_high_max.as_device_ptr().as_raw();
+                let mut vlow_ptr = st_valid_low.as_device_ptr().as_raw();
+                let mut vhigh_ptr = st_valid_high.as_device_ptr().as_raw();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut k_i as *mut _ as *mut c_void,
+                    &mut low_min_ptr as *mut _ as *mut c_void,
+                    &mut high_max_ptr as *mut _ as *mut c_void,
+                    &mut vlow_ptr as *mut _ as *mut c_void,
+                    &mut vhigh_ptr as *mut _ as *mut c_void,
+                ];
+                cuda.stream
+                    .launch(&f_build, gridk, block, 0, args)
+                    .expect("st_build launch");
             }
         }
-        let cuda = CudaMinmax::new(0).expect("cuda minmax");
-        let _ = cuda
-            .minmax_many_series_one_param_time_major_dev(
-                &h_tm,
-                &l_tm,
-                cols,
-                rows,
-                &MinmaxParams { order: Some(16) },
-            )
-            .expect("launch");
-        Box::new(MinmaxManySeriesState {
+        cuda.synchronize().expect("st build sync");
+
+        let elems = rows * len;
+        let d_is_min: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_is_min");
+        let d_is_max: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_is_max");
+        let d_last_min: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_last_min");
+        let d_last_max: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_last_max");
+
+        Box::new(MinmaxBatchState {
             cuda,
-            cols,
+            d_high,
+            d_low,
+            d_orders,
+            st_low_min,
+            st_high_max,
+            st_valid_low,
+            st_valid_high,
+            d_is_min,
+            d_is_max,
+            d_last_min,
+            d_last_max,
+            len,
             rows,
-            order: 16,
-            d_is_min: unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap(),
-            d_is_max: unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap(),
-            d_last_min: unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap(),
-            d_last_max: unsafe { DeviceBuffer::uninitialized(cols * rows) }.unwrap(),
+            first_valid,
         })
     }
 
@@ -889,14 +1010,6 @@ pub mod benches {
                 prep_minmax_batch,
             )
             .with_inner_iters(4),
-            CudaBenchScenario::new(
-                "minmax",
-                "many_series_one_param",
-                "minmax_cuda_many_series_one_param",
-                "250x1m",
-                prep_minmax_many_series,
-            )
-            .with_inner_iters(2),
         ]
     }
 }

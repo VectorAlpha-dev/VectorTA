@@ -188,31 +188,26 @@ void tsi_prepare_momentum_f32(const float* __restrict__ prices,
                               float* __restrict__ mom,   // len = series_len
                               float* __restrict__ amom)  // len = series_len
 {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    // Initialize outputs to NaN
-    for (int i = 0; i < series_len; ++i) { mom[i] = NAN; amom[i] = NAN; }
-    if (first_valid < 0 || first_valid + 1 >= series_len) return;
+    const int t = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (t >= series_len) return;
 
-    float prev = prices[first_valid];
-    float nextv = prices[first_valid + 1];
-    if (!isfinite(nextv)) return; // match early-exit semantics
+    // Default: NaN.
+    float mv = NAN;
+    float av = NAN;
 
-    float first_m = nextv - prev;
-    mom[first_valid + 1]  = first_m;
-    amom[first_valid + 1] = fabsf(first_m);
-    prev = nextv;
-
-    for (int t = first_valid + 2; t < series_len; ++t) {
-        float cur = prices[t];
-        if (!isfinite(cur)) {
-            // do not advance prev; leave NaNs in outputs for this t
-            continue;
+    if (first_valid >= 0 && (first_valid + 1) < series_len && t > first_valid) {
+        // Fast path assumes no interior NaNs; this matches scalar for the common case
+        // (prefix NaNs only), and is conservative (emits NaN momentum) when inputs are non-finite.
+        const float cur  = prices[t];
+        const float prev = prices[t - 1];
+        if (isfinite(cur) && isfinite(prev)) {
+            mv = cur - prev;
+            av = fabsf(mv);
         }
-        float m = cur - prev;
-        prev = cur;
-        mom[t]  = m;
-        amom[t] = fabsf(m);
     }
+
+    mom[t]  = mv;
+    amom[t] = av;
 }
 
 // -------- New param-parallel kernel: one series × many params (time-major) --------

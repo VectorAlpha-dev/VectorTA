@@ -805,7 +805,7 @@ pub struct EhlersKamaBatchRange {
 impl Default for EhlersKamaBatchRange {
     fn default() -> Self {
         Self {
-            period: (10, 50, 1),
+            period: (10, 259, 1),
         }
     }
 }

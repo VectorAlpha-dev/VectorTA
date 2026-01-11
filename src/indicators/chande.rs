@@ -1009,7 +1009,7 @@ impl Default for ChandeBatchRange {
     fn default() -> Self {
         Self {
             period: (22, 22, 0),
-            mult: (3.0, 3.0, 0.0),
+            mult: (3.0, 3.249, 0.001),
         }
     }
 }

@@ -257,7 +257,7 @@ pub fn wilders_with_kernel(
     let warm = first + period - 1;
     let mut out = alloc_with_nan_prefix(len, warm);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -409,7 +409,7 @@ pub fn wilders_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -796,7 +796,7 @@ pub struct WildersBatchRange {
 
 impl Default for WildersBatchRange {
     fn default() -> Self {
-        Self { period: (5, 24, 1) }
+        Self { period: (5, 254, 1) }
     }
 }
 
@@ -1826,6 +1826,12 @@ mod tests {
                 Ok(())
             })
             .map_err(|e| e.into())
+    }
+
+    #[cfg(not(feature = "proptest"))]
+    fn check_wilders_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
     }
 
     generate_all_wilders_tests!(

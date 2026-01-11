@@ -1003,23 +1003,173 @@ impl CudaSrwma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::srwma::{SrwmaBatchRange, SrwmaParams};
 
-    define_ma_period_benches!(
-        srwma_benches,
-        CudaSrwma,
-        crate::indicators::moving_averages::srwma::SrwmaBatchRange,
-        crate::indicators::moving_averages::srwma::SrwmaParams,
-        srwma_batch_dev,
-        srwma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::srwma::SrwmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::srwma::SrwmaParams { period: Some(64) },
-        "srwma",
-        "srwma"
-    );
-    pub use srwma_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct SrwmaBatchDevState {
+        cuda: CudaSrwma,
+        d_prices: DeviceBuffer<f32>,
+        d_weights_flat: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warm_indices: DeviceBuffer<i32>,
+        d_inv_norms: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        max_wlen: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for SrwmaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .srwma_batch_device(
+                    &self.d_prices,
+                    &self.d_weights_flat,
+                    &self.d_periods,
+                    &self.d_warm_indices,
+                    &self.d_inv_norms,
+                    self.series_len,
+                    self.first_valid,
+                    self.max_wlen,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
+                .expect("srwma batch kernel");
+            self.cuda.stream.synchronize().expect("srwma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSrwma::new(0).expect("cuda srwma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = SrwmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let prepared =
+            CudaSrwma::prepare_batch_inputs(&price, &sweep).expect("srwma prepare batch inputs");
+        let n_combos = prepared.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_weights_flat = DeviceBuffer::from_slice(&prepared.weights_flat).expect("d_weights_flat");
+        let d_periods = DeviceBuffer::from_slice(&prepared.periods_i32).expect("d_periods");
+        let d_warm_indices = DeviceBuffer::from_slice(&prepared.warm_indices).expect("d_warm_indices");
+        let d_inv_norms = DeviceBuffer::from_slice(&prepared.inv_norms).expect("d_inv_norms");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }.expect("d_out");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SrwmaBatchDevState {
+            cuda,
+            d_prices,
+            d_weights_flat,
+            d_periods,
+            d_warm_indices,
+            d_inv_norms,
+            series_len: prepared.series_len,
+            first_valid: prepared.first_valid,
+            max_wlen: prepared.max_wlen,
+            n_combos,
+            d_out,
+        })
+    }
+
+    struct SrwmaManyDevState {
+        cuda: CudaSrwma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        d_weights: DeviceBuffer<f32>,
+        period: usize,
+        inv_norm: f32,
+        cols: usize,
+        rows: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for SrwmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .srwma_many_series_one_param_device(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    &self.d_weights,
+                    self.period as i32,
+                    self.inv_norm,
+                    self.cols as i32,
+                    self.rows as i32,
+                    &mut self.d_out_tm,
+                )
+                .expect("srwma many-series kernel");
+            self.cuda.stream.synchronize().expect("srwma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaSrwma::new(0).expect("cuda srwma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = SrwmaParams { period: Some(64) };
+        let prepared = CudaSrwma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("srwma prepare many-series");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_weights = DeviceBuffer::from_slice(&prepared.weights).expect("d_weights");
+        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(SrwmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            d_weights,
+            period: prepared.period,
+            inv_norm: prepared.inv_norm,
+            cols,
+            rows,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "srwma",
+                "one_series_many_params",
+                "srwma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "srwma",
+                "many_series_one_param",
+                "srwma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }
 
 fn expand_grid(range: &SrwmaBatchRange) -> Vec<SrwmaParams> {

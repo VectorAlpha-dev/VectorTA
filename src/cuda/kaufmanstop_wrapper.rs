@@ -375,40 +375,70 @@ impl CudaKaufmanstop {
             let d_warm = DeviceBuffer::from_slice(&warm_ps)?;
             let d_signed = DeviceBuffer::from_slice(&signed_mults)?;
 
-            // Allocate MA slab for the tile: [tile_n * len], time-major per param
-            let mut d_ma_tile = unsafe { DeviceBuffer::<f32>::uninitialized(tile_n * len) }?;
-
-            // Stage MA rows into a single pinned host slab, then upload once.
-            let mut h_ma_tile =
-                unsafe { LockedBuffer::<f32>::uninitialized(tile_n * len) }?;
-            let mut keep_alive: Vec<DeviceArrayF32> = Vec::with_capacity(tile_n);
-            for (j, prm) in tile.iter().enumerate() {
-                let period = prm.period.unwrap();
-                let ma_type = prm.ma_type.as_deref().unwrap_or("sma");
-                let ma_dev = selector
-                    .ma_to_device(ma_type, CudaMaData::SliceF32(&range), period)
-                    .map_err(|e| CudaKaufmanstopError::InvalidInput(format!("ma_to_device: {}", e)))?;
-                debug_assert_eq!(ma_dev.rows, 1);
-                debug_assert_eq!(ma_dev.cols, len);
-
-                // Destination host slice for param j
-                let offset = j * len;
-                let slice = &mut h_ma_tile.as_mut_slice()[offset..offset + len];
-                unsafe {
-                    ma_dev.buf.async_copy_to(slice, &self.stream)?;
+            // MA slab for the tile: prefer a single batched MA sweep when possible.
+            // This avoids O(tile_n) MA launches and avoids device->host->device staging.
+            let ma_type0 = tile[0].ma_type.as_deref().unwrap_or("sma");
+            let same_ma_type = tile.iter().all(|p| {
+                p.ma_type
+                    .as_deref()
+                    .unwrap_or("sma")
+                    .eq_ignore_ascii_case(ma_type0)
+            });
+            let (sweep_p0, sweep_p1, sweep_step) = sweep.period;
+            let step = if sweep_step == 0 || sweep_p0 == sweep_p1 {
+                0usize
+            } else {
+                sweep_step.max(1)
+            };
+            let p_first = tile[0].period.unwrap_or(0);
+            let p_last = tile[tile_n - 1].period.unwrap_or(0);
+            let periods_are_progression = if tile_n == 1 {
+                true
+            } else if step == 0 {
+                false
+            } else {
+                let forward = p_last >= p_first;
+                let mut ok = true;
+                for (i, prm) in tile.iter().enumerate() {
+                    let expected = if forward {
+                        p_first.saturating_add(i * step)
+                    } else {
+                        p_first.saturating_sub(i * step)
+                    };
+                    if prm.period.unwrap_or(0) != expected {
+                        ok = false;
+                        break;
+                    }
                 }
-                keep_alive.push(ma_dev);
-            }
-            // Ensure D2H fills complete before uploading to device, then free sources
-            self.stream.synchronize()?;
-            drop(keep_alive);
-            unsafe {
-                d_ma_tile.async_copy_from(&h_ma_tile, &self.stream)?;
+                ok
+            };
+
+            let mut ma_dev_tile: Option<DeviceArrayF32> = None;
+            if same_ma_type && periods_are_progression {
+                if let Ok(dev) = selector.ma_sweep_to_device(
+                    ma_type0,
+                    CudaMaData::SliceF32(&range),
+                    p_first,
+                    p_last,
+                    step,
+                ) {
+                    if dev.rows == tile_n && dev.cols == len {
+                        ma_dev_tile = Some(dev);
+                    }
+                }
             }
 
             // Launch the tile kernel
-            let bx = bx_default;
-            let by = prefer_by(tile_n);
+            use cust::device::DeviceAttribute;
+            let max_threads = Device::get_device(self.device_id)?
+                .get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+            let mut bx = bx_default.max(32).min(max_threads.max(32));
+            let mut by = prefer_by(tile_n).max(1);
+            // Ensure bx*by does not exceed max threads per block (CUDA limit).
+            let max_by = (max_threads / bx).max(1);
+            if by > max_by {
+                by = max_by;
+            }
             let grid_x = ((len as u32) + bx - 1) / bx;
             let grid_y = ((tile_n as u32) + by - 1) / by;
             let grid = GridSize::xyz(grid_x.max(1), grid_y.max(1), 1);
@@ -417,30 +447,34 @@ impl CudaKaufmanstop {
             let shmem = (bx as usize) * std::mem::size_of::<f32>();
 
             let out_offset = p0 * len;
-            let launch_res = unsafe {
-                let mut hp = d_high.as_device_ptr().as_raw();
-                let mut lp = d_low.as_device_ptr().as_raw();
-                let mut mp = d_ma_tile.as_device_ptr().as_raw();
-                let mut wp = d_warm.as_device_ptr().as_raw();
-                let mut sp = d_signed.as_device_ptr().as_raw();
-                let mut rows_i = len as i32;
-                let mut params_i = tile_n as i32;
-                let mut bil = if dir_long { 1i32 } else { 0i32 };
-                let mut out_ptr = d_out.as_device_ptr().add(out_offset).as_raw();
+            let launch_res = if let Some(ma_dev) = ma_dev_tile.as_ref() {
+                unsafe {
+                    let mut hp = d_high.as_device_ptr().as_raw();
+                    let mut lp = d_low.as_device_ptr().as_raw();
+                    let mut mp = ma_dev.buf.as_device_ptr().as_raw();
+                    let mut wp = d_warm.as_device_ptr().as_raw();
+                    let mut sp = d_signed.as_device_ptr().as_raw();
+                    let mut rows_i = len as i32;
+                    let mut params_i = tile_n as i32;
+                    let mut bil = if dir_long { 1i32 } else { 0i32 };
+                    let mut out_ptr = d_out.as_device_ptr().add(out_offset).as_raw();
 
-                let args: &mut [*mut c_void] = &mut [
-                    &mut hp as *mut _ as *mut c_void,
-                    &mut lp as *mut _ as *mut c_void,
-                    &mut mp as *mut _ as *mut c_void,
-                    &mut wp as *mut _ as *mut c_void,
-                    &mut sp as *mut _ as *mut c_void,
-                    &mut rows_i as *mut _ as *mut c_void,
-                    &mut params_i as *mut _ as *mut c_void,
-                    &mut bil as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut hp as *mut _ as *mut c_void,
+                        &mut lp as *mut _ as *mut c_void,
+                        &mut mp as *mut _ as *mut c_void,
+                        &mut wp as *mut _ as *mut c_void,
+                        &mut sp as *mut _ as *mut c_void,
+                        &mut rows_i as *mut _ as *mut c_void,
+                        &mut params_i as *mut _ as *mut c_void,
+                        &mut bil as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
 
-                self.stream.launch(&ks_many_params_fn, grid, block, shmem as u32, args)
+                    self.stream.launch(&ks_many_params_fn, grid, block, shmem as u32, args)
+                }
+            } else {
+                Err(cust::error::CudaError::UnknownError)
             };
 
             if let Err(_e) = launch_res {
@@ -512,6 +546,9 @@ impl CudaKaufmanstop {
                     self.stream.synchronize()?;
                 }
             }
+
+            // Keep ordering conservative: ensure kernels complete before freeing per-tile buffers.
+            self.stream.synchronize()?;
 
             p0 = p1;
         }
@@ -759,21 +796,61 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        in_bytes + out_bytes + 64 * 1024 * 1024
+        // Output + MA slab (same shape as output)
+        in_bytes + (2 * out_bytes) + 64 * 1024 * 1024
     }
 
     struct KaufmanstopBatchState {
         cuda: CudaKaufmanstop,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: KaufmanstopBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_ma: DeviceBuffer<f32>,
+        d_warm: DeviceBuffer<i32>,
+        d_signed: DeviceBuffer<f32>,
+        len: usize,
+        params: usize,
+        base_is_low: i32,
+        grid: GridSize,
+        block: BlockSize,
+        shmem: u32,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for KaufmanstopBatchState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .kaufmanstop_batch_dev(&self.high, &self.low, &self.sweep)
-                .expect("kaufmanstop batch");
+                .module
+                .get_function("kaufmanstop_one_series_many_params_time_major_f32")
+                .expect("kaufmanstop_one_series_many_params_time_major_f32");
+            unsafe {
+                let mut hp = self.d_high.as_device_ptr().as_raw();
+                let mut lp = self.d_low.as_device_ptr().as_raw();
+                let mut mp = self.d_ma.as_device_ptr().as_raw();
+                let mut wp = self.d_warm.as_device_ptr().as_raw();
+                let mut sp = self.d_signed.as_device_ptr().as_raw();
+                let mut rows_i = self.len as i32;
+                let mut params_i = self.params as i32;
+                let mut bil = self.base_is_low;
+                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+
+                let args: &mut [*mut c_void] = &mut [
+                    &mut hp as *mut _ as *mut c_void,
+                    &mut lp as *mut _ as *mut c_void,
+                    &mut mp as *mut _ as *mut c_void,
+                    &mut wp as *mut _ as *mut c_void,
+                    &mut sp as *mut _ as *mut c_void,
+                    &mut rows_i as *mut _ as *mut c_void,
+                    &mut params_i as *mut _ as *mut c_void,
+                    &mut bil as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+
+                self.cuda
+                    .stream
+                    .launch(&func, self.grid, self.block, self.shmem, args)
+                    .expect("kaufmanstop launch");
+            }
+            self.cuda.stream.synchronize().expect("kaufmanstop sync");
         }
     }
 
@@ -793,11 +870,72 @@ pub mod benches {
             direction: ("long".to_string(), "long".to_string(), 0.0),
             ma_type: ("sma".to_string(), "sma".to_string(), 0.0),
         };
+
+        // First valid index (matches scalar/CPU wrapper)
+        let first = high
+            .iter()
+            .zip(low.iter())
+            .position(|(&h, &l)| !h.is_nan() && !l.is_nan())
+            .unwrap_or(0);
+
+        // Build range (high-low) on host with NaN propagation
+        let mut range = vec![f32::NAN; ONE_SERIES_LEN];
+        for i in first..ONE_SERIES_LEN {
+            let (h, l) = (high[i], low[i]);
+            range[i] = if h.is_nan() || l.is_nan() { f32::NAN } else { h - l };
+        }
+
+        // Expand combos once and build warm/mult arrays.
+        let combos = expand_grid_wrapper(&sweep).expect("expand_grid_wrapper");
+        let params = combos.len();
+        let mut warm_ps: Vec<i32> = Vec::with_capacity(params);
+        let mut signed_mults: Vec<f32> = Vec::with_capacity(params);
+        for prm in &combos {
+            let period = prm.period.unwrap();
+            let mult = prm.mult.unwrap() as f32;
+            warm_ps.push((first + period - 1) as i32);
+            // Wrapper uses negative mult for long direction.
+            signed_mults.push(-mult);
+        }
+
+        // Precompute MA(range) slab on device once (SMA period sweep).
+        let selector = CudaMaSelector::new(0);
+        let ma_dev = selector
+            .ma_sweep_to_device("sma", CudaMaData::SliceF32(&range), sweep.period.0, sweep.period.1, sweep.period.2 as usize)
+            .expect("ma_sweep_to_device");
+        let d_ma = ma_dev.buf;
+
+        let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
+        let d_warm = DeviceBuffer::from_slice(&warm_ps).expect("d_warm");
+        let d_signed = DeviceBuffer::from_slice(&signed_mults).expect("d_signed");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(params * ONE_SERIES_LEN) }.expect("d_out");
+
+        // Kernel launch geometry (matches wrapper defaults).
+        let bx = 256u32;
+        let by = 4u32;
+        let grid_x = ((ONE_SERIES_LEN as u32) + bx - 1) / bx;
+        let grid_y = ((params as u32) + by - 1) / by;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (bx, by, 1).into();
+        let shmem = (bx as usize * std::mem::size_of::<f32>()) as u32;
+
+        cuda.stream.synchronize().expect("kaufmanstop prep sync");
         Box::new(KaufmanstopBatchState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_high,
+            d_low,
+            d_ma,
+            d_warm,
+            d_signed,
+            len: ONE_SERIES_LEN,
+            params,
+            base_is_low: 1i32, // "long"
+            grid,
+            block,
+            shmem,
+            d_out,
         })
     }
 

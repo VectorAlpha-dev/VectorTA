@@ -21,7 +21,6 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -98,7 +97,7 @@ impl CudaHma {
     }
     #[inline]
     fn assume_out_prefilled() -> bool {
-        true
+        false
     }
     pub fn new(device_id: usize) -> Result<Self, CudaHmaError> {
         cust::init(CudaFlags::empty())?;
@@ -425,21 +424,10 @@ impl CudaHma {
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
 
         let elems = n * len;
-        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ring_elems) }?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
-
-        // Device NaN prefill if kernel assumes prefilled output
-        if Self::assume_out_prefilled() {
-            unsafe {
-                let ptr: cu::CUdeviceptr = d_out.as_device_ptr().as_raw();
-                let n32: usize = d_out.len();
-                let st: cu::CUstream = self.stream.as_inner();
-                let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
-                if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::Cuda(cust::error::CudaError::UnknownError));
-                }
-            }
-        }
+        let mut d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         // Policy: currently only Plain batch kernel; allow user override of block_x
         let block_x = match self.policy.batch {
@@ -448,8 +436,8 @@ impl CudaHma {
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok())
             {
-                Some(v) if v == 128 || v == 256 || v == 512 => v,
-                _ => 256,
+                Some(v) if v > 0 => v,
+                _ => 1,
             },
         };
         unsafe {
@@ -480,6 +468,8 @@ impl CudaHma {
             block_x,
             shared_bytes,
         )?;
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -665,23 +655,10 @@ impl CudaHma {
         let ring_elems = cols
             .checked_mul(sqrt_len)
             .ok_or(CudaHmaError::ArithmeticOverflow { what: "cols * sqrt_len" })?;
-        let mut d_ring: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ring_elems) }?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
-
-        if Self::assume_out_prefilled() {
-            unsafe {
-                let ptr: cu::CUdeviceptr = d_out.as_device_ptr().as_raw();
-                let n32: usize = d_out.len();
-                let st: cu::CUstream = self.stream.as_inner();
-                let res = cu::cuMemsetD32Async(ptr, 0x7FFF_FFFFu32, n32, st);
-                if res != cu::CUresult::CUDA_SUCCESS {
-                    return Err(CudaHmaError::InvalidInput(format!(
-                        "cuMemsetD32Async failed: {:?}",
-                        res
-                    )));
-                }
-            }
-        }
+        let mut d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         // Policy: currently only 1D many-series kernel; allow override of block_x
         let block_x = match self.policy.many_series {
@@ -720,6 +697,8 @@ impl CudaHma {
             block_x,
             shared_bytes,
         )?;
+
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -779,21 +758,226 @@ impl CudaHma {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::hma::{HmaBatchRange, HmaParams};
 
-    define_ma_period_benches!(
-        hma_benches,
-        CudaHma,
-        crate::indicators::moving_averages::hma::HmaBatchRange,
-        crate::indicators::moving_averages::hma::HmaParams,
-        hma_batch_dev,
-        hma_multi_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::hma::HmaBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::moving_averages::hma::HmaParams { period: Some(64) },
-        "hma",
-        "hma"
-    );
-    pub use hma_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct HmaBatchDevState {
+        cuda: CudaHma,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_sqrt_len: usize,
+        d_ring: DeviceBuffer<f32>,
+        d_out: DeviceBuffer<f32>,
+        block_x: u32,
+        shared_bytes: usize,
+    }
+    impl CudaBenchState for HmaBatchDevState {
+        fn launch(&mut self) {
+            let periods_ptr = unsafe { self.d_periods.as_device_ptr().as_raw() };
+            let ring_ptr = unsafe { self.d_ring.as_device_ptr().as_raw() };
+            let out_ptr = unsafe { self.d_out.as_device_ptr().as_raw() };
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    periods_ptr,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_sqrt_len,
+                    ring_ptr,
+                    out_ptr,
+                    self.block_x,
+                    self.shared_bytes,
+                )
+                .expect("hma batch kernel");
+            self.cuda.stream.synchronize().expect("hma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHma::new(0).expect("cuda hma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = HmaBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+
+        let (combos, first_valid, series_len, max_sqrt_len) =
+            CudaHma::prepare_batch_inputs(&price, &sweep).expect("hma prepare batch inputs");
+        let n_combos = combos.len();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(0) as i32)
+            .collect();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let ring_elems = n_combos
+            .checked_mul(max_sqrt_len)
+            .expect("ring elems overflow");
+        let d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ring_elems) }.expect("d_ring");
+        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
+            .expect("d_out");
+
+        let block_x = match cuda.policy().batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => match std::env::var("HMA_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                Some(v) if v > 0 => v,
+                _ => 1,
+            },
+        };
+        let shared_bytes: usize = if CudaHma::ring_in_shared() {
+            max_sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
+        } else {
+            0
+        };
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(HmaBatchDevState {
+            cuda,
+            d_prices,
+            d_periods,
+            series_len,
+            n_combos,
+            first_valid,
+            max_sqrt_len,
+            d_ring,
+            d_out,
+            block_x,
+            shared_bytes,
+        })
+    }
+
+    struct HmaManyDevState {
+        cuda: CudaHma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        sqrt_len: usize,
+        d_ring: DeviceBuffer<f32>,
+        d_out_tm: DeviceBuffer<f32>,
+        block_x: u32,
+        shared_bytes: usize,
+    }
+    impl CudaBenchState for HmaManyDevState {
+        fn launch(&mut self) {
+            let ring_ptr = unsafe { self.d_ring.as_device_ptr().as_raw() };
+            let out_ptr = unsafe { self.d_out_tm.as_device_ptr().as_raw() };
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_prices_tm,
+                    &self.d_first_valids,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    self.sqrt_len,
+                    ring_ptr,
+                    out_ptr,
+                    self.block_x,
+                    self.shared_bytes,
+                )
+                .expect("hma many-series kernel");
+            self.cuda.stream.synchronize().expect("hma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaHma::new(0).expect("cuda hma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = HmaParams { period: Some(64) };
+
+        let (first_valids, period, sqrt_len) =
+            CudaHma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("hma prepare many-series inputs");
+
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let ring_elems = cols.checked_mul(sqrt_len).expect("ring elems overflow");
+        let d_ring: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(ring_elems) }.expect("d_ring");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+
+        let block_x = match cuda.policy().many_series {
+            ManySeriesKernelPolicy::OneD { block_x } => block_x,
+            _ => match std::env::var("HMA_MS_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                Some(v) if v == 128 || v == 256 || v == 512 => v,
+                _ => 256,
+            },
+        };
+        let shared_bytes: usize = if CudaHma::ring_in_shared() {
+            sqrt_len * (block_x as usize) * std::mem::size_of::<f32>()
+        } else {
+            0
+        };
+
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(HmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            period,
+            sqrt_len,
+            d_ring,
+            d_out_tm,
+            block_x,
+            shared_bytes,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "hma",
+                "one_series_many_params",
+                "hma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "hma",
+                "many_series_one_param",
+                "hma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

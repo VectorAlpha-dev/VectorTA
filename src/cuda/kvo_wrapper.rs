@@ -279,15 +279,17 @@ impl CudaKvo {
             .get_function("kvo_batch_f32")
             .map_err(|_| CudaKvoError::MissingKernelSymbol { name: "kvo_batch_f32" })?;
 
-        let block_x = match self.policy.batch {
+        // Warp-per-combo: grid.x is sized by warps_per_block, not threads.
+        let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        // 1-D grid over combos (kernel grid-strides over combo index)
-        let threads = block_x;
-        let blocks = ((n_combos as u32) + threads - 1) / threads;
+        block_x = block_x.max(32);
+        block_x -= block_x % 32;
+        let warps_per_block = (block_x / 32).max(1);
+        let blocks = ((n_combos as u32) + warps_per_block - 1) / warps_per_block;
         let grid: GridSize = (blocks.max(1), 1, 1).into();
-        let block: BlockSize = (threads, 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
         Self::validate_launch(grid, block)?;
         unsafe {
             let mut p_vf = d_vf.as_device_ptr().as_raw();
@@ -656,20 +658,30 @@ pub mod benches {
         in_bytes + out_bytes + fv_bytes + 64 * 1024 * 1024
     }
 
-    struct KvoBatchState {
+    struct KvoBatchDeviceState {
         cuda: CudaKvo,
-        h: Vec<f32>,
-        l: Vec<f32>,
-        c: Vec<f32>,
-        v: Vec<f32>,
-        sweep: KvoBatchRange,
+        d_vf: DeviceBuffer<f32>,
+        d_shorts: DeviceBuffer<i32>,
+        d_longs: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
     }
-    impl CudaBenchState for KvoBatchState {
+    impl CudaBenchState for KvoBatchDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .kvo_batch_dev(&self.h, &self.l, &self.c, &self.v, &self.sweep)
-                .expect("kvo batch");
+            self.cuda
+                .launch_batch_kernel(
+                    &self.d_vf,
+                    self.len as i32,
+                    self.first_valid as i32,
+                    &self.d_shorts,
+                    &self.d_longs,
+                    self.n_combos as i32,
+                    &mut self.d_out,
+                )
+                .expect("kvo launch_batch_kernel");
+            let _ = self.cuda.stream.synchronize();
         }
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
@@ -690,40 +702,63 @@ pub mod benches {
             short_period: SHORT_RANGE,
             long_period: LONG_RANGE,
         };
-        Box::new(KvoBatchState {
+        let first_valid =
+            first_valid_ohlcv(&h, &l, &c, &vol).expect("first_valid_ohlcv");
+        let combos = expand_grid(&sweep).expect("expand_grid");
+        let mut shorts = Vec::with_capacity(combos.len());
+        let mut longs = Vec::with_capacity(combos.len());
+        for c in &combos {
+            shorts.push(c.short_period.unwrap() as i32);
+            longs.push(c.long_period.unwrap() as i32);
+        }
+        let vf = precompute_vf_f32(&h, &l, &c, &vol, first_valid);
+        let d_vf = DeviceBuffer::from_slice(&vf).expect("d_vf");
+        let d_shorts = DeviceBuffer::from_slice(&shorts).expect("d_shorts");
+        let d_longs = DeviceBuffer::from_slice(&longs).expect("d_longs");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(combos.len() * ONE_SERIES_LEN) }.expect("d_out");
+        Box::new(KvoBatchDeviceState {
             cuda,
-            h,
-            l,
-            c,
-            v: vol,
-            sweep,
+            d_vf,
+            d_shorts,
+            d_longs,
+            d_out,
+            len: ONE_SERIES_LEN,
+            first_valid,
+            n_combos: combos.len(),
         })
     }
 
-    struct KvoManyState {
+    struct KvoManyDeviceState {
         cuda: CudaKvo,
-        h_tm: Vec<f32>,
-        l_tm: Vec<f32>,
-        c_tm: Vec<f32>,
-        v_tm: Vec<f32>,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_close: DeviceBuffer<f32>,
+        d_vol: DeviceBuffer<f32>,
+        d_fv: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
         cols: usize,
         rows: usize,
-        params: KvoParams,
+        short_p: usize,
+        long_p: usize,
     }
-    impl CudaBenchState for KvoManyState {
+    impl CudaBenchState for KvoManyDeviceState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .kvo_many_series_one_param_time_major_dev(
-                    &self.h_tm,
-                    &self.l_tm,
-                    &self.c_tm,
-                    &self.v_tm,
-                    self.cols,
-                    self.rows,
-                    &self.params,
+            self.cuda
+                .launch_many_series_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_close,
+                    &self.d_vol,
+                    &self.d_fv,
+                    self.cols as i32,
+                    self.rows as i32,
+                    self.short_p as i32,
+                    self.long_p as i32,
+                    &mut self.d_out,
                 )
-                .expect("kvo many-series");
+                .expect("kvo launch_many_series_kernel");
+            let _ = self.cuda.stream.synchronize();
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -745,19 +780,31 @@ pub mod benches {
                 c_tm[idx] = base + 0.03f32 * (t as f32 * 0.0015).sin();
             }
         }
+        let (short_p, long_p) = (6usize, 20usize);
         let params = KvoParams {
-            short_period: Some(6),
-            long_period: Some(20),
+            short_period: Some(short_p),
+            long_period: Some(long_p),
         };
-        Box::new(KvoManyState {
+        let first_valids = first_valids_time_major(&h_tm, &l_tm, &c_tm, &vol_tm, cols, rows);
+        let d_high = DeviceBuffer::from_slice(&h_tm).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&l_tm).expect("d_low");
+        let d_close = DeviceBuffer::from_slice(&c_tm).expect("d_close");
+        let d_vol = DeviceBuffer::from_slice(&vol_tm).expect("d_vol");
+        let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_fv");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");
+        Box::new(KvoManyDeviceState {
             cuda,
-            h_tm,
-            l_tm,
-            c_tm,
-            v_tm: vol_tm,
+            d_high,
+            d_low,
+            d_close,
+            d_vol,
+            d_fv,
+            d_out,
             cols,
             rows,
-            params,
+            short_p,
+            long_p,
         })
     }
 

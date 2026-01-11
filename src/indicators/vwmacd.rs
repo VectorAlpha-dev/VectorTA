@@ -2086,9 +2086,9 @@ pub struct VwmacdBatchRange {
 impl Default for VwmacdBatchRange {
     fn default() -> Self {
         Self {
-            fast: (12, 16, 0),
-            slow: (26, 30, 0),
-            signal: (9, 12, 0),
+            fast: (12, 12, 0),
+            slow: (26, 275, 1),
+            signal: (9, 9, 0),
             fast_ma_type: "sma".to_string(),
             slow_ma_type: "sma".to_string(),
             signal_ma_type: "ema".to_string(),

@@ -230,7 +230,7 @@ pub fn linearreg_slope_with_kernel(
     }
     let mut out = alloc_with_nan_prefix(data.len(), first_valid_idx + period - 1);
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     unsafe {
@@ -254,137 +254,86 @@ pub fn linearreg_slope_with_kernel(
 
 #[inline]
 pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Precompute constants for x = 0..(period-1)
-    let n = period as f64;
-    let m = (period - 1) as f64;
-
-    // sum_x = 0 + 1 + ... + (period-1) = (period-1)*period/2
-    let sum_x = 0.5 * m * n;
-
-    // sum_x2 = 0^2 + 1^2 + ... + (period-1)^2 = (period-1)*period*(2*period-1)/6
-    let sum_x2 = (m * n) * (2.0 * m + 1.0) / 6.0;
-
-    let denom = n * sum_x2 - sum_x * sum_x;
-    if denom.abs() < f64::EPSILON {
-        // Degenerate (should not happen for period>=2); emit NaNs in valid region
-        for i in (first + period - 1)..data.len() {
-            out[i] = f64::NAN;
-        }
+    // Tulip-style rolling linear regression (trend.h), specialized for slope output.
+    //
+    // This uses x = 1..period weights and maintains:
+    // - y  = ∑ y
+    // - xy = ∑ (x * y)
+    // with an O(1) slide update.
+    let len = data.len();
+    if len == 0 {
         return;
     }
 
-    // Build initial window sums over indices [first .. first+period-1]
+    let p = period as f64;
     let base = first;
-    let mut s0 = 0.0f64; // sum_y
-    let mut s1 = 0.0f64; // sum_{j=0..p-1} j * y[first + j]
-    for j in 0..period {
-        let y = data[base + j];
-        s0 += y;
-        s1 = y.mul_add(j as f64, s1);
+    let mut i = base + period - 1;
+    if i >= len {
+        return;
     }
 
-    // Emit slope for each window using rolling O(1) updates
-    let mut i = first + period - 1; // first valid output index
-    let mut step = 0usize; // steps since initial window
-                           // Kahan compensation terms to curb drift in rolling updates
-    let mut s0_c = 0.0f64;
-    let mut s1_c = 0.0f64;
-    const RECALC_EVERY: usize = 256; // periodic exact recompute to limit drift
-    while i < data.len() {
-        // Optional fast path: if the window is (near) perfectly linear, snap to the two-point slope
-        // using first/last values which the property tests expect exactly.
-        if m > 0.0 {
-            let start = i + 1 - period;
-            let y_first = data[start];
-            let y_last = data[i];
-            let a2 = (y_last - y_first) / m;
-            let s0_model = a2.mul_add(sum_x, y_first * n);
-            let s1_model = a2.mul_add(sum_x2, y_first * sum_x);
-            let tol0 = 1e-12_f64 * (1.0_f64).max(s0_model.abs()).max(s0.abs());
-            let tol1 = 1e-12_f64 * (1.0_f64).max(s1_model.abs()).max(s1.abs());
-            if (s0 - s0_model).abs() <= tol0 && (s1 - s1_model).abs() <= tol1 {
-                out[i] = a2;
-                let next = i + 1;
-                if next >= data.len() {
-                    break;
-                }
-                // Slide window by 1 and continue (common path below)
-                let y_old = data[next - period];
-                let y_new = data[next];
-                let delta0 = y_new - y_old;
-                let yk0 = delta0 - s0_c;
-                let t0 = s0 + yk0;
-                s0_c = (t0 - s0) - yk0;
-                s0 = t0;
-                let delta1 = -s0 + n * y_new;
-                let yk1 = delta1 - s1_c;
-                let t1 = s1 + yk1;
-                s1_c = (t1 - s1) - yk1;
-                s1 = t1;
-                step = step.wrapping_add(1);
-                if (step & (RECALC_EVERY - 1)) == 0 {
-                    let start = next + 1 - period;
-                    let mut sy = 0.0f64;
-                    let mut sxy = 0.0f64;
-                    for j in 0..period {
-                        let y = data[start + j];
-                        sy += y;
-                        sxy = y.mul_add(j as f64, sxy);
-                    }
-                    s0 = sy;
-                    s1 = sxy;
-                    s0_c = 0.0;
-                    s1_c = 0.0;
-                }
-                i = next;
-                continue;
-            }
+    // Closed-form sums over x = 1..period
+    let x = 0.5 * p * (p + 1.0);
+    let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
+    let denom = p * x2 - x * x;
+    if denom.abs() < f64::EPSILON {
+        for out_i in i..len {
+            out[out_i] = f64::NAN;
+        }
+        return;
+    }
+    let bd = 1.0 / denom;
+    let p_bd = p * bd;
+    let x_bd = x * bd;
+
+    unsafe {
+        let dp = data.as_ptr();
+
+        // Preload window [base .. base+period-2] (period-1 values).
+        let mut y = 0.0f64;
+        let mut xy = 0.0f64;
+        for j in 0..(period - 1) {
+            let v = *dp.add(base + j);
+            y += v;
+            xy += v * (j + 1) as f64;
         }
 
-        let num = n.mul_add(s1, -sum_x * s0);
-        out[i] = num / denom;
+        let mut in_new = dp.add(base + period - 1);
+        let mut in_old = dp.add(base);
+        let end = dp.add(len);
+        let mut out_ptr = out.as_mut_ptr().add(base + period - 1);
 
-        let next = i + 1;
-        if next >= data.len() {
-            break;
+        while in_new.add(1) < end {
+            // Iteration 0
+            let v0 = *in_new;
+            y += v0;
+            xy += v0 * p;
+            let b0 = xy * p_bd - y * x_bd;
+            *out_ptr = if b0.abs() <= 1.1e-8 { 0.0 } else { b0 };
+            xy -= y;
+            y -= *in_old;
+
+            // Iteration 1
+            let v1 = *in_new.add(1);
+            y += v1;
+            xy += v1 * p;
+            let b1 = xy * p_bd - y * x_bd;
+            *out_ptr.add(1) = if b1.abs() <= 1.1e-8 { 0.0 } else { b1 };
+            xy -= y;
+            y -= *in_old.add(1);
+
+            in_new = in_new.add(2);
+            in_old = in_old.add(2);
+            out_ptr = out_ptr.add(2);
         }
 
-        // Slide window by 1: old leaves from the left, new enters on the right
-        let y_old = data[next - period];
-        let y_new = data[next];
-
-        // Update s0 with Kahan compensation
-        let delta0 = y_new - y_old;
-        let yk0 = delta0 - s0_c;
-        let t0 = s0 + yk0;
-        s0_c = (t0 - s0) - yk0;
-        s0 = t0;
-
-        // Update s1 using updated s0' and Kahan compensation
-        let delta1 = -s0 + n * y_new;
-        let yk1 = delta1 - s1_c;
-        let t1 = s1 + yk1;
-        s1_c = (t1 - s1) - yk1;
-        s1 = t1;
-
-        step = step.wrapping_add(1);
-        if (step & (RECALC_EVERY - 1)) == 0 {
-            // Recompute sums exactly for current window to curb rounding drift
-            let start = next + 1 - period;
-            let mut sy = 0.0f64;
-            let mut sxy = 0.0f64;
-            for j in 0..period {
-                let y = data[start + j];
-                sy += y;
-                sxy = y.mul_add(j as f64, sxy);
-            }
-            s0 = sy;
-            s1 = sxy;
-            s0_c = 0.0;
-            s1_c = 0.0;
+        if in_new < end {
+            let v = *in_new;
+            y += v;
+            xy += v * p;
+            let b = xy * p_bd - y * x_bd;
+            *out_ptr = if b.abs() <= 1.1e-8 { 0.0 } else { b };
         }
-
-        i = next;
     }
 }
 
@@ -449,7 +398,7 @@ pub struct LinearRegSlopeBatchRange {
 impl Default for LinearRegSlopeBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 14, 0),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1350,7 +1299,7 @@ pub fn linearreg_slope_into_slice(
     }
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

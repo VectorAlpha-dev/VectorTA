@@ -117,13 +117,19 @@ extern "C" __global__ void natr_batch_f32(
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    // 1) Fill output row with NaNs cooperatively
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+    // 1) NaN-fill output so it's well-defined.
+    if (first_valid >= series_len || warm >= series_len) {
+        for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+            out[base + idx] = dev_nan();
+        }
+        return;
+    }
+
+    // Only fill the warmup prefix. The computed region is written once below.
+    for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = dev_nan();
     }
     __syncthreads();
-
-    if (first_valid >= series_len || warm >= series_len) return;
 
     // 2) Accumulate warmup TR sum across threads (intrathread Kahan, then block reduce)
     const int start = first_valid;
@@ -180,12 +186,17 @@ extern "C" __global__ void natr_batch_f32_with_inv(
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+    if (first_valid >= series_len || warm >= series_len) {
+        for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
+            out[base + idx] = dev_nan();
+        }
+        return;
+    }
+
+    for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = dev_nan();
     }
     __syncthreads();
-
-    if (first_valid >= series_len || warm >= series_len) return;
 
     const int start = first_valid;
     float local_sum = 0.0f;
@@ -218,6 +229,193 @@ extern "C" __global__ void natr_batch_f32_with_inv(
     }
 }
 
+// -------------------- Batch: warp-coalesced IO (one series × many params) --------------------
+//
+// This kernel keeps the exact same sequential Wilder recurrence as the plain batch kernel,
+// but uses one warp per row to coalesce global loads/stores. Lane 0 performs the recurrence
+// while all lanes participate in IO.
+//
+// - blockDim.x must be exactly 32
+// - output is written once: warmup prefix is NaN, then all t>=warm are computed
+extern "C" __global__ void natr_batch_warp_io_f32(
+    const float* __restrict__ tr,
+    const float* __restrict__ close,
+    const int*   __restrict__ periods,
+    int series_len,
+    int first_valid,
+    int n_combos,
+    float*       __restrict__ out)
+{
+    if (blockDim.x != 32) return;
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 0) return;
+
+    const int warm = first_valid + period - 1;
+    const int base = combo * series_len;
+
+    const int lane = threadIdx.x & (warpSize - 1);
+    const unsigned mask = 0xFFFFFFFFu;
+
+    if (first_valid >= series_len || warm >= series_len) {
+        for (int idx = lane; idx < series_len; idx += warpSize) {
+            out[base + idx] = dev_nan();
+        }
+        return;
+    }
+
+    for (int idx = lane; idx < warm; idx += warpSize) {
+        out[base + idx] = dev_nan();
+    }
+
+    // Seed mean over first TR window (warp reduction is sufficient with one warp).
+    const int start = first_valid;
+    float local_sum = 0.0f;
+    float local_c   = 0.0f;
+    for (int k = lane; k < period; k += warpSize) {
+        const float v = tr[start + k];
+        float y = v - local_c;
+        float t = local_sum + y;
+        local_c = (t - local_sum) - y;
+        local_sum = t;
+    }
+    local_sum += local_c;
+    const float sum_f = warp_reduce_sum(local_sum);
+
+    __shared__ float sh_tr[32];
+    __shared__ float sh_scale[32];
+    __shared__ double sh_atr[32];
+
+    const double inv_p = 1.0 / static_cast<double>(period);
+    double atr = 0.0;
+    if (lane == 0) {
+        atr = static_cast<double>(sum_f) * inv_p;
+    }
+
+    for (int tile = warm; tile < series_len; tile += warpSize) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        if (valid) {
+            sh_tr[lane] = tr[t];
+            sh_scale[lane] = safe_scale_100_over_close(close[t]);
+        }
+        __syncwarp(mask);
+
+        if (lane == 0) {
+            #pragma unroll
+            for (int o = 0; o < 32; ++o) {
+                const int tt = tile + o;
+                if (tt >= series_len) break;
+                if (tt != warm) {
+                    const double trv = static_cast<double>(sh_tr[o]);
+                    atr = (trv - atr) * inv_p + atr;
+                }
+                sh_atr[o] = atr;
+            }
+        }
+        __syncwarp(mask);
+
+        if (valid) {
+            const double a = sh_atr[lane];
+            const float scale = sh_scale[lane];
+            out[base + t] = (scale == scale) ? static_cast<float>(a * static_cast<double>(scale)) : dev_nan();
+        }
+        __syncwarp(mask);
+    }
+}
+
+extern "C" __global__ void natr_batch_warp_io_f32_with_inv(
+    const float* __restrict__ tr,
+    const float* __restrict__ inv_close100, // length = series_len
+    const int*   __restrict__ periods,
+    int series_len,
+    int first_valid,
+    int n_combos,
+    float*       __restrict__ out)
+{
+    if (blockDim.x != 32) return;
+    const int combo = blockIdx.x;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    if (period <= 0) return;
+
+    const int warm = first_valid + period - 1;
+    const int base = combo * series_len;
+
+    const int lane = threadIdx.x & (warpSize - 1);
+    const unsigned mask = 0xFFFFFFFFu;
+
+    if (first_valid >= series_len || warm >= series_len) {
+        for (int idx = lane; idx < series_len; idx += warpSize) {
+            out[base + idx] = dev_nan();
+        }
+        return;
+    }
+
+    for (int idx = lane; idx < warm; idx += warpSize) {
+        out[base + idx] = dev_nan();
+    }
+
+    const int start = first_valid;
+    float local_sum = 0.0f;
+    float local_c   = 0.0f;
+    for (int k = lane; k < period; k += warpSize) {
+        const float v = tr[start + k];
+        float y = v - local_c;
+        float t = local_sum + y;
+        local_c = (t - local_sum) - y;
+        local_sum = t;
+    }
+    local_sum += local_c;
+    const float sum_f = warp_reduce_sum(local_sum);
+
+    __shared__ float sh_tr[32];
+    __shared__ float sh_scale[32];
+    __shared__ double sh_atr[32];
+
+    const double inv_p = 1.0 / static_cast<double>(period);
+    double atr = 0.0;
+    if (lane == 0) {
+        atr = static_cast<double>(sum_f) * inv_p;
+    }
+
+    for (int tile = warm; tile < series_len; tile += warpSize) {
+        const int t = tile + lane;
+        const bool valid = (t < series_len);
+
+        if (valid) {
+            sh_tr[lane] = tr[t];
+            sh_scale[lane] = inv_close100[t];
+        }
+        __syncwarp(mask);
+
+        if (lane == 0) {
+            #pragma unroll
+            for (int o = 0; o < 32; ++o) {
+                const int tt = tile + o;
+                if (tt >= series_len) break;
+                if (tt != warm) {
+                    const double trv = static_cast<double>(sh_tr[o]);
+                    atr = (trv - atr) * inv_p + atr;
+                }
+                sh_atr[o] = atr;
+            }
+        }
+        __syncwarp(mask);
+
+        if (valid) {
+            const double a = sh_atr[lane];
+            const float scale = sh_scale[lane];
+            out[base + t] = (scale == scale) ? static_cast<float>(a * static_cast<double>(scale)) : dev_nan();
+        }
+        __syncwarp(mask);
+    }
+}
+
 // -------------------- Many-series × one param (time-major) --------------------
 
 // time-major indexing: arr[t * num_series + s]
@@ -246,18 +444,24 @@ extern "C" __global__ void natr_many_series_one_param_f32(
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int fv = first_valids[s];
 
-        // Initialize output with NaNs cooperatively
-        for (int t = lane; t < series_len; t += warpSize) {
-            out_tm[t * stride + s] = dev_nan();
-        }
-
         if (fv < 0 || fv >= series_len) {
+            for (int t = lane; t < series_len; t += warpSize) {
+                out_tm[t * stride + s] = dev_nan();
+            }
             continue;
         }
 
         const int warm_end = fv + period; // exclusive end
         if (warm_end > series_len) {
+            for (int t = lane; t < series_len; t += warpSize) {
+                out_tm[t * stride + s] = dev_nan();
+            }
             continue;
+        }
+
+        const int warm = warm_end - 1;
+        for (int t = lane; t < warm; t += warpSize) {
+            out_tm[t * stride + s] = dev_nan();
         }
 
         // Warmup: sum TR over [fv, warm_end) with intrawarp Kahan partials
@@ -286,7 +490,6 @@ extern "C" __global__ void natr_many_series_one_param_f32(
         float sum = warp_reduce_sum(local);
 
         if (lane == 0) {
-            const int warm = warm_end - 1;
             const double inv_p = 1.0 / static_cast<double>(period);
             double atr = static_cast<double>(sum) * inv_p;
 
@@ -314,4 +517,3 @@ extern "C" __global__ void natr_many_series_one_param_f32(
         }
     }
 }
-

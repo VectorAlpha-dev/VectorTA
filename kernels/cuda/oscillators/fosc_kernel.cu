@@ -2,8 +2,8 @@
 //
 // FP32-first, compensated-accumulation rewrite for Ada/Lovelace (e.g., RTX 4090).
 // Key changes vs previous version:
-// - One thread per combo/series (1D launch) – no idle lanes, no __syncthreads().
-// - Rolling accumulators (Σy, Σxy) use Kahan/Neumaier compensated FP32.
+// - One thread per combo/series (1D launch) â€“ no idle lanes, no __syncthreads().
+// - Rolling accumulators (Î£y, Î£xy) use Kahan/Neumaier compensated FP32.
 // - Use FMA (fmaf) in critical expressions to reduce rounding.
 // - Warmup/NaN semantics preserved.
 // - No FP64 in hot loops to avoid 1/64 FP64 throughput on GA10x/AD10x.
@@ -16,7 +16,7 @@ __device__ __forceinline__ float f32_nan() { return __int_as_float(0x7fffffff); 
 
 // Using FP64 for running sums to match scalar parity
 
-// === One-series × many-params (batch). Row-major output [combo][t] ===
+// === One-series Ã— many-params (batch). Row-major output [combo][t] ===
 extern "C" __global__ void fosc_batch_f32(
     const float* __restrict__ data,   // [len]
     int len,
@@ -45,9 +45,9 @@ extern "C" __global__ void fosc_batch_f32(
     const double p   = (double)period;
     const double p1  = p + 1.0;
     const double inv_p = 1.0 / p;
-    const double sx  = 0.5 * p * p1;                              // Σx
-    const double sx2 = (p * p1 * (2.0 * p + 1.0)) / 6.0;          // Σx^2
-    const double den = p * sx2 - sx * sx;                         // p*Σx^2 - (Σx)^2
+    const double sx  = 0.5 * p * p1;                              // Î£x
+    const double sx2 = (p * p1 * (2.0 * p + 1.0)) / 6.0;          // Î£x^2
+    const double den = p * sx2 - sx * sx;                         // p*Î£x^2 - (Î£x)^2
     const double inv_den = (fabs(den) < 1e-18) ? 0.0 : (1.0 / den);
 
     // Initialize running sums over [first_valid .. first_valid + period - 2]
@@ -91,17 +91,17 @@ extern "C" __global__ void fosc_batch_f32(
         const int old_idx = t + 1 - period;
         const float oldv = data[old_idx];
 
-        // Maintain Σxy over the new window:
+        // Maintain Î£xy over the new window:
         //   xy_plus = sum_xy + newv*p
         //   sum_xy_next = xy_plus - y_plus
         sum_xy = xy_plus - y_plus;
 
-        // Maintain Σy over the new window
+        // Maintain Î£y over the new window
         sum_y = y_plus - oldv;
     }
 }
 
-// === Many-series × one-param (time-major). Data is time-major [t][series] ===
+// === Many-series Ã— one-param (time-major). Data is time-major [t][series] ===
 extern "C" __global__ void fosc_many_series_one_param_time_major_f32(
     const float* __restrict__ data_tm,     // [rows][cols] time-major
     const int* __restrict__ first_valids,  // [cols]

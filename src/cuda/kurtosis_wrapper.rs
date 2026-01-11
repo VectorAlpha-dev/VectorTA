@@ -163,6 +163,11 @@ impl CudaKurtosis {
     pub fn device_id(&self) -> u32 { self.device_id }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaKurtosisError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -184,19 +189,11 @@ impl CudaKurtosis {
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged {
-            return;
-        }
-        if self.debug_batch_logged {
-            return;
-        }
+        if self.debug_batch_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] kurtosis batch selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaKurtosis)).debug_batch_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaKurtosis)).debug_batch_logged = true;
@@ -208,19 +205,11 @@ impl CudaKurtosis {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged {
-            return;
-        }
-        if self.debug_many_logged {
-            return;
-        }
+        if self.debug_many_logged { return; }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] kurtosis many-series selected kernel: {:?}", sel);
-                }
-                unsafe {
-                    (*(self as *const _ as *mut CudaKurtosis)).debug_many_logged = true;
                 }
                 unsafe {
                     (*(self as *const _ as *mut CudaKurtosis)).debug_many_logged = true;
@@ -686,15 +675,34 @@ pub mod benches {
 
     struct KurtosisBatchState {
         cuda: CudaKurtosis,
-        price: Vec<f32>,
-        sweep: KurtosisBatchRange,
+        d_ps1: DeviceBuffer<Float2>,
+        d_ps2: DeviceBuffer<Float2>,
+        d_ps3: DeviceBuffer<Float2>,
+        d_ps4: DeviceBuffer<Float2>,
+        d_ps_nan: DeviceBuffer<i32>,
+        d_periods: DeviceBuffer<i32>,
+        first_valid: usize,
+        len: usize,
+        n_combos: usize,
+        d_out: DeviceBuffer<f32>,
     }
     impl CudaBenchState for KurtosisBatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .kurtosis_batch_dev(&self.price, &self.sweep)
+            self.cuda
+                .launch_batch(
+                    &self.d_ps1,
+                    &self.d_ps2,
+                    &self.d_ps3,
+                    &self.d_ps4,
+                    &self.d_ps_nan,
+                    self.len,
+                    self.first_valid,
+                    &self.d_periods,
+                    self.n_combos,
+                    &mut self.d_out,
+                )
                 .expect("kurtosis batch");
+            self.cuda.synchronize().expect("kurtosis sync");
         }
     }
 
@@ -704,10 +712,34 @@ pub mod benches {
         let sweep = KurtosisBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        let sweep = KurtosisBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
-        };
-        Box::new(KurtosisBatchState { cuda, price, sweep })
+        let (combos, first_valid, len) =
+            CudaKurtosis::prepare_batch_inputs(&price, &sweep).expect("kurtosis prep");
+        let (h_ps1, h_ps2, h_ps3, h_ps4, h_ps_nan) =
+            cuda.build_prefixes_ds(&price).expect("prefixes");
+        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+
+        let d_ps1 = DeviceBuffer::from_slice(h_ps1.as_slice()).expect("d_ps1");
+        let d_ps2 = DeviceBuffer::from_slice(h_ps2.as_slice()).expect("d_ps2");
+        let d_ps3 = DeviceBuffer::from_slice(h_ps3.as_slice()).expect("d_ps3");
+        let d_ps4 = DeviceBuffer::from_slice(h_ps4.as_slice()).expect("d_ps4");
+        let d_ps_nan = DeviceBuffer::from_slice(h_ps_nan.as_slice()).expect("d_ps_nan");
+        let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
+        let elems = len * combos.len();
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_out");
+
+        Box::new(KurtosisBatchState {
+            cuda,
+            d_ps1,
+            d_ps2,
+            d_ps3,
+            d_ps4,
+            d_ps_nan,
+            d_periods,
+            first_valid,
+            len,
+            n_combos: combos.len(),
+            d_out,
+        })
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {

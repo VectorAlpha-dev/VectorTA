@@ -938,8 +938,8 @@ pub struct VoscBatchRange {
 impl Default for VoscBatchRange {
     fn default() -> Self {
         Self {
-            short_period: (2, 10, 1),
-            long_period: (5, 20, 1),
+            short_period: (2, 2, 0),
+            long_period: (5, 254, 1),
         }
     }
 }

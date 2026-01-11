@@ -1560,10 +1560,10 @@ pub struct KdjBatchRange {
 impl Default for KdjBatchRange {
     fn default() -> Self {
         Self {
-            fast_k_period: (9, 30, 1),
-            slow_k_period: (3, 6, 1),
+            fast_k_period: (9, 258, 1),
+            slow_k_period: (3, 3, 0),
             slow_k_ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
-            slow_d_period: (3, 6, 1),
+            slow_d_period: (3, 3, 0),
             slow_d_ma_type: ("sma".to_string(), "sma".to_string(), "".to_string()),
         }
     }

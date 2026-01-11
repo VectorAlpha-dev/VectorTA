@@ -138,14 +138,11 @@ extern "C" __global__ void gatorosc_batch_f32(
     float* __restrict__ uchn  = out_upper_change + (size_t)combo * len;
     float* __restrict__ lchn  = out_lower_change + (size_t)combo * len;
 
-    // Prefill NaNs with all threads
-    for (int i = threadIdx.x; i < len; i += blockDim.x) {
-        upper[i] = GATOR_NAN_F; lower[i] = GATOR_NAN_F; uchn[i] = GATOR_NAN_F; lchn[i] = GATOR_NAN_F;
-    }
-    __syncthreads();
-    if (threadIdx.x != 0) return;
-
-    if (first_valid >= len) return;
+    // Use only the first warp. The wrapper should launch blockDim.x as a
+    // multiple of 32, ideally exactly 32 (one warp per combo row).
+    const int lane = threadIdx.x & 31;
+    if (threadIdx.x >= 32) return;
+    const unsigned mask = 0xffffffffu;
 
     // Alphas in FP32 (no FP64)
     const float ja   = 2.0f / (float)(jl + 1);
@@ -158,69 +155,241 @@ extern "C" __global__ void gatorosc_batch_f32(
     float* tring = s + ring_len_max;
     float* lring = s + 2 * ring_len_max;
     const int rlen = ring_len_max;
-    int rpos = 0;
+
+    // Fallback path: keep the original sequential implementation for the rare
+    // "very long period" DS mode or for unexpected launch parameters.
+    const int maxlen = max(jl, max(tl, ll));
+    const bool use_ds = (maxlen >= DS_LEN_THRESHOLD);
+    // The warp-scan path below requires a full warp. Keep the sequential fallback as
+    // the safe default whenever blockDim.x < 32 or the ring is not 32-aligned.
+    if (use_ds || blockDim.x < 32 || first_valid >= len || rlen < 32 || (rlen & 31) != 0 || js < 0 || ts < 0 || ls < 0 ||
+        js >= rlen || ts >= rlen || ls >= rlen) {
+        if (lane != 0) return;
+
+        // Full NaN prefill (rare path; keep semantics obvious).
+        for (int i = 0; i < len; ++i) {
+            upper[i] = GATOR_NAN_F;
+            lower[i] = GATOR_NAN_F;
+            uchn[i]  = GATOR_NAN_F;
+            lchn[i]  = GATOR_NAN_F;
+        }
+
+        if (first_valid >= len) return;
+
+        // Initialize EMA states at first_valid
+        float seed = isfinite(data[first_valid]) ? data[first_valid] : 0.0f;
+
+        float  jema_f = seed, tema_f = seed, lema_f = seed;
+        dsfloat jema_ds = ds_make(seed), tema_ds = ds_make(seed), lema_ds = ds_make(seed);
+
+        // Pre-fill rings with the seed state
+        for (int k = 0; k < rlen; ++k) {
+            jring[k] = seed; tring[k] = seed; lring[k] = seed;
+        }
+
+        float u_prev = 0.0f, l_prev = 0.0f;
+        bool have_u = false, have_l = false;
+        int rpos = 0;
+
+        for (int i = first_valid; i < len; ++i) {
+            const float xi = data[i];
+
+            if (!use_ds) {
+                const float x = fin_or_prev(xi, jema_f);
+                jema_f = ema_update_f32(jema_f, ja, x);
+                tema_f = ema_update_f32(tema_f, ta, x);
+                lema_f = ema_update_f32(lema_f, la, x);
+
+                jring[rpos] = jema_f;
+                tring[rpos] = tema_f;
+                lring[rpos] = lema_f;
+            } else {
+                const float x = fin_or_prev(xi, jema_ds.hi);
+                ema_update_ds(jema_ds, ja, x);
+                ema_update_ds(tema_ds, ta, x);
+                ema_update_ds(lema_ds, la, x);
+
+                jring[rpos] = jema_ds.hi;
+                tring[rpos] = tema_ds.hi;
+                lring[rpos] = lema_ds.hi;
+            }
+
+            int jj = rpos - js; if (jj < 0) jj += rlen;
+            int tt = rpos - ts; if (tt < 0) tt += rlen;
+            int llp = rpos - ls; if (llp < 0) llp += rlen;
+
+            if (i >= uwarm) {
+                const float u = fabsf(jring[jj] - tring[tt]);
+                upper[i] = u;
+                if (i == uwarm) { u_prev = u; have_u = true; }
+                else if (i >= ucwarm && have_u) { uchn[i] = u - u_prev; u_prev = u; }
+            }
+            if (i >= lwarm) {
+                const float l = -fabsf(tring[tt] - lring[llp]);
+                lower[i] = l;
+                if (i == lwarm) { l_prev = l; have_l = true; }
+                else if (i >= lcwarm && have_l) { lchn[i] = -(l - l_prev); l_prev = l; }
+            }
+
+            rpos += 1; if (rpos == rlen) rpos = 0;
+        }
+        return;
+    }
+
+    // ---- Fast path: warp-cooperative scan over time (32-wide tiles) --------
 
     // Initialize EMA states at first_valid
     float seed = isfinite(data[first_valid]) ? data[first_valid] : 0.0f;
 
-    // Heuristic: dual‑FP32 only for very long periods
-    const int maxlen = max(jl, max(tl, ll));
-    const bool use_ds = (maxlen >= DS_LEN_THRESHOLD);
-
-    // State
-    float jema_f = seed, tema_f = seed, lema_f = seed;
-    dsfloat jema_ds = ds_make(seed), tema_ds = ds_make(seed), lema_ds = ds_make(seed);
-
-    // Pre-fill rings with the seed state
-    for (int k = 0; k < rlen; ++k) { 
-        jring[k] = seed; tring[k] = seed; lring[k] = seed; 
+    // Pre-fill shared rings with the seed state (covers look-backs before first_valid)
+    for (int k = lane; k < rlen; k += 32) {
+        jring[k] = seed;
+        tring[k] = seed;
+        lring[k] = seed;
     }
 
-    float u_prev = 0.0f, l_prev = 0.0f; 
-    bool have_u = false, have_l = false;
+    // Warmup NaN prefixes (avoid full-row memset)
+    const int up_pref  = (uwarm  < len) ? uwarm  : len;
+    const int lo_pref  = (lwarm  < len) ? lwarm  : len;
+    const int uc_pref  = (ucwarm < len) ? ucwarm : len;
+    const int lc_pref  = (lcwarm < len) ? lcwarm : len;
+    for (int i = lane; i < up_pref; i += 32) { upper[i] = GATOR_NAN_F; }
+    for (int i = lane; i < lo_pref; i += 32) { lower[i] = GATOR_NAN_F; }
+    for (int i = lane; i < uc_pref; i += 32) { uchn[i]  = GATOR_NAN_F; }
+    for (int i = lane; i < lc_pref; i += 32) { lchn[i]  = GATOR_NAN_F; }
 
-    // Main scan
-    for (int i = first_valid; i < len; ++i) {
-        const float xi = data[i];
+    // States carried between tiles (broadcast in-warp).
+    float prev_j = seed;
+    float prev_t = seed;
+    float prev_l = seed;
 
-        if (!use_ds) {
-            const float x = fin_or_prev(xi, jema_f);
-            jema_f = ema_update_f32(jema_f, ja, x);
-            tema_f = ema_update_f32(tema_f, ta, x);
-            lema_f = ema_update_f32(lema_f, la, x);
+    float prev_u = 0.0f;   // upper[t-1] when t >= uwarm+1
+    float prev_lo = 0.0f;  // lower[t-1] when t >= lwarm+1
 
-            jring[rpos] = jema_f;
-            tring[rpos] = tema_f;
-            lring[rpos] = lema_f;
-        } else {
-            const float x = fin_or_prev(xi, jema_ds.hi);
-            ema_update_ds(jema_ds, ja, x);
-            ema_update_ds(tema_ds, ta, x);
-            ema_update_ds(lema_ds, la, x);
+    // Ring write base. With rlen a multiple of 32, rbase is always a multiple of 32,
+    // so the lane stores never wrap within the tile.
+    int rbase = 0;
 
-            jring[rpos] = jema_ds.hi;
-            tring[rpos] = tema_ds.hi;
-            lring[rpos] = lema_ds.hi;
+    const float oma_j = 1.0f - ja;
+    const float oma_t = 1.0f - ta;
+    const float oma_l = 1.0f - la;
+
+    for (int t0 = first_valid; t0 < len; t0 += 32) {
+        const int t = t0 + lane;
+        const int remaining = len - t0;
+        const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
+        const int tile_end  = t0 + last_lane;
+
+        // Load price (out-of-range lanes use NaN -> identity updates).
+        const float xi = (t < len) ? data[t] : GATOR_NAN_F;
+        const bool xi_finite = (t < len) && isfinite(xi);
+
+        // ---------------- Jaws EMA (NaN -> hold) ----------------
+        float Aj = xi_finite ? oma_j : 1.0f;
+        float Bj = xi_finite ? (ja * xi) : 0.0f;
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, Aj, off);
+            const float B_prev = __shfl_up_sync(mask, Bj, off);
+            if (lane >= off) {
+                const float A_cur = Aj;
+                const float B_cur = Bj;
+                Aj = A_cur * A_prev;
+                Bj = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float pj = __shfl_sync(mask, prev_j, 0);
+        const float yj = fmaf(Aj, pj, Bj);
+        prev_j = __shfl_sync(mask, yj, last_lane);
+
+        // x(t) for teeth/lips: finite(price) ? price : jaws_prev (jaws at t-1)
+        float jaws_prev = __shfl_up_sync(mask, yj, 1);
+        if (lane == 0) jaws_prev = pj;
+        const float x_eff = xi_finite ? xi : jaws_prev;
+
+        // ---------------- Teeth EMA ----------------
+        float At = (t < len) ? oma_t : 1.0f;
+        float Bt = (t < len) ? (ta * x_eff) : 0.0f;
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, At, off);
+            const float B_prev = __shfl_up_sync(mask, Bt, off);
+            if (lane >= off) {
+                const float A_cur = At;
+                const float B_cur = Bt;
+                At = A_cur * A_prev;
+                Bt = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float pt = __shfl_sync(mask, prev_t, 0);
+        const float yt = fmaf(At, pt, Bt);
+        prev_t = __shfl_sync(mask, yt, last_lane);
+
+        // ---------------- Lips EMA ----------------
+        float Al = (t < len) ? oma_l : 1.0f;
+        float Bl = (t < len) ? (la * x_eff) : 0.0f;
+        #pragma unroll
+        for (int off = 1; off < 32; off <<= 1) {
+            const float A_prev = __shfl_up_sync(mask, Al, off);
+            const float B_prev = __shfl_up_sync(mask, Bl, off);
+            if (lane >= off) {
+                const float A_cur = Al;
+                const float B_cur = Bl;
+                Al = A_cur * A_prev;
+                Bl = fmaf(A_cur, B_prev, B_cur);
+            }
+        }
+        const float pl = __shfl_sync(mask, prev_l, 0);
+        const float yl = fmaf(Al, pl, Bl);
+        prev_l = __shfl_sync(mask, yl, last_lane);
+
+        // Write EMA states into the shared rings.
+        const int rpos = rbase + lane; // no wrap within tile
+        jring[rpos] = yj;
+        tring[rpos] = yt;
+        lring[rpos] = yl;
+        __syncwarp();
+
+        // Emit outputs for this tile.
+        float u = GATOR_NAN_F;
+        float lo = GATOR_NAN_F;
+        if (t < len) {
+            int jj = rpos - js; if (jj < 0) jj += rlen;
+            int tt = rpos - ts; if (tt < 0) tt += rlen;
+            int llp = rpos - ls; if (llp < 0) llp += rlen;
+
+            if (t >= uwarm) {
+                u = fabsf(jring[jj] - tring[tt]);
+                upper[t] = u;
+            }
+            if (t >= lwarm) {
+                lo = -fabsf(tring[tt] - lring[llp]);
+                lower[t] = lo;
+            }
+
+            if (t >= ucwarm) {
+                float up = __shfl_up_sync(mask, u, 1);
+                if (lane == 0) up = prev_u;
+                uchn[t] = u - up;
+            }
+            if (t >= lcwarm) {
+                float lp = __shfl_up_sync(mask, lo, 1);
+                if (lane == 0) lp = prev_lo;
+                lchn[t] = lp - lo;
+            }
         }
 
-        int jj = rpos - js; if (jj < 0) jj += rlen;
-        int tt = rpos - ts; if (tt < 0) tt += rlen;
-        int llp = rpos - ls; if (llp < 0) llp += rlen;
-
-        if (i >= uwarm) {
-            const float u = fabsf(jring[jj] - tring[tt]);
-            upper[i] = u;
-            if (i == uwarm) { u_prev = u; have_u = true; }
-            else if (i >= ucwarm && have_u) { uchn[i] = u - u_prev; u_prev = u; }
+        // Carry last values for tile-boundary diffs.
+        if (tile_end >= uwarm) {
+            prev_u = __shfl_sync(mask, u, last_lane);
         }
-        if (i >= lwarm) {
-            const float l = -fabsf(tring[tt] - lring[llp]);
-            lower[i] = l;
-            if (i == lwarm) { l_prev = l; have_l = true; }
-            else if (i >= lcwarm && have_l) { lchn[i] = -(l - l_prev); l_prev = l; }
+        if (tile_end >= lwarm) {
+            prev_lo = __shfl_sync(mask, lo, last_lane);
         }
 
-        rpos += 1; if (rpos == rlen) rpos = 0;
+        // Advance ring write base (rlen is a multiple of 32).
+        rbase += 32;
+        if (rbase == rlen) rbase = 0;
     }
 }
 
@@ -340,4 +509,3 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
         rpos += 1; if (rpos == ring_len) rpos = 0;
     }
 }
-

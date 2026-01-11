@@ -868,7 +868,7 @@ pub struct UiBatchRange {
 impl Default for UiBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 60, 1),
+            period: (14, 263, 1),
             scalar: (100.0, 100.0, 0.0),
         }
     }

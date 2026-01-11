@@ -67,8 +67,71 @@ extern "C" __global__ void pvi_build_scale_f32(
     }
 }
 
+
+// Fast dense-input scale builder: 16-lane warp subgroup prefix product.
+//
+// Assumes:
+// - close/volume have no NaNs for indices >= first_valid
+// - first_valid is the first index where both close and volume are finite
+extern "C" __global__ void pvi_build_scale_warp16_f32(
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
+    int len,
+    int first_valid,
+    float* __restrict__ scale_out)
+{
+    if (len <= 0) return;
+    if (blockIdx.x != 0) return;
+
+    const int lane = threadIdx.x & 31;
+    if (threadIdx.x >= 16) return;
+    const unsigned mask = 0x0000ffffu;
+
+    const int fv = first_valid < 0 ? 0 : first_valid;
+    const float nan_f = nanf("");
+
+    // Warmup prefix -> NaN
+    for (int i = lane; i < fv && i < len; i += 16) scale_out[i] = nan_f;
+    if (fv >= len) return;
+
+    if (lane == 0) scale_out[fv] = 1.0f;
+    if (fv + 1 >= len) return;
+
+    double accum0 = 1.0; // lane 0 only
+
+    for (int t0 = fv + 1; t0 < len; t0 += 16) {
+        const int i = t0 + lane;
+        double f = 1.0;
+        if (i < len) {
+            const float cf = close[i];
+            const float c0 = close[i - 1];
+            const float vf = volume[i];
+            const float v0 = volume[i - 1];
+            if ((double)vf > (double)v0) {
+                const double c = (double)cf;
+                const double prev = (double)c0;
+                const double r = (c - prev) / prev;
+                f = 1.0 + r;
+            }
+        }
+
+        // Inclusive prefix product within the subgroup.
+        double prefix = f;
+        for (int offset = 1; offset < 16; offset <<= 1) {
+            double other = __shfl_up_sync(mask, prefix, offset, 16);
+            if (lane >= offset) prefix *= other;
+        }
+
+        const double base = __shfl_sync(mask, accum0, 0, 16);
+        if (i < len) scale_out[i] = (float)(base * prefix);
+
+        const double tile_prod = __shfl_sync(mask, prefix, 15, 16);
+        if (lane == 0) accum0 *= tile_prod;
+    }
+}
+
 // 2) Apply scale to many rows (one-series × many-params).
-// One thread per time index; loops over rows to reduce kernel count and avoid grid-y overflow.
+// Thread-per-(row,time) for coalesced row-major writes.
 extern "C" __global__ void pvi_apply_scale_batch_f32(
     const float* __restrict__ scale,
     int len,
@@ -77,38 +140,32 @@ extern "C" __global__ void pvi_apply_scale_batch_f32(
     int rows,
     float* __restrict__ out)                 // [rows * len], row-major
 {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x;
-    if (t >= len || rows <= 0) return;
+    const int t = blockIdx.x * blockDim.x + threadIdx.x; // time
+    const int r = (int)blockIdx.y * (int)blockDim.y + (int)threadIdx.y; // row
+    if (t >= len || r >= rows || rows <= 0) return;
 
-    const float s = scale[t];
-    const bool s_is_finite = isfinite(s);
     const float nan_f = nanf("");
+    const size_t out_idx = (size_t)r * (size_t)len + (size_t)t;
 
     if (t < first_valid) {
-        for (int r = 0; r < rows; ++r) {
-            out[r * len + t] = nan_f;
-        }
+        out[out_idx] = nan_f;
         return;
     }
+    const float ivf = initial_values[r];
     if (t == first_valid) {
-        for (int r = 0; r < rows; ++r) {
-            out[r * len + t] = initial_values[r];
-        }
+        out[out_idx] = ivf;
         return;
     }
 
-    if (!s_is_finite) {
-        for (int r = 0; r < rows; ++r) {
-            out[r * len + t] = nan_f;
-        }
+    const float s = scale[t];
+    if (!isfinite(s)) {
+        out[out_idx] = nan_f;
         return;
     }
 
-    for (int r = 0; r < rows; ++r) {
-        const double iv = (double)initial_values[r];
-        const double sd = (double)s;
-        out[r * len + t] = (float)(iv * sd);
-    }
+    const double iv = (double)ivf;
+    const double sd = (double)s;
+    out[out_idx] = (float)(iv * sd);
 }
 
 // Direct batch application: compute PVI per row (FP64 accumulator), one thread per row (grid-stride)

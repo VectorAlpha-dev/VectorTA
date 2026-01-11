@@ -106,6 +106,8 @@ extern "C" __global__ void deviation_batch_f32(
     const size_t row_off = static_cast<size_t>(combo) * static_cast<size_t>(len);
     const float inv_den = 1.0f / static_cast<float>(period);
     const bool is_one = (period == 1);
+    const int nan_base = prefix_nan[first_valid];
+    const bool any_nan_since_first = (prefix_nan[len] - nan_base) != 0;
 
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
@@ -114,21 +116,25 @@ extern "C" __global__ void deviation_batch_f32(
         float out_val = dev_nan();
         if (t >= warm) {
             const int start = t + 1 - period; // using len+1 prefixes
-            const int bad = prefix_nan[t + 1] - prefix_nan[start];
-            if (bad == 0) {
+            bool ok = true;
+            if (any_nan_since_first) {
+                ok = (prefix_nan[t + 1] - prefix_nan[start]) == 0;
+            }
+            if (ok) {
                 if (is_one) {
                     out_val = 0.0f;
                 } else {
-                    // Load window sums as double-single and compute variance in DS
-                    twof s1  = twof_sub(ld_twof(prefix_sum,    t + 1),
-                                         ld_twof(prefix_sum,    start));
-                    twof s2  = twof_sub(ld_twof(prefix_sum_sq, t + 1),
-                                         ld_twof(prefix_sum_sq, start));
-                    twof mean  = twof_scale(s1, inv_den);
-                    twof mean2 = twof_scale(s2, inv_den);
-                    twof var_ds = twof_sub(mean2, twof_sqr(mean));
+                    const float2 ps_e  = prefix_sum[t + 1];
+                    const float2 ps_s  = prefix_sum[start];
+                    const float2 ps2_e = prefix_sum_sq[t + 1];
+                    const float2 ps2_s = prefix_sum_sq[start];
 
-                    float var_f = twof_to_f(var_ds);
+                    const float sum  = (ps_e.x  - ps_s.x)  + (ps_e.y  - ps_s.y);
+                    const float sum2 = (ps2_e.x - ps2_s.x) + (ps2_e.y - ps2_s.y);
+
+                    const float mean = sum * inv_den;
+                    const float ex2  = sum2 * inv_den;
+                    float var_f = fmaf(-mean, mean, ex2);
                     if (var_f < 0.0f) var_f = 0.0f; // clamp tiny negatives
                     out_val = (var_f > 0.0f) ? sqrtf(var_f) : 0.0f;
                 }

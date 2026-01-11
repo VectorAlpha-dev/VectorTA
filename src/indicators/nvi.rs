@@ -274,7 +274,7 @@ pub fn nvi_with_kernel(input: &NviInput, kernel: Kernel) -> Result<NviOutput, Nv
     }
     let mut out = alloc_with_nan_prefix(close.len(), first);
     let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     // Prefer AVX2 over AVX512 in Auto: AVX512 often downclocks and can underperform for this kernel.
@@ -364,7 +364,7 @@ pub fn nvi_into_slice(
     }
 
     let mut chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

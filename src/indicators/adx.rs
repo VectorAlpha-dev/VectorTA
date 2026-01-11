@@ -887,7 +887,7 @@ pub struct AdxBatchRange {
 impl Default for AdxBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 50, 1),
+            period: (14, 263, 1),
         }
     }
 }

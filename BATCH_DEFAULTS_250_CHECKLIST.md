@@ -1,0 +1,201 @@
+# Batch Default Parameter Grid (250 combos) Checklist
+
+Goal: for each indicator that supports `*_batch`, make the **default** batch parameter sweep produce **exactly 250 parameter combinations** (rows), while ensuring the indicator’s single-parameter defaults remain included in the sweep (so “default row” tests keep passing).
+
+Notes:
+- Indicators whose batch APIs are “parity-only” or have no parameters remain 1 row; they’re tracked here as `N/A`.
+- Check an item only after:
+  - `impl Default for <Indicator>BatchRange` yields 250 combos (or `N/A`), and
+  - the single default parameter set is still present in the batch grid.
+
+## Checklist
+- [x] `acosc` (`AcoscBatchRange`) - `src/indicators/acosc.rs` (N/A: no params; 1 row)
+- [x] `adosc` (`AdoscBatchRange`) - `src/indicators/adosc.rs`
+- [x] `adx` (`AdxBatchRange`) - `src/indicators/adx.rs`
+- [x] `adxr` (`AdxrBatchRange`) - `src/indicators/adxr.rs`
+- [x] `alligator` (`AlligatorBatchRange`) - `src/indicators/alligator.rs`
+- [x] `alma` (`AlmaBatchRange`) - `src/indicators/moving_averages/alma.rs`
+- [x] `alphatrend` (`AlphaTrendBatchRange`) - `src/indicators/alphatrend.rs`
+- [x] `ao` (`AoBatchRange`) - `src/indicators/ao.rs`
+- [x] `apo` (`ApoBatchRange`) - `src/indicators/apo.rs`
+- [x] `aroon` (`AroonBatchRange`) - `src/indicators/aroon.rs`
+- [x] `aroonosc` (`AroonOscBatchRange`) - `src/indicators/aroonosc.rs`
+- [x] `aso` (`AsoBatchRange`) - `src/indicators/aso.rs`
+- [x] `atr` (`AtrBatchRange`) - `src/indicators/atr.rs`
+- [x] `avsl` (`AvslBatchRange`) - `src/indicators/avsl.rs`
+- [x] `bandpass` (`BandPassBatchRange`) - `src/indicators/bandpass.rs`
+- [x] `bollinger_bands` (`BollingerBandsBatchRange`) - `src/indicators/bollinger_bands.rs`
+- [x] `bollinger_bands_width` (`BollingerBandsWidthBatchRange`) - `src/indicators/bollinger_bands_width.rs`
+- [x] `bop` (`BopBatchRange`) - `src/indicators/bop.rs` (N/A: no params; 1 row)
+- [x] `buff_averages` (`BuffAveragesBatchRange`) - `src/indicators/moving_averages/buff_averages.rs`
+- [x] `cci` (`CciBatchRange`) - `src/indicators/cci.rs`
+- [x] `cci_cycle` (`CciCycleBatchRange`) - `src/indicators/cci_cycle.rs`
+- [x] `ce` (`CeBatchRange`) - `src/indicators/chandelier_exit.rs`
+- [x] `cfo` (`CfoBatchRange`) - `src/indicators/cfo.rs`
+- [x] `cg` (`CgBatchRange`) - `src/indicators/cg.rs`
+- [x] `chande` (`ChandeBatchRange`) - `src/indicators/chande.rs`
+- [x] `chop` (`ChopBatchRange`) - `src/indicators/chop.rs`
+- [x] `cksp` (`CkspBatchRange`) - `src/indicators/cksp.rs`
+- [x] `cmo` (`CmoBatchRange`) - `src/indicators/cmo.rs`
+- [x] `coppock` (`CoppockBatchRange`) - `src/indicators/coppock.rs`
+- [x] `cora_wave` (`CoraWaveBatchRange`) - `src/indicators/cora_wave.rs`
+- [x] `correl_hl` (`CorrelHlBatchRange`) - `src/indicators/correl_hl.rs`
+- [x] `correlation_cycle` (`CorrelationCycleBatchRange`) - `src/indicators/correlation_cycle.rs`
+- [x] `cvi` (`CviBatchRange`) - `src/indicators/cvi.rs`
+- [x] `cwma` (`CwmaBatchRange`) - `src/indicators/moving_averages/cwma.rs`
+- [x] `damiani_volatmeter` (`DamianiVolatmeterBatchRange`) - `src/indicators/damiani_volatmeter.rs`
+- [x] `dec_osc` (`DecOscBatchRange`) - `src/indicators/dec_osc.rs`
+- [x] `decycler` (`DecyclerBatchRange`) - `src/indicators/decycler.rs`
+- [x] `dema` (`DemaBatchRange`) - `src/indicators/moving_averages/dema.rs`
+- [x] `devstop` (`DevStopBatchRange`) - `src/indicators/devstop.rs`
+- [x] `deviation` (`DeviationBatchRange`) - `src/indicators/deviation.rs`
+- [x] `di` (`DiBatchRange`) - `src/indicators/di.rs`
+- [x] `dm` (`DmBatchRange`) - `src/indicators/dm.rs`
+- [x] `dma` (`DmaBatchRange`) - `src/indicators/moving_averages/dma.rs`
+- [x] `donchian` (`DonchianBatchRange`) - `src/indicators/donchian.rs`
+- [x] `dpo` (`DpoBatchRange`) - `src/indicators/dpo.rs`
+- [x] `dti` (`DtiBatchRange`) - `src/indicators/dti.rs`
+- [x] `dvdiqqe` (`DvdiqqeBatchRange`) - `src/indicators/dvdiqqe.rs`
+- [x] `dx` (`DxBatchRange`) - `src/indicators/dx.rs`
+- [x] `edcf` (`EdcfBatchRange`) - `src/indicators/moving_averages/edcf.rs`
+- [x] `efi` (`EfiBatchRange`) - `src/indicators/efi.rs`
+- [x] `ehlers_ecema` (`EhlersEcemaBatchRange`) - `src/indicators/moving_averages/ehlers_ecema.rs`
+- [x] `ehlers_itrend` (`EhlersITrendBatchRange`) - `src/indicators/moving_averages/ehlers_itrend.rs`
+- [x] `ehlers_kama` (`EhlersKamaBatchRange`) - `src/indicators/moving_averages/ehlers_kama.rs`
+- [x] `ehlers_pma` (`EhlersPmaBatchRange`) - `src/indicators/moving_averages/ehlers_pma.rs`
+- [x] `ehma` (`EhmaBatchRange`) - `src/indicators/moving_averages/ehma.rs`
+- [x] `ema` (`EmaBatchRange`) - `src/indicators/moving_averages/ema.rs`
+- [x] `emd` (`EmdBatchRange`) - `src/indicators/emd.rs`
+- [x] `emv` (`EmvBatchRange`) - `src/indicators/emv.rs` (N/A: no params; 1 row)
+- [x] `epma` (`EpmaBatchRange`) - `src/indicators/moving_averages/epma.rs`
+- [x] `er` (`ErBatchRange`) - `src/indicators/er.rs`
+- [x] `eri` (`EriBatchRange`) - `src/indicators/eri.rs`
+- [x] `fisher` (`FisherBatchRange`) - `src/indicators/fisher.rs`
+- [x] `fosc` (`FoscBatchRange`) - `src/indicators/fosc.rs`
+- [x] `frama` (`FramaBatchRange`) - `src/indicators/moving_averages/frama.rs`
+- [x] `fvg_ts` (`FvgTsBatchRange`) - `src/indicators/fvg_trailing_stop.rs`
+- [x] `fwma` (`FwmaBatchRange`) - `src/indicators/moving_averages/fwma.rs`
+- [x] `gatorosc` (`GatorOscBatchRange`) - `src/indicators/gatorosc.rs`
+- [x] `gaussian` (`GaussianBatchRange`) - `src/indicators/moving_averages/gaussian.rs`
+- [x] `halftrend` (`HalfTrendBatchRange`) - `src/indicators/halftrend.rs`
+- [x] `highpass_2_pole` (`HighPass2BatchRange`) - `src/indicators/moving_averages/highpass_2_pole.rs`
+- [x] `highpass` (`HighPassBatchRange`) - `src/indicators/moving_averages/highpass.rs`
+- [x] `hma` (`HmaBatchRange`) - `src/indicators/moving_averages/hma.rs`
+- [x] `hwma` (`HwmaBatchRange`) - `src/indicators/moving_averages/hwma.rs`
+- [x] `ift_rsi` (`IftRsiBatchRange`) - `src/indicators/ift_rsi.rs`
+- [x] `jma` (`JmaBatchRange`) - `src/indicators/moving_averages/jma.rs`
+- [x] `jsa` (`JsaBatchRange`) - `src/indicators/moving_averages/jsa.rs`
+- [x] `kama` (`KamaBatchRange`) - `src/indicators/moving_averages/kama.rs`
+- [x] `kaufmanstop` (`KaufmanstopBatchRange`) - `src/indicators/kaufmanstop.rs`
+- [x] `kdj` (`KdjBatchRange`) - `src/indicators/kdj.rs`
+- [x] `keltner` (`KeltnerBatchRange`) - `src/indicators/keltner.rs`
+- [x] `kst` (`KstBatchRange`) - `src/indicators/kst.rs`
+- [x] `kurtosis` (`KurtosisBatchRange`) - `src/indicators/kurtosis.rs`
+- [x] `kvo` (`KvoBatchRange`) - `src/indicators/kvo.rs`
+- [x] `linreg` (`LinRegBatchRange`) - `src/indicators/moving_averages/linreg.rs`
+- [x] `linearreg_angle` (`Linearreg_angleBatchRange`) - `src/indicators/linearreg_angle.rs`
+- [x] `linearreg_intercept` (`LinearRegInterceptBatchRange`) - `src/indicators/linearreg_intercept.rs`
+- [x] `linearreg_slope` (`LinearRegSlopeBatchRange`) - `src/indicators/linearreg_slope.rs`
+- [x] `lpc` (`LpcBatchRange`) - `src/indicators/lpc.rs`
+- [x] `lrsi` (`LrsiBatchRange`) - `src/indicators/lrsi.rs`
+- [x] `maaq` (`MaaqBatchRange`) - `src/indicators/moving_averages/maaq.rs`
+- [x] `mab` (`MabBatchRange`) - `src/indicators/mab.rs`
+- [x] `macd` (`MacdBatchRange`) - `src/indicators/macd.rs`
+- [x] `macz` (`MaczBatchRange`) - `src/indicators/macz.rs`
+- [x] `mama` (`MamaBatchRange`) - `src/indicators/moving_averages/mama.rs`
+- [x] `marketefi` (`MarketefiBatchRange`) - `src/indicators/marketefi.rs` (N/A: no params; 1 row)
+- [x] `mass` (`MassBatchRange`) - `src/indicators/mass.rs`
+- [x] `mean_ad` (`MeanAdBatchRange`) - `src/indicators/mean_ad.rs`
+- [x] `medium_ad` (`MediumAdBatchRange`) - `src/indicators/medium_ad.rs`
+- [x] `medprice` (`MedpriceBatchRange`) - `src/indicators/medprice.rs` (N/A: no params; 1 row)
+- [x] `mfi` (`MfiBatchRange`) - `src/indicators/mfi.rs`
+- [x] `midpoint` (`MidpointBatchRange`) - `src/indicators/midpoint.rs`
+- [x] `midprice` (`MidpriceBatchRange`) - `src/indicators/midprice.rs`
+- [x] `minmax` (`MinmaxBatchRange`) - `src/indicators/minmax.rs`
+- [x] `mod_god_mode` (`ModGodModeBatchRange`) - `src/indicators/mod_god_mode.rs`
+- [x] `mom` (`MomBatchRange`) - `src/indicators/mom.rs`
+- [x] `msw` (`MswBatchRange`) - `src/indicators/msw.rs`
+- [x] `mwdx` (`MwdxBatchRange`) - `src/indicators/moving_averages/mwdx.rs`
+- [x] `nama` (`NamaBatchRange`) - `src/indicators/moving_averages/nama.rs`
+- [x] `natr` (`NatrBatchRange`) - `src/indicators/natr.rs`
+- [x] `net_myrsi` (`NetMyrsiBatchRange`) - `src/indicators/net_myrsi.rs`
+- [x] `nma` (`NmaBatchRange`) - `src/indicators/moving_averages/nma.rs`
+- [x] `nwe` (`NweBatchRange`) - `src/indicators/nadaraya_watson_envelope.rs`
+- [x] `obv` (`ObvBatchRange`) - `src/indicators/obv.rs` (N/A: no params; 1 row)
+- [x] `ott` (`OttBatchRange`) - `src/indicators/ott.rs`
+- [x] `otto` (`OttoBatchRange`) - `src/indicators/otto.rs`
+- [x] `percentile_nearest_rank` (`PercentileNearestRankBatchRange`) - `src/indicators/percentile_nearest_rank.rs`
+- [x] `pfe` (`PfeBatchRange`) - `src/indicators/pfe.rs`
+- [x] `pivot` (`PivotBatchRange`) - `src/indicators/pivot.rs` (N/A: discrete modes; 1 row)
+- [x] `pma` (`PmaBatchRange`) - `src/indicators/pma.rs` (N/A: no params; 1 row)
+- [x] `ppo` (`PpoBatchRange`) - `src/indicators/ppo.rs`
+- [x] `prb` (`PrbBatchRange`) - `src/indicators/prb.rs`
+- [x] `pvi` (`PviBatchRange`) - `src/indicators/pvi.rs`
+- [x] `pwma` (`PwmaBatchRange`) - `src/indicators/moving_averages/pwma.rs`
+- [x] `qqe` (`QqeBatchRange`) - `src/indicators/qqe.rs`
+- [x] `qstick` (`QstickBatchRange`) - `src/indicators/qstick.rs`
+- [x] `range_filter` (`RangeFilterBatchRange`) - `src/indicators/range_filter.rs`
+- [x] `reflex` (`ReflexBatchRange`) - `src/indicators/moving_averages/reflex.rs`
+- [x] `reverse_rsi` (`ReverseRsiBatchRange`) - `src/indicators/reverse_rsi.rs`
+- [x] `roc` (`RocBatchRange`) - `src/indicators/roc.rs`
+- [x] `rocp` (`RocpBatchRange`) - `src/indicators/rocp.rs`
+- [x] `rocr` (`RocrBatchRange`) - `src/indicators/rocr.rs`
+- [x] `rsi` (`RsiBatchRange`) - `src/indicators/rsi.rs`
+- [x] `rsmk` (`RsmkBatchRange`) - `src/indicators/rsmk.rs`
+- [x] `rsx` (`RsxBatchRange`) - `src/indicators/rsx.rs`
+- [x] `rvi` (`RviBatchRange`) - `src/indicators/rvi.rs`
+- [x] `safezonestop` (`SafeZoneStopBatchRange`) - `src/indicators/safezonestop.rs`
+- [x] `sama` (`SamaBatchRange`) - `src/indicators/moving_averages/sama.rs`
+- [x] `sar` (`SarBatchRange`) - `src/indicators/sar.rs`
+- [x] `sinwma` (`SinWmaBatchRange`) - `src/indicators/moving_averages/sinwma.rs`
+- [x] `sma` (`SmaBatchRange`) - `src/indicators/moving_averages/sma.rs`
+- [x] `smma` (`SmmaBatchRange`) - `src/indicators/moving_averages/smma.rs`
+- [x] `squeeze_momentum` (`SqueezeMomentumBatchRange`) - `src/indicators/squeeze_momentum.rs`
+- [x] `sqwma` (`SqwmaBatchRange`) - `src/indicators/moving_averages/sqwma.rs`
+- [x] `srsi` (`SrsiBatchRange`) - `src/indicators/srsi.rs`
+- [x] `srwma` (`SrwmaBatchRange`) - `src/indicators/moving_averages/srwma.rs`
+- [x] `stc` (`StcBatchRange`) - `src/indicators/stc.rs`
+- [x] `stddev` (`StdDevBatchRange`) - `src/indicators/stddev.rs`
+- [x] `stoch` (`StochBatchRange`) - `src/indicators/stoch.rs`
+- [x] `stochf` (`StochfBatchRange`) - `src/indicators/stochf.rs`
+- [x] `supertrend` (`SuperTrendBatchRange`) - `src/indicators/supertrend.rs`
+- [x] `supersmoother` (`SuperSmootherBatchRange`) - `src/indicators/moving_averages/supersmoother.rs`
+- [x] `supersmoother_3_pole` (`SuperSmoother3PoleBatchRange`) - `src/indicators/moving_averages/supersmoother_3_pole.rs`
+- [x] `swma` (`SwmaBatchRange`) - `src/indicators/moving_averages/swma.rs`
+- [x] `tilson` (`TilsonBatchRange`) - `src/indicators/moving_averages/tilson.rs`
+- [x] `tradjema` (`TradjemaBatchRange`) - `src/indicators/moving_averages/tradjema.rs`
+- [x] `trendflex` (`TrendFlexBatchRange`) - `src/indicators/moving_averages/trendflex.rs`
+- [x] `trima` (`TrimaBatchRange`) - `src/indicators/moving_averages/trima.rs`
+- [x] `trix` (`TrixBatchRange`) - `src/indicators/trix.rs`
+- [x] `tsf` (`TsfBatchRange`) - `src/indicators/tsf.rs`
+- [x] `tsi` (`TsiBatchRange`) - `src/indicators/tsi.rs`
+- [x] `ttm_squeeze` (`TtmSqueezeBatchRange`) - `src/indicators/ttm_squeeze.rs`
+- [x] `ttm_trend` (`TtmTrendBatchRange`) - `src/indicators/ttm_trend.rs`
+- [x] `ui` (`UiBatchRange`) - `src/indicators/ui.rs`
+- [x] `ultosc` (`UltOscBatchRange`) - `src/indicators/ultosc.rs`
+- [x] `uma` (`UmaBatchRange`) - `src/indicators/moving_averages/uma.rs`
+- [x] `vama` (`VamaBatchRange`) - `src/indicators/moving_averages/volatility_adjusted_ma.rs`
+- [x] `var` (`VarBatchRange`) - `src/indicators/var.rs`
+- [x] `vi` (`ViBatchRange`) - `src/indicators/vi.rs`
+- [x] `vidya` (`VidyaBatchRange`) - `src/indicators/vidya.rs`
+- [x] `vlma` (`VlmaBatchRange`) - `src/indicators/vlma.rs`
+- [x] `volume_adjusted_ma` (`VolumeAdjustedMaBatchRange`) - `src/indicators/moving_averages/volume_adjusted_ma.rs`
+- [x] `volatility_adjusted_ma` (`VamaBatchRange`) - `src/indicators/moving_averages/volatility_adjusted_ma.rs`
+- [x] `vosc` (`VoscBatchRange`) - `src/indicators/vosc.rs`
+- [x] `voss` (`VossBatchRange`) - `src/indicators/voss.rs`
+- [x] `vpci` (`VpciBatchRange`) - `src/indicators/vpci.rs`
+- [x] `vpt` (`VptBatchRange`) - `src/indicators/vpt.rs` (N/A: no params; 1 row)
+- [x] `vpwma` (`VpwmaBatchRange`) - `src/indicators/moving_averages/vpwma.rs`
+- [x] `vwap` (`VwapBatchRange`) - `src/indicators/moving_averages/vwap.rs`
+- [x] `vwma` (`VwmaBatchRange`) - `src/indicators/moving_averages/vwma.rs`
+- [x] `vwmacd` (`VwmacdBatchRange`) - `src/indicators/vwmacd.rs`
+- [x] `wad` (`WadBatchRange`) - `src/indicators/wad.rs` (N/A: dummy; 1 row)
+- [x] `wavetrend` (`WavetrendBatchRange`) - `src/indicators/wavetrend.rs`
+- [x] `wclprice` (`WclpriceBatchRange`) - `src/indicators/wclprice.rs` (N/A: no params; 1 row)
+- [x] `wilders` (`WildersBatchRange`) - `src/indicators/moving_averages/wilders.rs`
+- [x] `willr` (`WillrBatchRange`) - `src/indicators/willr.rs`
+- [x] `wma` (`WmaBatchRange`) - `src/indicators/moving_averages/wma.rs`
+- [x] `wto` (`WtoBatchRange`) - `src/indicators/wto.rs`
+- [x] `zlema` (`ZlemaBatchRange`) - `src/indicators/moving_averages/zlema.rs`
+- [x] `zscore` (`ZscoreBatchRange`) - `src/indicators/zscore.rs`
+- [x] `tema` (`TemaBatchRange`) - `src/indicators/moving_averages/tema.rs`

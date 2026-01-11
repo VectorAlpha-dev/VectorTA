@@ -114,6 +114,10 @@ impl CudaMeanAd {
 
     pub fn set_policy(&mut self, policy: CudaMeanAdPolicy) { self.policy = policy; }
     pub fn policy(&self) -> &CudaMeanAdPolicy { &self.policy }
+    pub fn synchronize(&self) -> Result<(), CudaMeanAdError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -321,8 +325,72 @@ impl CudaMeanAd {
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_warms = DeviceBuffer::from_slice(&warms_i32)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+
+        self.mean_ad_batch_device(
+            &d_prices,
+            &d_periods,
+            &d_warms,
+            series_len,
+            first_valid,
+            max_period,
+            &mut d_out,
+        )?;
+        self.stream.synchronize()?;
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
+    }
+
+    pub fn mean_ad_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_warms: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaMeanAdError> {
+        if series_len == 0 {
+            return Err(CudaMeanAdError::InvalidInput("empty input".into()));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaMeanAdError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaMeanAdError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
+        }
+        let n_combos = d_periods.len();
+        if n_combos == 0 {
+            return Err(CudaMeanAdError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
+        if d_warms.len() != n_combos {
+            return Err(CudaMeanAdError::InvalidInput(
+                "warm_indices length mismatch".into(),
+            ));
+        }
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("output size overflow".into()))?;
+        if d_out.len() != out_elems {
+            return Err(CudaMeanAdError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+        if max_period == 0 {
+            return Err(CudaMeanAdError::InvalidInput(
+                "max_period must be > 0".into(),
+            ));
+        }
 
         let mut func = self
             .module
@@ -389,13 +457,7 @@ impl CudaMeanAd {
             self.stream
                 .launch(&mut func, grid, block, shared_bytes, &mut args)?;
         }
-
-        self.stream.synchronize()?;
-        Ok(DeviceArrayF32 {
-            buf: d_out,
-            rows: n_combos,
-            cols: series_len,
-        })
+        Ok(())
     }
 
     fn prepare_many_series_inputs(
@@ -522,26 +584,254 @@ impl CudaMeanAd {
             cols,
         })
     }
+
+    fn mean_ad_many_series_one_param_time_major_device_inplace(
+        &self,
+        d_prices_tm: &DeviceBuffer<f32>,
+        d_firsts: &DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaMeanAdError> {
+        if cols == 0 || rows == 0 {
+            return Err(CudaMeanAdError::InvalidInput("empty grid".into()));
+        }
+        if period == 0 {
+            return Err(CudaMeanAdError::InvalidInput("period must be > 0".into()));
+        }
+        if period > rows {
+            return Err(CudaMeanAdError::InvalidInput(
+                "period exceeds series length".into(),
+            ));
+        }
+        let total_elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaMeanAdError::InvalidInput("size overflow".into()))?;
+        if d_prices_tm.len() != total_elems {
+            return Err(CudaMeanAdError::InvalidInput(
+                "device prices buffer wrong length".into(),
+            ));
+        }
+        if d_firsts.len() != cols {
+            return Err(CudaMeanAdError::InvalidInput(
+                "device first_valids buffer wrong length".into(),
+            ));
+        }
+        if d_out_tm.len() != total_elems {
+            return Err(CudaMeanAdError::InvalidInput(
+                "device output buffer wrong length".into(),
+            ));
+        }
+
+        // Heuristic for dynamic shared memory: ring per thread => period * block_x * 4 bytes
+        let max_shmem: usize = 48 * 1024; // conservative default
+        let mut block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x as usize,
+            _ => 128,
+        };
+        // If period is small (<= SMALL_PERIOD_MAX in kernel), kernel uses register ring => no dyn smem needed
+        let small_period_max: usize = 64;
+        if period > small_period_max {
+            block_x = block_x
+                .min(max_shmem / (period * std::mem::size_of::<f32>()))
+                .max(1);
+        }
+        let grid_x = ((cols + block_x - 1) / block_x) as u32;
+        let block: BlockSize = (block_x as u32, 1, 1).into();
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let shared_bytes = if period > small_period_max {
+            (period * block_x * std::mem::size_of::<f32>()) as u32
+        } else {
+            0
+        };
+        self.validate_launch(grid_x, 1, 1, block_x as u32, 1, 1)?;
+
+        let mut func = self
+            .module
+            .get_function("mean_ad_many_series_one_param_f32")
+            .map_err(|_| CudaMeanAdError::MissingKernelSymbol {
+                name: "mean_ad_many_series_one_param_f32",
+            })?;
+
+        unsafe {
+            let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
+            let mut period_i = period as i32;
+            let mut num_series_i = cols as i32;
+            let mut series_len_i = rows as i32;
+            let mut firsts_ptr = d_firsts.as_device_ptr().as_raw();
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+            let mut args: [*mut c_void; 6] = [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut period_i as *mut _ as *mut c_void,
+                &mut num_series_i as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut firsts_ptr as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&mut func, grid, block, shared_bytes, &mut args)?;
+        }
+
+        Ok(())
+    }
 }
 
 // ---------- Bench profiles ----------
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    define_ma_period_benches!(
-        mean_ad_benches,
-        CudaMeanAd,
-        crate::indicators::mean_ad::MeanAdBatchRange,
-        crate::indicators::mean_ad::MeanAdParams,
-        mean_ad_batch_dev,
-        mean_ad_many_series_one_param_time_major_dev,
-        crate::indicators::mean_ad::MeanAdBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1)
-        },
-        crate::indicators::mean_ad::MeanAdParams { period: Some(32) },
-        "mean_ad",
-        "mean_ad"
-    );
-    pub use mean_ad_benches::bench_profiles;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct MeanAdBatchDeviceState {
+        cuda: CudaMeanAd,
+        d_prices: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        d_warms: DeviceBuffer<i32>,
+        d_out: DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        max_period: usize,
+    }
+
+    impl CudaBenchState for MeanAdBatchDeviceState {
+        fn launch(&mut self) {
+            self.cuda
+                .mean_ad_batch_device(
+                    &self.d_prices,
+                    &self.d_periods,
+                    &self.d_warms,
+                    self.series_len,
+                    self.first_valid,
+                    self.max_period,
+                    &mut self.d_out,
+                )
+                .expect("mean_ad_batch_device");
+            self.cuda.synchronize().expect("sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaMeanAd::new(0).expect("cuda mean_ad");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = MeanAdBatchRange {
+            period: (10, 10 + PARAM_SWEEP - 1, 1),
+        };
+        let (combos, first_valid, series_len, max_period) =
+            CudaMeanAd::prepare_batch_inputs(&price, &sweep).expect("prep");
+
+        let mut periods_i32 = Vec::with_capacity(combos.len());
+        let mut warms_i32 = Vec::with_capacity(combos.len());
+        for prm in &combos {
+            let p = prm.period.unwrap() as usize;
+            periods_i32.push(p as i32);
+            let warm = first_valid + 2 * p - 2;
+            warms_i32.push(warm as i32);
+        }
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
+        let d_warms = DeviceBuffer::from_slice(&warms_i32).expect("d_warms");
+        let out_elems = combos.len() * series_len;
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }.expect("d_out");
+
+        Box::new(MeanAdBatchDeviceState {
+            cuda,
+            d_prices,
+            d_periods,
+            d_warms,
+            d_out,
+            series_len,
+            first_valid,
+            max_period,
+        })
+    }
+
+    struct MeanAdManySeriesState {
+        cuda: CudaMeanAd,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_firsts: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for MeanAdManySeriesState {
+        fn launch(&mut self) {
+            self.cuda
+                .mean_ad_many_series_one_param_time_major_device_inplace(
+                    &self.d_prices_tm,
+                    &self.d_firsts,
+                    self.cols,
+                    self.rows,
+                    self.period,
+                    &mut self.d_out_tm,
+                )
+                .expect("mean_ad many-series launch");
+            self.cuda.synchronize().expect("mean_ad many-series sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cols = 250usize;
+        let rows = 1_000_000usize;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = MeanAdParams { period: Some(32) };
+        let (firsts, period) =
+            CudaMeanAd::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("mean_ad prepare many-series inputs");
+
+        let cuda = CudaMeanAd::new(0).expect("cuda mean_ad");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_firsts = DeviceBuffer::from_slice(&firsts).expect("d_firsts");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.synchronize().expect("mean_ad many prep sync");
+
+        Box::new(MeanAdManySeriesState {
+            cuda,
+            d_prices_tm,
+            d_firsts,
+            cols,
+            rows,
+            period,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new(
+                "mean_ad",
+                "one_series_many_params",
+                "mean_ad_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "mean_ad",
+                "many_series_one_param",
+                "mean_ad_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(
+                (2 * 250usize * 1_000_000usize) * std::mem::size_of::<f32>()
+                    + 250usize * std::mem::size_of::<i32>()
+                    + 64 * 1024 * 1024,
+            ),
+        ]
+    }
 }

@@ -1018,7 +1018,7 @@ impl Default for CoppockBatchRange {
         Self {
             short: (11, 11, 0),
             long: (14, 14, 0),
-            ma: (10, 10, 0),
+            ma: (10, 259, 1),
         }
     }
 }

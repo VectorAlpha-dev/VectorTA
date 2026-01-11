@@ -22,7 +22,7 @@
 #endif
 
 // --- Batch: one series × many params ---
-// Inputs are prefix sums over time for a single series; grid-stride over rows (params).
+// Inputs are prefix sums over time for a single series.
 extern "C" __global__ void vi_batch_f32(
     const float* __restrict__ pfx_tr,   // len = series_len (time-major 1D)
     const float* __restrict__ pfx_vp,   // len = series_len
@@ -34,81 +34,87 @@ extern "C" __global__ void vi_batch_f32(
     float* __restrict__ out_plus,       // len = n_rows * series_len (row-major)
     float* __restrict__ out_minus       // len = n_rows * series_len (row-major)
 ) {
-    for (int row = blockIdx.x * blockDim.x + threadIdx.x;
-         row < n_rows;
-         row += blockDim.x * gridDim.x)
-    {
-        const int period = periods[row];
-        const int base   = row * series_len;
-        float* __restrict__ plus  = out_plus  + base;
-        float* __restrict__ minus = out_minus + base;
+    // Preferred launch: 2D grid (time tiles in X, rows in Y).
+    if (gridDim.y > 1) {
+        const int t   = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+        const int row = (int)blockIdx.y;
+        if (t >= series_len || row >= n_rows) {
+            return;
+        }
+        const size_t out_idx = (size_t)row * (size_t)series_len + (size_t)t;
 
-        // Validate once per row
+        const int period = periods[row];
         if (UNLIKELY(period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len)) {
-            for (int i = 0; i < series_len; ++i) { plus[i] = VI_NAN; minus[i] = VI_NAN; }
-            continue;
+            out_plus[out_idx] = VI_NAN;
+            out_minus[out_idx] = VI_NAN;
+            return;
         }
 
         const int tail = series_len - first_valid;
         if (UNLIKELY(tail < period)) {
-            for (int i = 0; i < series_len; ++i) { plus[i] = VI_NAN; minus[i] = VI_NAN; }
-            continue;
+            out_plus[out_idx] = VI_NAN;
+            out_minus[out_idx] = VI_NAN;
+            return;
         }
 
         const int warm = first_valid + period - 1;
-
-        // Warmup (prefix) region is NaN
-        for (int i = 0; i < warm; ++i) {
-            plus[i]  = VI_NAN;
-            minus[i] = VI_NAN;
+        if (t < warm) {
+            out_plus[out_idx] = VI_NAN;
+            out_minus[out_idx] = VI_NAN;
+            return;
         }
 
-        // --- Steady state ---
-        if (first_valid == 0) {
-            // Edge element i == period-1 uses full prefix (no subtraction)
-            const int i0 = period - 1;
-            {
-                const float tr_sum = pfx_tr[i0];
-                const float inv    = 1.0f / tr_sum;       // one IEEE divide
-                plus[i0]  = pfx_vp[i0] * inv;            // two fast multiplies
-                minus[i0] = pfx_vm[i0] * inv;
-            }
+        const int prev = t - period;
+        const float tr_prev = (prev >= 0) ? pfx_tr[prev] : 0.0f;
+        const float vp_prev = (prev >= 0) ? pfx_vp[prev] : 0.0f;
+        const float vm_prev = (prev >= 0) ? pfx_vm[prev] : 0.0f;
 
-            // From here on: sliding window using pointer-increment addressing
-            const float* __restrict__ tr_cur = pfx_tr + (i0 + 1);
-            const float* __restrict__ vp_cur = pfx_vp + (i0 + 1);
-            const float* __restrict__ vm_cur = pfx_vm + (i0 + 1);
-
-            const float* __restrict__ tr_prev = tr_cur - period;
-            const float* __restrict__ vp_prev = vp_cur - period;
-            const float* __restrict__ vm_prev = vm_cur - period;
-
-            for (int i = i0 + 1; i < series_len; ++i) {
-                const float tr_sum = (*tr_cur++ - *tr_prev++);
-                const float inv    = 1.0f / tr_sum;  // one divide
-                plus[i]  = (*vp_cur++ - *vp_prev++) * inv;
-                minus[i] = (*vm_cur++ - *vm_prev++) * inv;
-            }
-        } else {
-            // warm >= period, so we always use the difference path
-            const int i0 = warm;
-
-            const float* __restrict__ tr_cur = pfx_tr + i0;
-            const float* __restrict__ vp_cur = pfx_vp + i0;
-            const float* __restrict__ vm_cur = pfx_vm + i0;
-
-            const float* __restrict__ tr_prev = tr_cur - period;
-            const float* __restrict__ vp_prev = vp_cur - period;
-            const float* __restrict__ vm_prev = vm_cur - period;
-
-            for (int i = i0; i < series_len; ++i) {
-                const float tr_sum = (*tr_cur++ - *tr_prev++);
-                const float inv    = 1.0f / tr_sum;  // one divide
-                plus[i]  = (*vp_cur++ - *vp_prev++) * inv;
-                minus[i] = (*vm_cur++ - *vm_prev++) * inv;
-            }
-        }
+        const float tr_sum = pfx_tr[t] - tr_prev;
+        const float inv    = 1.0f / tr_sum;
+        out_plus[out_idx]  = (pfx_vp[t] - vp_prev) * inv;
+        out_minus[out_idx] = (pfx_vm[t] - vm_prev) * inv;
+        return;
     }
+
+    // Fallback: 1D grid over all output elements (supports very large n_rows).
+    const size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x + (size_t)threadIdx.x;
+    const size_t total = (size_t)n_rows * (size_t)series_len;
+    if (tid >= total) {
+        return;
+    }
+    const int row = (int)(tid / (size_t)series_len);
+    const int t   = (int)(tid - (size_t)row * (size_t)series_len);
+
+    const int period = periods[row];
+    if (UNLIKELY(period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len)) {
+        out_plus[tid] = VI_NAN;
+        out_minus[tid] = VI_NAN;
+        return;
+    }
+
+    const int tail = series_len - first_valid;
+    if (UNLIKELY(tail < period)) {
+        out_plus[tid] = VI_NAN;
+        out_minus[tid] = VI_NAN;
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+    if (t < warm) {
+        out_plus[tid] = VI_NAN;
+        out_minus[tid] = VI_NAN;
+        return;
+    }
+
+    const int prev = t - period;
+    const float tr_prev = (prev >= 0) ? pfx_tr[prev] : 0.0f;
+    const float vp_prev = (prev >= 0) ? pfx_vp[prev] : 0.0f;
+    const float vm_prev = (prev >= 0) ? pfx_vm[prev] : 0.0f;
+
+    const float tr_sum = pfx_tr[t] - tr_prev;
+    const float inv    = 1.0f / tr_sum;
+    out_plus[tid]  = (pfx_vp[t] - vp_prev) * inv;
+    out_minus[tid] = (pfx_vm[t] - vm_prev) * inv;
 }
 
 // --- Many series × one param (time-major) ---
@@ -124,80 +130,49 @@ extern "C" __global__ void vi_many_series_one_param_f32(
     float* __restrict__ plus_tm,
     float* __restrict__ minus_tm
 ) {
-    // grid-stride over series for scalability/occupancy
-    for (int series = blockIdx.x * blockDim.x + threadIdx.x;
-         series < num_series;
-         series += blockDim.x * gridDim.x)
-    {
-        const int first = first_valids[series];
+    const size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x + (size_t)threadIdx.x;
+    const size_t total = (size_t)num_series * (size_t)series_len;
+    if (tid >= total) {
+        return;
+    }
 
-        float* __restrict__ col_plus  = plus_tm  + series;
-        float* __restrict__ col_minus = minus_tm + series;
+    const int series = (int)(tid % (size_t)num_series);
+    const int row    = (int)(tid / (size_t)num_series);
+    const size_t idx = (size_t)row * (size_t)num_series + (size_t)series;
 
-        if (UNLIKELY(period <= 0 || period > series_len || first < 0 || first >= series_len)) {
-            for (int row = 0; row < series_len; ++row) {
-                *col_plus  = VI_NAN; *col_minus = VI_NAN;
-                col_plus  += num_series; col_minus += num_series;
-            }
-            continue;
-        }
+    const int first = first_valids[series];
+    if (UNLIKELY(period <= 0 || period > series_len || first < 0 || first >= series_len)) {
+        plus_tm[idx] = VI_NAN;
+        minus_tm[idx] = VI_NAN;
+        return;
+    }
 
-        const int tail = series_len - first;
-        if (UNLIKELY(tail < period)) {
-            for (int row = 0; row < series_len; ++row) {
-                *col_plus  = VI_NAN; *col_minus = VI_NAN;
-                col_plus  += num_series; col_minus += num_series;
-            }
-            continue;
-        }
+    const int tail = series_len - first;
+    if (UNLIKELY(tail < period)) {
+        plus_tm[idx] = VI_NAN;
+        minus_tm[idx] = VI_NAN;
+        return;
+    }
 
-        const int warm = first + period - 1;
+    const int warm = first + period - 1;
+    if (row < warm) {
+        plus_tm[idx] = VI_NAN;
+        minus_tm[idx] = VI_NAN;
+        return;
+    }
 
-        // Warmup prefix: write NaN
-        for (int row = 0; row < warm; ++row) {
-            *col_plus  = VI_NAN; *col_minus = VI_NAN;
-            col_plus  += num_series; col_minus += num_series;
-        }
-
-        if (first == 0) {
-            // Edge row: row == period-1 uses full prefix
-            int row = period - 1;
-            int idx = row * num_series + series;
-
-            {
-                const float tr_sum = pfx_tr_tm[idx];
-                const float inv    = 1.0f / tr_sum;              // one divide
-                *col_plus  = pfx_vp_tm[idx] * inv;
-                *col_minus = pfx_vm_tm[idx] * inv;
-                col_plus  += num_series; col_minus += num_series;
-            }
-
-            // Sliding window from next row onward
-            int idx_cur  = idx + num_series;                        // (row+1, series)
-            int idx_prev = (row + 1 - period) * num_series + series; // (0, series)
-            for (row = row + 1; row < series_len; ++row) {
-                const float tr_sum = pfx_tr_tm[idx_cur] - pfx_tr_tm[idx_prev];
-                const float inv    = 1.0f / tr_sum;              // one divide
-                *col_plus  = (pfx_vp_tm[idx_cur] - pfx_vp_tm[idx_prev]) * inv;
-                *col_minus = (pfx_vm_tm[idx_cur] - pfx_vm_tm[idx_prev]) * inv;
-                col_plus  += num_series; col_minus += num_series;
-                idx_cur  += num_series; idx_prev += num_series;
-            }
-        } else {
-            // warm >= period: always difference path
-            int row      = warm;
-            int idx_cur  = row * num_series + series;
-            int idx_prev = (row - period) * num_series + series;
-
-            for (; row < series_len; ++row) {
-                const float tr_sum = pfx_tr_tm[idx_cur] - pfx_tr_tm[idx_prev];
-                const float inv    = 1.0f / tr_sum;              // one divide
-                *col_plus  = (pfx_vp_tm[idx_cur] - pfx_vp_tm[idx_prev]) * inv;
-                *col_minus = (pfx_vm_tm[idx_cur] - pfx_vm_tm[idx_prev]) * inv;
-                col_plus  += num_series; col_minus += num_series;
-                idx_cur  += num_series; idx_prev += num_series;
-            }
-        }
+    const int prev_row = row - period;
+    if (prev_row >= 0) {
+        const size_t idx_prev = (size_t)prev_row * (size_t)num_series + (size_t)series;
+        const float tr_sum = pfx_tr_tm[idx] - pfx_tr_tm[idx_prev];
+        const float inv    = 1.0f / tr_sum;
+        plus_tm[idx]  = (pfx_vp_tm[idx] - pfx_vp_tm[idx_prev]) * inv;
+        minus_tm[idx] = (pfx_vm_tm[idx] - pfx_vm_tm[idx_prev]) * inv;
+    } else {
+        const float tr_sum = pfx_tr_tm[idx];
+        const float inv    = 1.0f / tr_sum;
+        plus_tm[idx]  = pfx_vp_tm[idx] * inv;
+        minus_tm[idx] = pfx_vm_tm[idx] * inv;
     }
 }
 

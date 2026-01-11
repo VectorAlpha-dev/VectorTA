@@ -493,7 +493,8 @@ extern "C" __global__ void ppo_from_ma_batch_f32(
         const float ff = fast_ma[fast_off + t];
         float y = nanf;
         if (t >= warm && isfinite(sf) && isfinite(ff) && sf != 0.0f) {
-            y = (ff / sf) * 100.0f - 100.0f;
+            const double ratio = (double)ff / (double)sf;
+            y = (float)(ratio * 100.0 - 100.0);
         }
         out[r * len + t] = y;
     }
@@ -521,7 +522,8 @@ extern "C" __global__ void ppo_from_ma_many_series_one_param_time_major_f32(
         const float ff = fast_ma_tm[t * cols + s];
         float y = nanf;
         if (t >= warm && isfinite(sf) && isfinite(ff) && sf != 0.0f) {
-            y = (ff / sf) * 100.0f - 100.0f;
+            const double ratio = (double)ff / (double)sf;
+            y = (float)(ratio * 100.0 - 100.0);
         }
         out_tm[t * cols + s] = y;
     }

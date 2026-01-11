@@ -258,7 +258,7 @@ fn apo_prepare<'a>(
     }
 
     let mut chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     // APO is two EMAs (sequential recurrence); SIMD typically provides no benefit and can be slower
@@ -729,8 +729,8 @@ pub struct ApoBatchRange {
 impl Default for ApoBatchRange {
     fn default() -> Self {
         Self {
-            short: (5, 20, 5),
-            long: (15, 50, 5),
+            short: (10, 10, 0),
+            long: (20, 269, 1),
         }
     }
 }
@@ -2074,6 +2074,15 @@ mod tests {
             .map_err(|e| e.into())
     }
 
+    #[cfg(not(feature = "proptest"))]
+    fn check_apo_property(
+        test_name: &str,
+        kernel: Kernel,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        skip_if_unsupported!(kernel, test_name);
+        Ok(())
+    }
+
     macro_rules! generate_all_apo_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2670,13 +2679,13 @@ pub fn apo_into(
 
         if in_ptr == out_ptr {
             let mut tmp = vec![0.0; len];
-            apo_into_slice(&mut tmp, &input, detect_best_kernel())
+            apo_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            apo_into_slice(out, &input, detect_best_kernel())
+            apo_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
     }

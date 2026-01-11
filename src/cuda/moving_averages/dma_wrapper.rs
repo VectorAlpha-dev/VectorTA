@@ -668,28 +668,37 @@ impl CudaDma {
             .get_function("dma_batch_tiled_f32_tx128")
             .is_ok();
         let has_tx64 = self.module.get_function("dma_batch_tiled_f32_tx64").is_ok();
+        let has_tx32 = self.module.get_function("dma_batch_tiled_f32_tx32").is_ok();
         let prefer_tiled = match self.policy.batch {
             BatchKernelPolicy::Tiled { .. } => true,
             BatchKernelPolicy::Plain { .. } => false,
             BatchKernelPolicy::Auto => n_combos >= 32,
         };
 
-        if prefer_tiled && (has_tx128 || has_tx64) {
+        if prefer_tiled && (has_tx128 || has_tx64 || has_tx32) {
             let mut tx: u32 = match self.policy.batch {
                 BatchKernelPolicy::Tiled { tile, .. } => tile,
                 _ => std::env::var("DMA_BATCH_TX")
                     .ok()
                     .and_then(|s| s.parse::<u32>().ok())
-                    .filter(|&v| v == 64 || v == 128)
-                    .unwrap_or(128),
+                    .filter(|&v| v == 32 || v == 64 || v == 128)
+                    .unwrap_or(32),
             };
             if tx == 128 && !has_tx128 {
-                tx = 64;
+                tx = if has_tx64 { 64 } else { 32 };
+            }
+            if tx == 64 && !has_tx64 {
+                tx = 32;
+            }
+            if tx == 32 && !has_tx32 {
+                tx = if has_tx64 { 64 } else { 128 };
             }
             let func_name = if tx == 128 {
                 "dma_batch_tiled_f32_tx128"
-            } else {
+            } else if tx == 64 {
                 "dma_batch_tiled_f32_tx64"
+            } else {
+                "dma_batch_tiled_f32_tx32"
             };
             let func = self
                 .module
@@ -1225,29 +1234,176 @@ struct BatchInputs {
 
 pub mod benches {
     use super::*;
-    use crate::define_ma_period_benches;
+    use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
+    use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use crate::indicators::moving_averages::dma::{DmaBatchRange, DmaParams};
 
-    define_ma_period_benches!(
-        dma_benches,
-        CudaDma,
-        crate::indicators::moving_averages::dma::DmaBatchRange,
-        crate::indicators::moving_averages::dma::DmaParams,
-        dma_batch_dev,
-        dma_many_series_one_param_time_major_dev,
-        crate::indicators::moving_averages::dma::DmaBatchRange {
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
+    const MANY_SERIES_COLS: usize = 250;
+    const MANY_SERIES_LEN: usize = 1_000_000;
+
+    fn bytes_one_series_many_params() -> usize {
+        let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+        let params_bytes = PARAM_SWEEP * 4 * std::mem::size_of::<i32>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        // plus shared scratch headroom
+        in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
+    }
+    fn bytes_many_series_one_param() -> usize {
+        let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
+        let in_bytes = elems * std::mem::size_of::<f32>();
+        let first_bytes = MANY_SERIES_COLS * std::mem::size_of::<i32>();
+        let out_bytes = elems * std::mem::size_of::<f32>();
+        in_bytes + first_bytes + out_bytes + 64 * 1024 * 1024
+    }
+
+    struct DmaBatchDevState {
+        cuda: CudaDma,
+        d_prices: DeviceBuffer<f32>,
+        d_hulls: DeviceBuffer<i32>,
+        d_emas: DeviceBuffer<i32>,
+        d_gains: DeviceBuffer<i32>,
+        d_types: DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_sqrt_len: usize,
+        d_out: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DmaBatchDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_batch_kernels(
+                    &self.d_prices,
+                    &self.d_hulls,
+                    &self.d_emas,
+                    &self.d_gains,
+                    &self.d_types,
+                    self.series_len,
+                    self.n_combos,
+                    self.first_valid,
+                    self.max_sqrt_len,
+                    &mut self.d_out,
+                )
+                .expect("dma batch kernels");
+            self.cuda.stream.synchronize().expect("dma sync");
+        }
+    }
+
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDma::new(0).expect("cuda dma");
+        let price = gen_series(ONE_SERIES_LEN);
+        let sweep = DmaBatchRange {
             hull_length: (7, 7 + PARAM_SWEEP - 1, 1),
             ema_length: (20, 20, 0),
             ema_gain_limit: (50, 50, 0),
             hull_ma_type: "WMA".to_string(),
-        },
-        crate::indicators::moving_averages::dma::DmaParams {
+        };
+        let inputs = CudaDma::prepare_batch_inputs(&price, &sweep).expect("prepare_batch_inputs");
+        let n_combos = inputs.combos.len();
+
+        let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
+        let d_hulls = DeviceBuffer::from_slice(&inputs.hull_lengths).expect("d_hulls");
+        let d_emas = DeviceBuffer::from_slice(&inputs.ema_lengths).expect("d_emas");
+        let d_gains = DeviceBuffer::from_slice(&inputs.ema_gain_limits).expect("d_gains");
+        let d_types = DeviceBuffer::from_slice(&inputs.hull_types).expect("d_types");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(n_combos * inputs.series_len)
+        }
+        .expect("d_out");
+        cuda.stream.synchronize().expect("sync after prep");
+
+        Box::new(DmaBatchDevState {
+            cuda,
+            d_prices,
+            d_hulls,
+            d_emas,
+            d_gains,
+            d_types,
+            series_len: inputs.series_len,
+            n_combos,
+            first_valid: inputs.first_valid,
+            max_sqrt_len: inputs.max_sqrt_len,
+            d_out,
+        })
+    }
+
+    struct DmaManyDevState {
+        cuda: CudaDma,
+        d_prices_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        hull_length: usize,
+        ema_length: usize,
+        ema_gain_limit: usize,
+        hull_type: i32,
+        sqrt_len: usize,
+        d_out_tm: DeviceBuffer<f32>,
+    }
+    impl CudaBenchState for DmaManyDevState {
+        fn launch(&mut self) {
+            self.cuda
+                .launch_many_series_kernels(
+                    &self.d_prices_tm,
+                    self.hull_length,
+                    self.ema_length,
+                    self.ema_gain_limit,
+                    self.hull_type,
+                    self.rows,
+                    self.cols,
+                    &self.d_first_valids,
+                    self.sqrt_len,
+                    &mut self.d_out_tm,
+                )
+                .expect("dma many-series kernels");
+            self.cuda.stream.synchronize().expect("dma sync");
+        }
+    }
+
+    fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
+        let cuda = CudaDma::new(0).expect("cuda dma");
+        let cols = MANY_SERIES_COLS;
+        let rows = MANY_SERIES_LEN;
+        let data_tm = gen_time_major_prices(cols, rows);
+        let params = DmaParams {
             hull_length: Some(64),
             ema_length: Some(20),
             ema_gain_limit: Some(50),
             hull_ma_type: Some("WMA".to_string()),
-        },
-        "dma",
-        "dma"
-    );
-    pub use dma_benches::bench_profiles;
+        };
+        let (first_valids, hull_length, ema_length, ema_gain_limit, hull_type, sqrt_len) =
+            CudaDma::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
+        let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        cuda.stream.synchronize().expect("sync after prep");
+        Box::new(DmaManyDevState {
+            cuda,
+            d_prices_tm,
+            d_first_valids,
+            cols,
+            rows,
+            hull_length,
+            ema_length,
+            ema_gain_limit,
+            hull_type,
+            sqrt_len,
+            d_out_tm,
+        })
+    }
+
+    pub fn bench_profiles() -> Vec<CudaBenchScenario> {
+        vec![
+            CudaBenchScenario::new("dma", "one_series_many_params", "dma_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
+                .with_sample_size(10)
+                .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new("dma", "many_series_one_param", "dma_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
+                .with_sample_size(5)
+                .with_mem_required(bytes_many_series_one_param()),
+        ]
+    }
 }

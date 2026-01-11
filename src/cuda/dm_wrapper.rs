@@ -504,39 +504,80 @@ pub mod benches {
 
     struct BatchState {
         cuda: CudaDm,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: DmBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_periods: DeviceBuffer<i32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_plus: DeviceBuffer<f32>,
+        d_minus: DeviceBuffer<f32>,
     }
     impl CudaBenchState for BatchState {
         fn launch(&mut self) {
-            let _ = self
-                .cuda
-                .dm_batch_dev(&self.high, &self.low, &self.sweep)
-                .unwrap();
+            self.cuda
+                .launch_batch(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_periods,
+                    self.len,
+                    self.n_combos,
+                    self.first_valid,
+                    &mut self.d_plus,
+                    &mut self.d_minus,
+                )
+                .expect("dm batch kernel");
+            self.cuda.stream.synchronize().expect("dm sync");
         }
     }
 
     struct ManySeriesState {
         cuda: CudaDm,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         period: usize,
+        block_x: u32,
+        grid_x: u32,
+        d_plus_tm: DeviceBuffer<f32>,
+        d_minus_tm: DeviceBuffer<f32>,
     }
     impl CudaBenchState for ManySeriesState {
         fn launch(&mut self) {
-            let _ = self
+            let func = self
                 .cuda
-                .dm_many_series_one_param_time_major_dev(
-                    &self.high_tm,
-                    &self.low_tm,
-                    self.cols,
-                    self.rows,
-                    self.period,
-                )
-                .unwrap();
+                .module
+                .get_function("dm_many_series_one_param_time_major_f32")
+                .expect("dm_many_series_one_param_time_major_f32");
+            let grid: GridSize = (self.grid_x.max(1), 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            unsafe {
+                let mut h = self.d_high_tm.as_device_ptr().as_raw();
+                let mut l = self.d_low_tm.as_device_ptr().as_raw();
+                let mut c = self.cols as i32;
+                let mut r = self.rows as i32;
+                let mut p = self.period as i32;
+                let mut fv = self.d_first_valids.as_device_ptr().as_raw();
+                let mut po = self.d_plus_tm.as_device_ptr().as_raw();
+                let mut mo = self.d_minus_tm.as_device_ptr().as_raw();
+                let mut args: [*mut c_void; 8] = [
+                    &mut h as *mut _ as *mut c_void,
+                    &mut l as *mut _ as *mut c_void,
+                    &mut c as *mut _ as *mut c_void,
+                    &mut r as *mut _ as *mut c_void,
+                    &mut p as *mut _ as *mut c_void,
+                    &mut fv as *mut _ as *mut c_void,
+                    &mut po as *mut _ as *mut c_void,
+                    &mut mo as *mut _ as *mut c_void,
+                ];
+                self.cuda
+                    .stream
+                    .launch(&func, grid, block, 0, &mut args)
+                    .expect("dm many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("dm sync");
         }
     }
 
@@ -544,12 +585,36 @@ pub mod benches {
         let cuda = CudaDm::new(0).expect("cuda dm");
         let close = gen_series(LEN_1M);
         let (high, low) = synth_hl_from_close(&close);
+        let first_valid = (0..LEN_1M)
+            .find(|&i| !high[i].is_nan() && !low[i].is_nan())
+            .unwrap_or(LEN_1M);
         let sweep = DmBatchRange { period: (8, 96, 8) };
+        let periods_host: Vec<i32> = (sweep.period.0..=sweep.period.1)
+            .step_by(sweep.period.2.max(1))
+            .map(|p| p as i32)
+            .collect();
+        let n_combos = periods_host.len();
+
+        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
+        let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&periods_host, &cuda.stream) }.expect("d_periods");
+        let out_elems = n_combos * LEN_1M;
+        let d_plus: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_plus");
+        let d_minus: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_minus");
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(BatchState {
             cuda,
-            high,
-            low,
-            sweep,
+            d_high,
+            d_low,
+            d_periods,
+            len: LEN_1M,
+            first_valid,
+            n_combos,
+            d_plus,
+            d_minus,
         })
     }
 
@@ -569,13 +634,53 @@ pub mod benches {
         };
         let (high_tm, low_tm) = synth_hl_from_close(&close_tm);
         let period = 14usize;
+        let mut first_valids: Vec<i32> = vec![-1; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+        let elems = cols * rows;
+        let d_plus_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_plus_tm");
+        let d_minus_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_minus_tm");
+
+        // Match wrapper block_x selection once in prep.
+        let mut func = cuda
+            .module
+            .get_function("dm_many_series_one_param_time_major_f32")
+            .expect("dm_many_series_one_param_time_major_f32");
+        let block_x = match cuda.policy.many_series {
+            ManySeriesKernelPolicy::Auto => match func
+                .suggested_launch_configuration(0, (1024, 1, 1).into())
+            {
+                Ok((_min_grid, suggested_block)) => suggested_block.clamp(32, 1024),
+                Err(_) => 256,
+            },
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
+        let grid_x = ((cols as u32) + block_x - 1) / block_x;
+        cuda.stream.synchronize().expect("sync after prep");
         Box::new(ManySeriesState {
             cuda,
-            high_tm,
-            low_tm,
+            d_high_tm,
+            d_low_tm,
+            d_first_valids,
             cols,
             rows,
             period,
+            block_x,
+            grid_x,
+            d_plus_tm,
+            d_minus_tm,
         })
     }
 

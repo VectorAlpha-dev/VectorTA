@@ -193,7 +193,7 @@ pub fn pma_with_kernel(input: &PmaInput, kernel: Kernel) -> Result<PmaOutput, Pm
     let first = pma_first_valid_idx(data)?;
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -870,7 +870,7 @@ pub fn pma_into_slice(
     let first = pma_first_valid_idx(data)?;
 
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
@@ -1206,7 +1206,7 @@ pub fn pma_batch_py<'py>(
             slice_in,
             first,
             match kern {
-                Kernel::Auto => detect_best_kernel(),
+                Kernel::Auto => Kernel::Scalar,
                 Kernel::ScalarBatch => Kernel::Scalar,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::Avx512Batch => Kernel::Avx512,

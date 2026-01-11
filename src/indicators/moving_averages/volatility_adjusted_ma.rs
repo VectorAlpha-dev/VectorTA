@@ -1004,8 +1004,8 @@ pub struct VamaBatchRange {
 impl Default for VamaBatchRange {
     fn default() -> Self {
         Self {
-            base_period: (100, 130, 10),
-            vol_period: (40, 60, 10),
+            base_period: (113, 362, 1),
+            vol_period: (51, 51, 0),
         }
     }
 }

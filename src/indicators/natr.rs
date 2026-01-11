@@ -262,7 +262,7 @@ pub fn natr_with_kernel(input: &NatrInput, kernel: Kernel) -> Result<NatrOutput,
     let mut out = alloc_with_nan_prefix(len, first_valid_idx + period - 1);
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
@@ -835,7 +835,7 @@ pub struct NatrBatchRange {
 impl Default for NatrBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 30, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -2465,7 +2465,7 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
 
     // Choose kernel
     let chosen = match kern {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 

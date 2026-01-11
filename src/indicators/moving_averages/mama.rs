@@ -1526,7 +1526,7 @@ pub struct MamaBatchRange {
 impl Default for MamaBatchRange {
     fn default() -> Self {
         Self {
-            fast_limit: (0.5, 0.5, 0.0),
+            fast_limit: (0.5, 0.749, 0.001),
             slow_limit: (0.05, 0.05, 0.0),
         }
     }

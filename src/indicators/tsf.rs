@@ -429,7 +429,13 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
         sum_x2 += xf * xf;
     }
     let divisor = pf * sum_x2 - sum_x * sum_x;
-    // Use direct divisions to mirror streaming path numerics
+    // Precompute reciprocals (Tulip-style). The streaming path uses the same order to keep
+    // batch and streaming outputs consistent.
+    let inv_div = 1.0 / divisor;
+    let inv_pf = 1.0 / pf;
+    let pf_over_div = pf * inv_div;
+    let sumx_over_div = sum_x * inv_div;
+    let p_minus_mean_x = pf - sum_x * inv_pf;
 
     // First index we are allowed to write (warmup prefix handled by caller)
     let mut base = first_val;
@@ -441,71 +447,73 @@ pub fn tsf_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
     // --- initialize S0 = ∑y, S1 = ∑(j*y) for window [base .. base+p-1] ---
     let mut s0 = 0.0f64;
     let mut s1 = 0.0f64;
-    let mut ok = true;
-    for j in 0..p {
-        let v = data[base + j];
-        if v.is_nan() {
-            s0 = f64::NAN;
-            s1 = f64::NAN;
-            ok = false;
-            break; // propagate NaN just like the naive loop
+    let mut nan_count = 0usize;
+    unsafe {
+        let mut ptr = data.as_ptr().add(base);
+        for j in 0..p {
+            let v = *ptr;
+            if v.is_nan() {
+                nan_count += 1;
+            } else {
+                s0 += v;
+                s1 += (j as f64) * v;
+            }
+            ptr = ptr.add(1);
         }
-        s0 += v;
-        s1 += (j as f64) * v;
     }
 
     // write forecast for the first full window
-    if ok {
-        let m = (pf * s1 - sum_x * s0) / divisor;
-        let b = (s0 - m * sum_x) / pf;
-        out[i] = b + m * pf;
+    if nan_count == 0 {
+        let m = s1 * pf_over_div - s0 * sumx_over_div;
+        unsafe { *out.get_unchecked_mut(i) = s0 * inv_pf + m * p_minus_mean_x; }
     } else {
-        out[i] = f64::NAN;
+        s0 = f64::NAN;
+        s1 = f64::NAN;
+        unsafe { *out.get_unchecked_mut(i) = f64::NAN; }
     }
 
     // --- slide window in O(1): S0' = S0 - y_old + y_new ; S1' = S1 + p*y_new - S0' ---
     while i + 1 < n {
-        let y_old = data[base];
-        let y_new = data[base + p];
+        let y_old = unsafe { *data.get_unchecked(base) };
+        let y_new = unsafe { *data.get_unchecked(base + p) };
         base += 1;
         i += 1;
 
-        if s0.is_finite() && s1.is_finite() && y_old.is_finite() && y_new.is_finite() {
-            // fast O(1) update
-            let new_s0 = s0 + (y_new - y_old);
-            let new_s1 = pf * y_new + s1 - new_s0;
-            s0 = new_s0;
-            s1 = new_s1;
+        let prev_nan = nan_count;
+        if y_old.is_nan() {
+            nan_count = nan_count.saturating_sub(1);
+        }
+        if y_new.is_nan() {
+            nan_count = nan_count.saturating_add(1);
+        }
 
-            let m = (pf * s1 - sum_x * s0) / divisor;
-            let b = (s0 - m * sum_x) / pf;
-            out[i] = b + m * pf;
-        } else {
-            // Fallback: recompute sums for this window to recover after NaNs
-            let mut r0 = 0.0f64;
-            let mut r1 = 0.0f64;
-            let mut clean = true;
-            for j in 0..p {
-                let v = data[base + j];
-                if v.is_nan() {
-                    r0 = f64::NAN;
-                    r1 = f64::NAN;
-                    clean = false;
-                    break;
-                }
-                r0 += v;
-                r1 += (j as f64) * v;
-            }
-            s0 = r0;
-            s1 = r1;
-
-            if clean {
-                let m = (pf * s1 - sum_x * s0) / divisor;
-                let b = (s0 - m * sum_x) / pf;
-                out[i] = b + m * pf;
+        if nan_count == 0 {
+            if prev_nan == 0 {
+                // fast O(1) update
+                let new_s0 = s0 + (y_new - y_old);
+                let new_s1 = pf * y_new + s1 - new_s0;
+                s0 = new_s0;
+                s1 = new_s1;
             } else {
-                out[i] = f64::NAN;
+                // Window just became clean: recover sums once.
+                let mut r0 = 0.0f64;
+                let mut r1 = 0.0f64;
+                for j in 0..p {
+                    let v = unsafe { *data.get_unchecked(base + j) };
+                    r0 += v;
+                    r1 += (j as f64) * v;
+                }
+                s0 = r0;
+                s1 = r1;
             }
+
+            let m = s1 * pf_over_div - s0 * sumx_over_div;
+            unsafe { *out.get_unchecked_mut(i) = s0 * inv_pf + m * p_minus_mean_x; }
+        } else {
+            // Window contains at least one NaN -> forecast is NaN; keep sums poisoned.
+            s0 = f64::NAN;
+            s1 = f64::NAN;
+            unsafe { *out.get_unchecked_mut(i) = f64::NAN; }
         }
     }
 }
@@ -799,6 +807,11 @@ pub struct TsfStream {
     sum_x: f64, // ∑ x
     sum_x_sqr: f64,
     divisor: f64, // p*∑x² - (∑x)²
+    inv_pf: f64,
+    inv_divisor: f64,
+    pf_over_div: f64,
+    sumx_over_div: f64,
+    p_minus_mean_x: f64,
 
     // sliding accumulators (when window is clean)
     s0: f64, // ∑ y
@@ -825,6 +838,11 @@ impl TsfStream {
             sum_x_sqr += xf * xf;
         }
         let divisor = pf * sum_x_sqr - (sum_x * sum_x);
+        let inv_pf = 1.0 / pf;
+        let inv_divisor = 1.0 / divisor;
+        let pf_over_div = pf * inv_divisor;
+        let sumx_over_div = sum_x * inv_divisor;
+        let p_minus_mean_x = pf - sum_x * inv_pf;
 
         Ok(Self {
             period,
@@ -835,6 +853,11 @@ impl TsfStream {
             sum_x,
             sum_x_sqr,
             divisor,
+            inv_pf,
+            inv_divisor,
+            pf_over_div,
+            sumx_over_div,
+            p_minus_mean_x,
             s0: 0.0,
             s1: 0.0,
             nan_count: 0,
@@ -860,10 +883,9 @@ impl TsfStream {
                     return Some(f64::NAN);
                 }
 
-                // First forecast after warmup: forecast = b + m*pf
-                let m = (self.pf * self.s1 - self.sum_x * self.s0) / self.divisor;
-                let b = (self.s0 - m * self.sum_x) / self.pf;
-                return Some(b + m * self.pf);
+                // First forecast after warmup: forecast = mean_y + m*(p - mean_x)
+                let m = self.s1 * self.pf_over_div - self.s0 * self.sumx_over_div;
+                return Some(self.s0 * self.inv_pf + m * self.p_minus_mean_x);
             }
             return None;
         }
@@ -903,10 +925,9 @@ impl TsfStream {
                 self.s1 = s1;
             }
 
-            // Forecast = b + m*pf with standard OLS closed form
-            let m = (self.pf * self.s1 - self.sum_x * self.s0) / self.divisor;
-            let b = (self.s0 - m * self.sum_x) / self.pf;
-            b + m * self.pf
+            // Forecast = mean_y + m*(p - mean_x)
+            let m = self.s1 * self.pf_over_div - self.s0 * self.sumx_over_div;
+            self.s0 * self.inv_pf + m * self.p_minus_mean_x
         } else {
             // Window contains at least one NaN → forecast is NaN; keep S0/S1 in a poisoned state.
             self.s0 = f64::NAN;
@@ -982,7 +1003,7 @@ pub struct TsfBatchRange {
 impl Default for TsfBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 240, 1),
+            period: (14, 263, 1),
         }
     }
 }

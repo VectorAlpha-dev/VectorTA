@@ -120,88 +120,91 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                                   const float* __restrict__ tr,
                                   float* __restrict__ out)
 {
-    const int row = blockIdx.x;
-    if (row >= n_combos || series_len <= 0) return;
+    if (series_len <= 0 || n_combos <= 0) return;
+    if (first_valid < 0 || first_valid >= series_len) return;
 
-    const int p_vis_atr = vis_atr[row];
-    const int p_vis_std = vis_std[row];
-    const int p_sed_atr = sed_atr[row];
-    const int p_sed_std = sed_std[row];
-    const float th = threshold[row];
+    const int total_threads = blockDim.x * gridDim.x;
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
 
-    const int needed = max(max(max(p_vis_atr, p_vis_std), max(p_sed_atr, p_sed_std)), 3);
-    if (first_valid >= series_len) return;
+    for (; row < n_combos; row += total_threads) {
+        const int p_vis_atr = vis_atr[row];
+        const int p_vis_std = vis_std[row];
+        const int p_sed_atr = sed_atr[row];
+        const int p_sed_std = sed_std[row];
+        const float th = threshold[row];
 
-    const int base_vol  = (row * 2 + 0) * series_len;
-    const int base_anti = (row * 2 + 1) * series_len;
+        const int needed = max(max(max(p_vis_atr, p_vis_std), max(p_sed_atr, p_sed_std)), 3);
 
-    const int warm_end = min(series_len, first_valid + needed - 1);
-    if (threadIdx.x != 0) return;
+        const size_t base_vol  = ((size_t)(row * 2 + 0)) * (size_t)series_len;
+        const size_t base_anti = ((size_t)(row * 2 + 1)) * (size_t)series_len;
 
-    // Wilder ATR state (FP32) with Kahan seed for initial window
-    float atr_vis = NAN, atr_sed = NAN;
-    float sum_vis = 0.0f, c_vis = 0.0f;
-    float sum_sed = 0.0f, c_sed = 0.0f;
+        const int warm_end = min(series_len, first_valid + needed - 1);
 
-    // Keep lag history in registers; treat history as 0 before first writes
-    float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
-    const float lag_s = 0.5f;
+        // Wilder ATR state (FP32) with Kahan seed for initial window
+        float atr_vis = NAN, atr_sed = NAN;
+        float sum_vis = 0.0f, c_vis = 0.0f;
+        float sum_sed = 0.0f, c_sed = 0.0f;
 
-    for (int t = first_valid; t < series_len; ++t) {
-        const float tr_t = LDG(&tr[t]);
-        const int k = t - first_valid;
+        // Keep lag history in registers; treat history as 0 before first writes
+        float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
+        const float lag_s = 0.5f;
 
-        // Wilder ATR for vis
-        if (k < p_vis_atr) {
-            kahan_add(sum_vis, c_vis, tr_t);
-            if (k == p_vis_atr - 1) atr_vis = sum_vis / (float)p_vis_atr;
-        } else if (finite_f32(atr_vis)) {
-            const float alpha = 1.0f / (float)p_vis_atr;
-            atr_vis = fmaf(atr_vis, (1.0f - alpha), tr_t * alpha);
-        }
+        for (int t = first_valid; t < series_len; ++t) {
+            const float tr_t = LDG(&tr[t]);
+            const int k = t - first_valid;
 
-        // Wilder ATR for sed
-        if (k < p_sed_atr) {
-            kahan_add(sum_sed, c_sed, tr_t);
-            if (k == p_sed_atr - 1) atr_sed = sum_sed / (float)p_sed_atr;
-        } else if (finite_f32(atr_sed)) {
-            const float alpha = 1.0f / (float)p_sed_atr;
-            atr_sed = fmaf(atr_sed, (1.0f - alpha), tr_t * alpha);
-        }
+            // Wilder ATR for vis
+            if (k < p_vis_atr) {
+                kahan_add(sum_vis, c_vis, tr_t);
+                if (k == p_vis_atr - 1) atr_vis = sum_vis / (float)p_vis_atr;
+            } else if (finite_f32(atr_vis)) {
+                const float alpha = 1.0f / (float)p_vis_atr;
+                atr_vis = fmaf(atr_vis, (1.0f - alpha), tr_t * alpha);
+            }
 
-        // Start outputs once every window is satisfied (includes warm_end)
-        if (k >= needed - 1) {
-            const float inv_sed = 1.0f / safe_pos_den(atr_sed);
-            const float base    = atr_vis * inv_sed;
-            const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
-            out[base_vol + t]   = vol_t;
-            // update lag ring after writing
-            vh3 = vh2; vh2 = vh1; vh1 = vol_t;
+            // Wilder ATR for sed
+            if (k < p_sed_atr) {
+                kahan_add(sum_sed, c_sed, tr_t);
+                if (k == p_sed_atr - 1) atr_sed = sum_sed / (float)p_sed_atr;
+            } else if (finite_f32(atr_sed)) {
+                const float alpha = 1.0f / (float)p_sed_atr;
+                atr_sed = fmaf(atr_sed, (1.0f - alpha), tr_t * alpha);
+            }
 
-            // Anti only when both stddev windows are full
-            if (k >= max(p_vis_std, p_sed_std) - 1) {
-                const int prev_v = t - p_vis_std;
-                const int prev_s = t - p_sed_std;
+            // Start outputs once every window is satisfied (includes warm_end)
+            if (k >= needed - 1) {
+                const float inv_sed = 1.0f / safe_pos_den(atr_sed);
+                const float base    = atr_vis * inv_sed;
+                const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
+                out[base_vol + (size_t)t] = vol_t;
+                // update lag ring after writing
+                vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                const float2 S_t   = s_prefix[t];
-                const float2 SS_t  = ss_prefix[t];
-                const float2 S_pv  = (prev_v >= 0) ? s_prefix[prev_v]  : make_float2(0.f,0.f);
-                const float2 SS_pv = (prev_v >= 0) ? ss_prefix[prev_v] : make_float2(0.f,0.f);
-                const float2 S_ps  = (prev_s >= 0) ? s_prefix[prev_s]  : make_float2(0.f,0.f);
-                const float2 SS_ps = (prev_s >= 0) ? ss_prefix[prev_s] : make_float2(0.f,0.f);
+                // Anti only when both stddev windows are full
+                if (k >= max(p_vis_std, p_sed_std) - 1) {
+                    const int prev_v = t - p_vis_std;
+                    const int prev_s = t - p_sed_std;
 
-                const float std_v = std_from_ff_prefix(S_t, S_pv, SS_t, SS_pv, p_vis_std);
-                const float std_s = std_from_ff_prefix(S_t, S_ps, SS_t, SS_ps, p_sed_std);
+                    const float2 S_t   = s_prefix[t];
+                    const float2 SS_t  = ss_prefix[t];
+                    const float2 S_pv  = (prev_v >= 0) ? s_prefix[prev_v]  : make_float2(0.f,0.f);
+                    const float2 SS_pv = (prev_v >= 0) ? ss_prefix[prev_v] : make_float2(0.f,0.f);
+                    const float2 S_ps  = (prev_s >= 0) ? s_prefix[prev_s]  : make_float2(0.f,0.f);
+                    const float2 SS_ps = (prev_s >= 0) ? ss_prefix[prev_s] : make_float2(0.f,0.f);
 
-                const float anti_t = th - (std_v / safe_pos_den(std_s));
-                out[base_anti + t] = anti_t;
+                    const float std_v = std_from_ff_prefix(S_t, S_pv, SS_t, SS_pv, p_vis_std);
+                    const float std_s = std_from_ff_prefix(S_t, S_ps, SS_t, SS_ps, p_sed_std);
+
+                    const float anti_t = th - (std_v / safe_pos_den(std_s));
+                    out[base_anti + (size_t)t] = anti_t;
+                }
             }
         }
-    }
-    // Re-assert NaN prefix exactly through warm_end for both outputs
-    for (int t = 0; t <= warm_end && t < series_len; ++t) {
-        out[base_vol + t] = nan_f32();
-        out[base_anti + t] = nan_f32();
+        // Re-assert NaN prefix exactly through warm_end for both outputs
+        for (int t = 0; t <= warm_end && t < series_len; ++t) {
+            out[base_vol + (size_t)t] = nan_f32();
+            out[base_anti + (size_t)t] = nan_f32();
+        }
     }
 }
 
@@ -228,95 +231,100 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
     const float2* __restrict__ ss_tm,
     float* __restrict__ out_tm)
 {
-    const int series = blockIdx.x;
-    if (series >= num_series || series_len <= 0) return;
-
-    const int fv = max(0, first_valids[series]);
-    const int needed = max(max(max(vis_atr, vis_std), max(sed_atr, sed_std)), 3);
-    const int warm_end = min(series_len, fv + needed - 1);
+    if (num_series <= 0 || series_len <= 0) return;
 
     const int stride = num_series;
-    if (threadIdx.x != 0) return;
+    const int total_threads = blockDim.x * gridDim.x;
+    int series = blockIdx.x * blockDim.x + threadIdx.x;
 
-    float atr_vis = NAN, atr_sed = NAN;
-    float sum_vis = 0.0f, c_vis = 0.0f;
-    float sum_sed = 0.0f, c_sed = 0.0f;
-    const float lag_s = 0.5f;
-    float prev_close = NAN;
-    bool have_prev = false;
+    for (; series < num_series; series += total_threads) {
+        const int fv = max(0, first_valids[series]);
+        if (fv >= series_len) continue;
 
-    // lag history in registers
-    float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
+        const int needed = max(max(max(vis_atr, vis_std), max(sed_atr, sed_std)), 3);
+        const int warm_end = min(series_len, fv + needed - 1);
 
-    for (int t = fv; t < series_len; ++t) {
-        const int idx = t * stride + series;
-        const int k   = t - fv;
-        const float h = LDG(&high_tm[idx]);
-        const float l = LDG(&low_tm[idx]);
-        const float c = LDG(&close_tm[idx]);
+        float atr_vis = NAN, atr_sed = NAN;
+        float sum_vis = 0.0f, c_vis = 0.0f;
+        float sum_sed = 0.0f, c_sed = 0.0f;
+        const float lag_s = 0.5f;
+        float prev_close = NAN;
+        bool have_prev = false;
 
-        float tr;
-        if (have_prev && finite_f32(c)) {
-            const float tr1 = h - l;
-            const float tr2 = fabsf(h - prev_close);
-            const float tr3 = fabsf(l - prev_close);
-            tr = fmaxf(tr1, fmaxf(tr2, tr3));
-        } else {
-            tr = 0.0f;
-        }
-        if (finite_f32(c)) { prev_close = c; have_prev = true; }
+        // lag history in registers
+        float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
 
-        // Wilder ATR vis
-        if (k < vis_atr) {
-            kahan_add(sum_vis, c_vis, tr);
-            if (k == vis_atr - 1) atr_vis = sum_vis / (float)vis_atr;
-        } else if (finite_f32(atr_vis)) {
-            const float alpha = 1.0f / (float)vis_atr;
-            atr_vis = fmaf(atr_vis, (1.0f - alpha), tr * alpha);
-        }
+        for (int t = fv; t < series_len; ++t) {
+            const int idx = t * stride + series;
+            const int k   = t - fv;
+            const float h = LDG(&high_tm[idx]);
+            const float l = LDG(&low_tm[idx]);
+            const float c = LDG(&close_tm[idx]);
 
-        // Wilder ATR sed
-        if (k < sed_atr) {
-            kahan_add(sum_sed, c_sed, tr);
-            if (k == sed_atr - 1) atr_sed = sum_sed / (float)sed_atr;
-        } else if (finite_f32(atr_sed)) {
-            const float alpha = 1.0f / (float)sed_atr;
-            atr_sed = fmaf(atr_sed, (1.0f - alpha), tr * alpha);
-        }
+            float tr;
+            if (have_prev && finite_f32(c)) {
+                const float tr1 = h - l;
+                const float tr2 = fabsf(h - prev_close);
+                const float tr3 = fabsf(l - prev_close);
+                tr = fmaxf(tr1, fmaxf(tr2, tr3));
+            } else {
+                tr = 0.0f;
+            }
+            if (finite_f32(c)) { prev_close = c; have_prev = true; }
 
-        if (k >= needed - 1) {
-            const int out_row = t * (2 * stride);
-            const float inv_sed = 1.0f / safe_pos_den(atr_sed);
-            const float base    = atr_vis * inv_sed;
-            const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
-            out_tm[out_row + series] = vol_t;
+            // Wilder ATR vis
+            if (k < vis_atr) {
+                kahan_add(sum_vis, c_vis, tr);
+                if (k == vis_atr - 1) atr_vis = sum_vis / (float)vis_atr;
+            } else if (finite_f32(atr_vis)) {
+                const float alpha = 1.0f / (float)vis_atr;
+                atr_vis = fmaf(atr_vis, (1.0f - alpha), tr * alpha);
+            }
 
-            vh3 = vh2; vh2 = vh1; vh1 = vol_t;
+            // Wilder ATR sed
+            if (k < sed_atr) {
+                kahan_add(sum_sed, c_sed, tr);
+                if (k == sed_atr - 1) atr_sed = sum_sed / (float)sed_atr;
+            } else if (finite_f32(atr_sed)) {
+                const float alpha = 1.0f / (float)sed_atr;
+                atr_sed = fmaf(atr_sed, (1.0f - alpha), tr * alpha);
+            }
 
-            // Anti when both std windows full
-            if (k >= max(vis_std, sed_std) - 1) {
-                const int prev_v = t - vis_std;
-                const int prev_s = t - sed_std;
+            if (k >= needed - 1) {
+                const size_t out_row = (size_t)t * (size_t)(2 * stride);
+                const float inv_sed = 1.0f / safe_pos_den(atr_sed);
+                const float base    = atr_vis * inv_sed;
+                const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
+                out_tm[out_row + (size_t)series] = vol_t;
 
-                const int pv_idx = (prev_v >= 0) ? (prev_v * stride + series) : -1;
-                const int ps_idx = (prev_s >= 0) ? (prev_s * stride + series) : -1;
+                vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                const float2 S_t   = s_tm[idx];
-                const float2 SS_t  = ss_tm[idx];
-                const float2 S_pv  = (pv_idx >= 0) ? s_tm[pv_idx]  : make_float2(0.f,0.f);
-                const float2 SS_pv = (pv_idx >= 0) ? ss_tm[pv_idx] : make_float2(0.f,0.f);
-                const float2 S_ps  = (ps_idx >= 0) ? s_tm[ps_idx]  : make_float2(0.f,0.f);
-                const float2 SS_ps = (ps_idx >= 0) ? ss_tm[ps_idx] : make_float2(0.f,0.f);
+                // Anti when both std windows full
+                if (k >= max(vis_std, sed_std) - 1) {
+                    const int prev_v = t - vis_std;
+                    const int prev_s = t - sed_std;
 
-                const float std_v = std_from_ff_prefix(S_t, S_pv, SS_t, SS_pv, vis_std);
-                const float std_s = std_from_ff_prefix(S_t, S_ps, SS_t, SS_ps, sed_std);
-                out_tm[out_row + (stride + series)] = threshold - (std_v / safe_pos_den(std_s));
+                    const int pv_idx = (prev_v >= 0) ? (prev_v * stride + series) : -1;
+                    const int ps_idx = (prev_s >= 0) ? (prev_s * stride + series) : -1;
+
+                    const float2 S_t   = s_tm[idx];
+                    const float2 SS_t  = ss_tm[idx];
+                    const float2 S_pv  = (pv_idx >= 0) ? s_tm[pv_idx]  : make_float2(0.f,0.f);
+                    const float2 SS_pv = (pv_idx >= 0) ? ss_tm[pv_idx] : make_float2(0.f,0.f);
+                    const float2 S_ps  = (ps_idx >= 0) ? s_tm[ps_idx]  : make_float2(0.f,0.f);
+                    const float2 SS_ps = (ps_idx >= 0) ? ss_tm[ps_idx] : make_float2(0.f,0.f);
+
+                    const float std_v = std_from_ff_prefix(S_t, S_pv, SS_t, SS_pv, vis_std);
+                    const float std_s = std_from_ff_prefix(S_t, S_ps, SS_t, SS_ps, sed_std);
+                    out_tm[out_row + (size_t)(stride + series)] = threshold - (std_v / safe_pos_den(std_s));
+                }
             }
         }
-    }
-    // Re-assert NaN prefix exactly through warm_end for this series
-    for (int t = 0; t <= warm_end && t < series_len; ++t) {
-        out_tm[t * (2 * stride) + series] = nan_f32();
-        out_tm[t * (2 * stride) + (stride + series)] = nan_f32();
+        // Re-assert NaN prefix exactly through warm_end for this series
+        for (int t = 0; t <= warm_end && t < series_len; ++t) {
+            const size_t out_row = (size_t)t * (size_t)(2 * stride);
+            out_tm[out_row + (size_t)series] = nan_f32();
+            out_tm[out_row + (size_t)(stride + series)] = nan_f32();
+        }
     }
 }

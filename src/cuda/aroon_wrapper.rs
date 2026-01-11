@@ -195,46 +195,18 @@ impl CudaAroon {
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
         let mut d_down: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Launch kernel with y-chunking if needed
-        let mut func = self
-            .module
-            .get_function("aroon_batch_f32")
-            .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_batch_f32" })?;
-        let _ = func.set_cache_config(CacheConfig::PreferShared);
-        // Dynamic shared memory: two int deques of capacity (max_len+1)
-        let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
-        // Ask occupancy suggester using our dynamic smem needs
-        let (suggested_block, _min_grid) = func
-            .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
-            .unwrap_or((128, 0));
-        let block_x: u32 = if suggested_block > 0 { suggested_block } else { 128 } as u32;
-        // Best-effort: opt-in to larger dynamic shared memory if supported
-        // Best-effort attribute setting omitted here to avoid driver-specific failures.
-        let shmem_bytes: u32 = shmem_bytes_usize as u32;
-        let max_grid_y = 65_535usize;
-        let mut launched = 0usize;
-        while launched < combos.len() {
-            let chunk = (combos.len() - launched).min(max_grid_y);
-            let grid: GridSize = (1u32, chunk as u32, 1u32).into();
-            let block: BlockSize = (block_x, 1, 1).into();
-            let stream = &self.stream;
-            unsafe {
-                launch!(
-                    func<<<grid, block, shmem_bytes, stream>>>(
-                        d_high.as_device_ptr(),
-                        d_low.as_device_ptr(),
-                        d_lengths.as_device_ptr().add(launched),
-                        n as i32,
-                        first as i32,
-                        chunk as i32,
-                        d_up.as_device_ptr().add(launched * n),
-                        d_down.as_device_ptr().add(launched * n)
-                    )
-                )
-                ?;
-            }
-            launched += chunk;
-        }
+        let _ = self.launch_batch_kernel(
+            &d_high,
+            &d_low,
+            &d_lengths,
+            n,
+            first,
+            max_len,
+            combos.len(),
+            &mut d_up,
+            &mut d_down,
+            0,
+        )?;
 
         self.stream.synchronize()?;
 
@@ -251,6 +223,63 @@ impl CudaAroon {
             },
         };
         Ok(CudaAroonBatchResult { outputs, combos })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn launch_batch_kernel(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_lengths: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        max_len: usize,
+        n_combos: usize,
+        d_up: &mut DeviceBuffer<f32>,
+        d_down: &mut DeviceBuffer<f32>,
+        block_x: u32,
+    ) -> Result<u32, CudaAroonError> {
+        if n_combos == 0 || series_len == 0 {
+            return Ok(0);
+        }
+
+        let mut func = self
+            .module
+            .get_function("aroon_batch_f32")
+            .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_batch_f32" })?;
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+
+        // Dynamic shared memory: two int deques of capacity (max_len+1)
+        let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
+
+        let selected_block_x = if block_x > 0 { block_x } else { 1 };
+
+        let max_grid_y = 65_535usize;
+        let mut launched = 0usize;
+        while launched < n_combos {
+            let chunk = (n_combos - launched).min(max_grid_y);
+            let grid: GridSize = (1u32, chunk as u32, 1u32).into();
+            let block: BlockSize = (selected_block_x, 1, 1).into();
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, shmem_bytes, stream>>>(
+                        d_high.as_device_ptr(),
+                        d_low.as_device_ptr(),
+                        d_lengths.as_device_ptr().add(launched),
+                        series_len as i32,
+                        first_valid as i32,
+                        chunk as i32,
+                        d_up.as_device_ptr().add(launched * series_len),
+                        d_down.as_device_ptr().add(launched * series_len)
+                    )
+                )?;
+            }
+            launched += chunk;
+        }
+
+        Ok(selected_block_x)
     }
 
     /// Many-series × one-param (time-major). Returns two VRAM-backed matrices.
@@ -435,50 +464,111 @@ pub mod benches {
         (h, l)
     }
 
-    struct AroonBatchBench {
+    struct AroonBatchDevBench {
         cuda: CudaAroon,
-        high: Vec<f32>,
-        low: Vec<f32>,
-        sweep: AroonBatchRange,
+        d_high: DeviceBuffer<f32>,
+        d_low: DeviceBuffer<f32>,
+        d_lengths: DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        max_len: usize,
+        n_combos: usize,
+        d_up: DeviceBuffer<f32>,
+        d_down: DeviceBuffer<f32>,
     }
-    impl CudaBenchState for AroonBatchBench {
+    impl CudaBenchState for AroonBatchDevBench {
         fn launch(&mut self) {
             let _ = self
                 .cuda
-                .aroon_batch_dev(&self.high, &self.low, &self.sweep);
+                .launch_batch_kernel(
+                    &self.d_high,
+                    &self.d_low,
+                    &self.d_lengths,
+                    self.series_len,
+                    self.first_valid,
+                    self.max_len,
+                    self.n_combos,
+                    &mut self.d_up,
+                    &mut self.d_down,
+                    0,
+                )
+                .expect("aroon batch kernel");
+            self.cuda.stream.synchronize().expect("aroon sync");
         }
     }
-    fn prep_batch() -> Box<dyn CudaBenchState> {
+    fn prep_batch_dev() -> Box<dyn CudaBenchState> {
         let (h, l) = gen_series(200_000);
-        let sweep = AroonBatchRange {
-            length: (10, 500, 1),
-        };
+        let sweep = AroonBatchRange { length: (10, 500, 1) };
         let cuda = CudaAroon::new(0).expect("cuda aroon");
-        Box::new(AroonBatchBench {
+
+        let combos = CudaAroon::expand_lengths(&sweep).expect("aroon lengths");
+        let first_valid = CudaAroon::find_first_valid_pair(&h, &l).expect("aroon first");
+        let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
+        let lengths_i32: Vec<i32> = combos.iter().map(|c| c.length.unwrap() as i32).collect();
+
+        let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
+        let d_low = DeviceBuffer::from_slice(&l).expect("d_low");
+        let d_lengths = DeviceBuffer::from_slice(&lengths_i32).expect("d_lengths");
+
+        let series_len = h.len();
+        let n_combos = combos.len();
+        let elems = series_len * n_combos;
+        let d_up = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_up");
+        let d_down = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_down");
+
+        Box::new(AroonBatchDevBench {
             cuda,
-            high: h,
-            low: l,
-            sweep,
+            d_high,
+            d_low,
+            d_lengths,
+            series_len,
+            first_valid,
+            max_len,
+            n_combos,
+            d_up,
+            d_down,
         })
     }
 
     struct AroonManyBench {
         cuda: CudaAroon,
-        high_tm: Vec<f32>,
-        low_tm: Vec<f32>,
+        d_high_tm: DeviceBuffer<f32>,
+        d_low_tm: DeviceBuffer<f32>,
+        d_first_valids: DeviceBuffer<i32>,
         cols: usize,
         rows: usize,
         length: usize,
+        block_x: u32,
+        shmem_bytes: u32,
+        d_up: DeviceBuffer<f32>,
+        d_down: DeviceBuffer<f32>,
     }
     impl CudaBenchState for AroonManyBench {
         fn launch(&mut self) {
-            let _ = self.cuda.aroon_many_series_one_param_time_major_dev(
-                &self.high_tm,
-                &self.low_tm,
-                self.cols,
-                self.rows,
-                self.length,
-            );
+            let mut func = self
+                .cuda
+                .module
+                .get_function("aroon_many_series_one_param_f32")
+                .expect("aroon_many_series_one_param_f32");
+            let grid: GridSize = (self.cols as u32, 1, 1).into();
+            let block: BlockSize = (self.block_x, 1, 1).into();
+            let stream = &self.cuda.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, self.shmem_bytes, stream>>>(
+                        self.d_high_tm.as_device_ptr(),
+                        self.d_low_tm.as_device_ptr(),
+                        self.d_first_valids.as_device_ptr(),
+                        self.length as i32,
+                        self.cols as i32,
+                        self.rows as i32,
+                        self.d_up.as_device_ptr(),
+                        self.d_down.as_device_ptr()
+                    )
+                )
+                .expect("aroon many-series launch");
+            }
+            self.cuda.stream.synchronize().expect("aroon sync");
         }
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
@@ -495,13 +585,50 @@ pub mod benches {
             }
         }
         let cuda = CudaAroon::new(0).expect("cuda aroon");
+        let mut first_valids: Vec<i32> = vec![-1; cols];
+        for s in 0..cols {
+            for t in 0..rows {
+                let idx = t * cols + s;
+                if high_tm[idx].is_finite() && low_tm[idx].is_finite() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
+            }
+        }
+
+        let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
+        let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
+        let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+
+        // Match wrapper kernel config selection (once in prep).
+        let mut func = cuda
+            .module
+            .get_function("aroon_many_series_one_param_f32")
+            .expect("aroon_many_series_one_param_f32");
+        let _ = func.set_cache_config(CacheConfig::PreferShared);
+        let shmem_bytes_usize: usize = 2 * (25 + 1) * std::mem::size_of::<i32>();
+        let (suggested_block, _min_grid) = func
+            .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
+            .unwrap_or((128, 0));
+        let block_x: u32 = (if suggested_block > 0 { suggested_block } else { 128 }) as u32;
+        let shmem_bytes: u32 = shmem_bytes_usize as u32;
+
+        let elems = cols * rows;
+        let d_up = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_up");
+        let d_down = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }.expect("d_down");
+        cuda.stream.synchronize().expect("sync");
         Box::new(AroonManyBench {
             cuda,
-            high_tm,
-            low_tm,
+            d_high_tm,
+            d_low_tm,
+            d_first_valids,
             cols,
             rows,
             length: 25,
+            block_x,
+            shmem_bytes,
+            d_up,
+            d_down,
         })
     }
 
@@ -512,9 +639,9 @@ pub mod benches {
             CudaBenchScenario::new(
                 "aroon",
                 "one_series_many_params",
-                "aroon_cuda_batch",
+                "aroon_cuda_batch_dev",
                 "200k_x_491",
-                prep_batch,
+                prep_batch_dev,
             )
             .with_mem_required(bytes_batch),
             CudaBenchScenario::new(

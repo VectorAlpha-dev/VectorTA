@@ -115,8 +115,11 @@ void ttm_trend_batch_prefix_ff2_tiled(
     const int warm = sh_warm  [ty];
     if (p <= 0) return;
 
-    // We assume 'out' is already memset to 0.0f. Only write for t >= warm.
-    if (t < warm) return;
+    // Warmup outputs are `false` (0.0f).
+    if (t < warm) {
+        out[(size_t)row * series_len + t] = 0.0f;
+        return;
+    }
 
     const float invp = 1.0f / (float)p;
     float avg;

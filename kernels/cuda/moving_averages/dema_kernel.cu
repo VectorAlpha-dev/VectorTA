@@ -28,7 +28,7 @@
 // Host prefill recommended; enable fallback in-kernel prefix NaN init by default
 // to preserve current crate behavior without host-side changes.
 #ifndef DEMA_INIT_NANS_IN_KERNEL
-#define DEMA_INIT_NANS_IN_KERNEL 0
+#define DEMA_INIT_NANS_IN_KERNEL 1
 #endif
 
 // --------------------------------------------
@@ -49,13 +49,19 @@ void dema_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    // All recurrence is sequential; a single thread suffices
-    if (threadIdx.x != 0)  return;
-
-    if (first_valid >= series_len) return;
-
     const int period = periods[combo];
-    if (period <= 0) return;
+    const bool invalid =
+        (period <= 0) ||
+        (first_valid < 0) ||
+        (first_valid >= series_len) ||
+        (period > (series_len - first_valid));
+
+    if (invalid) {
+        for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
+            out[base + i] = NAN;
+        }
+        return;
+    }
 
     const float alpha = 2.0f / (static_cast<float>(period) + 1.0f);
     const int   warm  = first_valid + period - 1;
@@ -63,10 +69,13 @@ void dema_batch_f32(const float* __restrict__ prices,
 #if DEMA_INIT_NANS_IN_KERNEL
     // Only set prefix to NaN; remaining outputs will be overwritten.
     const int nan_end = (warm < series_len ? warm : series_len);
-    for (int i = 0; i < nan_end; ++i) {
+    for (int i = threadIdx.x; i < nan_end; i += blockDim.x) {
         out[base + i] = NAN;
     }
 #endif
+
+    // All recurrence is sequential; a single thread suffices
+    if (threadIdx.x != 0)  return;
 
     // Seed EMA at first_valid
     int t = first_valid;
@@ -130,19 +139,22 @@ void dema_many_series_one_param_time_major_f32(
 
     const int   stride  = num_series; // time-major stride
     const int   fv      = first_valids[series_idx];
-    if (fv >= series_len) return;
-
     const float alpha   = 2.0f / (static_cast<float>(period) + 1.0f);
     const int   warm    = fv + period - 1;
 
 #if DEMA_INIT_NANS_IN_KERNEL
     // Initialize only the NaN prefix for this series using intra-warp striding.
     const int nan_end = (warm < series_len ? warm : series_len);
-    for (int t = lane; t < nan_end; t += 32) {
+    // Each lane owns one series column, so write the full prefix for that series.
+    // Writes are coalesced across the warp (time-major layout).
+    for (int t = 0; t < nan_end; ++t) {
         out_tm[(size_t)t * stride + series_idx] = NAN;
     }
-    // No sync needed; each lane writes disjoint locations.
 #endif
+
+    if (fv >= series_len) {
+        return;
+    }
 
     // Lock-step over time to keep memory coalesced across the warp.
     // Maintain per-lane state: "started" after fv is reached.

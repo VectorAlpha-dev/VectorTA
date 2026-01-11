@@ -325,7 +325,7 @@ fn tradjema_prepare<'a>(
     }
 
     let chosen = match kernel {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     Ok((high, low, close, length, first, mult, chosen))
@@ -1283,12 +1283,12 @@ pub fn tradjema_into(
         {
             // aliasing: compute into temp then copy
             let mut tmp = vec![f64::NAN; len];
-            tradjema_into_slice(&mut tmp, &input, detect_best_kernel())
+            tradjema_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             std::slice::from_raw_parts_mut(out_ptr, len).copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            tradjema_into_slice(out, &input, detect_best_kernel())
+            tradjema_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())
@@ -1422,7 +1422,7 @@ pub fn tradjema_js(
         length,
         mult,
         first,
-        detect_best_kernel(),
+        Kernel::Scalar,
         &mut out,
     );
 
@@ -1488,7 +1488,7 @@ pub struct TradjemaBatchRange {
 impl Default for TradjemaBatchRange {
     fn default() -> Self {
         Self {
-            length: (40, 40, 0),
+            length: (40, 289, 1),
             mult: (10.0, 10.0, 0.0),
         }
     }

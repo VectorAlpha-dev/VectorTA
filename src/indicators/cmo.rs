@@ -231,7 +231,7 @@ fn cmo_prepare<'a>(
         });
     }
     let mut chosen = match k {
-        Kernel::Auto => detect_best_kernel(),
+        Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     // Normalize any batch kernels to their single-series equivalents here.
@@ -654,7 +654,7 @@ pub struct CmoBatchRange {
 impl Default for CmoBatchRange {
     fn default() -> Self {
         Self {
-            period: (14, 40, 1),
+            period: (14, 263, 1),
         }
     }
 }
@@ -1931,7 +1931,7 @@ pub fn cmo_js(data: &[f64], period: Option<usize>) -> Result<Vec<f64>, JsValue> 
     let input = CmoInput::from_slice(data, params);
 
     let mut output = vec![0.0; data.len()]; // Single allocation
-    cmo_into_slice(&mut output, &input, detect_best_kernel())
+    cmo_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
@@ -1957,13 +1957,13 @@ pub fn cmo_into(
         if in_ptr == out_ptr {
             // CRITICAL: Aliasing check
             let mut temp = vec![0.0; len];
-            cmo_into_slice(&mut temp, &input, detect_best_kernel())
+            cmo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            cmo_into_slice(out, &input, detect_best_kernel())
+            cmo_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
         Ok(())

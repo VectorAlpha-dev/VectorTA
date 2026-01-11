@@ -126,6 +126,111 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
 
 #[cfg(feature = "cuda")]
 #[test]
+fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[halftrend_cuda_batch_time_major_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    // Force the wrapper's time-major batch path: rows>=16 && len>=8192.
+    let len = 8192usize;
+    let mut close = vec![f64::NAN; len];
+    for i in 4..len {
+        let x = i as f64;
+        close[i] = (x * 0.0023).sin() + 0.0004 * x;
+    }
+    let mut high = close.clone();
+    let mut low = close.clone();
+    for i in 0..len {
+        if !close[i].is_nan() {
+            let x = i as f64 * 0.0025;
+            let off = (0.002 * x.sin()).abs() + 0.15;
+            high[i] = close[i] + off;
+            low[i] = close[i] - off;
+        }
+    }
+
+    let sweep = HalfTrendBatchRange {
+        amplitude: (2, 32, 2),
+        channel_deviation: (2.0, 2.0, 0.0),
+        atr_period: (14, 14, 0),
+    };
+
+    // Quantize to f32 to match CUDA inputs
+    let hq: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
+    let lq: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
+    let cq: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
+    let cpu =
+        halftrend_batch_with_kernel_slices_internal(&hq, &lq, &cq, &sweep, Kernel::ScalarBatch)?;
+
+    let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
+    let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
+    let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
+
+    let cuda = CudaHalftrend::new(0).expect("CudaHalftrend::new");
+
+    let need = cpu.rows * cpu.cols;
+    let mut g_ht = vec![0f32; need];
+    let mut g_tr = vec![0f32; need];
+    let mut g_ah = vec![0f32; need];
+    let mut g_al = vec![0f32; need];
+    let mut g_bs = vec![0f32; need];
+    let mut g_ss = vec![0f32; need];
+    let (rows, cols, _) = cuda.halftrend_batch_into_host_f32(
+        &high_f32,
+        &low_f32,
+        &close_f32,
+        &sweep,
+        &mut g_ht,
+        &mut g_tr,
+        &mut g_ah,
+        &mut g_al,
+        &mut g_bs,
+        &mut g_ss,
+    )?;
+
+    assert_eq!(rows, cpu.rows);
+    assert_eq!(cols, cpu.cols);
+
+    let tol = 1e-3; // FP32 tolerance
+    for idx in 0..need {
+        assert!(
+            approx_eq(cpu.halftrend[idx], g_ht[idx] as f64, tol),
+            "halftrend mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.trend[idx], g_tr[idx] as f64, 1e-3),
+            "trend mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.atr_high[idx], g_ah[idx] as f64, tol),
+            "atr_high mismatch at {}",
+            idx
+        );
+        assert!(
+            approx_eq(cpu.atr_low[idx], g_al[idx] as f64, tol),
+            "atr_low mismatch at {}",
+            idx
+        );
+        // buy/sell are sparse; compare only where one is finite
+        let cb = cpu.buy_signal[idx];
+        let gb = g_bs[idx] as f64;
+        if !(cb.is_nan() && gb.is_nan()) {
+            assert!(approx_eq(cb, gb, 5e-2), "buy mismatch at {}", idx);
+        }
+        let cs = cpu.sell_signal[idx];
+        let gs = g_ss[idx] as f64;
+        if !(cs.is_nan() && gs.is_nan()) {
+            assert!(approx_eq(cs, gs, 5e-2), "sell mismatch at {}", idx);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
 fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if !cuda_available() {
         eprintln!("[halftrend_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");

@@ -1,4 +1,4 @@
-// Dynamic Trend Index (DTI) – optimized FP32 kernels
+// Dynamic Trend Index (DTI) â€“ optimized FP32 kernels
 // Semantics are identical to the original:
 //  - start = first_valid + 1
 //  - outputs [0..start-1] = NaN
@@ -37,7 +37,7 @@ static __device__ __forceinline__ void ema_kahan_step(const float alpha,
     e                  = t;
 }
 
-// -------------------- Batch (one series × many params) --------------------
+// -------------------- Batch (one series Ã— many params) --------------------
 // x, ax: precomputed on host starting at index `start`
 extern "C" __global__ void dti_batch_f32(
     const float* __restrict__ x,          // [series_len]
@@ -99,7 +99,7 @@ extern "C" __global__ void dti_batch_f32(
     }
 }
 
-// -------------------- Many series × one param (time-major) --------------------
+// -------------------- Many series Ã— one param (time-major) --------------------
 // Inputs are time-major: a[t * num_series + s]
 extern "C" __global__ void dti_many_series_one_param_f32(
     const float* __restrict__ high_tm,
