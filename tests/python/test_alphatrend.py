@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -33,7 +33,7 @@ class TestAlphaTrend:
         volume = test_data['volume']
         expected = EXPECTED_OUTPUTS['alphatrend']
         
-        # Call AlphaTrend with default parameters
+        
         k1, k2 = ta_indicators.alphatrend(
             open_data,
             high,
@@ -48,8 +48,8 @@ class TestAlphaTrend:
         assert len(k1) == len(close)
         assert len(k2) == len(close)
         
-        # Check last 5 K1 values
-        # Match Rust unit test tolerance (abs diff < 1e-6)
+        
+        
         assert_close(
             k1[-5:],
             expected['k1_last_5_values'],
@@ -58,8 +58,8 @@ class TestAlphaTrend:
             msg="AlphaTrend K1 last 5 values mismatch"
         )
         
-        # Check last 5 K2 values
-        # Match Rust unit test tolerance (abs diff < 1e-6)
+        
+        
         assert_close(
             k2[-5:],
             expected['k2_last_5_values'],
@@ -76,7 +76,7 @@ class TestAlphaTrend:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Call AlphaTrend with no_volume=True (uses RSI)
+        
         k1, k2 = ta_indicators.alphatrend(
             open_data,
             high,
@@ -91,7 +91,7 @@ class TestAlphaTrend:
         assert len(k1) == len(close)
         assert len(k2) == len(close)
         
-        # Check that non-NaN values exist after warmup
+        
         non_nan_k1 = k1[~np.isnan(k1)]
         non_nan_k2 = k2[~np.isnan(k2)]
         assert len(non_nan_k1) > 0
@@ -118,7 +118,7 @@ class TestAlphaTrend:
     def test_alphatrend_inconsistent_lengths(self):
         """Test AlphaTrend fails with inconsistent array lengths"""
         open_data = np.array([10.0, 20.0, 30.0])
-        high = np.array([12.0, 22.0])  # Different length
+        high = np.array([12.0, 22.0])  
         low = np.array([8.0, 18.0, 28.0])
         close = np.array([11.0, 21.0, 31.0])
         volume = np.array([100.0, 200.0, 300.0])
@@ -158,7 +158,7 @@ class TestAlphaTrend:
         volume = test_data['volume']
         expected = EXPECTED_OUTPUTS['alphatrend']
         
-        # Initialize stream with default parameters
+        
         stream = ta_indicators.AlphaTrendStream(
             coeff=expected['default_params']['coeff'],
             period=expected['default_params']['period'],
@@ -168,8 +168,8 @@ class TestAlphaTrend:
         stream_k1 = []
         stream_k2 = []
         
-        # Feed data points one by one
-        for i in range(min(100, len(close))):  # Test first 100 points for speed
+        
+        for i in range(min(100, len(close))):  
             result = stream.update(high[i], low[i], close[i], volume[i])
             
             if result is not None:
@@ -179,14 +179,14 @@ class TestAlphaTrend:
                 stream_k1.append(np.nan)
                 stream_k2.append(np.nan)
         
-        # Note: If streaming returns None throughout, this is a known limitation
-        # Document the expected behavior
+        
+        
         if all(np.isnan(stream_k1)):
-            # Current implementation doesn't support full streaming
+            
             pass
         else:
-            # If streaming is implemented, verify results
-            # Batch calculation for comparison
+            
+            
             batch_k1, batch_k2 = ta_indicators.alphatrend(
                 test_data['open'][:100],
                 high[:100],
@@ -198,7 +198,7 @@ class TestAlphaTrend:
                 no_volume=expected['default_params']['no_volume']
             )
             
-            # Compare where both have values
+            
             for i in range(len(stream_k1)):
                 if not np.isnan(stream_k1[i]) and not np.isnan(batch_k1[i]):
                     assert_close(stream_k1[i], batch_k1[i], rtol=1e-9,
@@ -209,7 +209,7 @@ class TestAlphaTrend:
     
     def test_alphatrend_different_parameters(self):
         """Test AlphaTrend with various parameter combinations"""
-        # Generate synthetic data
+        
         size = 100
         np.random.seed(42)
         open_data = np.cumsum(np.random.randn(size)) + 100
@@ -218,7 +218,7 @@ class TestAlphaTrend:
         close = (high + low) / 2 + np.random.randn(size) * 0.5
         volume = np.abs(np.random.randn(size)) * 1000 + 500
         
-        # Test different coefficients
+        
         for coeff in [0.5, 1.0, 2.0]:
             k1, k2 = ta_indicators.alphatrend(
                 open_data, high, low, close, volume,
@@ -227,7 +227,7 @@ class TestAlphaTrend:
             assert len(k1) == size
             assert len(k2) == size
         
-        # Test different periods
+        
         for period in [7, 14, 21]:
             k1, k2 = ta_indicators.alphatrend(
                 open_data, high, low, close, volume,
@@ -236,7 +236,7 @@ class TestAlphaTrend:
             assert len(k1) == size
             assert len(k2) == size
         
-        # Test with and without volume
+        
         k1_mfi, k2_mfi = ta_indicators.alphatrend(
             open_data, high, low, close, volume,
             coeff=1.0, period=14, no_volume=False
@@ -246,8 +246,8 @@ class TestAlphaTrend:
             coeff=1.0, period=14, no_volume=True
         )
         
-        # Results should be different when using RSI vs MFI
-        # After warmup period, check that they differ
+        
+        
         valid_idx = ~(np.isnan(k1_mfi) | np.isnan(k1_rsi))
         if np.any(valid_idx):
             assert not np.allclose(k1_mfi[valid_idx], k1_rsi[valid_idx], rtol=1e-10)
@@ -271,14 +271,14 @@ class TestAlphaTrend:
             no_volume=expected['default_params']['no_volume']
         )
         
-        # Check warmup period
+        
         warmup = expected['warmup_period']
         
-        # First warmup values should be NaN
+        
         assert np.all(np.isnan(k1[:warmup])), f"Expected NaN in K1 warmup period (first {warmup} values)"
         assert np.all(np.isnan(k2[:warmup])), f"Expected NaN in K2 warmup period (first {warmup} values)"
         
-        # After warmup, should have real values (not all NaN)
+        
         if len(k1) > warmup + 10:
             assert not np.all(np.isnan(k1[warmup:warmup+10])), "K1 should have real values after warmup"
             assert not np.all(np.isnan(k2[warmup:warmup+10])), "K2 should have real values after warmup"
@@ -291,14 +291,14 @@ class TestAlphaTrend:
         implemented in the Python bindings. When implemented, it should follow
         the pattern of other batch functions like alma_batch.
         """
-        close = test_data['close'][:200]  # Use smaller dataset for speed
+        close = test_data['close'][:200]  
         high = test_data['high'][:200]
         low = test_data['low'][:200]
         open_data = test_data['open'][:200]
         volume = test_data['volume'][:200]
         expected = EXPECTED_OUTPUTS['alphatrend']
         
-        # Test single parameter set (default)
+        
         result = ta_indicators.alphatrend_batch(
             open_data,
             high,
@@ -316,43 +316,43 @@ class TestAlphaTrend:
         assert 'periods' in result
         assert 'no_volume_flags' in result
         
-        # Should have 1 combination
+        
         assert result['k1_values'].shape[0] == 1
         assert result['k2_values'].shape[0] == 1
         assert result['k1_values'].shape[1] == len(close)
         assert result['k2_values'].shape[1] == len(close)
         
-        # Test multiple parameter combinations
+        
         result_multi = ta_indicators.alphatrend_batch(
             open_data,
             high,
             low,
             close,
             volume,
-            coeff_range=(0.5, 2.0, 0.5),  # 0.5, 1.0, 1.5, 2.0
-            period_range=(7, 21, 7),       # 7, 14, 21
-            no_volume=[False, True]        # Both MFI and RSI
+            coeff_range=(0.5, 2.0, 0.5),  
+            period_range=(7, 21, 7),       
+            no_volume=[False, True]        
         )
         
-        # Should have 4 * 3 * 2 = 24 combinations
+        
         assert result_multi['k1_values'].shape[0] == 24
         assert result_multi['k2_values'].shape[0] == 24
         
-        # Verify parameters are correct
+        
         assert len(result_multi['coeffs']) == 24
         assert len(result_multi['periods']) == 24
         assert len(result_multi['no_volume_flags']) == 24
     
     def test_alphatrend_nan_distribution(self, test_data):
         """Test AlphaTrend NaN handling throughout the data"""
-        # Create data with NaN values scattered throughout
+        
         close = test_data['close'].copy()
         high = test_data['high'].copy()
         low = test_data['low'].copy()
         open_data = test_data['open'].copy()
         volume = test_data['volume'].copy()
         
-        # Insert some NaN values
+        
         nan_indices = [50, 100, 150, 200, 250]
         for idx in nan_indices:
             if idx < len(close):
@@ -360,7 +360,7 @@ class TestAlphaTrend:
                 high[idx] = np.nan
                 low[idx] = np.nan
         
-        # Should still compute where possible
+        
         k1, k2 = ta_indicators.alphatrend(
             open_data,
             high,
@@ -375,15 +375,15 @@ class TestAlphaTrend:
         assert len(k1) == len(close)
         assert len(k2) == len(close)
         
-        # NaN indices should affect outputs. Batch implementation uses a sticky regime:
-        # when inputs are NaN, it may keep the previous alpha instead of emitting NaN.
-        # Accept either explicit NaN or a sticky (unchanged) value at that index.
+        
+        
+        
         for idx in nan_indices:
             if idx < len(k1):
                 sticky_ok = False
                 if idx > 0:
                     same_k1 = np.isfinite(k1[idx]) and np.isfinite(k1[idx-1]) and np.isclose(k1[idx], k1[idx-1])
-                    # K2 can also legitimately remain the prior lagged value
+                    
                     same_k2 = np.isfinite(k2[idx]) and np.isfinite(k2[idx-1]) and np.isclose(k2[idx], k2[idx-1])
                     sticky_ok = same_k1 or same_k2
                 assert (np.isnan(k1[idx]) or np.isnan(k2[idx]) or sticky_ok), \

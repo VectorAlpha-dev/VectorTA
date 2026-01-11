@@ -4,8 +4,8 @@ import numpy as np
 
 try:
     import cupy as cp
-except Exception:  # pragma: no cover - optional dependency or env issues
-    # Catch broad exceptions (e.g., binary incompatibilities) and skip tests
+except Exception:  
+    
     cp = None
 
 try:

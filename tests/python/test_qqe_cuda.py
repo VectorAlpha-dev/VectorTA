@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional
+except ImportError:  
     cp = None
 
 try:
@@ -50,10 +50,10 @@ class TestQqeCuda:
         close = test_data['close']
         rsi_p, ema_p, fast_k = 14, 5, 4.236
 
-        # CPU baseline
+        
         cpu_fast, cpu_slow = ti.qqe(close, rsi_p, ema_p, fast_k)
 
-        # CUDA single-combo batch
+        
         handle, meta = ti.qqe_cuda_batch_dev(
             close.astype(np.float32),
             rsi_period_range=(rsi_p, rsi_p, 0),
@@ -61,7 +61,7 @@ class TestQqeCuda:
             fast_factor_range=(fast_k, fast_k, 0.0),
         )
         gpu = cp.asnumpy(cp.asarray(handle))
-        # rows: [fast; slow]
+        
         fast_row = gpu[0]
         slow_row = gpu[1]
 
@@ -78,7 +78,7 @@ class TestQqeCuda:
 
         rsi_p, ema_p, fast_k = 14, 5, 4.236
 
-        # CPU baseline
+        
         cpu_fast = np.full_like(tm, np.nan)
         cpu_slow = np.full_like(tm, np.nan)
         for j in range(N):
@@ -86,11 +86,11 @@ class TestQqeCuda:
             cpu_fast[:, j] = f
             cpu_slow[:, j] = s
 
-        # CUDA
+        
         handle = ti.qqe_cuda_many_series_one_param_dev(
             tm.astype(np.float32), rsi_p, ema_p, fast_k
         )
-        out_tm = cp.asnumpy(cp.asarray(handle))  # shape (T, 2N)
+        out_tm = cp.asnumpy(cp.asarray(handle))  
         gpu_fast = out_tm[:, :N]
         gpu_slow = out_tm[:, N:]
 

@@ -6,7 +6,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 
-const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
 const importPath = process.platform === 'win32' 
     ? 'file:///' + wasmPath.replace(/\\/g, '/')
     : wasmPath;

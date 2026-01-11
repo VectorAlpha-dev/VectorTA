@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -27,13 +27,13 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "donchian_cuda_batch_dev"):
         return False
     try:
-        # tiny probe
+        
         high = np.array([np.nan, 3.0, 5.0, 4.0], dtype=np.float32)
         low  = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float32)
         out = ti.donchian_cuda_batch_dev(high, low, period_range=(2, 2, 0))
-        _ = cp.asarray(out["upper"])  # device array interface
+        _ = cp.asarray(out["upper"])  
         return True
-    except Exception as exc:  # pragma: no cover - availability probe only
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False

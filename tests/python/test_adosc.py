@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -32,11 +32,11 @@ class TestAdosc:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with short period only (default long = 10)
+        
         result = ta_indicators.adosc(high, low, close, volume, 2, 10)
         assert len(result) == len(close)
         
-        # Test with long period only (default short = 3)
+        
         result2 = ta_indicators.adosc(high, low, close, volume, 3, 12)
         assert len(result2) == len(close)
     
@@ -49,25 +49,25 @@ class TestAdosc:
         
         result = ta_indicators.adosc(
             high, low, close, volume,
-            short_period=3,  # Default short period
-            long_period=10   # Default long period
+            short_period=3,  
+            long_period=10   
         )
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_last_five = [-166.2175, -148.9983, -144.9052, -128.5921, -142.0772]
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-1,  # Using same tolerance as Rust test
+            rtol=1e-1,  
             msg="ADOSC last 5 values mismatch"
         )
         
-        # All values should be finite
+        
         assert np.all(np.isfinite(result)), "All ADOSC values should be finite"
         
-        # ADOSC has no warmup period - first value should be calculated
+        
         assert not np.isnan(result[0]), "First ADOSC value should not be NaN (no warmup period)"
     
     def test_adosc_default_candles(self, test_data):
@@ -77,7 +77,7 @@ class TestAdosc:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Default params: short_period=3, long_period=10
+        
         result = ta_indicators.adosc(high, low, close, volume, 3, 10)
         assert len(result) == len(close)
     
@@ -88,11 +88,11 @@ class TestAdosc:
         close = np.array([7.0, 7.0, 7.0])
         volume = np.array([1000.0, 1000.0, 1000.0])
         
-        # Zero short period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.adosc(high, low, close, volume, short_period=0, long_period=10)
         
-        # Zero long period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=0)
     
@@ -126,7 +126,7 @@ class TestAdosc:
     def test_adosc_mismatched_lengths(self):
         """Test ADOSC fails when input arrays have different lengths"""
         high = np.array([10.0, 11.0, 12.0])
-        low = np.array([5.0, 5.5])  # Different length
+        low = np.array([5.0, 5.5])  
         close = np.array([7.0, 8.0, 9.0])
         volume = np.array([1000.0, 1000.0, 1000.0])
         
@@ -140,11 +140,11 @@ class TestAdosc:
         close = np.array([7.0, 8.0, 9.0, 10.0, 11.0])
         volume = np.array([1000.0, 1000.0, 1000.0, 1000.0, 1000.0])
         
-        # short = long
+        
         with pytest.raises(ValueError, match="short_period must be less than long_period"):
             ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=3)
         
-        # short > long
+        
         with pytest.raises(ValueError, match="short_period must be less than long_period"):
             ta_indicators.adosc(high, low, close, volume, short_period=5, long_period=3)
     
@@ -165,12 +165,12 @@ class TestAdosc:
         result = ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=10)
         assert len(result) == len(close)
         
-        # ADOSC starts calculating from index 0 (no warmup period)
-        # After index 240, no NaN values should exist
+        
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after index 240"
         
-        # First value should not be NaN (ADOSC calculates from the start)
+        
         assert not np.isnan(result[0]), "First ADOSC value should not be NaN"
     
     def test_adosc_streaming(self, test_data):
@@ -182,14 +182,14 @@ class TestAdosc:
         short_period = 3
         long_period = 10
         
-        # Batch calculation
+        
         batch_result = ta_indicators.adosc(
             high, low, close, volume,
             short_period=short_period,
             long_period=long_period
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.AdoscStream(short_period=short_period, long_period=long_period)
         stream_values = []
         
@@ -199,10 +199,10 @@ class TestAdosc:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values - should be identical
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             assert_close(b, s, rtol=1e-9, atol=1e-9, 
                         msg=f"ADOSC streaming mismatch at index {i}")
@@ -216,22 +216,22 @@ class TestAdosc:
         
         result = ta_indicators.adosc_batch(
             high, low, close, volume,
-            short_period_range=(3, 3, 0),  # Default short period only
-            long_period_range=(10, 10, 0)  # Default long period only
+            short_period_range=(3, 3, 0),  
+            long_period_range=(10, 10, 0)  
         )
         
         assert 'values' in result
         assert 'shorts' in result
         assert 'longs' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         
-        # Should match single calculation
+        
         single_result = ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=10)
         assert_close(default_row, single_result, rtol=1e-9, msg="ADOSC batch default row mismatch")
     
@@ -244,23 +244,23 @@ class TestAdosc:
         
         result = ta_indicators.adosc_batch(
             high, low, close, volume,
-            short_period_range=(2, 5, 1),  # 2, 3, 4, 5
-            long_period_range=(8, 12, 2)   # 8, 10, 12
+            short_period_range=(2, 5, 1),  
+            long_period_range=(8, 12, 2)   
         )
         
-        # Check structure
+        
         assert 'values' in result
         assert 'shorts' in result
         assert 'longs' in result
         
-        # Should have valid combinations only (where short < long)
-        # Valid: (2,8), (2,10), (2,12), (3,8), (3,10), (3,12), (4,8), (4,10), (4,12), (5,8), (5,10), (5,12)
-        # But (5,8) is invalid since we need short < long, so 11 valid combinations
+        
+        
+        
         valid_count = sum(1 for s in [2, 3, 4, 5] for l in [8, 10, 12] if s < l)
         assert result['values'].shape[0] == valid_count
         assert result['values'].shape[1] == len(close)
         
-        # Verify periods match
+        
         assert len(result['shorts']) == valid_count
         assert len(result['longs']) == valid_count
     
@@ -269,12 +269,12 @@ class TestAdosc:
         high = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
         low = np.array([5.0, 5.5, 6.0, 6.5, 7.0])
         close = np.array([7.0, 8.0, 9.0, 10.0, 11.0])
-        volume = np.array([0.0, 0.0, 0.0, 0.0, 0.0])  # All zero volume
+        volume = np.array([0.0, 0.0, 0.0, 0.0, 0.0])  
         
         result = ta_indicators.adosc(high, low, close, volume, short_period=2, long_period=3)
         assert len(result) == len(close)
         
-        # With zero volume, ADOSC should be 0
+        
         assert_close(result, np.zeros_like(result), rtol=1e-9, msg="ADOSC with zero volume should be 0")
     
     def test_adosc_constant_price(self):
@@ -288,8 +288,8 @@ class TestAdosc:
         result = ta_indicators.adosc(high, low, close, volume, short_period=3, long_period=5)
         assert len(result) == len(close)
         
-        # With constant price (high = low), MFM is undefined (0/0), should be treated as 0
-        # So ADOSC should be 0
+        
+        
         assert_close(result, np.zeros_like(result), rtol=1e-9, msg="ADOSC with constant price should be 0")
 
 

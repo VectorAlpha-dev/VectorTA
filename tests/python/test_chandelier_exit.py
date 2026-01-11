@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,7 +30,7 @@ class TestChandelierExit:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with defaults (period=22, mult=3.0, use_close=True)
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high, low, close, 22, 3.0, True
         )
@@ -44,7 +44,7 @@ class TestChandelierExit:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['chandelier_exit']
         
-        # Call Chandelier Exit with default parameters
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high,
             low,
@@ -57,17 +57,17 @@ class TestChandelierExit:
         assert len(long_stop) == len(close)
         assert len(short_stop) == len(close)
         
-        # The expected values are from specific indices (15386-15390), not the last values
-        # Check if those indices exist and match
+        
+        
         expected_indices = [15386, 15387, 15388, 15389, 15390]
         
         if len(short_stop) > max(expected_indices):
-            # Test specific indices if they exist
-            # Match Rust absolute tolerance (<= 1e-5) for reference values
+            
+            
             for idx, exp_val in zip(expected_indices, expected['short_stop_last_5']):
                 assert_close(short_stop[idx], exp_val, rtol=1e-12, atol=1e-5, msg=f"short_stop[{idx}]")
         else:
-            # Fallback: just verify we have valid values after warmup
+            
             non_nan_indices = [i for i in range(len(short_stop)) if not np.isnan(short_stop[i])]
             assert len(non_nan_indices) > 0, "Should have some non-NaN short_stop values"
     
@@ -77,7 +77,7 @@ class TestChandelierExit:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: period=22, mult=3.0, use_close=True
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high, low, close, 22, 3.0, True
         )
@@ -124,14 +124,14 @@ class TestChandelierExit:
         low = test_data['low'][:30]
         close = test_data['close'][:30]
         
-        # Test with negative multiplier (should work but produce inverted stops)
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high, low, close, period=10, mult=-2.0, use_close=True
         )
         assert len(long_stop) == 30
         assert len(short_stop) == 30
         
-        # Test with zero multiplier (should work)
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high, low, close, period=10, mult=0.0, use_close=True
         )
@@ -144,7 +144,7 @@ class TestChandelierExit:
         low = test_data['low'][:50].copy()
         close = test_data['close'][:50].copy()
         
-        # Insert NaN values at various positions
+        
         high[10] = np.nan
         low[20] = np.nan
         close[30] = np.nan
@@ -156,8 +156,8 @@ class TestChandelierExit:
         assert len(long_stop) == 50
         assert len(short_stop) == 50
         
-        # Check warmup period has NaN values
-        for i in range(9):  # period - 1
+        
+        for i in range(9):  
             assert np.isnan(long_stop[i]), f"Expected NaN at warmup index {i}"
             assert np.isnan(short_stop[i]), f"Expected NaN at warmup index {i}"
     
@@ -171,7 +171,7 @@ class TestChandelierExit:
     def test_chandelier_exit_inconsistent_lengths(self):
         """Test CE fails with inconsistent data lengths"""
         high = np.array([10.0, 11.0, 12.0])
-        low = np.array([9.0, 10.0])  # Different length
+        low = np.array([9.0, 10.0])  
         close = np.array([9.5, 10.5, 11.5])
         
         with pytest.raises(ValueError, match="Inconsistent data lengths"):
@@ -183,7 +183,7 @@ class TestChandelierExit:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with custom parameters
+        
         long_stop, short_stop = ta_indicators.chandelier_exit(
             high,
             low,
@@ -196,18 +196,18 @@ class TestChandelierExit:
         assert len(long_stop) == len(close)
         assert len(short_stop) == len(close)
         
-        # Check that we have non-NaN values after warmup
+        
         assert not all(np.isnan(long_stop[14:]))
         assert not all(np.isnan(short_stop[14:]))
     
     def test_chandelier_exit_streaming(self, test_data):
         """Test Chandelier Exit streaming functionality - mirrors check_chandelier_exit_streaming"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         expected = EXPECTED_OUTPUTS['chandelier_exit']
         
-        # Batch calculation
+        
         batch_long, batch_short = ta_indicators.chandelier_exit(
             high, low, close,
             period=expected['default_params']['period'],
@@ -215,14 +215,14 @@ class TestChandelierExit:
             use_close=expected['default_params']['use_close']
         )
         
-        # Create streaming instance
+        
         stream = ta_indicators.ChandelierExitStreamPy(
             period=expected['default_params']['period'],
             mult=expected['default_params']['mult'],
             use_close=expected['default_params']['use_close']
         )
         
-        # Process data points one by one
+        
         stream_long = []
         stream_short = []
         for i in range(len(close)):
@@ -234,7 +234,7 @@ class TestChandelierExit:
                 stream_long.append(np.nan)
                 stream_short.append(np.nan)
         
-        # Compare batch vs streaming (allowing for small numerical differences)
+        
         for i in range(len(close)):
             if np.isnan(batch_long[i]) and np.isnan(stream_long[i]):
                 continue
@@ -248,25 +248,25 @@ class TestChandelierExit:
                 assert_close(batch_short[i], stream_short[i], rtol=1e-9, atol=1e-9,
                            msg=f"CE streaming short mismatch at index {i}")
         
-        # Test reset
+        
         stream.reset()
         result_after_reset = None
         for i in range(30):
             result_after_reset = stream.update(high[i], low[i], close[i])
         
-        # Should have results after warmup
+        
         assert result_after_reset is not None
     
     def test_chandelier_exit_batch(self, test_data):
         """Test Chandelier Exit batch processing - mirrors alma batch tests"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
         result = ta_indicators.chandelier_exit_batch(
             high, low, close,
-            period_range=(22, 22, 0),  # Default period only
-            mult_range=(3.0, 3.0, 0.0),  # Default mult only
+            period_range=(22, 22, 0),  
+            mult_range=(3.0, 3.0, 0.0),  
             use_close=True
         )
         
@@ -275,19 +275,19 @@ class TestChandelierExit:
         assert 'mults' in result
         assert 'use_close' in result
         
-        # Should have 1 combination (default params)
-        assert result['values'].shape[0] == 2  # 2 rows (long_stop, short_stop)
-        assert result['values'].shape[1] == 100  # columns = data length
         
-        # Extract the short_stop row (second row)
+        assert result['values'].shape[0] == 2  
+        assert result['values'].shape[1] == 100  
+        
+        
         short_stop_row = result['values'][1]
         
-        # Compare with single calculation
+        
         single_long, single_short = ta_indicators.chandelier_exit(
             high, low, close, period=22, mult=3.0, use_close=True
         )
         
-        # Values should match
+        
         for i in range(100):
             if np.isnan(single_short[i]) and np.isnan(short_stop_row[i]):
                 continue
@@ -297,25 +297,25 @@ class TestChandelierExit:
     
     def test_chandelier_exit_batch_sweep(self, test_data):
         """Test CE batch with parameter sweep"""
-        high = test_data['high'][:50]  # Small dataset for speed
+        high = test_data['high'][:50]  
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
         result = ta_indicators.chandelier_exit_batch(
             high, low, close,
-            period_range=(10, 20, 10),  # periods: 10, 20
-            mult_range=(2.0, 3.0, 1.0),  # mults: 2.0, 3.0
+            period_range=(10, 20, 10),  
+            mult_range=(2.0, 3.0, 1.0),  
             use_close=True
         )
         
-        # Should have 2 * 2 = 4 combinations
-        # Each combo produces 2 rows (long, short), so 8 rows total
+        
+        
         assert result['values'].shape[0] == 8
         assert result['values'].shape[1] == 50
         assert len(result['periods']) == 4
         assert len(result['mults']) == 4
         
-        # Verify parameters are correct
+        
         expected_periods = [10, 10, 20, 20]
         expected_mults = [2.0, 3.0, 2.0, 3.0]
         
@@ -329,7 +329,7 @@ class TestChandelierExit:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with minimum data for period=22
+        
         small_high = high[:30]
         small_low = low[:30]
         small_close = close[:30]
@@ -344,12 +344,12 @@ class TestChandelierExit:
         assert len(long_stop) == 30
         assert len(short_stop) == 30
         
-        # First 21 values should be NaN (warmup period = period - 1)
+        
         assert all(np.isnan(long_stop[:21]))
         assert all(np.isnan(short_stop[:21]))
         
-        # Should have some valid values after warmup
-        # Note: Direction determines which stop is active
+        
+        
         has_valid = False
         for i in range(21, 30):
             if not np.isnan(long_stop[i]) or not np.isnan(short_stop[i]):

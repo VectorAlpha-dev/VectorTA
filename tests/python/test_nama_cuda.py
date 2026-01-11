@@ -7,12 +7,12 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -26,13 +26,13 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, "nama_cuda_batch_dev"):
         return False
-    # Probe minimal call; tolerate environment errors as unavailability
+    
     probe = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
     try:
         handle = ti.nama_cuda_batch_dev(probe, period_range=(3, 3, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
@@ -95,7 +95,7 @@ class TestNamaCuda:
         series = test_data["close"][:T].astype(np.float64)
         data_tm = np.full((T, N), np.nan, dtype=np.float64)
         for j in range(N):
-            # Create varied but deterministic columns with NaN prefixes
+            
             for t in range(j + 5, T):
                 base = series[t] if np.isfinite(series[t]) else 0.0
                 data_tm[t, j] = np.sin(0.0021 * base + 0.017 * j) + 0.00029 * t

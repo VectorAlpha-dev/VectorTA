@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         handle = ti.marketefi_cuda_batch_dev(h, l, v)
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - detection only
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

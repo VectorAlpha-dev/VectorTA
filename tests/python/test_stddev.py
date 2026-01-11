@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestStdDev:
         """Test StdDev with partial parameters - mirrors check_stddev_partial_params"""
         close = test_data['close']
         
-        # Test with default params (period=5, nbdev=1.0)
+        
         result = ta_indicators.stddev(close, 5, 1.0)
         assert len(result) == len(close)
     
@@ -37,12 +37,12 @@ class TestStdDev:
         """Test StdDev matches expected values from Rust tests - mirrors check_stddev_accuracy"""
         close = test_data['close']
         
-        # Using default params: period=5, nbdev=1.0
+        
         result = ta_indicators.stddev(close, period=5, nbdev=1.0)
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         expected_last_five = [
             180.12506767314034,
             77.7395652441455,
@@ -54,18 +54,18 @@ class TestStdDev:
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-1,  # Using larger tolerance as per Rust test
+            rtol=1e-1,  
             msg="StdDev last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('stddev', result, 'close', {'period': 5, 'nbdev': 1.0})
     
     def test_stddev_default_candles(self, test_data):
         """Test StdDev with default parameters - mirrors check_stddev_default_candles"""
         close = test_data['close']
         
-        # Default params: period=5, nbdev=1.0
+        
         result = ta_indicators.stddev(close, 5, 1.0)
         assert len(result) == len(close)
     
@@ -108,15 +108,15 @@ class TestStdDev:
         """Test StdDev slice reinput - mirrors check_stddev_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.stddev(close, period=10, nbdev=1.0)
         
-        # Second pass using first result as input
+        
         second_result = ta_indicators.stddev(first_result, period=10, nbdev=1.0)
         
         assert len(second_result) == len(first_result)
         
-        # After warmup period (19), should have no NaN values
+        
         assert all(not np.isnan(v) for v in second_result[19:])
     
     def test_stddev_nan_handling(self, test_data):
@@ -126,7 +126,7 @@ class TestStdDev:
         result = ta_indicators.stddev(close, period=5, nbdev=1.0)
         assert len(result) == len(close)
         
-        # After index 20, should have no NaN values
+        
         if len(result) > 20:
             assert all(not np.isnan(v) for v in result[20:])
     
@@ -134,15 +134,15 @@ class TestStdDev:
         """Test StdDev with different kernel options"""
         close = test_data['close']
         
-        # Test scalar kernel
+        
         result_scalar = ta_indicators.stddev(close, 5, 1.0, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test auto kernel (default)
+        
         result_auto = ta_indicators.stddev(close, 5, 1.0)
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(
             result_scalar,
             result_auto,
@@ -154,19 +154,19 @@ class TestStdDev:
         """Test StdDev streaming functionality"""
         close = test_data['close']
         
-        # Create stream
+        
         stream = ta_indicators.StdDevStream(period=5, nbdev=1.0)
         
-        # Process data through stream
+        
         stream_results = []
         for price in close:
             result = stream.update(price)
             stream_results.append(result if result is not None else np.nan)
         
-        # Batch calculation for comparison
+        
         batch_results = ta_indicators.stddev(close, period=5, nbdev=1.0)
         
-        # Compare results
+        
         assert_close(
             stream_results,
             batch_results,
@@ -178,7 +178,7 @@ class TestStdDev:
         """Test StdDev batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter combination
+        
         result = ta_indicators.stddev_batch(
             close,
             period_range=(5, 5, 0),
@@ -189,11 +189,11 @@ class TestStdDev:
         assert 'periods' in result
         assert 'nbdevs' in result
         
-        # Should have 1 row, len(close) columns
+        
         values = result['values']
         assert values.shape == (1, len(close))
         
-        # Compare with single calculation
+        
         single_result = ta_indicators.stddev(close, 5, 1.0)
         assert_close(
             values[0],
@@ -204,9 +204,9 @@ class TestStdDev:
     
     def test_stddev_batch_multiple_periods(self, test_data):
         """Test StdDev batch with multiple periods"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 5, 10, 15
+        
         result = ta_indicators.stddev_batch(
             close,
             period_range=(5, 15, 5),
@@ -216,12 +216,12 @@ class TestStdDev:
         values = result['values']
         periods = result['periods']
         
-        # Should have 3 rows
+        
         assert values.shape == (3, len(close))
         assert len(periods) == 3
         assert list(periods) == [5, 10, 15]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(periods):
             single_result = ta_indicators.stddev(close, int(period), 1.0)
             assert_close(
@@ -233,24 +233,24 @@ class TestStdDev:
     
     def test_stddev_batch_full_parameter_sweep(self, test_data):
         """Test StdDev batch with full parameter sweep"""
-        close = test_data['close'][:50]  # Small dataset for speed
+        close = test_data['close'][:50]  
         
         result = ta_indicators.stddev_batch(
             close,
-            period_range=(5, 10, 5),      # 2 periods: 5, 10
-            nbdev_range=(1.0, 2.0, 0.5)   # 3 nbdevs: 1.0, 1.5, 2.0
+            period_range=(5, 10, 5),      
+            nbdev_range=(1.0, 2.0, 0.5)   
         )
         
         values = result['values']
         periods = result['periods']
         nbdevs = result['nbdevs']
         
-        # Should have 2 * 3 = 6 combinations
+        
         assert values.shape == (6, len(close))
         assert len(periods) == 6
         assert len(nbdevs) == 6
         
-        # Verify parameter combinations
+        
         expected_combos = [
             (5, 1.0), (5, 1.5), (5, 2.0),
             (10, 1.0), (10, 1.5), (10, 2.0)

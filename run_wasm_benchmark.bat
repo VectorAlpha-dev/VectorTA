@@ -24,14 +24,14 @@ if %FORCE_REBUILD%==1 (
     echo Force rebuilding WASM package with optimizations...
     goto :build
 )
-if not exist pkg\my_project.js (
+if not exist pkg\vector_ta.js (
     echo Building WASM package with optimizations...
     goto :build
 )
 goto :skipbuild
 
 :build
-call wasm-pack build --target nodejs --features wasm --release -- --features nightly-avx
+call wasm-pack build --target nodejs --out-name vector_ta --release --features wasm,nightly-avx
 if %errorlevel% neq 0 (
     echo Error: Failed to build WASM package
     exit /b 1

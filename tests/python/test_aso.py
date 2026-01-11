@@ -8,7 +8,7 @@ import sys
 import os
 from pathlib import Path
 
-# Add the parent directory to the path to import test utilities
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
@@ -28,7 +28,7 @@ class TestAso:
         """Test ASO matches expected values from Rust tests - mirrors check_aso_accuracy"""
         expected = EXPECTED_OUTPUTS['aso']
         
-        # Call ASO with default parameters
+        
         bulls, bears = my_project.aso(
             test_data['open'],
             test_data['high'],
@@ -41,7 +41,7 @@ class TestAso:
         assert len(bulls) == len(test_data['close'])
         assert len(bears) == len(test_data['close'])
         
-        # Check last 5 values match expected
+        
         assert_close(
             bulls[-5:],
             expected['last_5_bulls'],
@@ -60,7 +60,7 @@ class TestAso:
     
     def test_aso_partial_params(self, test_data):
         """Test ASO with default parameters - mirrors check_aso_partial_params"""
-        # Test with minimal required data, params will use defaults
+        
         bulls, bears = my_project.aso(
             test_data['open'],
             test_data['high'],
@@ -115,7 +115,7 @@ class TestAso:
     def test_aso_mismatched_lengths(self):
         """Test ASO fails with mismatched array lengths - mirrors MissingData error"""
         open_data = np.array([10.0, 20.0, 30.0])
-        high_data = np.array([15.0, 25.0])  # Different length
+        high_data = np.array([15.0, 25.0])  
         low_data = np.array([8.0, 18.0, 28.0])
         close_data = np.array([12.0, 22.0, 32.0])
         
@@ -140,24 +140,24 @@ class TestAso:
         low_data = test_data['low'][:100]
         close_data = test_data['close'][:100]
         
-        # Mode 0: Average of both
+        
         bulls0, bears0 = my_project.aso(open_data, high_data, low_data, close_data, mode=0)
         
-        # Mode 1: Intrabar only
+        
         bulls1, bears1 = my_project.aso(open_data, high_data, low_data, close_data, mode=1)
         
-        # Mode 2: Group only
+        
         bulls2, bears2 = my_project.aso(open_data, high_data, low_data, close_data, mode=2)
         
-        # The modes should produce different results (at least after warmup)
-        # Check a valid index after warmup period
+        
+        
         check_idx = 50
         assert bulls0[check_idx] != bulls1[check_idx] or bulls0[check_idx] != bulls2[check_idx], \
             "Different modes should produce different results"
         
-        # Also verify that in modes 1 and 2, bulls + bears = 100
-        # (Note: mode 0 may have a slight deviation due to averaging)
-        for i in range(20, 100):  # After warmup
+        
+        
+        for i in range(20, 100):  
             if not np.isnan(bulls1[i]) and not np.isnan(bears1[i]):
                 sum1 = bulls1[i] + bears1[i]
                 assert abs(sum1 - 100.0) < 1e-9, f"Mode 1: bulls + bears != 100 at index {i}: {sum1}"
@@ -180,12 +180,12 @@ class TestAso:
         assert len(bulls) == len(test_data['close'])
         assert len(bears) == len(test_data['close'])
         
-        # First period-1 values should be NaN (warmup period)
+        
         for i in range(9):
             assert np.isnan(bulls[i]), f"Expected NaN in bulls warmup at index {i}"
             assert np.isnan(bears[i]), f"Expected NaN in bears warmup at index {i}"
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(bulls) > 240:
             for i in range(240, len(bulls)):
                 assert not np.isnan(bulls[i]), f"Found unexpected NaN in bulls at index {i}"
@@ -196,7 +196,7 @@ class TestAso:
         period = 10
         mode = 0
         
-        # Batch calculation
+        
         batch_bulls, batch_bears = my_project.aso(
             test_data['open'],
             test_data['high'],
@@ -206,7 +206,7 @@ class TestAso:
             mode=mode
         )
         
-        # Streaming calculation
+        
         stream = my_project.AsoStream(period=period, mode=mode)
         stream_bulls = []
         stream_bears = []
@@ -230,20 +230,20 @@ class TestAso:
         stream_bulls = np.array(stream_bulls)
         stream_bears = np.array(stream_bears)
         
-        # Note: The streaming implementation has known differences from batch:
-        # 1. It doesn't apply SMA smoothing
-        # 2. Mode 0 has a calculation bug
-        # So we just verify the values are reasonable
+        
+        
+        
+        
         
         assert len(batch_bulls) == len(stream_bulls)
         assert len(batch_bears) == len(stream_bears)
         
-        # Check warmup period has NaN
+        
         for i in range(period - 1):
             assert np.isnan(stream_bulls[i]), f"Expected NaN in streaming bulls at warmup index {i}"
             assert np.isnan(stream_bears[i]), f"Expected NaN in streaming bears at warmup index {i}"
         
-        # After warmup, values should be in valid range [0, 100]
+        
         for i in range(period, min(100, len(stream_bulls))):
             if not np.isnan(stream_bulls[i]):
                 assert -1e-9 <= stream_bulls[i] <= 100.0 + 1e-9, \
@@ -252,7 +252,7 @@ class TestAso:
                 assert -1e-9 <= stream_bears[i] <= 100.0 + 1e-9, \
                     f"Streaming bears out of range at index {i}: {stream_bears[i]}"
             
-            # For modes 1 and 2, sum should be ~100 (mode 0 has known bug)
+            
             if mode != 0 and not np.isnan(stream_bulls[i]) and not np.isnan(stream_bears[i]):
                 total = stream_bulls[i] + stream_bears[i]
                 assert abs(total - 100.0) < 1e-9, \
@@ -260,20 +260,20 @@ class TestAso:
     
     def test_aso_batch(self, test_data):
         """Test ASO batch processing - mirrors check_aso_batch"""
-        # Use smaller dataset for speed
+        
         open_data = test_data['open'][:100]
         high_data = test_data['high'][:100]
         low_data = test_data['low'][:100]
         close_data = test_data['close'][:100]
         
-        # Test batch with multiple parameter combinations
+        
         result = my_project.aso_batch(
             open_data,
             high_data,
             low_data,
             close_data,
-            period_range=(8, 12, 2),  # periods: 8, 10, 12
-            mode_range=(0, 2, 1)      # modes: 0, 1, 2
+            period_range=(8, 12, 2),  
+            mode_range=(0, 2, 1)      
         )
         
         assert 'bulls' in result
@@ -281,7 +281,7 @@ class TestAso:
         assert 'periods' in result
         assert 'modes' in result
         
-        # Should have 3 periods * 3 modes = 9 combinations
+        
         expected_combos = 9
         assert result['bulls'].shape[0] == expected_combos
         assert result['bears'].shape[0] == expected_combos
@@ -290,24 +290,24 @@ class TestAso:
         assert len(result['periods']) == expected_combos
         assert len(result['modes']) == expected_combos
         
-        # Verify each combination
+        
         combo_idx = 0
         for period in [8, 10, 12]:
             for mode in [0, 1, 2]:
                 assert result['periods'][combo_idx] == period
                 assert result['modes'][combo_idx] == mode
                 
-                # Extract this combination's results
+                
                 batch_bulls = result['bulls'][combo_idx]
                 batch_bears = result['bears'][combo_idx]
                 
-                # Compare with single calculation
+                
                 single_bulls, single_bears = my_project.aso(
                     open_data, high_data, low_data, close_data,
                     period=period, mode=mode
                 )
                 
-                # Values should match
+                
                 assert_close(
                     batch_bulls, single_bulls, rtol=1e-10,
                     msg=f"Batch bulls mismatch for period={period}, mode={mode}"
@@ -326,7 +326,7 @@ class TestAso:
         low_data = test_data['low'][:50]
         close_data = test_data['close'][:50]
         
-        # Single combination (default params)
+        
         result = my_project.aso_batch(
             open_data,
             high_data,
@@ -336,7 +336,7 @@ class TestAso:
             mode_range=(0, 0, 0)
         )
         
-        # Should have exactly 1 combination
+        
         assert result['bulls'].shape[0] == 1
         assert result['bears'].shape[0] == 1
         assert len(result['periods']) == 1
@@ -344,7 +344,7 @@ class TestAso:
         assert result['periods'][0] == 10
         assert result['modes'][0] == 0
         
-        # Compare with single calculation
+        
         single_bulls, single_bears = my_project.aso(
             open_data, high_data, low_data, close_data,
             period=10, mode=0

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestKst:
         """Test KST with default parameters - mirrors check_kst_default_params"""
         close = test_data['close']
         
-        # KST returns tuple (line, signal)
+        
         line, signal = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -44,7 +44,7 @@ class TestKst:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['kst']
         
-        # KST returns tuple (line, signal)
+        
         line, signal = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -55,7 +55,7 @@ class TestKst:
         assert len(line) == len(close)
         assert len(signal) == len(close)
         
-        # Check last 5 values match expected with 1e-1 tolerance (as in Rust tests)
+        
         assert_close(
             line[-5:],
             expected['last_5_line'],
@@ -72,7 +72,7 @@ class TestKst:
             msg="KST signal last 5 values mismatch"
         )
         
-        # Also run full comparison with Rust for line values
+        
         compare_with_rust('kst_line', line)
         compare_with_rust('kst_signal', signal)
     
@@ -80,7 +80,7 @@ class TestKst:
         """Test KST with partial parameters"""
         close = test_data['close']
         
-        # Test with some custom params
+        
         line, signal = ta_indicators.kst(
             close,
             sma_period1=12, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -92,7 +92,7 @@ class TestKst:
     
     def test_kst_zero_period(self):
         """Test KST fails with zero period"""
-        data = np.array([10.0, 20.0, 30.0] * 20)  # Need enough data
+        data = np.array([10.0, 20.0, 30.0] * 20)  
         
         with pytest.raises(ValueError):
             ta_indicators.kst(data, sma_period1=0)
@@ -108,7 +108,7 @@ class TestKst:
         small_data = np.array([10.0, 20.0, 30.0])
         
         with pytest.raises(ValueError):
-            ta_indicators.kst(small_data, roc_period4=50)  # Default is 30, but 50 exceeds data
+            ta_indicators.kst(small_data, roc_period4=50)  
     
     def test_kst_nan_handling(self, test_data):
         """Test KST handles NaN values correctly - mirrors check_kst_nan_handling"""
@@ -141,13 +141,13 @@ class TestKst:
         """Test KST with different kernel selections"""
         close = test_data['close']
         
-        # Test with explicit kernel selection
+        
         line_auto, signal_auto = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
             roc_period1=10, roc_period2=15, roc_period3=20, roc_period4=30,
             signal_period=9,
-            kernel=None  # Auto-detect
+            kernel=None  
         )
         line_scalar, signal_scalar = ta_indicators.kst(
             close,
@@ -160,7 +160,7 @@ class TestKst:
         assert len(line_auto) == len(close)
         assert len(line_scalar) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(line_auto, line_scalar, rtol=1e-10)
         assert_close(signal_auto, signal_scalar, rtol=1e-10)
     
@@ -168,25 +168,25 @@ class TestKst:
         """Test KST streaming functionality"""
         close = np.array(test_data['close'])
         
-        # Streaming handles data differently than batch:
-        # - Batch can handle NaN prefix and identifies first valid value
-        # - Streaming expects continuous valid data (designed for real-time)
-        # 
-        # For fair comparison, use only valid data for streaming
+        
+        
+        
+        
+        
         first_valid = next((i for i, v in enumerate(close) if not np.isnan(v)), 0)
         valid_close = close[first_valid:]
         
-        # Create stream with default params
+        
         stream = ta_indicators.KstStream(10, 10, 10, 15, 10, 15, 20, 30, 9)
         
-        # Process valid values through stream
+        
         stream_results = []
         for price in valid_close:
-            if not np.isnan(price):  # Extra safety check
+            if not np.isnan(price):  
                 result = stream.update(price)
                 stream_results.append(result)
         
-        # Convert None to (NaN, NaN) for comparison
+        
         line_results = []
         signal_results = []
         for r in stream_results:
@@ -194,10 +194,10 @@ class TestKst:
                 line_results.append(np.nan)
                 signal_results.append(np.nan)
             else:
-                line_results.append(r[0])  # line value
-                signal_results.append(r[1])  # signal value
+                line_results.append(r[0])  
+                signal_results.append(r[1])  
         
-        # Compare with batch calculation on same valid data
+        
         batch_line, batch_signal = ta_indicators.kst(
             valid_close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -205,19 +205,19 @@ class TestKst:
             signal_period=9
         )
         
-        # Compare line results (these should match)
+        
         assert_close(line_results, batch_line, rtol=1e-10)
         
-        # NOTE: There's a known issue with KstStream signal calculation
-        # The streaming implementation has an off-by-one error in the signal warmup logic
-        # that causes signals to never be produced for certain parameter combinations.
-        # This is a bug in the Rust implementation that needs to be fixed.
-        # For now, we skip the signal comparison.
-        # 
-        # TODO: Fix KstStream::update() signal warmup logic in src/indicators/kst.rs
-        # assert_close(signal_results, batch_signal, rtol=1e-10)
         
-        # Instead, just verify that line values are produced
+        
+        
+        
+        
+        
+        
+        
+        
+        
         valid_lines = sum(1 for v in line_results if not np.isnan(v))
         assert valid_lines > 0, "Stream should produce some valid line values"
     
@@ -225,7 +225,7 @@ class TestKst:
         """Test batch processing with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set with defaults
+        
         batch_result = ta_indicators.kst_batch(
             close,
             sma1_range=(10, 10, 0),
@@ -239,7 +239,7 @@ class TestKst:
             sig_range=(9, 9, 0)
         )
         
-        # Should return a dict with line, signal and parameters
+        
         assert 'line' in batch_result
         assert 'signal' in batch_result
         assert 'sma1' in batch_result
@@ -252,11 +252,11 @@ class TestKst:
         assert 'roc4' in batch_result
         assert 'sig' in batch_result
         
-        # Should have shape (1, len(close))
+        
         assert batch_result['line'].shape == (1, len(close))
         assert batch_result['signal'].shape == (1, len(close))
         
-        # Should match single calculation
+        
         single_line, single_signal = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -268,58 +268,58 @@ class TestKst:
     
     def test_kst_batch_multiple_parameters(self, test_data):
         """Test batch processing with multiple parameter combinations"""
-        close = test_data['close'][:200]  # Use smaller dataset for speed
+        close = test_data['close'][:200]  
         
-        # Multiple parameter combinations (vary only a few to keep test manageable)
+        
         batch_result = ta_indicators.kst_batch(
             close,
             sma1_range=(10, 10, 0),
             sma2_range=(10, 10, 0),
             sma3_range=(10, 10, 0),
             sma4_range=(15, 15, 0),
-            roc1_range=(10, 12, 2),  # 10, 12
+            roc1_range=(10, 12, 2),  
             roc2_range=(15, 15, 0),
             roc3_range=(20, 20, 0),
             roc4_range=(30, 30, 0),
-            sig_range=(8, 10, 2)  # 8, 10
+            sig_range=(8, 10, 2)  
         )
         
-        # Should have 2 * 2 = 4 combinations
+        
         assert batch_result['line'].shape[0] == 4
         assert batch_result['line'].shape[1] == len(close)
         assert batch_result['signal'].shape[0] == 4
         assert batch_result['signal'].shape[1] == len(close)
         
-        # Verify parameter arrays
+        
         assert len(batch_result['roc1']) == 4
         assert len(batch_result['sig']) == 4
     
     def test_kst_batch_custom_ranges(self, test_data):
         """Test batch processing with custom parameter ranges"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
         batch_result = ta_indicators.kst_batch(
             close,
-            sma1_range=(8, 12, 2),    # 8, 10, 12
+            sma1_range=(8, 12, 2),    
             sma2_range=(10, 10, 0),
             sma3_range=(10, 10, 0),
             sma4_range=(15, 15, 0),
             roc1_range=(10, 10, 0),
             roc2_range=(15, 15, 0),
             roc3_range=(20, 20, 0),
-            roc4_range=(25, 30, 5),   # 25, 30
-            sig_range=(9, 9, 0)       # Just 9
+            roc4_range=(25, 30, 5),   
+            sig_range=(9, 9, 0)       
         )
         
-        # Should have 3 * 2 * 1 = 6 combinations
+        
         assert batch_result['line'].shape[0] == 6
         assert batch_result['signal'].shape[0] == 6
     
     def test_kst_edge_cases(self):
         """Test KST with edge case inputs"""
-        # Minimum valid data - need at least 53 for signal[-1] to be valid
-        # Line warmup: max(30+15-1) = 44, Signal warmup: 44+9-1 = 52
-        # So index 52 (53rd element) is first valid signal value
+        
+        
+        
         min_data = np.random.rand(53)
         line, signal = ta_indicators.kst(
             min_data,
@@ -330,12 +330,12 @@ class TestKst:
         assert len(line) == len(min_data)
         assert len(signal) == len(min_data)
         
-        # Check warmup period - should have NaN values at start
-        # With default params, warmup is roc_period4 + sma_period4 - 1 = 44
+        
+        
         assert np.isnan(line[0])
         assert np.isnan(signal[0])
         
-        # Should have valid values after warmup
+        
         assert not np.isnan(line[-1])
         assert not np.isnan(signal[-1])
     
@@ -343,7 +343,7 @@ class TestKst:
         """Test KST batch with different kernels"""
         close = test_data['close'][:100]
         
-        # Test with explicit kernel selection
+        
         result_auto = ta_indicators.kst_batch(
             close,
             sma1_range=(10, 10, 0),
@@ -371,15 +371,15 @@ class TestKst:
             kernel='scalar'
         )
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_auto['line'], result_scalar['line'], rtol=1e-10)
         assert_close(result_auto['signal'], result_scalar['signal'], rtol=1e-10)
     
     def test_kst_reinput(self, test_data):
         """Test KST applied twice (re-input) - similar to ALMA reinput test"""
-        close = test_data['close'][:500]  # Use smaller dataset for speed
+        close = test_data['close'][:500]  
         
-        # First pass
+        
         first_line, first_signal = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -388,7 +388,7 @@ class TestKst:
         )
         assert len(first_line) == len(close)
         
-        # Second pass - apply KST to the KST line output
+        
         second_line, second_signal = ta_indicators.kst(
             first_line,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -397,17 +397,17 @@ class TestKst:
         )
         assert len(second_line) == len(first_line)
         
-        # Verify warmup period cascades correctly
-        # After first pass: warmup = 44
-        # After second pass: warmup should be ~88
+        
+        
+        
         warmup_first = 44
         warmup_second = warmup_first + 44
         
-        # Check that we have NaN in expected positions
+        
         assert np.isnan(first_line[0])
         assert np.isnan(second_line[warmup_second - 1])
         
-        # Check we have valid values after warmup
+        
         if len(second_line) > warmup_second + 10:
             assert not np.isnan(second_line[warmup_second + 10])
     
@@ -415,7 +415,7 @@ class TestKst:
         """Test KST with NaN values at start of data"""
         close = test_data['close'][:200]
         
-        # Insert NaN values at the beginning
+        
         close_with_nan = np.array(close)
         close_with_nan[:20] = np.nan
         
@@ -429,14 +429,14 @@ class TestKst:
         assert len(line) == len(close_with_nan)
         assert len(signal) == len(close_with_nan)
         
-        # Warmup should be extended by NaN prefix
-        # Original warmup = 44, plus 20 NaN values = 64
+        
+        
         expected_warmup = 44 + 20
         
-        # Check NaN positions
+        
         assert np.isnan(line[expected_warmup - 1])
         
-        # Should have valid values well after warmup
+        
         if len(line) > expected_warmup + 10:
             assert not np.isnan(line[expected_warmup + 10])
     
@@ -444,7 +444,7 @@ class TestKst:
         """Test KST warmup period calculation"""
         close = test_data['close'][:100]
         
-        # Test with default parameters
+        
         line, signal = ta_indicators.kst(
             close,
             sma_period1=10, sma_period2=10, sma_period3=10, sma_period4=15,
@@ -452,19 +452,19 @@ class TestKst:
             signal_period=9
         )
         
-        # Warmup = max(roc_period_i + sma_period_i - 1) for all i
-        # = max(10+10-1, 15+10-1, 20+10-1, 30+15-1) = max(19, 24, 29, 44) = 44
+        
+        
         expected_warmup = 44
         
-        # Check that values before warmup are NaN
+        
         for i in range(expected_warmup):
             assert np.isnan(line[i]), f"Expected NaN at index {i} during warmup"
         
-        # Check that values after warmup are valid (not NaN)
+        
         for i in range(expected_warmup, min(expected_warmup + 5, len(line))):
             assert not np.isnan(line[i]), f"Expected valid value at index {i} after warmup"
         
-        # Signal warmup is line warmup + signal_period - 1
+        
         signal_warmup = expected_warmup + 9 - 1
         for i in range(signal_warmup):
             assert np.isnan(signal[i]), f"Expected NaN in signal at index {i} during warmup"
@@ -473,7 +473,7 @@ class TestKst:
         """Test KST with invalid parameters"""
         data = np.random.rand(100)
         
-        # Test with zero periods (should fail)
+        
         with pytest.raises(ValueError):
             ta_indicators.kst(
                 data,
@@ -512,7 +512,7 @@ class TestKst:
     
     def test_kst_insufficient_data(self):
         """Test KST with insufficient data for calculation"""
-        # Need at least max(roc_period + sma_period) points
+        
         small_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
         with pytest.raises(ValueError):

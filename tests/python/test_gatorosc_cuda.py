@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional for CUDA checks
+except ImportError:  
     cp = None
 
 try:
@@ -35,9 +35,9 @@ def _cuda_available() -> bool:
             (8, 8, 0), (5, 5, 0),
             (5, 5, 0), (3, 3, 0),
         )
-        _ = cp.asarray(out[0])  # upper
+        _ = cp.asarray(out[0])  
         return True
-    except Exception as e:  # detection path
+    except Exception as e:  
         msg = str(e).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

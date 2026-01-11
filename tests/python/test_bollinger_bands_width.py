@@ -7,7 +7,7 @@ import numpy as np
 import os
 import sys
 
-# Add the parent directory to the Python path
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 import my_project
 
@@ -35,14 +35,14 @@ class TestBollingerBandsWidth:
     
     def test_partial_params(self):
         """Test BBW with partial parameters - mirrors check_bbw_partial_params."""
-        # Custom period and devup, default others
+        
         result = my_project.bollinger_bands_width(
             self.close,
             period=22,
             devup=2.2,
-            devdn=2.0,  # default
+            devdn=2.0,  
             matype="ema",
-            devtype=None  # use default
+            devtype=None  
         )
         
         assert len(result) == len(self.close)
@@ -51,7 +51,7 @@ class TestBollingerBandsWidth:
     
     def test_default_params(self):
         """Test BBW with default parameters - mirrors check_bbw_default."""
-        # Use default params
+        
         result = my_project.bollinger_bands_width(
             self.close,
             period=20,
@@ -61,10 +61,10 @@ class TestBollingerBandsWidth:
         
         assert len(result) == len(self.close)
         
-        # Check warmup period
+        
         assert_all_nan(result[:19], "Expected NaN in warmup period")
         
-        # After warmup, should have values
+        
         assert_no_nan(result[240:], "Expected no NaN after sufficient warmup")
     
     def test_accuracy(self):
@@ -78,7 +78,7 @@ class TestBollingerBandsWidth:
         
         assert len(result) == len(self.close)
         
-        # If we have expected values, check them
+        
         if 'last_5_values' in self.expected:
             last_5 = result[-5:]
             assert_array_close(
@@ -152,7 +152,7 @@ class TestBollingerBandsWidth:
         
         for matype in matypes:
             result = my_project.bollinger_bands_width(
-                self.close[:100],  # Use smaller dataset
+                self.close[:100],  
                 period=14,
                 devup=2.0,
                 devdn=2.0,
@@ -164,11 +164,11 @@ class TestBollingerBandsWidth:
     
     def test_different_devtypes(self):
         """Test BBW with different deviation types."""
-        devtypes = [0, 1, 2]  # stddev, mean_ad, median_ad
+        devtypes = [0, 1, 2]  
         
         for devtype in devtypes:
             result = my_project.bollinger_bands_width(
-                self.close[:100],  # Use smaller dataset
+                self.close[:100],  
                 period=14,
                 devup=2.0,
                 devdn=2.0,
@@ -189,10 +189,10 @@ class TestBollingerBandsWidth:
         
         assert len(result) == len(self.close)
         
-        # First period-1 values should be NaN
+        
         assert_all_nan(result[:19], "Expected NaN in warmup period")
         
-        # After a reasonable warmup, no NaN values should exist
+        
         if len(result) > 240:
             assert_no_nan(result[240:], "Found unexpected NaN after warmup")
     
@@ -203,28 +203,28 @@ class TestBollingerBandsWidth:
             period=period,
             devup=2.0,
             devdn=2.0,
-            matype="sma",  # Default moving average type
-            devtype=0      # Default deviation type (stddev)
+            matype="sma",  
+            devtype=0      
         )
         
-        # Feed data one by one
+        
         results = []
         for i, val in enumerate(self.close[:50]):
             result = stream.update(val)
             results.append(result)
         
-        # First period-1 updates should return None
+        
         for i in range(period - 1):
             assert results[i] is None, f"Expected None at index {i}"
         
-        # After that, should get values
+        
         for i in range(period - 1, 50):
             assert results[i] is not None, f"Expected value at index {i}"
             assert not np.isnan(results[i]), f"Got NaN at index {i}"
     
     def test_batch_single_params(self):
         """Test batch processing with single parameter set."""
-        # Single parameter combination
+        
         result = my_project.bollinger_bands_width_batch(
             self.close,
             period_range=(20, 20, 0),
@@ -237,11 +237,11 @@ class TestBollingerBandsWidth:
         assert 'devups' in result
         assert 'devdns' in result
         
-        # Should have 1 row
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(self.close)
         
-        # Compare with single calculation
+        
         single_result = my_project.bollinger_bands_width(
             self.close,
             period=20,
@@ -258,24 +258,24 @@ class TestBollingerBandsWidth:
     
     def test_batch_multiple_params(self):
         """Test batch processing with multiple parameter combinations."""
-        # Multiple periods and deviations
+        
         result = my_project.bollinger_bands_width_batch(
-            self.close[:100],  # Use smaller dataset
-            period_range=(10, 30, 10),  # 10, 20, 30
-            devup_range=(1.5, 2.5, 0.5),  # 1.5, 2.0, 2.5
-            devdn_range=(2.0, 2.0, 0)  # 2.0
+            self.close[:100],  
+            period_range=(10, 30, 10),  
+            devup_range=(1.5, 2.5, 0.5),  
+            devdn_range=(2.0, 2.0, 0)  
         )
         
-        # Should have 3 * 3 * 1 = 9 combinations
+        
         assert result['values'].shape[0] == 9
         assert result['values'].shape[1] == 100
         
-        # Check metadata arrays
+        
         assert len(result['periods']) == 9
         assert len(result['devups']) == 9
         assert len(result['devdns']) == 9
         
-        # Verify first combination
+        
         assert result['periods'][0] == 10
         assert result['devups'][0] == 1.5
         assert result['devdns'][0] == 2.0
@@ -295,13 +295,13 @@ class TestBollingerBandsWidth:
                 )
                 assert len(result) == 100
             except ValueError as e:
-                # Some kernels might not be supported on this platform
+                
                 assert ("not supported" in str(e) or "Unsupported" in str(e) or 
                         "not compiled" in str(e))
     
     def test_edge_cases(self):
         """Test edge cases for BBW."""
-        # Very small period
+        
         result = my_project.bollinger_bands_width(
             self.close[:10],
             period=2,
@@ -309,9 +309,9 @@ class TestBollingerBandsWidth:
             devdn=2.0
         )
         assert len(result) == 10
-        assert not np.isnan(result[1])  # Should have value after period-1
+        assert not np.isnan(result[1])  
         
-        # Large deviations
+        
         result = my_project.bollinger_bands_width(
             self.close[:50],
             period=10,
@@ -320,7 +320,7 @@ class TestBollingerBandsWidth:
         )
         assert len(result) == 50
         
-        # Asymmetric deviations
+        
         result = my_project.bollinger_bands_width(
             self.close[:50],
             period=10,

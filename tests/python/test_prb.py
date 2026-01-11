@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestPrb:
         """Test PRB matches expected values from Rust tests - mirrors check_prb_accuracy"""
         expected = EXPECTED_OUTPUTS['prb']
         
-        # Call PRB with default parameters
+        
         result = ta_indicators.prb(
             test_data['close'],
             smooth_data=expected['default_params']['smooth_data'],
@@ -40,24 +40,24 @@ class TestPrb:
             ndev=expected['default_params']['ndev']
         )
         
-        # PRB returns a tuple of (values, upper_band, lower_band)
+        
         values, upper_band, lower_band = result
         assert len(values) == len(test_data['close'])
         assert len(upper_band) == len(test_data['close'])
         assert len(lower_band) == len(test_data['close'])
         
-        # Check last 5 non-NaN values match expected
+        
         non_nan_values = values[~np.isnan(values)]
         assert len(non_nan_values) >= 5, "Should have at least 5 non-NaN values"
         
         assert_close(
             non_nan_values[-5:],
             expected['last_5_main_values'],
-            rtol=0.01,  # 1% tolerance - PRB uses polynomial regression which has more numerical variation than ALMA
+            rtol=0.01,  
             msg="PRB last 5 values mismatch"
         )
         
-        # Verify bands relationship: upper > main > lower for non-NaN values
+        
         for i in range(len(values)):
             if not np.isnan(values[i]):
                 assert not np.isnan(upper_band[i]), f"Upper band should not be NaN when main is not NaN at index {i}"
@@ -65,9 +65,9 @@ class TestPrb:
                 assert upper_band[i] > values[i], f"Upper band should be > main at index {i}"
                 assert values[i] > lower_band[i], f"Main should be > lower band at index {i}"
                 
-                # Check band spacing matches ndev
-                # The bands should be approximately ndev * stdev away from main
-                # This is a sanity check, not exact due to the calculation method
+                
+                
+                
                 band_width = upper_band[i] - values[i]
                 assert band_width > 0, f"Band width should be positive at index {i}"
     
@@ -75,7 +75,7 @@ class TestPrb:
         """Test PRB with partial parameters - mirrors check_prb_partial_params"""
         close = test_data['close']
         
-        # Test with all default params
+        
         result = ta_indicators.prb(
             close,
             smooth_data=True,
@@ -159,7 +159,7 @@ class TestPrb:
             ta_indicators.prb(
                 data,
                 smooth_data=True,
-                smooth_period=1,  # Must be >= 2
+                smooth_period=1,  
                 regression_period=2,
                 polynomial_order=2,
                 regression_offset=0,
@@ -176,7 +176,7 @@ class TestPrb:
                 smooth_data=False,
                 smooth_period=10,
                 regression_period=2,
-                polynomial_order=0,  # Must be >= 1
+                polynomial_order=0,  
                 regression_offset=0,
                 ndev=2.0
             )
@@ -185,7 +185,7 @@ class TestPrb:
         """Test PRB applied twice (re-input) - mirrors check_prb_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.prb(
             close,
             smooth_data=False,
@@ -199,7 +199,7 @@ class TestPrb:
         first_values, first_upper, first_lower = first_result
         assert len(first_values) == len(close)
         
-        # Second pass - apply PRB to PRB main values output
+        
         second_result = ta_indicators.prb(
             first_values,
             smooth_data=False,
@@ -213,7 +213,7 @@ class TestPrb:
         second_values, second_upper, second_lower = second_result
         assert len(second_values) == len(first_values)
         
-        # Verify structure is maintained
+        
         non_nan_first = first_values[~np.isnan(first_values)]
         non_nan_second = second_values[~np.isnan(second_values)]
         assert len(non_nan_second) > 0, "Should have non-NaN values after reinput"
@@ -235,23 +235,23 @@ class TestPrb:
         values, upper_band, lower_band = result
         assert len(values) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(values) > 240:
             assert not np.any(np.isnan(values[240:])), "Found unexpected NaN after warmup period"
             assert not np.any(np.isnan(upper_band[240:])), "Found unexpected NaN in upper band after warmup"
             assert not np.any(np.isnan(lower_band[240:])), "Found unexpected NaN in lower band after warmup"
         
-        # First regression_period-1 values should be NaN (warmup)
-        warmup = 50 - 1  # regression_period - 1
+        
+        warmup = 50 - 1  
         assert np.all(np.isnan(values[:warmup])), "Expected NaN in warmup period for main values"
         assert np.all(np.isnan(upper_band[:warmup])), "Expected NaN in warmup period for upper band"
         assert np.all(np.isnan(lower_band[:warmup])), "Expected NaN in warmup period for lower band"
     
     def test_prb_streaming(self, test_data):
         """Test PRB streaming matches batch calculation - mirrors check_prb_streaming"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Batch calculation
+        
         batch_result = ta_indicators.prb(
             close,
             smooth_data=False,
@@ -263,7 +263,7 @@ class TestPrb:
         )
         batch_values, batch_upper, batch_lower = batch_result
         
-        # Streaming calculation
+        
         stream = ta_indicators.PrbStreamPy(
             smooth_data=False,
             smooth_period=10,
@@ -293,10 +293,10 @@ class TestPrb:
         stream_upper = np.array(stream_upper)
         stream_lower = np.array(stream_lower)
         
-        # Compare batch vs streaming
+        
         assert len(batch_values) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b_val, s_val, b_up, s_up, b_lo, s_lo) in enumerate(
             zip(batch_values, stream_values, batch_upper, stream_upper, batch_lower, stream_lower)
         ):
@@ -311,7 +311,7 @@ class TestPrb:
     
     def test_prb_batch(self, test_data):
         """Test PRB batch processing - mirrors check_batch_default_row"""
-        close = test_data['close'][:200]  # Use smaller dataset for speed
+        close = test_data['close'][:200]  
         
         result = ta_indicators.prb_batch(
             close,
@@ -328,7 +328,7 @@ class TestPrb:
             regression_offset_start=0,
             regression_offset_end=0,
             regression_offset_step=0,
-            kernel=None  # Auto-detect best kernel
+            kernel=None  
         )
         
         assert 'values' in result
@@ -341,14 +341,14 @@ class TestPrb:
         assert 'rows' in result
         assert 'cols' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['rows'] == 1
         assert result['cols'] == len(close)
         assert result['values'].shape == (1, len(close))
         assert result['upper'].shape == (1, len(close))
         assert result['lower'].shape == (1, len(close))
         
-        # Verify bands relationship for the single row
+        
         main_row = result['values'][0]
         upper_row = result['upper'][0]
         lower_row = result['lower'][0]
@@ -360,7 +360,7 @@ class TestPrb:
     
     def test_prb_batch_sweep(self, test_data):
         """Test PRB batch with parameter sweep"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
         result = ta_indicators.prb_batch(
             close,
@@ -377,10 +377,10 @@ class TestPrb:
             regression_offset_start=0,
             regression_offset_end=2,
             regression_offset_step=1,
-            kernel=None  # Auto-detect best kernel
+            kernel=None  
         )
         
-        # Should have 3 * 3 * 3 * 3 = 81 combinations
+        
         expected_combos = 3 * 3 * 3 * 3
         assert result['rows'] == expected_combos
         assert result['cols'] == len(close)
@@ -388,13 +388,13 @@ class TestPrb:
         assert result['upper'].shape == (expected_combos, len(close))
         assert result['lower'].shape == (expected_combos, len(close))
         
-        # Verify each row has proper band relationship
+        
         for row_idx in range(expected_combos):
             main_row = result['values'][row_idx]
             upper_row = result['upper'][row_idx]
             lower_row = result['lower'][row_idx]
             
-            # Find non-NaN values and check band relationship
+            
             for i in range(len(main_row)):
                 if not np.isnan(main_row[i]):
                     assert upper_row[i] > main_row[i], f"Row {row_idx}: Upper should be > main at index {i}"
@@ -421,8 +421,8 @@ class TestPrb:
         
         result = ta_indicators.prb(
             close,
-            smooth_data=False,  # No smoothing
-            smooth_period=10,   # Ignored when smooth_data=False
+            smooth_data=False,  
+            smooth_period=10,   
             regression_period=50,
             polynomial_order=2,
             regression_offset=0,
@@ -434,13 +434,13 @@ class TestPrb:
         assert len(upper_band) == len(close)
         assert len(lower_band) == len(close)
         
-        # Check that we have values after warmup
+        
         non_nan_count = np.sum(~np.isnan(values))
         assert non_nan_count > 0
     
     def test_prb_linear_regression(self):
         """Test PRB with linear regression (order=1)"""
-        # Create linear data
+        
         data = np.arange(100, dtype=float) * 10 + 1000
         
         result = ta_indicators.prb(
@@ -448,7 +448,7 @@ class TestPrb:
             smooth_data=False,
             smooth_period=10,
             regression_period=20,
-            polynomial_order=1,  # Linear
+            polynomial_order=1,  
             regression_offset=0,
             ndev=2.0
         )
@@ -456,12 +456,12 @@ class TestPrb:
         values, upper_band, lower_band = result
         assert len(values) == len(data)
         
-        # For perfectly linear data with linear regression, 
-        # the regression should closely match the input
+        
+        
         non_nan_values = values[~np.isnan(values)]
         assert len(non_nan_values) > 0
         
-        # The bands should still exist and be properly spaced
+        
         for i in range(len(values)):
             if not np.isnan(values[i]):
                 assert upper_band[i] > values[i]
@@ -476,7 +476,7 @@ class TestPrb:
             smooth_data=True,
             smooth_period=10,
             regression_period=50,
-            polynomial_order=3,  # Cubic
+            polynomial_order=3,  
             regression_offset=0,
             ndev=2.0
         )
@@ -487,7 +487,7 @@ class TestPrb:
         non_nan_count = np.sum(~np.isnan(values))
         assert non_nan_count > 0
         
-        # Verify bands exist and are properly ordered
+        
         for i in range(len(values)):
             if not np.isnan(values[i]):
                 assert upper_band[i] > values[i]
@@ -497,25 +497,25 @@ class TestPrb:
         """Test PRB with regression offset"""
         data = np.random.randn(150) * 50 + 1000
         
-        # Test positive offset
+        
         result_pos = ta_indicators.prb(
             data,
             smooth_data=True,
             smooth_period=10,
             regression_period=50,
             polynomial_order=2,
-            regression_offset=5,  # Positive offset
+            regression_offset=5,  
             ndev=2.0
         )
         
-        # Test negative offset
+        
         result_neg = ta_indicators.prb(
             data,
             smooth_data=True,
             smooth_period=10,
             regression_period=50,
             polynomial_order=2,
-            regression_offset=-5,  # Negative offset
+            regression_offset=-5,  
             ndev=2.0
         )
         
@@ -525,11 +525,11 @@ class TestPrb:
         assert len(values_pos) == len(data)
         assert len(values_neg) == len(data)
         
-        # Both should have valid values
+        
         assert np.sum(~np.isnan(values_pos)) > 0
         assert np.sum(~np.isnan(values_neg)) > 0
         
-        # The offsets should produce different results
+        
         non_nan_idx = ~(np.isnan(values_pos) | np.isnan(values_neg))
         if np.any(non_nan_idx):
             assert not np.allclose(values_pos[non_nan_idx], values_neg[non_nan_idx])

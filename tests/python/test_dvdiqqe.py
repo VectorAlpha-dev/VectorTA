@@ -8,11 +8,11 @@ from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 
 def test_dvdiqqe_with_default_params():
     """Test DVDIQQE with default parameters."""
-    # Load real test data from CSV
+    
     test_data = load_test_data()
     expected = EXPECTED_OUTPUTS['dvdiqqe']
     
-    # Calculate DVDIQQE with default parameters
+    
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
         open=test_data['open'],
         high=test_data['high'],
@@ -28,32 +28,32 @@ def test_dvdiqqe_with_default_params():
         tick_size=expected['default_params']['tick_size']
     )
     
-    # Check output shape
+    
     assert len(dvdi) == len(test_data['close'])
     assert len(fast_tl) == len(test_data['close'])
     assert len(slow_tl) == len(test_data['close'])
     assert len(center_line) == len(test_data['close'])
     
-    # Check warmup period - find where values start
+    
     warmup = None
     for i in range(len(dvdi)):
         if not np.isnan(dvdi[i]):
             warmup = i
             break
     
-    # Verify warmup exists 
+    
     assert warmup is not None, "Should have some non-NaN values"
     
-    # Check that warmup period has NaN values (if there is one)
+    
     if warmup > 0:
         assert np.all(np.isnan(dvdi[:warmup])), f"Expected NaN in warmup period (0:{warmup}) for DVDI"
         assert np.all(np.isnan(fast_tl[:warmup])), f"Expected NaN in warmup period (0:{warmup}) for Fast TL"
         assert np.all(np.isnan(slow_tl[:warmup])), f"Expected NaN in warmup period (0:{warmup}) for Slow TL"
     
-    # If warmup is 0, that's also valid - it means the indicator produces values from the start
-    # This can happen depending on the implementation
     
-    # Check that we have valid values after warmup
+    
+    
+    
     assert not np.any(np.isnan(dvdi[warmup:])), "Found unexpected NaN after warmup in DVDI"
     assert not np.any(np.isnan(fast_tl[warmup:])), "Found unexpected NaN after warmup in Fast TL"
     assert not np.any(np.isnan(slow_tl[warmup:])), "Found unexpected NaN after warmup in Slow TL"
@@ -62,23 +62,23 @@ def test_dvdiqqe_with_default_params():
 
 def test_dvdiqqe_pinescript_reference_values():
     """Test DVDIQQE accuracy against exact PineScript reference values."""
-    # Load reference values from test_utils
+    
     expected = EXPECTED_OUTPUTS['dvdiqqe']
     expected_dvdi = np.array(expected['pinescript_dvdi'])
     expected_slow_tl = np.array(expected['pinescript_slow_tl'])
     expected_fast_tl = np.array(expected['pinescript_fast_tl'])
     expected_center = np.array(expected['pinescript_center'])
     
-    # NOTE: These reference values are documented from PineScript implementation.
-    # The exact input data that produces these values needs to be determined.
-    # For now, we validate that the indicator produces reasonable outputs.
     
-    # Use real test data
+    
+    
+    
+    
     test_data = load_test_data()
-    # Use a subset to match the reference values length
+    
     n_samples = 30
     
-    # Calculate DVDIQQE with default parameters
+    
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -94,15 +94,15 @@ def test_dvdiqqe_pinescript_reference_values():
         tick_size=expected['default_params']['tick_size']
     )
     
-    # Verify output structure
+    
     assert len(dvdi) == n_samples
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
     assert len(center_line) == n_samples
     
-    # Validate that the indicator produces values in reasonable ranges
-    # The PineScript reference values show large magnitudes, so we validate the structure
-    # Find actual warmup period
+    
+    
+    
     warmup = None
     for i in range(len(dvdi)):
         if not np.isnan(dvdi[i]):
@@ -114,28 +114,28 @@ def test_dvdiqqe_pinescript_reference_values():
         assert np.all(np.isnan(dvdi[:warmup])), "Expected NaN in warmup period"
     assert not np.any(np.isnan(dvdi[warmup:])), "Unexpected NaN after warmup"
     
-    # Document the expected reference values for future validation
-    # When the exact input data is available, these assertions should be enabled:
-    # last_5_dvdi = dvdi[-5:]
-    # last_5_slow = slow_tl[-5:]
-    # last_5_fast = fast_tl[-5:]
-    # last_5_center = center_line[-5:]
-    # assert_close(last_5_dvdi, expected_dvdi, rtol=1e-6, msg="DVDI values")
-    # assert_close(last_5_slow, expected_slow_tl, rtol=1e-6, msg="Slow TL values")
-    # assert_close(last_5_fast, expected_fast_tl, rtol=1e-6, msg="Fast TL values")
-    # assert_close(last_5_center, expected_center, rtol=1e-6, msg="Center line values")
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 
 
 def test_dvdiqqe_accuracy():
     """Test DVDIQQE general accuracy and behavior."""
-    # Use real test data for accuracy validation
+    
     test_data = load_test_data()
     expected = EXPECTED_OUTPUTS['dvdiqqe']
     
-    # Use first 100 samples for faster testing
+    
     n_samples = 100
     
-    # Calculate DVDIQQE with default parameters
+    
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -146,14 +146,14 @@ def test_dvdiqqe_accuracy():
         smoothing_period=expected['default_params']['smoothing_period']
     )
     
-    # Verify output properties
+    
     assert len(dvdi) == n_samples
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
     assert len(center_line) == n_samples
     
-    # Check that values are reasonable
-    # Find actual warmup period
+    
+    
     warmup = None
     for i in range(len(dvdi)):
         if not np.isnan(dvdi[i]):
@@ -161,13 +161,13 @@ def test_dvdiqqe_accuracy():
             break
     
     assert warmup is not None, "Should have non-NaN values"
-    # After warmup period, all values should be finite
+    
     assert np.all(np.isfinite(dvdi[warmup:])), "DVDI has non-finite values after warmup"
     assert np.all(np.isfinite(fast_tl[warmup:])), "Fast TL has non-finite values after warmup"
     assert np.all(np.isfinite(slow_tl[warmup:])), "Slow TL has non-finite values after warmup"
     assert np.all(np.isfinite(center_line[warmup:])), "Center line has non-finite values after warmup"
     
-    # Verify dynamic center line changes over time
+    
     center_values = center_line[warmup:]
     assert len(np.unique(center_values)) > 1, "Dynamic center line should vary over time"
 
@@ -176,7 +176,7 @@ def test_dvdiqqe_matches_rust_reference_values_last5():
     """Ensure Python binding matches the Rust unit test reference values (last 5)."""
     test_data = load_test_data()
 
-    # Parameters exactly as used in Rust tests
+    
     params = dict(
         period=13,
         smoothing_period=6,
@@ -195,7 +195,7 @@ def test_dvdiqqe_matches_rust_reference_values_last5():
         **params,
     )
 
-    # Rust reference arrays (from src/indicators/dvdiqqe.rs tests)
+    
     exp_dvdi = np.array([-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595])
     exp_slow = np.array([-990.21769695, -955.69385266, -951.82562405, -903.39071943, -903.39071943])
     exp_fast = np.array([-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895])
@@ -207,7 +207,7 @@ def test_dvdiqqe_matches_rust_reference_values_last5():
         21.908895469736102,
     ])
 
-    # Compare last 5 with absolute tolerance <= 1e-6 (no relative tolerance)
+    
     assert_close(dvdi[-5:], exp_dvdi, rtol=0.0, atol=1e-6, msg="DVDI last-5")
     assert_close(slow_tl[-5:], exp_slow, rtol=0.0, atol=1e-6, msg="Slow TL last-5")
     assert_close(fast_tl[-5:], exp_fast, rtol=0.0, atol=1e-6, msg="Fast TL last-5")
@@ -216,11 +216,11 @@ def test_dvdiqqe_matches_rust_reference_values_last5():
 
 def test_dvdiqqe_with_custom_params():
     """Test DVDIQQE with custom parameters."""
-    # Use real test data
+    
     test_data = load_test_data()
     n_samples = 50
     
-    # Test with custom parameters
+    
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -235,34 +235,34 @@ def test_dvdiqqe_with_custom_params():
         center_type="static"
     )
     
-    # Verify outputs
+    
     assert len(dvdi) == n_samples
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
     assert len(center_line) == n_samples
     
-    # Check static center line (should be all zeros or constant)
-    # Static center line should have the same value throughout
+    
+    
     unique_center = np.unique(center_line[~np.isnan(center_line)])
     assert len(unique_center) == 1, "Static center line should be constant"
 
 
 def test_dvdiqqe_without_volume():
     """Test DVDIQQE without volume data (should use tick volume)."""
-    # Use real test data
+    
     test_data = load_test_data()
     n_samples = 50
     
-    # Calculate without volume (should use tick volume internally)
+    
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
         low=test_data['low'][:n_samples],
         close=test_data['close'][:n_samples]
-        # No volume parameter - should default to tick volume
+        
     )
     
-    # Verify outputs
+    
     assert len(dvdi) == n_samples
     assert len(fast_tl) == n_samples
     assert len(slow_tl) == n_samples
@@ -316,7 +316,7 @@ def test_dvdiqqe_period_too_large():
             high=test_data['high'][:n_samples],
             low=test_data['low'][:n_samples],
             close=test_data['close'][:n_samples],
-            period=20  # Period too large for 5 samples
+            period=20  
         )
 
 
@@ -325,7 +325,7 @@ def test_dvdiqqe_nan_handling():
     test_data = load_test_data()
     expected = EXPECTED_OUTPUTS['dvdiqqe']
     
-    # Use first 100 samples
+    
     n_samples = 100
     
     dvdi, fast_tl, slow_tl, center_line = dvdiqqe(
@@ -340,7 +340,7 @@ def test_dvdiqqe_nan_handling():
     
     assert len(dvdi) == n_samples
     
-    # Find actual warmup period
+    
     warmup = None
     for i in range(len(dvdi)):
         if not np.isnan(dvdi[i]):
@@ -349,13 +349,13 @@ def test_dvdiqqe_nan_handling():
     
     assert warmup is not None, "Should have non-NaN values"
     
-    # Check warmup period has NaN values (if there is one)
+    
     if warmup > 0:
         assert np.all(np.isnan(dvdi[:warmup])), "Expected NaN in warmup period"
         assert np.all(np.isnan(fast_tl[:warmup])), "Expected NaN in Fast TL warmup"
         assert np.all(np.isnan(slow_tl[:warmup])), "Expected NaN in Slow TL warmup"
     
-    # After warmup period, no NaN values should exist
+    
     assert not np.any(np.isnan(dvdi[warmup:])), "Found unexpected NaN after warmup"
     assert not np.any(np.isnan(fast_tl[warmup:])), "Found unexpected NaN in Fast TL after warmup"
     assert not np.any(np.isnan(slow_tl[warmup:])), "Found unexpected NaN in Slow TL after warmup"
@@ -367,7 +367,7 @@ def test_dvdiqqe_invalid_parameters():
     test_data = load_test_data()
     n_samples = 30
     
-    # Test with zero period
+    
     with pytest.raises(ValueError, match="Invalid period|Period must be positive"):
         dvdiqqe(
             open=test_data['open'][:n_samples],
@@ -377,7 +377,7 @@ def test_dvdiqqe_invalid_parameters():
             period=0
         )
     
-    # Test with negative period
+    
     with pytest.raises(ValueError, match="Invalid period|Period must be positive"):
         dvdiqqe(
             open=test_data['open'][:n_samples],
@@ -387,7 +387,7 @@ def test_dvdiqqe_invalid_parameters():
             period=-5
         )
     
-    # Test with invalid multipliers
+    
     with pytest.raises(ValueError, match="Invalid multiplier|Multiplier must be positive"):
         dvdiqqe(
             open=test_data['open'][:n_samples],
@@ -403,7 +403,7 @@ def test_dvdiqqe_center_types():
     test_data = load_test_data()
     n_samples = 50
     
-    # Test static center type
+    
     dvdi_s, fast_s, slow_s, center_s = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -413,11 +413,11 @@ def test_dvdiqqe_center_types():
         center_type="static"
     )
     
-    # Static center should be constant
+    
     unique_center = np.unique(center_s[~np.isnan(center_s)])
     assert len(unique_center) == 1, "Static center should be constant"
     
-    # Test dynamic center type
+    
     dvdi_d, fast_d, slow_d, center_d = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -427,8 +427,8 @@ def test_dvdiqqe_center_types():
         center_type="dynamic"
     )
     
-    # Dynamic center should vary
-    # Find actual warmup for dynamic center
+    
+    
     warmup_d = None
     for i in range(len(center_d)):
         if not np.isnan(center_d[i]):
@@ -445,7 +445,7 @@ def test_dvdiqqe_volume_types():
     test_data = load_test_data()
     n_samples = 50
     
-    # Test with real volume
+    
     dvdi_real, _, _, _ = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -455,7 +455,7 @@ def test_dvdiqqe_volume_types():
         volume_type="real"
     )
     
-    # Test with tick volume
+    
     dvdi_tick, _, _, _ = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
@@ -465,17 +465,17 @@ def test_dvdiqqe_volume_types():
         volume_type="tick"
     )
     
-    # Test without volume (should use tick volume)
+    
     dvdi_no_vol, _, _, _ = dvdiqqe(
         open=test_data['open'][:n_samples],
         high=test_data['high'][:n_samples],
         low=test_data['low'][:n_samples],
         close=test_data['close'][:n_samples],
-        volume_type="real"  # Even with "real" type, no volume means tick volume
+        volume_type="real"  
     )
     
-    # Both should produce valid outputs
-    # Find warmup periods
+    
+    
     warmup_real = None
     warmup_tick = None
     warmup_no_vol = None
@@ -497,14 +497,14 @@ def test_dvdiqqe_volume_types():
     assert not np.any(np.isnan(dvdi_tick[warmup_tick:])), "Tick volume DVDI has NaN"
     assert not np.any(np.isnan(dvdi_no_vol[warmup_no_vol:])), "No volume DVDI has NaN"
     
-    # Verify tick volume matches no-volume behavior (both use tick volume)
+    
     compare_start = max(warmup_tick, warmup_no_vol)
     assert np.allclose(dvdi_tick[compare_start:], dvdi_no_vol[compare_start:], rtol=1e-10), \
         "Tick volume should match no-volume behavior"
     
-    # Note: Real and tick volume may produce similar results if the volume
-    # increase/decrease patterns are similar, which is expected behavior
-    # for PVI/NVI based indicators that only care about direction not magnitude
+    
+    
+    
 
 
 if __name__ == "__main__":

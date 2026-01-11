@@ -23,38 +23,18 @@ let testData;
 test.before(async () => {
     
     try {
-        
-        
-        
-        
-        
-        const localCjsPath = join(__dirname, './my_project.cjs');
-        
-        wasm = await import('node:module').then(m => m.createRequire(import.meta.url)(localCjsPath));
-    } catch (e1) {
+        const wasmPath = join(__dirname, '../../pkg/vector_ta.js');
+        const importPath = process.platform === 'win32'
+            ? 'file:///' + wasmPath.replace(/\\/g, '/')
+            : wasmPath;
+        wasm = await import(importPath);
+    } catch (e2) {
         try {
-            const wasmPath = join(__dirname, '../../pkg/my_project.js');
-            const importPath = process.platform === 'win32'
-                ? 'file:///' + wasmPath.replace(/\\/g, '/')
-                : wasmPath;
-            wasm = await import(importPath);
-            
-            try {
-                if (typeof wasm.default === 'function') {
-                    await wasm.default();
-                }
-            } catch (initErr) {
-                const wasmBinPath = join(__dirname, '../../pkg/my_project_bg.wasm');
-                const fs = await import('fs');
-                const bytes = fs.readFileSync ? fs.readFileSync(wasmBinPath) : (await (await import('node:fs/promises')).readFile(wasmBinPath));
-                if (typeof wasm.initSync === 'function') {
-                    wasm.initSync(bytes);
-                } else {
-                    throw initErr;
-                }
-            }
-        } catch (e2) {
-            console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
+            const { createRequire } = await import('node:module');
+            const require = createRequire(import.meta.url);
+            wasm = require(join(__dirname, '../../pkg/vector_ta.js'));
+        } catch {
+            console.error('Failed to load WASM module. Run "wasm-pack build --target nodejs --out-name vector_ta --features wasm" first');
             throw e2;
         }
     }

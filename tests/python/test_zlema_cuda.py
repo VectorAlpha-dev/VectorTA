@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -27,9 +27,9 @@ def _cuda_available() -> bool:
         sample = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float32)
         handle, meta = ti.zlema_cuda_batch_dev(sample, period_range=(3, 3, 0))
         _ = cp.asarray(handle)
-        _ = np.asarray(meta["periods"])  # ensure metadata is accessible
+        _ = np.asarray(meta["periods"])  
         return True
-    except Exception as exc:  # pragma: no cover - availability probe only
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -72,7 +72,7 @@ class TestZlemaCuda:
 
         cols = 6
         rows = 1024
-        # time-major: rows x cols
+        
         tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
             for t in range(s, rows):
@@ -81,7 +81,7 @@ class TestZlemaCuda:
 
         period = 13
 
-        # CPU baseline per series
+        
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
             series = tm[:, s]
@@ -91,7 +91,7 @@ class TestZlemaCuda:
         handle = ti.zlema_cuda_many_series_one_param_dev(tm.astype(np.float32), period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 
-        # Compare where CPU is not NaN
+        
         mask = ~np.isnan(cpu_tm)
         assert_close(gpu_tm[mask], cpu_tm[mask], rtol=1e-4, atol=5e-4,
                      msg="CUDA ZLEMA many-series mismatch vs CPU baseline")

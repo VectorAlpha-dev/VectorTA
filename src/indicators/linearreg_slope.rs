@@ -286,16 +286,26 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
     let p_bd = p * bd;
     let x_bd = x * bd;
 
+    #[inline(always)]
+    fn kahan_add(sum: &mut f64, c: &mut f64, x: f64) {
+        let y = x - *c;
+        let t = *sum + y;
+        *c = (t - *sum) - y;
+        *sum = t;
+    }
+
     unsafe {
         let dp = data.as_ptr();
 
         
         let mut y = 0.0f64;
+        let mut y_c = 0.0f64;
         let mut xy = 0.0f64;
+        let mut xy_c = 0.0f64;
         for j in 0..(period - 1) {
             let v = *dp.add(base + j);
-            y += v;
-            xy += v * (j + 1) as f64;
+            kahan_add(&mut y, &mut y_c, v);
+            kahan_add(&mut xy, &mut xy_c, v * (j + 1) as f64);
         }
 
         let mut in_new = dp.add(base + period - 1);
@@ -306,21 +316,21 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
         while in_new.add(1) < end {
             
             let v0 = *in_new;
-            y += v0;
-            xy += v0 * p;
+            kahan_add(&mut y, &mut y_c, v0);
+            kahan_add(&mut xy, &mut xy_c, v0 * p);
             let b0 = xy * p_bd - y * x_bd;
             *out_ptr = if b0.abs() <= 1.1e-8 { 0.0 } else { b0 };
-            xy -= y;
-            y -= *in_old;
+            kahan_add(&mut xy, &mut xy_c, -y);
+            kahan_add(&mut y, &mut y_c, -*in_old);
 
             
             let v1 = *in_new.add(1);
-            y += v1;
-            xy += v1 * p;
+            kahan_add(&mut y, &mut y_c, v1);
+            kahan_add(&mut xy, &mut xy_c, v1 * p);
             let b1 = xy * p_bd - y * x_bd;
             *out_ptr.add(1) = if b1.abs() <= 1.1e-8 { 0.0 } else { b1 };
-            xy -= y;
-            y -= *in_old.add(1);
+            kahan_add(&mut xy, &mut xy_c, -y);
+            kahan_add(&mut y, &mut y_c, -*in_old.add(1));
 
             in_new = in_new.add(2);
             in_old = in_old.add(2);
@@ -329,8 +339,8 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
 
         if in_new < end {
             let v = *in_new;
-            y += v;
-            xy += v * p;
+            kahan_add(&mut y, &mut y_c, v);
+            kahan_add(&mut xy, &mut xy_c, v * p);
             let b = xy * p_bd - y * x_bd;
             *out_ptr = if b.abs() <= 1.1e-8 { 0.0 } else { b };
         }

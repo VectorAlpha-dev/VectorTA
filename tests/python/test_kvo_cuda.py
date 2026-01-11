@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 
 try:
-    import cupy as cp  # optional; used to wrap device handle
-except Exception:  # pragma: no cover
+    import cupy as cp  
+except Exception:  
     cp = None
 
 try:
@@ -26,7 +26,7 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, 'kvo_cuda_batch_dev'):
         return False
-    # Probe minimal call
+    
     try:
         n = 8
         h = np.full(n, np.nan, dtype=np.float32)

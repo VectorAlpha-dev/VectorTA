@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -63,7 +63,7 @@ class TestTsiCuda:
         base = test_data['close'][:T].astype(np.float64)
         data_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            data_tm[1:, j] = base[1:] * (1.0 + 0.01 * j)  # ensure prev exists for momentum
+            data_tm[1:, j] = base[1:] * (1.0 + 0.01 * j)  
 
         long_p, short_p = 25, 13
 

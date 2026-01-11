@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:

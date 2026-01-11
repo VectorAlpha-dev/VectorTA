@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - CUDA optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -35,7 +35,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - detection guard
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

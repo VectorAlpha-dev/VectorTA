@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestRvi:
         """Test RVI with partial parameters - mirrors check_rvi_partial_params"""
         close = test_data['close']
         
-        # Test with partial params (period=10, others default)
+        
         result = ta_indicators.rvi(close, period=10, ma_len=14, matype=1, devtype=0)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestRvi:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_last_five = [
             67.48579363423423,
             62.03322230763894,
@@ -52,12 +52,12 @@ class TestRvi:
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-1,  # Using larger tolerance as per Rust test
+            rtol=1e-1,  
             msg="RVI last 5 values mismatch"
         )
         
-        # Check warmup period has NaN values
-        warmup = 10 - 1 + 14 - 1  # period - 1 + ma_len - 1
+        
+        warmup = 10 - 1 + 14 - 1  
         for i in range(warmup):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
     
@@ -65,7 +65,7 @@ class TestRvi:
         """Test RVI with default parameters - mirrors check_rvi_default_params"""
         close = test_data['close']
         
-        # Default params: period=10, ma_len=14, matype=1, devtype=0
+        
         result = ta_indicators.rvi(close, 10, 14, 1, 0)
         assert len(result) == len(close)
     
@@ -115,7 +115,7 @@ class TestRvi:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter combination
+        
         batch_result = ta_indicators.rvi_batch(
             close,
             period_range=(10, 10, 0),
@@ -124,7 +124,7 @@ class TestRvi:
             devtype_range=(0, 0, 0)
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.rvi(close, 10, 14, 1, 0)
         
         assert batch_result['values'].shape == (1, len(close))
@@ -137,9 +137,9 @@ class TestRvi:
     
     def test_rvi_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 10, 12, 14
+        
         batch_result = ta_indicators.rvi_batch(
             close,
             period_range=(10, 14, 2),
@@ -148,14 +148,14 @@ class TestRvi:
             devtype_range=(0, 0, 0)
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert batch_result['values'].shape == (3, 100)
         assert len(batch_result['periods']) == 3
         assert batch_result['periods'][0] == 10
         assert batch_result['periods'][1] == 12
         assert batch_result['periods'][2] == 14
         
-        # Verify each row matches individual calculation
+        
         periods = [10, 12, 14]
         for i, period in enumerate(periods):
             single_result = ta_indicators.rvi(close, period, 14, 1, 0)
@@ -172,43 +172,43 @@ class TestRvi:
         
         batch_result = ta_indicators.rvi_batch(
             close,
-            period_range=(10, 14, 2),  # 3 periods
-            ma_len_range=(10, 12, 2),  # 2 ma_lens
-            matype_range=(0, 1, 1),    # 2 matypes
-            devtype_range=(0, 1, 1)     # 2 devtypes
+            period_range=(10, 14, 2),  
+            ma_len_range=(10, 12, 2),  
+            matype_range=(0, 1, 1),    
+            devtype_range=(0, 1, 1)     
         )
         
-        # Should have 3 * 2 * 2 * 2 = 24 combinations
+        
         assert batch_result['values'].shape == (24, 50)
         assert len(batch_result['periods']) == 24
         assert len(batch_result['ma_lens']) == 24
         assert len(batch_result['matypes']) == 24
         assert len(batch_result['devtypes']) == 24
         
-        # Verify structure
+        
         for row in range(batch_result['values'].shape[0]):
             row_data = batch_result['values'][row]
             
-            # Check warmup has NaN
-            # Warmup depends on period and ma_len
+            
+            
             period = batch_result['periods'][row]
             ma_len = batch_result['ma_lens'][row]
             warmup = period - 1 + ma_len - 1
             for i in range(min(warmup, len(row_data))):
                 if not np.isnan(row_data[i]):
-                    # Only check if we expected NaN
-                    pass  # Some combinations might have shorter warmup
+                    
+                    pass  
             
-            # After warmup should have values
+            
             for i in range(warmup, len(row_data)):
                 assert not np.isnan(row_data[i]), f"Unexpected NaN at index {i} for combination {row}"
     
     def test_rvi_streaming(self):
         """Test RVI streaming functionality"""
-        # Create stream with default params
+        
         stream = ta_indicators.RviStream(period=10, ma_len=14, matype=1, devtype=0)
         
-        # Update should return None (not fully supported)
+        
         result = stream.update(100.0)
         assert result is None
     
@@ -235,39 +235,39 @@ class TestRvi:
     
     def test_rvi_different_devtypes(self, test_data):
         """Test RVI with different deviation types"""
-        close = test_data['close'][:100]  # Smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test all three devtypes
-        devtypes = [0, 1, 2]  # StdDev, MeanAbsDev, MedianAbsDev
+        
+        devtypes = [0, 1, 2]  
         results = []
         
         for devtype in devtypes:
             result = ta_indicators.rvi(close, 10, 14, 1, devtype)
             results.append(result)
         
-        # Results should be different for different devtypes
+        
         for i in range(len(devtypes)):
             for j in range(i + 1, len(devtypes)):
-                # Check that results are not identical
+                
                 diff = np.abs(results[i] - results[j])
-                # After warmup, there should be some differences
+                
                 assert np.nanmax(diff) > 1e-10, f"Devtype {devtypes[i]} and {devtypes[j]} gave identical results"
     
     def test_rvi_different_matypes(self, test_data):
         """Test RVI with different MA types"""
-        close = test_data['close'][:100]  # Smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test both matypes
-        matypes = [0, 1]  # SMA, EMA
+        
+        matypes = [0, 1]  
         results = []
         
         for matype in matypes:
             result = ta_indicators.rvi(close, 10, 14, matype, 0)
             results.append(result)
         
-        # Results should be different for different matypes
+        
         diff = np.abs(results[0] - results[1])
-        # After warmup, there should be some differences
+        
         assert np.nanmax(diff) > 1e-10, "SMA and EMA gave identical results"
 
 

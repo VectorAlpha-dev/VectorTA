@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,7 +31,7 @@ class TestModGodMode:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default parameters
+        
         wavetrend, signal, histogram = ta_indicators.mod_god_mode(
             high, low, close, volume,
             n1=17, n2=6, n3=4,
@@ -60,7 +60,7 @@ class TestModGodMode:
             use_volume=True
         )
         
-        # Pine Script reference values (last 5 wavetrend values)
+        
         expected_last_five = [
             61.66219598,
             55.92955776,
@@ -73,14 +73,14 @@ class TestModGodMode:
         if len(non_nan_values) >= 5:
             actual_last_five = non_nan_values[-5:]
             
-            # Check with tolerance of 4.0 (as determined in Rust tests)
+            
             for i, (expected, actual) in enumerate(zip(expected_last_five, actual_last_five)):
                 diff = abs(expected - actual)
                 assert diff < 4.0, f"Value {i} mismatch: expected {expected:.8f}, got {actual:.8f}, diff {diff:.8f}"
     
     def test_mod_god_mode_modes(self, test_data):
         """Test different MOD_GOD_MODE modes - mirrors check_mod_god_mode_modes"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
@@ -107,7 +107,7 @@ class TestModGodMode:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Test with volume
+        
         wt_with, sig_with, hist_with = ta_indicators.mod_god_mode(
             high, low, close, volume,
             n1=5, n2=3, n3=2,
@@ -115,7 +115,7 @@ class TestModGodMode:
             use_volume=True
         )
         
-        # Test without volume
+        
         wt_without, sig_without, hist_without = ta_indicators.mod_god_mode(
             high, low, close, None,
             n1=5, n2=3, n3=2,
@@ -123,14 +123,14 @@ class TestModGodMode:
             use_volume=False
         )
         
-        # Both should work and produce different results
+        
         assert len(wt_with) == len(close)
         assert len(wt_without) == len(close)
         
-        # Find first non-NaN values and compare
+        
         for i in range(len(wt_with)):
             if not np.isnan(wt_with[i]) and not np.isnan(wt_without[i]):
-                # They should be different (volume affects calculation)
+                
                 assert abs(wt_with[i] - wt_without[i]) > 1e-10, "Volume should affect the calculation"
                 break
     
@@ -163,7 +163,7 @@ class TestModGodMode:
     
     def test_mod_god_mode_insufficient_data(self):
         """Test MOD_GOD_MODE fails with insufficient data - mirrors check_mod_god_mode_insufficient_data"""
-        # n1=17 requires at least 17 data points
+        
         small_size = 10
         high = np.ones(small_size) * 10.5
         low = np.ones(small_size) * 9.5
@@ -199,7 +199,7 @@ class TestModGodMode:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Batch calculation
+        
         batch_wavetrend, batch_signal, batch_histogram = ta_indicators.mod_god_mode(
             high, low, close, volume,
             n1=5, n2=3, n3=2,
@@ -207,7 +207,7 @@ class TestModGodMode:
             use_volume=True
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.ModGodModeStreamPy(
             n1=5, n2=3, n3=2,
             mode='tradition_mg',
@@ -232,11 +232,11 @@ class TestModGodMode:
         
         stream_wavetrend = np.array(stream_wavetrend)
         
-        # Compare last values where both have valid data
+        
         valid_indices = ~(np.isnan(batch_wavetrend) | np.isnan(stream_wavetrend))
         
         if np.any(valid_indices):
-            # Get last valid index
+            
             last_valid = np.where(valid_indices)[0][-1]
             assert_close(
                 batch_wavetrend[last_valid], 
@@ -259,10 +259,10 @@ class TestModGodMode:
             use_volume=False
         )
         
-        # After warmup, check for unexpected NaNs
-        warmup = 7 + 4 + 3  # Conservative warmup estimate
+        
+        warmup = 7 + 4 + 3  
         if len(wavetrend) > warmup + 10:
-            # Check that we eventually get non-NaN values
+            
             has_values = False
             for i in range(warmup, len(wavetrend)):
                 if not np.isnan(wavetrend[i]):
@@ -285,11 +285,11 @@ class TestModGodMode:
             'use_volume': False
         }
         
-        # Calculate twice
+        
         wt1, sig1, hist1 = ta_indicators.mod_god_mode(high, low, close, None, **params)
         wt2, sig2, hist2 = ta_indicators.mod_god_mode(high, low, close, None, **params)
         
-        # Results should be identical
+        
         for i in range(len(wt1)):
             wt1_val = wt1[i]
             wt2_val = wt2[i]
@@ -320,13 +320,13 @@ class TestModGodMode:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test parameter sweep batch
+        
         result = ta_indicators.mod_god_mode_batch(
             high, low, close, volume,
-            n1_range=(17, 17, 0),  # Default n1 only
-            n2_range=(6, 6, 0),    # Default n2 only
-            n3_range=(4, 4, 0),    # Default n3 only
-            mode='tradition_mg'    # Single mode
+            n1_range=(17, 17, 0),  
+            n2_range=(6, 6, 0),    
+            n3_range=(4, 4, 0),    
+            mode='tradition_mg'    
         )
         
         assert 'wavetrend' in result
@@ -337,7 +337,7 @@ class TestModGodMode:
         assert 'n3s' in result
         assert 'modes' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['wavetrend'].shape[0] == 1
         assert result['wavetrend'].shape[1] == len(close)
         assert result['signal'].shape[0] == 1
@@ -349,7 +349,7 @@ class TestModGodMode:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # First pass
+        
         wavetrend, signal, histogram = ta_indicators.mod_god_mode(
             high, low, close, None,
             n1=5, n2=3, n3=2,
@@ -357,12 +357,12 @@ class TestModGodMode:
             use_volume=False
         )
         
-        # Use wavetrend output as new "close" data for second pass
-        # Create synthetic high/low from wavetrend
+        
+        
         synthetic_high = wavetrend + 0.5
         synthetic_low = wavetrend - 0.5
         
-        # Second pass - should work without errors
+        
         wavetrend2, signal2, histogram2 = ta_indicators.mod_god_mode(
             synthetic_high, synthetic_low, wavetrend, None,
             n1=5, n2=3, n3=2,

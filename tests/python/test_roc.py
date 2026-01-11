@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestRoc:
         """Test ROC with partial parameters (None values) - mirrors check_roc_partial_params"""
         close = test_data['close']
         
-        # Test with default params (period=10)
+        
         result = ta_indicators.roc(close, 10)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestRoc:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_last_five = [
             -0.22551709049294377,
             -0.5561903481650754,
@@ -56,15 +56,15 @@ class TestRoc:
             msg="ROC last 5 values mismatch"
         )
         
-        # Check warmup period has NaN values
-        for i in range(9):  # period - 1
+        
+        for i in range(9):  
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
     
     def test_roc_default_candles(self, test_data):
         """Test ROC with default parameters - mirrors check_roc_default_candles"""
         close = test_data['close']
         
-        # Default params: period=10
+        
         result = ta_indicators.roc(close, 10)
         assert len(result) == len(close)
     
@@ -93,15 +93,15 @@ class TestRoc:
         """Test ROC applied twice (re-input) - mirrors check_roc_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.roc(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass - apply ROC to ROC output
+        
         second_result = ta_indicators.roc(first_result, period=14)
         assert len(second_result) == len(first_result)
         
-        # After warmup period, should have values
+        
         for i in range(28, len(second_result)):
             assert not np.isnan(second_result[i]), f"Expected value after warmup, but found NaN at index {i}"
     
@@ -112,7 +112,7 @@ class TestRoc:
         result = ta_indicators.roc(close, period=9)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             for i in range(240, len(result)):
                 assert not np.isnan(result[i]), f"Found unexpected NaN at index {i}"
@@ -135,13 +135,13 @@ class TestRoc:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter combination
+        
         batch_result = ta_indicators.roc_batch(
             close,
             period_range=(10, 10, 0)
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.roc(close, 10)
         
         assert batch_result['values'].shape == (1, len(close))
@@ -152,29 +152,29 @@ class TestRoc:
             msg="Batch vs single mismatch"
         )
         
-        # Check parameter arrays
+        
         assert len(batch_result['periods']) == 1
         assert batch_result['periods'][0] == 10
     
     def test_roc_batch_multiple_parameters(self, test_data):
         """Test batch with multiple parameter values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple parameters
+        
         batch_result = ta_indicators.roc_batch(
             close,
-            period_range=(10, 12, 2)      # 10, 12
+            period_range=(10, 12, 2)      
         )
         
-        # Should have 2 combinations
+        
         assert batch_result['values'].shape == (2, 100)
         
-        # Verify parameter combinations
+        
         expected_periods = [10, 12]
         
         assert list(batch_result['periods']) == expected_periods
         
-        # Verify first combination matches single calculation
+        
         single_result = ta_indicators.roc(close, 10)
         assert_close(
             batch_result['values'][0], 
@@ -187,7 +187,7 @@ class TestRoc:
         """Test edge cases for batch processing"""
         close = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         
-        # Single value sweep
+        
         single_batch = ta_indicators.roc_batch(
             close,
             period_range=(3, 3, 1)
@@ -195,13 +195,13 @@ class TestRoc:
         
         assert single_batch['values'].shape == (1, 10)
         
-        # Step larger than range
+        
         large_batch = ta_indicators.roc_batch(
             close,
-            period_range=(3, 5, 10)  # Step larger than range
+            period_range=(3, 5, 10)  
         )
         
-        # Should only have period=3
+        
         assert large_batch['values'].shape == (1, 10)
         assert large_batch['periods'][0] == 3
     
@@ -209,19 +209,19 @@ class TestRoc:
         """Test ROC streaming functionality"""
         close = test_data['close']
         
-        # Create stream
+        
         stream = ta_indicators.RocStream(period=10)
         
-        # Process data point by point
+        
         stream_results = []
         for price in close:
             result = stream.update(price)
             stream_results.append(result if result is not None else np.nan)
         
-        # Compare with batch calculation
+        
         batch_result = ta_indicators.roc(close, period=10)
         
-        # Results should match
+        
         assert_close(
             stream_results, 
             batch_result, 
@@ -231,9 +231,9 @@ class TestRoc:
     
     def test_roc_kernel_parameter(self, test_data):
         """Test ROC with different kernel parameters"""
-        close = test_data['close'][:100]  # Smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test with different kernels
+        
         kernels = [None, 'scalar', 'avx2', 'avx512', 'auto']
         
         for kernel in kernels:
@@ -244,7 +244,7 @@ class TestRoc:
                     result = ta_indicators.roc(close, 10)
                 assert len(result) == len(close)
             except ValueError as e:
-                # Some kernels might not be compiled or available on this system/build
+                
                 msg = str(e)
                 allowed = (
                     "Unsupported kernel" in msg

@@ -3,8 +3,8 @@ import pytest
 import numpy as np
 
 try:
-    import cupy as cp  # to consume __cuda_array_interface__
-except Exception:  # pragma: no cover
+    import cupy as cp  
+except Exception:  
     cp = None
 
 try:
@@ -30,7 +30,7 @@ def test_voss_cuda_batch_dev_matches_cpu():
     td = load_test_data()
     close = td["close"].astype(np.float32)
 
-    # Small sweep to keep test time moderate
+    
     out = ti.voss_cuda_batch_dev(close, (10, 18, 4), (1, 3, 1), (0.15, 0.35, 0.10), device_id=0)
     voss_dev = out["voss"]
     filt_dev = out["filt"]
@@ -38,7 +38,7 @@ def test_voss_cuda_batch_dev_matches_cpu():
     voss = cp.asnumpy(cp.asarray(voss_dev)).astype(np.float32)
     filt = cp.asnumpy(cp.asarray(filt_dev)).astype(np.float32)
 
-    # CPU reference
+    
     rows = voss.shape[0]
     expect_v = []
     expect_f = []

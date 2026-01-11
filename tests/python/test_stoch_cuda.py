@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -33,7 +33,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(k)
         _ = cp.asarray(d)
         return True
-    except Exception as exc:  # pragma: no cover - probing path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -96,7 +96,7 @@ class TestStochCuda:
 
         fastk, slowk, slowd = 14, 3, 3
 
-        # CPU reference
+        
         ref_k = np.zeros_like(close_tm, dtype=np.float64)
         ref_d = np.zeros_like(close_tm, dtype=np.float64)
         for j in range(N):

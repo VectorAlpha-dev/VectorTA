@@ -4,7 +4,7 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -27,7 +27,7 @@ def _cuda_available() -> bool:
         handle = ti.wclprice_cuda_dev(high, low, close)
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg:
             return False

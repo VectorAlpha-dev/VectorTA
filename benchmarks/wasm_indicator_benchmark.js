@@ -6235,7 +6235,7 @@ class WasmIndicatorBenchmark {
         try {
             const { createRequire } = await import('module');
             const require = createRequire(import.meta.url);
-            const wasmPath = join(__dirname, '../pkg/my_project.js');
+            const wasmPath = join(__dirname, '../pkg/vector_ta.js');
             this.wasm = require(wasmPath);
             console.log('WASM module loaded successfully');
         } catch (error) {

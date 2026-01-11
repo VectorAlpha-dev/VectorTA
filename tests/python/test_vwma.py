@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,11 +30,11 @@ class TestVwma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default period (20)
+        
         result = ta_indicators.vwma(close, volume, 20)
         assert len(result) == len(close)
         
-        # Test with custom period
+        
         result_custom = ta_indicators.vwma(close, volume, 10)
         assert len(result_custom) == len(close)
     
@@ -52,8 +52,8 @@ class TestVwma:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
-        # Use absolute tolerance 1e-3 to match Rust tests exactly
+        
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -62,13 +62,13 @@ class TestVwma:
             msg="VWMA last 5 values mismatch (abs tol 1e-3)"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('vwma', result, 'close', expected['default_params'])
     
     def test_vwma_price_volume_mismatch(self):
         """Test VWMA fails when price and volume lengths don't match"""
         prices = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
-        volumes = np.array([100.0, 200.0, 300.0])  # Shorter array
+        volumes = np.array([100.0, 200.0, 300.0])  
         
         with pytest.raises(ValueError, match="Price and volume mismatch"):
             ta_indicators.vwma(prices, volumes, 3)
@@ -78,11 +78,11 @@ class TestVwma:
         prices = np.array([10.0, 20.0, 30.0])
         volumes = np.array([100.0, 200.0, 300.0])
         
-        # Period = 0
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.vwma(prices, volumes, 0)
         
-        # Period exceeds length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.vwma(prices, volumes, 10)
     
@@ -96,7 +96,7 @@ class TestVwma:
     
     def test_vwma_not_enough_valid_data(self):
         """Test VWMA fails with insufficient valid data"""
-        # First 8 values are NaN, only 2 valid values for period=5
+        
         prices = np.array([np.nan] * 8 + [10.0, 20.0])
         volumes = np.array([np.nan] * 8 + [100.0, 200.0])
         
@@ -108,7 +108,7 @@ class TestVwma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Default period is 20
+        
         result = ta_indicators.vwma(close, volume, 20)
         assert len(result) == len(close)
     
@@ -117,7 +117,7 @@ class TestVwma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Use slightly modified prices
+        
         custom_prices = close * 1.001
         
         result = ta_indicators.vwma(custom_prices, volume, 20)
@@ -128,17 +128,17 @@ class TestVwma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # First pass
+        
         first_result = ta_indicators.vwma(close, volume, 20)
         assert len(first_result) == len(close)
         
-        # Second pass - use VWMA output as prices, keep same volumes
+        
         second_result = ta_indicators.vwma(first_result, volume, 10)
         assert len(second_result) == len(first_result)
         
-        # After warmup, should have valid values
-        # First pass warmup: first + period - 1 = 0 + 20 - 1 = 19
-        # Second pass warmup: first_warmup + period2 - 1 = 19 + 10 - 1 = 28
+        
+        
+        
         expected_warmup = 28
         for i in range(expected_warmup, len(second_result)):
             assert not np.isnan(second_result[i]), f"Unexpected NaN at index {i}"
@@ -151,10 +151,10 @@ class TestVwma:
         result = ta_indicators.vwma(close, volume, 20)
         assert len(result) == len(close)
         
-        # First period-1 values should be NaN (warmup)
+        
         assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
         
-        # After warmup period, no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
     
@@ -164,10 +164,10 @@ class TestVwma:
         volume = test_data['volume']
         period = 20
         
-        # Batch calculation
+        
         batch_result = ta_indicators.vwma(close, volume, period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.VwmaStream(period)
         stream_values = []
         
@@ -177,10 +177,10 @@ class TestVwma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -195,22 +195,22 @@ class TestVwma:
         result = ta_indicators.vwma_batch(
             close,
             volume,
-            period_range=(20, 20, 0),  # Default period only
+            period_range=(20, 20, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['vwma']['last_5_values']
         
-        # Check last 5 values match
-        # Use absolute tolerance 1e-3 to align with Rust tests
+        
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -224,14 +224,14 @@ class TestVwma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test different kernels
+        
         kernels = ['auto', 'scalar', 'avx2', 'avx512']
         for kernel in kernels:
             try:
                 result = ta_indicators.vwma(close, volume, 20, kernel=kernel)
                 assert len(result) == len(close)
             except ValueError as e:
-                # AVX kernels might not be available on all systems
+                
                 if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
     
@@ -243,29 +243,29 @@ class TestVwma:
         result = ta_indicators.vwma(prices, volumes, 3)
         assert len(result) == len(prices)
         
-        # Check that we get NaN where all volumes in window are zero
-        # but valid values where at least one volume is non-zero
-        assert not np.isnan(result[2])  # Window has non-zero volumes
+        
+        
+        assert not np.isnan(result[2])  
     
     def test_vwma_partial_nan_data(self, test_data):
         """Test VWMA with NaN values in middle of dataset"""
         close = test_data['close'].copy()
         volume = test_data['volume'].copy()
         
-        # Inject NaN values in middle of data
+        
         close[100:110] = np.nan
         volume[100:110] = np.nan
         
-        # VWMA should handle NaN gracefully but might propagate them
-        # This test verifies the function doesn't crash
+        
+        
         result = ta_indicators.vwma(close, volume, 20)
         assert len(result) == len(close)
         
-        # Should have NaN during warmup
+        
         assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
         
-        # Note: NaN handling depends on implementation - some may continue
-        # producing NaN until all data is valid again
+        
+        
     
     def test_vwma_warmup_period(self, test_data):
         """Test VWMA warmup period calculation matches Rust exactly"""
@@ -275,32 +275,32 @@ class TestVwma:
         
         result = ta_indicators.vwma(close, volume, period)
         
-        # Warmup should be first + period - 1 = 0 + 20 - 1 = 19
-        # So indices 0-18 should be NaN, index 19 should be first valid
+        
+        
         assert np.all(np.isnan(result[:19])), "First 19 values should be NaN"
         assert not np.isnan(result[19]), "Index 19 should be first valid value"
     
     def test_vwma_batch_multiple_periods(self, test_data):
         """Test VWMA batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
         result = ta_indicators.vwma_batch(
             close,
             volume,
-            period_range=(10, 30, 10),  # periods: 10, 20, 30
+            period_range=(10, 30, 10),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 combinations
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
         assert len(result['periods']) == 3
         assert np.array_equal(result['periods'], [10, 20, 30])
         
-        # Verify each row matches single calculation
+        
         for i, period in enumerate([10, 20, 30]):
             single_result = ta_indicators.vwma(close, volume, period)
             assert_close(
@@ -315,7 +315,7 @@ class TestVwma:
         prices = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         volumes = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
         
-        # Test with step=0 (single value)
+        
         result = ta_indicators.vwma_batch(
             prices,
             volumes,
@@ -324,7 +324,7 @@ class TestVwma:
         assert result['values'].shape[0] == 1
         assert result['periods'] == [5]
         
-        # Test with step > range (single value)
+        
         result = ta_indicators.vwma_batch(
             prices,
             volumes,

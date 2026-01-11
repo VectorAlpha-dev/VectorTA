@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestMacd:
         """Test MACD with default parameters - mirrors check_macd_partial_params"""
         close = test_data['close']
         
-        # Test with default params
+        
         macd, signal, hist = ta_indicators.macd(close, 12, 26, 9, "ema")
         assert len(macd) == len(close)
         assert len(signal) == len(close)
@@ -45,7 +45,7 @@ class TestMacd:
         assert len(signal) == len(close)
         assert len(hist) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_macd = [
             -629.8674025082801,
             -600.2986584356258,
@@ -68,7 +68,7 @@ class TestMacd:
             71.17605737819008,
         ]
         
-        # Use same tolerance as Rust tests (1e-1)
+        
         assert_close(
             macd[-5:], 
             expected_macd,
@@ -116,7 +116,7 @@ class TestMacd:
         macd, signal, hist = ta_indicators.macd(close, 12, 26, 9, "ema")
         n = len(macd)
         
-        # After warmup period (approximately 240 values), there should be no NaNs
+        
         if n > 240:
             for i in range(240, n):
                 assert not np.isnan(macd[i])
@@ -127,37 +127,37 @@ class TestMacd:
         """Test MACD streaming functionality"""
         stream = ta_indicators.MacdStream(12, 26, 9, "ema")
         
-        # Test adding values one by one
+        
         values = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
         result = None
         
         for i, value in enumerate(values):
             result = stream.update(value)
-            # Should start returning values after we have enough data
-            # Need at least slow_period + signal_period - 1 = 26 + 9 - 1 = 34 values
+            
+            
         
-        # After 10 values, we don't have enough data yet
+        
         assert result is None
         
-        # Add more values to get results
+        
         for i in range(100):
             result = stream.update(50.0 + i)
         
-        # Should have results now
+        
         assert result is not None
         assert isinstance(result, tuple)
-        assert len(result) == 3  # (macd, signal, hist)
+        assert len(result) == 3  
     
     def test_macd_batch(self, test_data):
         """Test MACD batch processing"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Test batch with single parameter set
+        
         result = ta_indicators.macd_batch(
             close,
-            (12, 12, 1),  # fast_period_range
-            (26, 26, 1),  # slow_period_range
-            (9, 9, 1),    # signal_period_range
+            (12, 12, 1),  
+            (26, 26, 1),  
+            (9, 9, 1),    
             "ema"
         )
         
@@ -168,12 +168,12 @@ class TestMacd:
         assert 'slow_periods' in result
         assert 'signal_periods' in result
         
-        # Should have 1 row for single parameter set
+        
         assert result['macd'].shape == (1, 100)
         assert result['signal'].shape == (1, 100)
         assert result['hist'].shape == (1, 100)
         
-        # Compare with single calculation
+        
         single_macd, single_signal, single_hist = ta_indicators.macd(close, 12, 26, 9, "ema")
         
         assert_close(
@@ -197,18 +197,18 @@ class TestMacd:
     
     def test_macd_batch_multiple_params(self, test_data):
         """Test MACD batch with multiple parameter combinations"""
-        close = test_data['close'][:50]  # Use smaller dataset for speed
+        close = test_data['close'][:50]  
         
-        # Multiple parameter combinations
+        
         result = ta_indicators.macd_batch(
             close,
-            (10, 14, 2),   # fast: 10, 12, 14
-            (24, 28, 2),   # slow: 24, 26, 28
-            (8, 10, 1),    # signal: 8, 9, 10
+            (10, 14, 2),   
+            (24, 28, 2),   
+            (8, 10, 1),    
             "ema"
         )
         
-        # Should have 3 * 3 * 3 = 27 combinations
+        
         assert result['macd'].shape == (27, 50)
         assert result['signal'].shape == (27, 50)
         assert result['hist'].shape == (27, 50)
@@ -216,7 +216,7 @@ class TestMacd:
         assert len(result['slow_periods']) == 27
         assert len(result['signal_periods']) == 27
         
-        # Check first combination matches single calculation
+        
         first_macd, first_signal, first_hist = ta_indicators.macd(close, 10, 24, 8, "ema")
         
         assert_close(
@@ -235,18 +235,18 @@ class TestMacd:
         
         macd, signal, hist = ta_indicators.macd(close, fast_period, slow_period, signal_period, "ema")
         
-        # MACD warmup: first slow_period - 1 values should be NaN
+        
         macd_warmup = slow_period - 1
         for i in range(macd_warmup):
             assert np.isnan(macd[i]), f"Expected NaN at MACD index {i} during warmup"
         
-        # Signal and histogram warmup: first slow_period + signal_period - 2 values should be NaN
+        
         signal_warmup = slow_period + signal_period - 2
         for i in range(signal_warmup):
             assert np.isnan(signal[i]), f"Expected NaN at signal index {i} during warmup"
             assert np.isnan(hist[i]), f"Expected NaN at histogram index {i} during warmup"
         
-        # After warmup, values should not be NaN (for clean data)
+        
         assert not np.isnan(macd[macd_warmup]), f"Unexpected NaN at MACD index {macd_warmup} after warmup"
         assert not np.isnan(signal[signal_warmup]), f"Unexpected NaN at signal index {signal_warmup} after warmup"
         assert not np.isnan(hist[signal_warmup]), f"Unexpected NaN at histogram index {signal_warmup} after warmup"
@@ -260,25 +260,25 @@ class TestMacd:
     
     def test_macd_different_ma_types(self, test_data):
         """Test MACD with different moving average types"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Test EMA (default)
+        
         macd_ema, signal_ema, hist_ema = ta_indicators.macd(close, 12, 26, 9, "ema")
         assert len(macd_ema) == len(close)
         
-        # Test SMA
+        
         macd_sma, signal_sma, hist_sma = ta_indicators.macd(close, 12, 26, 9, "sma")
         assert len(macd_sma) == len(close)
         
-        # Test WMA
+        
         macd_wma, signal_wma, hist_wma = ta_indicators.macd(close, 12, 26, 9, "wma")
         assert len(macd_wma) == len(close)
         
-        # Results should be different for different MA types
+        
         assert not np.allclose(macd_ema[50:], macd_sma[50:], rtol=1e-5), "EMA and SMA should produce different results"
         assert not np.allclose(macd_ema[50:], macd_wma[50:], rtol=1e-5), "EMA and WMA should produce different results"
         
-        # Test invalid MA type
+        
         with pytest.raises(ValueError, match="Unknown MA type"):
             ta_indicators.macd(close, 12, 26, 9, "invalid_ma")
     
@@ -286,17 +286,17 @@ class TestMacd:
         """Test MACD batch processing edge cases"""
         close = test_data['close'][:50]
         
-        # Test with step larger than range
+        
         result = ta_indicators.macd_batch(
             close,
-            (12, 14, 10),  # Step 10 > range 2, should only get 12
-            (26, 26, 1),   # Single value
-            (9, 9, 1),     # Single value
+            (12, 14, 10),  
+            (26, 26, 1),   
+            (9, 9, 1),     
             "ema"
         )
         assert result['macd'].shape[0] == 1, "Should only have one parameter combination"
         
-        # Test empty data
+        
         empty = np.array([])
         with pytest.raises(ValueError, match="All values are NaN|Input data slice is empty"):
             ta_indicators.macd_batch(
@@ -307,28 +307,28 @@ class TestMacd:
                 "ema"
             )
         
-        # Test batch warmup periods
+        
         result = ta_indicators.macd_batch(
             close,
-            (10, 14, 2),   # 3 values: 10, 12, 14
-            (24, 28, 2),   # 3 values: 24, 26, 28
-            (8, 8, 1),     # 1 value: 8
+            (10, 14, 2),   
+            (24, 28, 2),   
+            (8, 8, 1),     
             "ema"
         )
         
-        # Should have 3 * 3 * 1 = 9 combinations
+        
         assert result['macd'].shape[0] == 9
         
-        # Check warmup periods for first combination (fast=10, slow=24, signal=8)
+        
         first_row_macd = result['macd'][0]
         first_row_signal = result['signal'][0]
         first_row_hist = result['hist'][0]
         
-        # MACD warmup is slow - 1 = 24 - 1 = 23
+        
         for i in range(23):
             assert np.isnan(first_row_macd[i]), f"Expected NaN in batch MACD at index {i}"
         
-        # Signal/hist warmup is slow + signal - 2 = 24 + 8 - 2 = 30
+        
         for i in range(30):
             assert np.isnan(first_row_signal[i]), f"Expected NaN in batch signal at index {i}"
             assert np.isnan(first_row_hist[i]), f"Expected NaN in batch histogram at index {i}"
@@ -337,15 +337,15 @@ class TestMacd:
         """Test MACD with different kernel parameters"""
         close = test_data['close'][:100]
         
-        # Test with scalar kernel
+        
         macd_scalar, signal_scalar, hist_scalar = ta_indicators.macd(close, 12, 26, 9, "ema", "scalar")
         assert len(macd_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         macd_auto, signal_auto, hist_auto = ta_indicators.macd(close, 12, 26, 9, "ema")
         assert len(macd_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(macd_scalar, macd_auto, rtol=1e-12)
         assert_close(signal_scalar, signal_auto, rtol=1e-12)
         assert_close(hist_scalar, hist_auto, rtol=1e-12)

@@ -19,7 +19,7 @@ class TestTema:
         
         assert isinstance(result, np.ndarray)
         assert result.shape == data.shape
-        # TEMA has a warmup period of (period-1)*3 = 6 for period=3
+        
         assert np.isnan(result[0:6]).all()
         assert not np.isnan(result[6:]).any()
         
@@ -28,15 +28,15 @@ class TestTema:
         data = np.random.random(1000)
         period = 9
         
-        # Test all kernel options
+        
         result_auto = tema(data, period, kernel='auto')
         result_scalar = tema(data, period, kernel='scalar')
         
-        # Results should be very close (within floating point precision)
+        
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10)
         
-        # Skip AVX kernels when not compiled with nightly-avx feature
-        # These will fail in normal builds
+        
+        
         
     def test_invalid_kernel(self):
         """Test error handling for invalid kernel"""
@@ -63,17 +63,17 @@ class TestTema:
         """Test error for invalid period values"""
         data = np.random.random(10)
         
-        # Period exceeds data length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             tema(data, 11)
             
-        # Period is zero
+        
         with pytest.raises(ValueError, match="Invalid period"):
             tema(data, 0)
             
     def test_error_not_enough_valid_data(self):
         """Test error when not enough valid data after NaN values"""
-        # First 8 values are NaN, only 2 valid values, but need period 9
+        
         data = np.array([np.nan] * 8 + [1.0, 2.0])
         
         with pytest.raises(ValueError, match="Not enough valid data"):
@@ -81,20 +81,20 @@ class TestTema:
             
     def test_leading_nans(self):
         """Test TEMA with leading NaN values"""
-        # Mix of NaN and valid values
+        
         data = np.array([np.nan, np.nan, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
         period = 2
         
         result = tema(data, period)
         
-        # First valid index is 2, TEMA warmup is (period-1)*3 = 3
-        # So first valid output is at index 2+3 = 5
+        
+        
         assert np.isnan(result[0:5]).all()
         assert not np.isnan(result[5:]).any()
         
     def test_compare_with_rust(self):
         """Test that Python bindings match Rust implementation"""
-        # Use the standard test data file that generate_references uses
+        
         from test_utils import load_test_data
         candles = load_test_data()
         data = candles['close']
@@ -108,13 +108,13 @@ class TestTema:
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         period = 3
         
-        # Create stream
+        
         stream = TemaStream(period)
         
-        # Batch calculation for comparison
+        
         batch_result = tema(data, period)
         
-        # Process data through stream
+        
         stream_results = []
         for value in data:
             result = stream.update(value)
@@ -122,8 +122,8 @@ class TestTema:
             
         stream_results = np.array(stream_results)
         
-        # Compare results (accounting for warmup)
-        # TEMA warmup is (period-1)*3 = 6
+        
+        
         np.testing.assert_allclose(
             batch_result[6:], 
             stream_results[6:], 
@@ -133,7 +133,7 @@ class TestTema:
     def test_batch_calculation(self):
         """Test batch TEMA calculation with multiple periods"""
         data = np.random.random(100)
-        period_range = (5, 15, 2)  # periods: 5, 7, 9, 11, 13, 15
+        period_range = (5, 15, 2)  
         
         result = tema_batch(data, period_range)
         
@@ -141,12 +141,12 @@ class TestTema:
         assert 'values' in result
         assert 'periods' in result
         
-        # Check dimensions
+        
         expected_periods = [5, 7, 9, 11, 13, 15]
         assert result['values'].shape == (len(expected_periods), len(data))
         np.testing.assert_array_equal(result['periods'], expected_periods)
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(expected_periods):
             individual_result = tema(data, period)
             np.testing.assert_allclose(
@@ -158,16 +158,16 @@ class TestTema:
     def test_batch_kernel_selection(self):
         """Test batch calculation with different kernels"""
         data = np.random.random(100)
-        period_range = (9, 15, 6)  # periods: 9, 15
+        period_range = (9, 15, 6)  
         
-        # Test different kernels
+        
         result_auto = tema_batch(data, period_range, kernel='auto')
         result_scalar = tema_batch(data, period_range, kernel='scalar')
         
-        # Auto and scalar should produce same results
+        
         np.testing.assert_allclose(result_auto['values'], result_scalar['values'], rtol=1e-10)
         
-        # Skip AVX kernels when not compiled with nightly-avx feature
+        
         
     def test_batch_invalid_kernel(self):
         """Test batch calculation with invalid kernel"""
@@ -179,14 +179,14 @@ class TestTema:
             
     def test_zero_copy_performance(self):
         """Test that zero-copy operations are working (indirect test)"""
-        # Large dataset to make copies noticeable
+        
         data = np.random.random(1_000_000)
         period = 20
         
-        # This should be fast due to zero-copy
+        
         result = tema(data, period)
         
-        # Verify result is correct shape and has expected NaN pattern
+        
         assert result.shape == data.shape
         warmup = (period - 1) * 3
         assert np.isnan(result[:warmup]).all()
@@ -194,7 +194,7 @@ class TestTema:
         
     def test_real_world_data(self):
         """Test with real-world conditions including warmup period"""
-        # Simulate real price data with some noise
+        
         np.random.seed(42)
         trend = np.linspace(100, 110, 200)
         noise = np.random.normal(0, 0.5, 200)
@@ -203,35 +203,35 @@ class TestTema:
         period = 9
         result = tema(data, period)
         
-        # Check warmup period
-        warmup = (period - 1) * 3  # 24 for period=9
+        
+        warmup = (period - 1) * 3  
         assert np.isnan(result[:warmup]).all()
         assert not np.isnan(result[warmup:]).any()
         
-        # Result should be smoother than input (but still responsive)
+        
         input_volatility = np.std(np.diff(data[warmup:]))
         output_volatility = np.std(np.diff(result[warmup:]))
-        # TEMA should reduce volatility but not as much as simple MA
+        
         assert output_volatility < input_volatility
-        assert output_volatility > input_volatility * 0.3  # Still responsive
+        assert output_volatility > input_volatility * 0.3  
         
     def test_edge_cases(self):
         """Test edge cases"""
-        # Single value
+        
         data = np.array([42.0])
         with pytest.raises(ValueError, match="Invalid period"):
             tema(data, 2)
             
-        # Period equals data length
+        
         data = np.random.random(10)
         result = tema(data, 10)
-        # All values should be NaN except possibly the last
+        
         assert np.isnan(result[:-1]).all()
         
-        # Minimum valid period
+        
         data = np.array([1.0, 2.0, 3.0])
         result = tema(data, 1)
-        # Period 1 TEMA is just the input
+        
         np.testing.assert_array_equal(result, data)
         
     def test_all_nan_input(self):
@@ -250,16 +250,16 @@ class TestTema:
         
         result = tema(data, expected['default_params']['period'])
         
-        # Check last 5 values match expected
+        
         np.testing.assert_allclose(
             result[-5:],
             expected['last_5_values'],
-            # Match or beat Rust unit test tolerance (<= 1e-9)
+            
             rtol=1e-9,
             err_msg="TEMA last 5 values mismatch"
         )
         
-        # Verify warmup period
+        
         warmup = expected['warmup_period']
         assert np.isnan(result[:warmup]).all(), f"Expected NaN in first {warmup} values"
         assert not np.isnan(result[warmup:]).any(), f"Unexpected NaN after warmup period"
@@ -267,44 +267,44 @@ class TestTema:
     def test_batch_warmup_periods(self):
         """Test that batch processing correctly handles different warmup periods"""
         data = np.random.random(50)
-        period_range = (3, 7, 2)  # periods: 3, 5, 7
+        period_range = (3, 7, 2)  
         
         result = tema_batch(data, period_range)
         
-        # Check each period has correct warmup
+        
         periods = [3, 5, 7]
         for i, period in enumerate(periods):
             warmup = (period - 1) * 3
             row = result['values'][i]
             
-            # Check warmup NaN values
+            
             assert np.isnan(row[:warmup]).all(), f"Period {period} warmup incorrect"
-            # Check remaining values are not NaN
+            
             assert not np.isnan(row[warmup:]).any(), f"Period {period} has unexpected NaNs"
             
     def test_very_small_dataset(self):
         """Test TEMA with very small datasets"""
-        # Test with minimum size for different periods
+        
         for period in [1, 2, 3, 4, 5]:
             min_size = period
             data = np.arange(1.0, min_size + 1)
             
             if period == 1:
-                # Period 1 should work and return input
+                
                 result = tema(data, period)
                 np.testing.assert_array_equal(result, data)
             else:
-                # Should either work with all NaN except last, or fail
+                
                 try:
                     result = tema(data, period)
-                    # If it works, check warmup
+                    
                     warmup = (period - 1) * 3
                     if warmup >= len(data):
                         assert np.isnan(result).all()
                     else:
                         assert np.isnan(result[:warmup]).all()
                 except ValueError as e:
-                    # Should be invalid period or not enough data
+                    
                     assert "Invalid period" in str(e) or "Not enough valid data" in str(e)
 
 

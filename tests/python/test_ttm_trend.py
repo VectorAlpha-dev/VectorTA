@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta
     except ImportError:
@@ -26,20 +26,20 @@ class TestTtmTrend:
     
     def test_ttm_trend_partial_params(self, test_data):
         """Test TTM Trend with partial parameters - mirrors check_ttm_partial_params"""
-        # Generate hl2 source data
+        
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         hl2 = (high + low) / 2.0
         
-        # Test with default period (None -> 5)
+        
         result = ta.ttm_trend(hl2, close, period=5)
         assert len(result) == len(close)
-        assert result.dtype == np.float64  # Now returns f64 with 0.0/1.0 values
+        assert result.dtype == np.float64  
     
     def test_ttm_trend_accuracy(self, test_data):
         """Test TTM Trend matches expected values from Rust tests - mirrors check_ttm_accuracy"""
-        # Generate hl2 source data
+        
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
@@ -49,8 +49,8 @@ class TestTtmTrend:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust test
-        # Convert f64 (0.0/1.0) to bool for comparison
+        
+        
         expected_last_five = [True, False, False, False, False]
         actual_last_five = [v == 1.0 for v in result[-5:]]
         assert actual_last_five == expected_last_five, f"Expected {expected_last_five}, got {actual_last_five}"
@@ -97,15 +97,15 @@ class TestTtmTrend:
     def test_ttm_trend_mismatched_lengths(self):
         """Test TTM Trend handles mismatched input lengths"""
         src = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        close = np.array([1.0, 2.0, 3.0])  # Shorter
+        close = np.array([1.0, 2.0, 3.0])  
         
-        # Should use the minimum length
+        
         result = ta.ttm_trend(src, close, period=2)
         assert len(result) == len(close)
     
     def test_ttm_trend_streaming(self, test_data):
         """Test TTM Trend streaming functionality - mirrors check_ttm_streaming"""
-        # Generate hl2 source data
+        
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
@@ -113,73 +113,73 @@ class TestTtmTrend:
         
         period = 5
         
-        # Batch calculation
+        
         batch_result = ta.ttm_trend(hl2, close, period=period)
         
-        # Streaming calculation
+        
         stream = ta.TtmTrendStream(period=period)
         stream_values = []
         
         for i in range(len(close)):
             value = stream.update(hl2[i], close[i])
             if value is None:
-                stream_values.append(False)  # Use False for warmup period
+                stream_values.append(False)  
             else:
                 stream_values.append(value)
         
-        # Compare results - convert f64 to bool for stream comparison
+        
         batch_bool = [False if np.isnan(v) else v == 1.0 for v in batch_result]
         assert stream_values == batch_bool
     
     def test_ttm_trend_batch_single_period(self, test_data):
         """Test TTM Trend batch with single period"""
-        # Generate hl2 source data
+        
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         hl2 = (high + low) / 2.0
         
-        # Single period batch
+        
         batch_result = ta.ttm_trend_batch(
             hl2,
             close,
-            period_range=(5, 5, 0)  # Only period 5
+            period_range=(5, 5, 0)  
         )
         
-        # Should match single calculation
+        
         single_result = ta.ttm_trend(hl2, close, period=5)
         
-        assert batch_result['values'].shape[0] == 1  # 1 row
-        assert batch_result['values'].shape[1] == len(close)  # n columns
-        # Use allclose for f64 comparison with NaN handling
+        assert batch_result['values'].shape[0] == 1  
+        assert batch_result['values'].shape[1] == len(close)  
+        
         assert np.allclose(batch_result['values'][0], single_result, equal_nan=True)
         assert batch_result['periods'].tolist() == [5]
     
     def test_ttm_trend_batch_multiple_periods(self, test_data):
         """Test TTM Trend batch with multiple periods"""
-        # Use smaller dataset for speed
+        
         high = test_data['high'][:100]
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         hl2 = (high + low) / 2.0
         
-        # Multiple periods: 5, 10, 15
+        
         batch_result = ta.ttm_trend_batch(
             hl2,
             close,
             period_range=(5, 15, 5)
         )
         
-        # Should have 3 rows
+        
         assert batch_result['values'].shape[0] == 3
         assert batch_result['values'].shape[1] == 100
         assert batch_result['periods'].tolist() == [5, 10, 15]
         
-        # Verify each row matches individual calculation
+        
         periods = [5, 10, 15]
         for i, period in enumerate(periods):
             single_result = ta.ttm_trend(hl2, close, period=period)
-            # Use allclose for f64 comparison with NaN handling
+            
             assert np.allclose(batch_result['values'][i], single_result, equal_nan=True)
     
     def test_ttm_trend_batch_invalid_range(self):
@@ -187,39 +187,39 @@ class TestTtmTrend:
         src = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         close = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # Period range that would exceed data length
+        
         with pytest.raises(ValueError):
             ta.ttm_trend_batch(
                 src,
                 close,
-                period_range=(10, 20, 5)  # All periods exceed data length
+                period_range=(10, 20, 5)  
             )
     
     def test_ttm_trend_with_kernel(self, test_data):
         """Test TTM Trend with different kernel options"""
-        # Generate hl2 source data
+        
         high = test_data['high'][:100]
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         hl2 = (high + low) / 2.0
         
-        # Test with different kernels
+        
         result_auto = ta.ttm_trend(hl2, close, period=5, kernel=None)
         result_scalar = ta.ttm_trend(hl2, close, period=5, kernel="scalar")
         
-        # Results should be identical regardless of kernel
-        # Use allclose for f64 comparison with NaN handling
+        
+        
         assert np.allclose(result_auto, result_scalar, equal_nan=True)
     
     def test_ttm_trend_batch_with_kernel(self, test_data):
         """Test TTM Trend batch with kernel option"""
-        # Generate hl2 source data
+        
         high = test_data['high'][:50]
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         hl2 = (high + low) / 2.0
         
-        # Test batch with kernel
+        
         result_auto = ta.ttm_trend_batch(
             hl2,
             close,
@@ -234,8 +234,8 @@ class TestTtmTrend:
             kernel="scalar"
         )
         
-        # Results should be identical
-        # Use allclose for f64 comparison with NaN handling
+        
+        
         assert np.allclose(result_auto['values'], result_scalar['values'], equal_nan=True)
 
 

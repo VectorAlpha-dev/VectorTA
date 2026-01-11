@@ -16,7 +16,7 @@ except ImportError:
 
 
 def _import_module():
-    # Try ta_indicators first (pymodule name), then crate name fallback
+    
     mod = None
     try:
         import ta_indicators as mod
@@ -27,7 +27,7 @@ def _import_module():
             pass
     if mod is None:
         raise SystemExit("Module not built. Run: maturin develop --features \"python,cuda\" --release")
-    # If CUDA attrs missing on the first import, try alternate name once more
+    
     if not hasattr(mod, 'alma_cuda_batch_dev'):
         try:
             import my_project as alt
@@ -50,7 +50,7 @@ if not hasattr(ti, 'alma_cuda_batch_dev'):
 
 
 def bench(name, fn, iters=10):
-    # Warmup
+    
     fn()
     t0 = time.perf_counter()
     for _ in range(iters):
@@ -61,7 +61,7 @@ def bench(name, fn, iters=10):
 
 
 def main():
-    # One series × many params
+    
     series_len = 50_000
     x = np.full(series_len, np.nan, dtype=np.float32)
     for i in range(3, series_len):
@@ -77,7 +77,7 @@ def main():
         )
         _ = cp.asarray(handle)
 
-    # Many series × one param (time-major)
+    
     T = 50_000
     N = 256
     tm = np.full((T, N), np.nan, dtype=np.float32)
@@ -90,7 +90,7 @@ def main():
         handle = ti.alma_cuda_many_series_one_param_dev(tm, 14, 0.85, 6.0)
         _ = cp.asarray(handle)
 
-    # Multi-stream batch with moderate combos
+    
     X2 = 100_000
     x2 = np.full(X2, np.nan, dtype=np.float32)
     for i in range(3, X2):
@@ -101,9 +101,9 @@ def main():
     print("ALMA CUDA Python Benchmarks (avg over 10 iters)")
     bench("alma_cuda_batch_dev(50k x ~4k params)", run_batch)
     bench("alma_cuda_many_series_one_param_dev(256 x 50k)", run_many_series)
-    # multi-stream variant removed
+    
 
-    # New: 1,000,000 x 240 params (period sweep only)
+    
     X3 = 1_000_000
     x3 = np.full(X3, np.nan, dtype=np.float32)
     for i in range(3, X3):
@@ -121,7 +121,7 @@ def main():
 
     bench("alma_cuda_batch_dev(1M x 240 params)", run_batch_1m_240)
 
-    # Optional very large case: 250k x ~4k params (may require >= 6-8GB VRAM)
+    
     try:
         X4 = 250_000
         x4 = np.full(X4, np.nan, dtype=np.float32)
@@ -133,8 +133,8 @@ def main():
             handle = ti.alma_cuda_batch_dev(
                 x4,
                 period_range=(1, 240, 1),
-                offset_range=(0.25, 0.85, 0.20),  # 4 values
-                sigma_range=(3.0, 12.0, 3.0),     # 4 values (approx 3840 combos)
+                offset_range=(0.25, 0.85, 0.20),  
+                sigma_range=(3.0, 12.0, 3.0),     
             )
             _ = cp.asarray(handle)
 

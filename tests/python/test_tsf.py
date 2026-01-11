@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestTsf:
         """Test TSF with partial parameters (None values) - mirrors check_tsf_partial_params"""
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta_indicators.tsf(close, 14)
         assert len(result) == len(close)
     
@@ -37,7 +37,7 @@ class TestTsf:
         """Test TSF matches expected values from Rust tests - mirrors check_tsf_accuracy"""
         close = test_data['close']
         
-        # Expected values from Rust tests
+        
         expected_last_five = [
             58846.945054945056,
             58818.83516483516,
@@ -46,11 +46,11 @@ class TestTsf:
             58962.25274725275,
         ]
         
-        result = ta_indicators.tsf(close, 14)  # Default period
+        result = ta_indicators.tsf(close, 14)  
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected with small tolerance
+        
         last_5 = result[-5:]
         for i, (actual, expected) in enumerate(zip(last_5, expected_last_five)):
             assert_close(actual, expected, atol=0.1, 
@@ -60,7 +60,7 @@ class TestTsf:
         """Test TSF from slice data - mirrors check_tsf_from_slice"""
         close = test_data['close']
         
-        # Test with custom period
+        
         result = ta_indicators.tsf(close, 20)
         assert len(result) == len(close)
     
@@ -95,14 +95,14 @@ class TestTsf:
     def test_tsf_nan_handling(self, test_data):
         """Test TSF handles NaN values correctly"""
         close = test_data['close'].copy()
-        # Add some NaN values
+        
         close[10:15] = np.nan
         
         result = ta_indicators.tsf(close, 14)
         assert len(result) == len(close)
         
-        # Check that NaN values are handled (should not crash)
-        # First few values should be NaN due to warmup period
+        
+        
         assert np.isnan(result[0])
     
     def test_tsf_streaming(self, test_data):
@@ -110,10 +110,10 @@ class TestTsf:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.tsf(close, period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.TsfStream(period)
         stream_result = []
         
@@ -121,25 +121,25 @@ class TestTsf:
             result = stream.update(value)
             stream_result.append(result if result is not None else np.nan)
         
-        # Compare batch vs streaming results
-        # Allow small tolerance for floating point differences
+        
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if not np.isnan(b) and not np.isnan(s):
                 assert_close(b, s, atol=1e-10,
                            msg=f"Batch vs streaming mismatch at index {i}")
             else:
-                # Both should be NaN
+                
                 assert np.isnan(b) and np.isnan(s), \
                     f"NaN mismatch at index {i}: batch={b}, stream={s}"
     
     def test_tsf_batch_operation(self, test_data):
         """Test TSF batch operations with parameter sweeps"""
-        close = test_data['close'][:1000]  # Use smaller dataset for speed
+        close = test_data['close'][:1000]  
         
-        # Test batch with period range
+        
         result = ta_indicators.tsf_batch(
             close,
-            period_range=(10, 20, 2)  # periods: 10, 12, 14, 16, 18, 20
+            period_range=(10, 20, 2)  
         )
         
         assert 'values' in result
@@ -148,30 +148,30 @@ class TestTsf:
         values = result['values']
         periods = result['periods']
         
-        # Should have 6 parameter combinations
+        
         assert len(periods) == 6
         assert values.shape == (6, len(close))
         
-        # Check that periods are correct
+        
         expected_periods = [10, 12, 14, 16, 18, 20]
         assert all(p == exp for p, exp in zip(periods, expected_periods))
     
     def test_tsf_kernel_options(self, test_data):
         """Test TSF with different kernel options"""
-        close = test_data['close'][:500]  # Smaller dataset
+        close = test_data['close'][:500]  
         
-        # Test with different kernels
-        kernels = ["scalar", "auto"]  # AVX kernels will be stubs
+        
+        kernels = ["scalar", "auto"]  
         
         results = {}
         for kernel in kernels:
             try:
                 results[kernel] = ta_indicators.tsf(close, 14, kernel=kernel)
             except ValueError:
-                # Some kernels might not be available
+                
                 continue
         
-        # All available kernels should produce same results
+        
         if len(results) > 1:
             base_kernel = list(results.keys())[0]
             base_result = results[base_kernel]
@@ -187,7 +187,7 @@ class TestTsf:
         """Compare Python binding output with direct Rust implementation"""
         close = test_data['close']
         
-        # Test with default parameters (period=14) since generate_references uses defaults
+        
         result = ta_indicators.tsf(close, 14)
         compare_with_rust('tsf', result, 'close', {'period': 14})
 

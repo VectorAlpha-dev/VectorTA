@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -28,11 +28,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with SMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "sma"
+        
         result = ta_indicators.ma(close, "sma", 20)
         assert len(result) == len(close)
         
-        # Compare with direct SMA call
+        
         direct_result = ta_indicators.sma(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher SMA mismatch")
     
@@ -40,11 +40,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with EMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "ema"
+        
         result = ta_indicators.ma(close, "ema", 20)
         assert len(result) == len(close)
         
-        # Compare with direct EMA call
+        
         direct_result = ta_indicators.ema(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher EMA mismatch")
     
@@ -52,11 +52,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with WMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "wma"
+        
         result = ta_indicators.ma(close, "wma", 20)
         assert len(result) == len(close)
         
-        # Compare with direct WMA call
+        
         direct_result = ta_indicators.wma(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher WMA mismatch")
     
@@ -64,11 +64,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with ALMA (uses default offset and sigma)"""
         close = test_data['close']
         
-        # Call MA dispatcher with "alma"
+        
         result = ta_indicators.ma(close, "alma", 9)
         assert len(result) == len(close)
         
-        # Compare with direct ALMA call using defaults
+        
         direct_result = ta_indicators.alma(close, 9, 0.85, 6.0)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher ALMA mismatch")
     
@@ -76,11 +76,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with DEMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "dema"
+        
         result = ta_indicators.ma(close, "dema", 20)
         assert len(result) == len(close)
         
-        # Compare with direct DEMA call
+        
         direct_result = ta_indicators.dema(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher DEMA mismatch")
     
@@ -88,11 +88,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with TEMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "tema"
+        
         result = ta_indicators.ma(close, "tema", 20)
         assert len(result) == len(close)
         
-        # Compare with direct TEMA call
+        
         direct_result = ta_indicators.tema(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher TEMA mismatch")
     
@@ -100,11 +100,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with HMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "hma"
+        
         result = ta_indicators.ma(close, "hma", 20)
         assert len(result) == len(close)
         
-        # Compare with direct HMA call
+        
         direct_result = ta_indicators.hma(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher HMA mismatch")
     
@@ -112,11 +112,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with KAMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "kama"
+        
         result = ta_indicators.ma(close, "kama", 10)
         assert len(result) == len(close)
         
-        # Compare with direct KAMA call
+        
         direct_result = ta_indicators.kama(close, 10)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher KAMA mismatch")
     
@@ -124,11 +124,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with ZLEMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with "zlema"
+        
         result = ta_indicators.ma(close, "zlema", 20)
         assert len(result) == len(close)
         
-        # Compare with direct ZLEMA call
+        
         direct_result = ta_indicators.zlema(close, 20)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher ZLEMA mismatch")
     
@@ -136,11 +136,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with Wilders"""
         close = test_data['close']
         
-        # Call MA dispatcher with "wilders"
+        
         result = ta_indicators.ma(close, "wilders", 14)
         assert len(result) == len(close)
         
-        # Compare with direct Wilders call
+        
         direct_result = ta_indicators.wilders(close, 14)
         assert_close(result, direct_result, rtol=1e-10, msg="MA dispatcher Wilders mismatch")
     
@@ -148,11 +148,11 @@ class TestMaDispatcher:
         """Test MA dispatcher with invalid MA type defaults to SMA"""
         close = test_data['close']
         
-        # Call MA dispatcher with invalid type - should default to SMA
+        
         result = ta_indicators.ma(close, "invalid_ma_type", 20)
         assert len(result) == len(close)
         
-        # Should match SMA
+        
         sma_result = ta_indicators.sma(close, 20)
         assert_close(result, sma_result, rtol=1e-10, msg="MA dispatcher should default to SMA")
     
@@ -160,12 +160,12 @@ class TestMaDispatcher:
         """Test MA dispatcher is case insensitive"""
         close = test_data['close']
         
-        # Test uppercase
+        
         result_upper = ta_indicators.ma(close, "SMA", 20)
         result_lower = ta_indicators.ma(close, "sma", 20)
         assert_close(result_upper, result_lower, rtol=1e-10, msg="MA dispatcher should be case insensitive")
         
-        # Test mixed case
+        
         result_mixed = ta_indicators.ma(close, "EmA", 20)
         ema_result = ta_indicators.ema(close, 20)
         assert_close(result_mixed, ema_result, rtol=1e-10, msg="MA dispatcher should handle mixed case")
@@ -200,9 +200,9 @@ class TestMaDispatcher:
     
     def test_ma_all_supported_types(self, test_data):
         """Test MA dispatcher with all supported MA types"""
-        close = test_data['close'][:1000]  # Use smaller dataset for speed
+        close = test_data['close'][:1000]  
         
-        # List of all MA types that should work with just period parameter
+        
         ma_types = [
             "sma", "ema", "dema", "tema", "smma", "zlema", "alma", "cwma",
             "edcf", "fwma", "gaussian", "highpass", "highpass2", "hma",
@@ -215,32 +215,32 @@ class TestMaDispatcher:
             try:
                 result = ta_indicators.ma(close, ma_type, 20)
                 assert len(result) == len(close), f"MA type {ma_type} returned wrong length"
-                # Check that we have some non-NaN values after warmup
+                
                 assert not np.all(np.isnan(result[100:])), f"MA type {ma_type} returned all NaN"
             except Exception as e:
                 pytest.fail(f"MA type {ma_type} failed: {str(e)}")
     
     def test_ma_special_types_with_defaults(self, test_data):
         """Test MA types that have special default handling"""
-        close = test_data['close'][:1000]  # Use smaller dataset
+        close = test_data['close'][:1000]  
         
-        # HWMA uses default na, nb, nc parameters
+        
         result = ta_indicators.ma(close, "hwma", 20)
         assert len(result) == len(close)
         
-        # MAAQ uses period/2 for fast_period and period*2 for slow_period
+        
         result = ta_indicators.ma(close, "maaq", 20)
         assert len(result) == len(close)
         
-        # MAMA converts period to fast_limit
+        
         result = ta_indicators.ma(close, "mama", 20)
         assert len(result) == len(close)
         
-        # MWDX ignores period but still works
+        
         result = ta_indicators.ma(close, "mwdx", 20)
         assert len(result) == len(close)
         
-        # Ehlers ITrend uses period as max_dc_period
+        
         result = ta_indicators.ma(close, "ehlers_itrend", 50)
         assert len(result) == len(close)
 

@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -55,7 +55,7 @@ class TestAsoCuda:
             l[i] = base - 0.11
             c[i] = base + 0.02
 
-        # CPU baseline single-combo
+        
         bulls_cpu, bears_cpu = ti.aso(o, h, l, c, 10, 0)
 
         hb, he = ti.aso_cuda_batch_dev(

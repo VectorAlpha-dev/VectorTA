@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -33,7 +33,7 @@ class TestMfi:
         volume = test_data['volume']
         typical_price = (high + low + close) / 3.0
         
-        # Test with default period (14)
+        
         result = ta_indicators.mfi(typical_price, volume, period=14)
         assert len(result) == len(typical_price)
     
@@ -54,7 +54,7 @@ class TestMfi:
         
         assert len(result) == len(typical_price)
         
-        # Check last 5 values match expected (absolute tol 1e-1 to match Rust tests)
+        
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -63,7 +63,7 @@ class TestMfi:
             msg="MFI last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('mfi', result, 'hlc3_volume', expected['default_params'])
     
     def test_mfi_default_candles(self, test_data):
@@ -123,8 +123,8 @@ class TestMfi:
         typical_price = np.array([1.0, 2.0, 3.0])
         volume = np.array([100.0, 200.0])
         
-        # When arrays have different lengths, the error appears as "Empty data"
-        # This is because NumPy/PyO3 handling results in empty data being passed
+        
+        
         with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.mfi(typical_price, volume, period=2)
     
@@ -139,34 +139,34 @@ class TestMfi:
         result = ta_indicators.mfi(typical_price, volume, period=14)
         assert len(result) == len(typical_price)
         
-        # First 13 values should be NaN (indices 0-12 for period=14)
+        
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
         
-        # Should have valid values after warmup
+        
         if len(result) > 13:
-            # Check that at least some values after warmup are not NaN
+            
             valid_after_warmup = result[13:]
             assert not np.all(np.isnan(valid_after_warmup)), "Expected valid values after warmup"
             
-            # MFI values should be bounded between 0 and 100
+            
             valid_values = valid_after_warmup[~np.isnan(valid_after_warmup)]
             assert np.all(valid_values >= 0.0), "MFI values should be >= 0"
             assert np.all(valid_values <= 100.0), "MFI values should be <= 100"
     
     def test_mfi_with_nan_input(self):
         """Test MFI with NaN values in input"""
-        # Create data with some NaN values
+        
         n = 30
         typical_price = np.arange(n, dtype=float)
-        typical_price[5] = np.nan  # Insert NaN
+        typical_price[5] = np.nan  
         volume = np.ones(n) * 1000
         
         result = ta_indicators.mfi(typical_price, volume, period=14)
         assert len(result) == len(typical_price)
         
-        # Current Rust behavior: a NaN in the seed window poisons the running sums,
-        # so all subsequent outputs remain NaN (no special NaN handling in kernel).
-        # Verify warmup NaNs and that the remainder are also NaN.
+        
+        
+        
         period = 14
         assert np.all(np.isnan(result[:period-1])), "Expected NaNs during warmup"
         assert np.all(np.isnan(result[period-1:])), "Expected NaNs after warmup due to seed NaN"
@@ -182,30 +182,30 @@ class TestMfi:
     
     def test_mfi_zero_volume(self):
         """Test MFI with zero volume - mirrors check_mfi_zero_volume"""
-        # Create price data with zero volume
+        
         n = 30
         typical_price = 100.0 + np.arange(n, dtype=float)
         volume = np.zeros(n)
         
         result = ta_indicators.mfi(typical_price, volume, period=14)
         
-        # When volume is zero, MFI should be 0
+        
         valid_values = result[~np.isnan(result)]
         assert_close(valid_values, 0.0, rtol=1e-10, 
                     msg="MFI should be 0 with zero volume")
     
     def test_mfi_streaming(self, test_data):
         """Test MFI streaming matches batch calculation"""
-        high = test_data['high'][:100]  # Use smaller dataset
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         typical_price = (high + low + close) / 3.0
         
-        # Batch calculation
+        
         batch_result = ta_indicators.mfi(typical_price, volume, period=14)
         
-        # Streaming calculation
+        
         stream = ta_indicators.MfiStream(period=14)
         stream_values = []
         
@@ -215,15 +215,15 @@ class TestMfi:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # MFI streaming waits for full period (14 values) before first output
-        # So first 14 values should be NaN (indices 0-13)
+        
+        
         assert np.all(np.isnan(stream_values[:14])), "Expected NaN during streaming warmup"
         
-        # Batch produces first value at index 13, streaming at index 14
-        # Compare values from index 14 onwards
+        
+        
         for i in range(14, len(batch_result)):
             if np.isnan(batch_result[i]) and np.isnan(stream_values[i]):
                 continue
@@ -241,21 +241,21 @@ class TestMfi:
         result = ta_indicators.mfi_batch(
             typical_price,
             volume,
-            period_range=(14, 14, 0)  # Default period only
+            period_range=(14, 14, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(typical_price)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['mfi']['last_5_values']
         
-        # Check last 5 values match (absolute tol 1e-1 to match Rust tests)
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -266,34 +266,34 @@ class TestMfi:
     
     def test_mfi_batch_multiple_periods(self, test_data):
         """Test batch MFI with multiple periods"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         typical_price = (high + low + close) / 3.0
         
-        # Multiple periods: 10, 15, 20
+        
         result = ta_indicators.mfi_batch(
             typical_price,
             volume,
             period_range=(10, 20, 5)
         )
         
-        # Check dimensions
+        
         assert result['values'].shape == (3, 100)
         assert np.array_equal(result['periods'], [10, 15, 20])
         
-        # Verify first row matches single calculation
+        
         single_result = ta_indicators.mfi(typical_price, volume, period=10)
         assert_close(result['values'][0], single_result, rtol=1e-10,
                     msg="Batch first row should match single calculation")
         
-        # Check warmup periods for each row
+        
         for i, period in enumerate([10, 15, 20]):
             row = result['values'][i]
-            # First period-1 values should be NaN
+            
             assert np.all(np.isnan(row[:period-1])), f"Expected NaN warmup for period={period}"
-            # Should have some valid values after warmup
+            
             if period < 100:
                 assert not np.all(np.isnan(row[period-1:])), f"Expected valid values after warmup for period={period}"
     
@@ -305,11 +305,11 @@ class TestMfi:
         volume = test_data['volume'][:100]
         typical_price = (high + low + close) / 3.0
         
-        # Test with explicit kernel selection
+        
         result_scalar = ta_indicators.mfi(typical_price, volume, period=14, kernel="scalar")
         result_auto = ta_indicators.mfi(typical_price, volume, period=14, kernel=None)
         
-        # Results should be very close (allowing for minor floating point differences)
+        
         assert_close(result_scalar, result_auto, rtol=1e-10,
                     msg="Kernel results should match")
     
@@ -327,11 +327,11 @@ class TestMfi:
         for period in periods:
             result = ta_indicators.mfi(typical_price, volume, period=period)
             assert len(result) == len(typical_price)
-            # Check warmup period
+            
             assert np.all(np.isnan(result[:period-1])), f"Expected NaN warmup for period={period}"
             results.append(result)
         
-        # Results should be different for different periods
+        
         for i in range(len(periods)-1):
             valid_indices = ~(np.isnan(results[i]) | np.isnan(results[i+1]))
             if np.any(valid_indices):

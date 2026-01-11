@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestRocr:
         """Test ROCR with partial parameters (None values) - mirrors check_rocr_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.rocr(close, 10)  # Using default period
+        
+        result = ta_indicators.rocr(close, 10)  
         assert len(result) == len(close)
     
     def test_rocr_accuracy(self, test_data):
@@ -45,7 +45,7 @@ class TestRocr:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -53,14 +53,14 @@ class TestRocr:
             msg="ROCR last 5 values mismatch"
         )
         
-        # Compare full output with Rust - disabled until generate_references supports ROCR
-        # compare_with_rust('rocr', result, 'close', expected['default_params'])
+        
+        
     
     def test_rocr_default_candles(self, test_data):
         """Test ROCR with default parameters - mirrors check_rocr_default_candles"""
         close = test_data['close']
         
-        # Default params: period=10
+        
         result = ta_indicators.rocr(close, 10)
         assert len(result) == len(close)
     
@@ -103,15 +103,15 @@ class TestRocr:
         """Test ROCR applied twice (re-input) - mirrors check_rocr_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.rocr(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass - apply ROCR to ROCR output
+        
         second_result = ta_indicators.rocr(first_result, period=14)
         assert len(second_result) == len(first_result)
         
-        # After warmup period (28), values should be valid
+        
         if len(second_result) > 28:
             assert not np.any(np.isnan(second_result[28:])), "Found unexpected NaN after double warmup period"
     
@@ -122,11 +122,11 @@ class TestRocr:
         result = ta_indicators.rocr(close, period=9)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period values should be NaN
+        
         assert np.all(np.isnan(result[:9])), "Expected NaN in warmup period"
     
     def test_rocr_streaming(self, test_data):
@@ -134,24 +134,24 @@ class TestRocr:
         close = test_data['close']
         period = 9
         
-        # Batch calculation
+        
         batch_result = ta_indicators.rocr(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.RocrStream(period=period)
         stream_values = []
         
         for price in close:
             result = stream.update(price)
-            # Stream returns None during warmup, we convert to NaN
+            
             stream_values.append(result if result is not None else np.nan)
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -161,20 +161,20 @@ class TestRocr:
     
     def test_rocr_edge_cases(self, test_data):
         """Test ROCR edge cases"""
-        # Test with data containing zeros (ROCR should handle division by zero)
+        
         data_with_zeros = np.array([1.0, 2.0, 0.0, 4.0, 5.0, 6.0, 0.0, 8.0, 9.0, 10.0])
         result = ta_indicators.rocr(data_with_zeros, period=2)
         assert len(result) == len(data_with_zeros)
         
-        # When past value is 0, ROCR should be 0 (not inf or nan)
-        assert result[2] == 0.0  # 0.0 / 1.0 -> 0.0 (special handling)
-        assert result[6] == 0.0  # 0.0 / 5.0 -> 0.0 (special handling)
         
-        # Test with very small period
+        assert result[2] == 0.0  
+        assert result[6] == 0.0  
+        
+        
         result = ta_indicators.rocr(test_data['close'][:20], period=1)
         assert len(result) == 20
         
-        # Test with large period
+        
         large_data = test_data['close'][:200]
         result = ta_indicators.rocr(large_data, period=100)
         assert len(result) == 200

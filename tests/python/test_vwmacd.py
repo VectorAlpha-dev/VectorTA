@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta
     except ImportError:
@@ -29,7 +29,7 @@ class TestVwmacd:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with all default params
+        
         macd, signal, hist = ta.vwmacd(
             close, volume, 
             12, 26, 9
@@ -45,7 +45,7 @@ class TestVwmacd:
 
         macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
 
-        # Exact references from src/indicators/vwmacd.rs::tests::check_vwmacd_accuracy
+        
         expected_macd_last5 = np.array([
             -394.95161155,
             -508.29106210,
@@ -72,7 +72,7 @@ class TestVwmacd:
         signal_last5 = np.asarray(signal[-5:])
         hist_last5 = np.asarray(hist[-5:])
 
-        # Rust tolerance is 2e-4; do not exceed it
+        
         assert_close(macd_last5, expected_macd_last5, rtol=0.0, atol=2e-4, msg="macd last5")
         assert_close(signal_last5, expected_signal_last5, rtol=0.0, atol=2e-4, msg="signal last5")
         assert_close(hist_last5, expected_hist_last5, rtol=0.0, atol=2e-4, msg="hist last5")
@@ -116,7 +116,7 @@ class TestVwmacd:
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
         
-        # Note: vwmacd doesn't validate fast < slow internally, it just returns invalid period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(data, volume, 26, 12, 9)
     
@@ -139,7 +139,7 @@ class TestVwmacd:
     def test_vwmacd_mismatched_input_lengths(self):
         """Test VWMACD fails with mismatched input lengths - mirrors check_vwmacd_mismatched_input_lengths"""
         close = np.array([10.0, 20.0, 30.0])
-        volume = np.array([100.0, 200.0])  # Different length
+        volume = np.array([100.0, 200.0])  
         
         with pytest.raises(ValueError, match="length mismatch|Output length mismatch|mismatched"):
             ta.vwmacd(close, volume, 12, 26, 9)
@@ -156,15 +156,15 @@ class TestVwmacd:
         close = test_data['close']
         volume = test_data['volume']
         
-        # First pass with specific parameters
+        
         macd1, signal1, hist1 = ta.vwmacd(close, volume, 12, 26, 9)
         assert len(macd1) == len(close)
         
-        # Second pass with different parameters
+        
         macd2, signal2, hist2 = ta.vwmacd(close, volume, 10, 20, 7)
         assert len(macd2) == len(close)
         
-        # Results should be different
+        
         assert not np.allclose(macd1[50:], macd2[50:], equal_nan=True)
     
     def test_vwmacd_nan_handling(self, test_data):
@@ -175,7 +175,7 @@ class TestVwmacd:
         macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
         assert len(macd) == len(close)
         
-        # After warmup period (slow_period - 1), no NaN values should exist
+        
         warmup = 26 - 1
         if len(macd) > warmup + 10:
             for i in range(warmup + 10, len(macd)):
@@ -196,7 +196,7 @@ class TestVwmacd:
         zero_volume = np.zeros_like(close)
 
         macd, signal, hist = ta.vwmacd(close, zero_volume, 12, 26, 9)
-        # Expect NaNs after warmup as denominators are zero
+        
         assert np.all(np.isnan(macd))
         assert np.all(np.isnan(signal))
         assert np.all(np.isnan(hist))
@@ -206,17 +206,17 @@ class TestVwmacd:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Create stream
+        
         stream = ta.VwmacdStream(fast_period=12, slow_period=26, signal_period=9)
         
-        # Process values one by one
+        
         stream_results = []
         for i in range(len(close)):
             result = stream.update(close[i], volume[i])
             if result is not None:
                 stream_results.append(result)
         
-        # Should have results after warmup
+        
         assert len(stream_results) > 0
     
     def test_vwmacd_batch_single_params(self, test_data):
@@ -224,7 +224,7 @@ class TestVwmacd:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Single parameter combination
+        
         result = ta.vwmacd_batch(
             close, volume,
             fast_range=(12, 12, 0),
@@ -232,7 +232,7 @@ class TestVwmacd:
             signal_range=(9, 9, 0)
         )
         
-        # Check structure
+        
         assert 'macd' in result
         assert 'signal' in result
         assert 'hist' in result
@@ -251,17 +251,17 @@ class TestVwmacd:
         
         result = ta.vwmacd_batch(
             close, volume,
-            fast_range=(10, 12, 2),  # 10, 12
-            slow_range=(20, 26, 6),  # 20, 26
-            signal_range=(7, 9, 2)   # 7, 9
+            fast_range=(10, 12, 2),  
+            slow_range=(20, 26, 6),  
+            signal_range=(7, 9, 2)   
         )
         
-        # Should have 2 * 2 * 2 = 8 combinations
+        
         assert result['macd'].shape == (8, len(close))
         assert result['signal'].shape == (8, len(close))
         assert result['hist'].shape == (8, len(close))
         
-        # Verify parameter combinations using the parameter arrays
+        
         expected_combos = [
             (10, 20, 7), (10, 20, 9),
             (10, 26, 7), (10, 26, 9),

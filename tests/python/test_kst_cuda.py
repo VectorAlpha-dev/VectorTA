@@ -3,7 +3,7 @@ import pytest
 
 try:
     import ta_indicators as ti
-except Exception:  # pragma: no cover
+except Exception:  
     ti = None
 
 
@@ -15,7 +15,7 @@ def test_kst_cuda_batch_matches_cpu():
     x = np.arange(n, dtype=np.float64)
     data[5:] = np.sin(x[5:] * 0.0012) + 0.0002 * x[5:]
 
-    # CPU baseline (returns line, signal)
+    
     line_cpu, sig_cpu = ti.kst(
         data,
         sma_period1=5, sma_period2=5, sma_period3=5, sma_period4=10,
@@ -23,7 +23,7 @@ def test_kst_cuda_batch_matches_cpu():
         signal_period=5,
     )
 
-    # CUDA batch for a small sweep including the exact CPU params in the first row
+    
     s1 = (5, 7, 2); s2=(5,5,0); s3=(5,5,0); s4=(10,10,0)
     r1 = (5,5,0); r2=(7,7,0); r3=(10,10,0); r4=(15,15,0)
     sg = (5,5,0)
@@ -34,7 +34,7 @@ def test_kst_cuda_batch_matches_cpu():
         r1, r2, r3, r4,
         sg,
     )
-    # First row should match CPU params
+    
     gpu_line = np.empty_like(line_cpu, dtype=np.float32)
     gpu_sig  = np.empty_like(sig_cpu,  dtype=np.float32)
     dev_line.buf.copy_to(gpu_line)
@@ -54,7 +54,7 @@ def test_kst_cuda_many_series_one_param_matches_cpu():
         t = np.arange(rows, dtype=np.float64)
         data_tm[5:, s] = np.sin((t[5:] + 0.1*s) * 0.0011) + 0.00015 * (t[5:] + 0.2*s)
 
-    # CPU per-series
+    
     line_cpu = np.empty_like(data_tm)
     sig_cpu  = np.empty_like(data_tm)
     for s in range(cols):

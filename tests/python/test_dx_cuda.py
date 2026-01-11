@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -27,7 +27,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, 'dx_cuda_batch_dev'):
         return False
     try:
-        # minimal smoke
+        
         close = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float32)
         high = close + 0.1
         low = close - 0.1
@@ -46,7 +46,7 @@ class TestDxCuda:
     @pytest.fixture(scope='class')
     def test_data(self):
         d = load_test_data()
-        # build H, L from close with a spread like other tests
+        
         close = d['close'].astype(np.float64)
         high = close.copy()
         low = close.copy()
@@ -66,17 +66,17 @@ class TestDxCuda:
         c = test_data['close']
         period = 14
 
-        # CPU baseline
+        
         cpu = ti.dx(h, l, c, period)
 
-        # CUDA single-combo batch
+        
         handle, meta = ti.dx_cuda_batch_dev(
             h.astype(np.float32), l.astype(np.float32), c.astype(np.float32),
             period_range=(period, period, 0)
         )
         gpu_row = cp.asnumpy(cp.asarray(handle))[0]
 
-        # fp32 vs fp64 -> looser tolerance
+        
         assert_close(gpu_row, cpu, rtol=1e-3, atol=1e-3, msg="DX CUDA batch vs CPU mismatch")
 
     def test_dx_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -89,14 +89,14 @@ class TestDxCuda:
         L = np.zeros((T, N), dtype=np.float64)
         C = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            # vary columns slightly
+            
             H[:, j] = h * (1.0 + 0.002 * j)
             L[:, j] = l * (1.0 + 0.002 * j)
             C[:, j] = c * (1.0 + 0.002 * j)
 
         period = 14
 
-        # CPU baseline per series
+        
         cpu_tm = np.zeros_like(C)
         for j in range(N):
             cpu_tm[:, j] = ti.dx(H[:, j], L[:, j], C[:, j], period)

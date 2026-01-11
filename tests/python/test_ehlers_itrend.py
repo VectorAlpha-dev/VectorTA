@@ -11,10 +11,10 @@ from test_utils import (
 )
 from rust_comparison import compare_with_rust
 
-# Import the indicator from the Rust module
+
 import my_project
 
-# Helper functions for NaN handling
+
 def assert_no_nan(arr, msg=""):
     """Assert no NaN values in array"""
     if np.any(np.isnan(arr)):
@@ -34,12 +34,12 @@ class TestEhlersITrend:
     
     def test_ehlers_itrend_partial_params(self):
         """Test with default parameters - mirrors check_itrend_partial_params"""
-        # Python binding doesn't support None parameters, must use actual values
-        # Test with default parameters (warmup_bars=12, max_dc_period=50)
+        
+        
         result = my_project.ehlers_itrend(self.close, 12, 50)
         assert len(result) == len(self.close)
         
-        # Test with custom parameters
+        
         result = my_project.ehlers_itrend(self.close, 15, 50)
         assert len(result) == len(self.close)
         
@@ -58,16 +58,16 @@ class TestEhlersITrend:
         
         assert len(result) == len(self.close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected['last_5_values'],
             rtol=0,
-            atol=0.1,  # Using 1e-1 tolerance as in Rust test
+            atol=0.1,  
             msg="Ehlers ITrend last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('ehlers_itrend', result, 'close', expected['default_params'])
     
     def test_ehlers_itrend_error_empty_input(self):
@@ -102,7 +102,7 @@ class TestEhlersITrend:
         expected = EXPECTED_OUTPUTS['ehlers_itrend']
         params = expected['default_params']
         
-        # First pass
+        
         first_result = my_project.ehlers_itrend(
             self.close,
             params['warmup_bars'],
@@ -110,7 +110,7 @@ class TestEhlersITrend:
         )
         assert len(first_result) == len(self.close)
         
-        # Second pass - apply to output with SAME parameters
+        
         second_result = my_project.ehlers_itrend(
             first_result,
             params['warmup_bars'],
@@ -118,9 +118,9 @@ class TestEhlersITrend:
         )
         assert len(second_result) == len(first_result)
         
-        # Verify no unexpected NaN values after warmup
-        # The second pass will echo first 12 values which may include NaN
-        # After position 12+12=24 we should have valid values
+        
+        
+        
         if len(second_result) > 24:
             assert_no_nan(second_result[24:], "Found unexpected NaN after double warmup")
     
@@ -138,25 +138,25 @@ class TestEhlersITrend:
         
         assert len(result) == len(self.close)
         
-        # First warmup_bars values should be NaN (not echo)
+        
         assert_all_nan(
             result[:warmup_bars],
             msg="Expected NaN in warmup period"
         )
         
-        # After warmup, should have filtered values (no NaN)
+        
         if len(result) > warmup_bars:
             assert_no_nan(result[warmup_bars:], "Found unexpected NaN after warmup")
             
-        # Verify warmup count matches expected
+        
         assert warmup_bars == 12, f"Expected warmup_bars=12, got {warmup_bars}"
     
     def test_ehlers_itrend_streaming(self):
         """Test streaming interface - mirrors check_itrend_streaming"""
-        # Batch calculation
+        
         batch_result = my_project.ehlers_itrend(self.close, 12, 50)
         
-        # Streaming calculation
+        
         stream = my_project.EhlersITrendStream(12, 50)
         stream_result = []
         
@@ -166,11 +166,11 @@ class TestEhlersITrend:
         
         stream_result = np.array(stream_result)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_result)
         
-        # They should match within tolerance after warmup
-        # Match Rust test tolerance (1e-7) for streaming parity
+        
+        
         for i in range(12, len(batch_result)):
             if not (np.isnan(batch_result[i]) and np.isnan(stream_result[i])):
                 assert abs(batch_result[i] - stream_result[i]) < 1e-7, \
@@ -181,28 +181,28 @@ class TestEhlersITrend:
         expected = EXPECTED_OUTPUTS['ehlers_itrend']
         params = expected['default_params']
         
-        # Single parameter combination
+        
         batch_result = my_project.ehlers_itrend_batch(
-            self.close[:100],  # Use smaller dataset
-            (params['warmup_bars'], params['warmup_bars'], 0),  # warmup_bars
-            (params['max_dc_period'], params['max_dc_period'], 0)  # max_dc_period
+            self.close[:100],  
+            (params['warmup_bars'], params['warmup_bars'], 0),  
+            (params['max_dc_period'], params['max_dc_period'], 0)  
         )
         
-        # Should return a dict with values and metadata
+        
         assert isinstance(batch_result, dict)
         assert 'values' in batch_result
         assert 'warmups' in batch_result
         assert 'max_dcs' in batch_result
         
-        # Should have 1 row x 100 cols
+        
         assert batch_result['values'].shape == (1, 100)
         
-        # Compare with single calculation
+        
         single_result = my_project.ehlers_itrend(self.close[:100], 12, 50)
         
-        # Note: Batch processing has a known issue where warmup period may contain
-        # uninitialized memory instead of proper NaN values. We skip the warmup
-        # period and compare only the calculated values.
+        
+        
+        
         warmup_bars = params['warmup_bars']
         assert_close(
             batch_result['values'][0][warmup_bars:],
@@ -217,19 +217,19 @@ class TestEhlersITrend:
         test_data = self.close[:100]
         batch_result = my_project.ehlers_itrend_batch(
             test_data,
-            (10, 14, 2),      # warmup_bars: 10, 12, 14
-            (40, 50, 10)      # max_dc_period: 40, 50
+            (10, 14, 2),      
+            (40, 50, 10)      
         )
         
-        # Should have 3 warmup x 2 max_dc = 6 combinations
+        
         assert batch_result['values'].shape[0] == 6
         assert batch_result['values'].shape[1] == 100
         
-        # Verify metadata
+        
         assert len(batch_result['warmups']) == 6
         assert len(batch_result['max_dcs']) == 6
         
-        # Verify ALL combinations match individual calculations
+        
         expected_params = [
             (10, 40), (10, 50),
             (12, 40), (12, 50),
@@ -240,13 +240,13 @@ class TestEhlersITrend:
             single_result = my_project.ehlers_itrend(test_data, warmup, max_dc)
             batch_row = batch_result['values'][idx]
             
-            # Check non-NaN values match (skip warmup period which may have uninitialized values)
-            # This is a known issue in batch processing - warmup period may contain uninitialized memory
+            
+            
             for i in range(warmup, len(single_result)):
                 if not np.isnan(single_result[i]) and not np.isnan(batch_row[i]):
                     assert abs(batch_row[i] - single_result[i]) < 1e-9, \
                         f"Batch row {idx} (warmup={warmup}, max_dc={max_dc}) mismatch at index {i}"
-            # Verify metadata
+            
             assert batch_result['warmups'][idx] == warmup
             assert batch_result['max_dcs'][idx] == max_dc
     
@@ -256,25 +256,25 @@ class TestEhlersITrend:
         
         batch_result = my_project.ehlers_itrend_batch(
             data,
-            (10, 15, 5),      # warmup_bars: 10, 15
-            (50, 50, 0)       # max_dc_period: 50
+            (10, 15, 5),      
+            (50, 50, 0)       
         )
         
-        # Should have 2 rows
+        
         assert batch_result['values'].shape == (2, 30)
         
-        # Note: Batch processing has a known issue where warmup period may contain
-        # uninitialized memory instead of proper NaN values. We skip this check
-        # and verify the computed values after warmup period instead.
         
-        # Verify values after warmup are valid
-        # First row (warmup=10): values after index 10 should be valid
+        
+        
+        
+        
+        
         for i in range(10, 30):
             assert not np.isnan(batch_result['values'][0][i]) or \
                    np.isfinite(batch_result['values'][0][i]), \
                    f"Invalid value at index {i} in first row"
         
-        # Second row (warmup=15): values after index 15 should be valid
+        
         for i in range(15, 30):
             assert not np.isnan(batch_result['values'][1][i]) or \
                    np.isfinite(batch_result['values'][1][i]), \
@@ -282,26 +282,26 @@ class TestEhlersITrend:
     
     def test_ehlers_itrend_edge_cases(self):
         """Test edge cases for the indicator"""
-        # Test with minimum valid data (warmup_bars + 1)
-        min_data = np.array([1.0] * 13)  # warmup=12, so need 13 values
+        
+        min_data = np.array([1.0] * 13)  
         result = my_project.ehlers_itrend(min_data, 12, 50)
         assert len(result) == 13
         
-        # First 12 should be NaN (not echo)
+        
         assert_all_nan(result[:12], msg="Expected NaN in warmup period")
         
-        # Test with different parameter combinations
+        
         test_cases = [
-            (5, 30),   # Small warmup, small max_dc
-            (20, 100), # Large warmup, large max_dc
-            (15, 15),  # Equal values
+            (5, 30),   
+            (20, 100), 
+            (15, 15),  
         ]
         
         for warmup, max_dc in test_cases:
             if len(self.close) > warmup:
                 result = my_project.ehlers_itrend(self.close[:100], warmup, max_dc)
                 assert len(result) == 100, f"Failed for warmup={warmup}, max_dc={max_dc}"
-                # Check warmup period has NaN
+                
                 assert_all_nan(
                     result[:warmup],
                     msg=f"Expected NaN in warmup period for warmup={warmup}"
@@ -309,37 +309,37 @@ class TestEhlersITrend:
     
     def test_ehlers_itrend_with_nan_input(self):
         """Test handling of data with NaN values in valid positions"""
-        # Create data with NaN in the middle
+        
         data_with_nan = self.close[:100].copy()
         data_with_nan[50:55] = np.nan
         
-        # This should propagate NaN appropriately
+        
         result = my_project.ehlers_itrend(data_with_nan, 12, 50)
         assert len(result) == 100
         
-        # First 12 values should be NaN (warmup period)
+        
         assert_all_nan(result[:12], msg="Expected NaN in warmup period")
         
-        # NaN should propagate through the calculation
-        # The indicator has 3-bar lookback, so NaN effects extend beyond the NaN region
+        
+        
         assert np.isnan(result[50]), "Expected NaN at index 50"
     
     def test_ehlers_itrend_performance_batch(self):
         """Test that batch processing is more efficient than multiple single calls"""
         import time
         
-        test_data = self.close[:500]  # Use reasonable size for timing
+        test_data = self.close[:500]  
         
-        # Time batch processing
+        
         start = time.time()
         batch_result = my_project.ehlers_itrend_batch(
             test_data,
-            (10, 20, 2),  # 6 values
-            (40, 60, 10)  # 3 values = 18 combinations
+            (10, 20, 2),  
+            (40, 60, 10)  
         )
         batch_time = time.time() - start
         
-        # Time equivalent single calls
+        
         start = time.time()
         single_results = []
         for warmup in range(10, 21, 2):
@@ -349,11 +349,11 @@ class TestEhlersITrend:
                 )
         single_time = time.time() - start
         
-        # Batch should be faster (though we won't assert this due to timing variability)
+        
         print(f"\n  Batch time: {batch_time:.3f}s, Single calls: {single_time:.3f}s")
         print(f"  Speedup: {single_time/batch_time:.1f}x")
         
-        # Verify results match
+        
         assert batch_result['values'].shape == (18, 500)
 
 

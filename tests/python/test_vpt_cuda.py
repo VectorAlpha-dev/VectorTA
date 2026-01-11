@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -71,7 +71,7 @@ class TestVptCuda:
             start = min(j, 6)
             price_tm[start:, j] = np.sin(0.013 * x[start:]) * 0.0007 * x[start:] + 100.0
             volume_tm[start:, j] = np.abs(np.cos(0.011 * x[start:])) * 450.0 + 110.0
-            price_tm[start, j] = 100.0  # ensure non-zero p[t-1]
+            price_tm[start, j] = 100.0  
 
         cpu_tm = np.zeros_like(price_tm)
         for j in range(N):

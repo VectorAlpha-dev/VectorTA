@@ -3031,7 +3031,7 @@ mod tests {
     #[test]
     fn uma_batch_py_no_copy_shape() {
         pyo3::Python::with_gil(|py| {
-            use numpy::PyArray1;
+            use numpy::{PyArray1, PyArrayMethods};
             let data = PyArray1::from_vec(py, (0..256).map(|i| i as f64).collect());
             let d = crate::indicators::moving_averages::uma::uma_batch_py(
                 py,
@@ -3044,7 +3044,7 @@ mod tests {
                 Some("scalar_batch"),
             )
             .unwrap();
-            let v = d.get_item("values").unwrap();
+            let v = d.get_item("values").unwrap().expect("values missing");
             
             assert!(v.downcast::<numpy::PyArray2<f64>>().is_ok());
         });

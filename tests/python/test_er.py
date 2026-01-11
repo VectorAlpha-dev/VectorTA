@@ -4,11 +4,11 @@ from numpy.testing import assert_array_almost_equal
 from pathlib import Path
 import sys
 
-# Import the my_project module - make sure the Python bindings are built
+
 try:
     import my_project as ta
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta
     except ImportError:
@@ -35,7 +35,7 @@ class TestER:
         
         assert len(result) == len(test_data)
         
-        # Check last 5 values match expected
+        
         assert_array_almost_equal(
             result[-5:], 
             expected['last_5_values'],
@@ -43,7 +43,7 @@ class TestER:
             err_msg="ER last 5 values mismatch"
         )
         
-        # Check values at specific indices
+        
         assert_array_almost_equal(
             result[100:105],
             expected['values_at_100_104'],
@@ -53,22 +53,22 @@ class TestER:
     
     def test_er_partial_params(self, test_data):
         """Test ER with partial parameters - mirrors check_er_partial_params"""
-        # ER has no optional params, but test with defaults
+        
         result = ta.er(test_data, period=5)
         assert isinstance(result, np.ndarray)
         assert len(result) == len(test_data)
     
     def test_er_default_candles(self, test_data):
         """Test ER with default parameters - mirrors check_er_default_candles"""
-        # Test with default period = 5
+        
         result = ta.er(test_data, period=5)
         assert len(result) == len(test_data)
         
-        # Calculate first valid index: first_non_nan + period - 1
+        
         first_valid = np.where(~np.isnan(test_data))[0][0] if np.any(~np.isnan(test_data)) else 0
         warmup_end = first_valid + 5 - 1
         
-        # Check warmup period has NaN values
+        
         assert all(np.isnan(result[:warmup_end]))
     
     def test_er_zero_period(self, test_data):
@@ -105,26 +105,26 @@ class TestER:
         result = ta.er(test_data, period=5)
         assert len(result) == len(test_data)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN (accounting for first valid data)
+        
         first_valid = np.where(~np.isnan(test_data))[0][0] if np.any(~np.isnan(test_data)) else 0
         warmup_end = first_valid + 5 - 1
         assert all(np.isnan(result[:warmup_end])), "Expected NaN in warmup period"
     
     def test_er_reinput(self, test_data):
         """Test ER applied twice (re-input)"""
-        # First pass
+        
         first_result = ta.er(test_data, period=5)
         assert len(first_result) == len(test_data)
         
-        # Second pass - apply ER to ER output
+        
         second_result = ta.er(first_result, period=5)
         assert len(second_result) == len(first_result)
         
-        # Check that values are still in valid range
+        
         valid_values = second_result[~np.isnan(second_result)]
         assert all(v >= 0.0 and v <= 1.0 for v in valid_values)
     
@@ -132,10 +132,10 @@ class TestER:
         """Test that streaming ER matches batch calculation"""
         period = 5
         
-        # Batch calculation
+        
         batch_result = ta.er(test_data, period=period)
         
-        # Streaming calculation
+        
         stream = ta.ErStream(period=period)
         stream_result = []
         
@@ -146,7 +146,7 @@ class TestER:
             else:
                 stream_result.append(np.nan)
         
-        # Compare results (streaming should match batch)
+        
         assert_array_almost_equal(batch_result, stream_result, decimal=10)
     
     def test_er_batch_single_period(self, test_data):
@@ -160,27 +160,27 @@ class TestER:
         
         assert result['rows'] == 1
         assert result['cols'] == len(test_data)
-        assert result['values'].shape == (1, len(test_data))  # Should be 2D
+        assert result['values'].shape == (1, len(test_data))  
         assert list(result['periods']) == [5]
         
-        # Should match single calculation
+        
         single_result = ta.er(test_data, period=5)
         assert_array_almost_equal(result['values'][0], single_result, decimal=10)
     
     def test_er_batch_multiple_periods(self, test_data):
         """Test batch ER with multiple periods"""
-        # Use smaller dataset for speed
+        
         data_subset = test_data[:100]
         
-        # Multiple periods: 5, 10, 15
+        
         result = ta.er_batch(data_subset, period_range=(5, 15, 5))
         
         assert result['rows'] == 3
         assert result['cols'] == 100
-        assert result['values'].shape == (3, 100)  # Should be 2D array
+        assert result['values'].shape == (3, 100)  
         assert list(result['periods']) == [5, 10, 15]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate([5, 10, 15]):
             row_data = result['values'][i]
             
@@ -191,26 +191,26 @@ class TestER:
         """Test edge cases for batch processing"""
         data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         
-        # Single value sweep
+        
         result = ta.er_batch(data, period_range=(5, 5, 1))
-        assert result['values'].shape == (1, 10)  # 2D array with 1 row
+        assert result['values'].shape == (1, 10)  
         assert list(result['periods']) == [5]
         
-        # Step larger than range
+        
         result = ta.er_batch(data, period_range=(5, 7, 10))
-        # Should only have period=5
-        assert result['values'].shape == (1, 10)  # 2D array with 1 row
+        
+        assert result['values'].shape == (1, 10)  
         assert list(result['periods']) == [5]
     
     def test_er_with_kernel_parameter(self, test_data):
         """Test ER with different kernel parameters"""
-        # Test with default kernel
+        
         result_auto = ta.er(test_data, period=5)
         
-        # Test with scalar kernel
+        
         result_scalar = ta.er(test_data, period=5, kernel="scalar")
         
-        # Results should be very close (may differ slightly due to SIMD optimizations)
+        
         assert_array_almost_equal(result_auto, result_scalar, decimal=8)
     
     def test_er_consistency(self):
@@ -218,12 +218,12 @@ class TestER:
         from test_utils import EXPECTED_OUTPUTS
         expected = EXPECTED_OUTPUTS['er']
         
-        # Test with perfectly trending data
+        
         trending_data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         result = ta.er(trending_data, period=5)
         
-        # For perfectly trending data, ER should be 1.0
-        valid_values = result[4:]  # Skip warmup
+        
+        valid_values = result[4:]  
         assert_array_almost_equal(
             valid_values,
             expected['trending_data_values'],
@@ -231,12 +231,12 @@ class TestER:
             err_msg="ER trending data mismatch"
         )
         
-        # Test with choppy data
+        
         choppy_data = np.array([1, 5, 2, 6, 3, 7, 4, 8, 5, 9], dtype=np.float64)
         result = ta.er(choppy_data, period=5)
         
-        # For choppy data, ER should be low (~0.143)
-        valid_values = result[4:]  # Skip warmup
+        
+        valid_values = result[4:]  
         assert_array_almost_equal(
             valid_values,
             expected['choppy_data_values'],

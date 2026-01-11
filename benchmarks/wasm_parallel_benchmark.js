@@ -6,7 +6,7 @@ import os from 'os';
 const require = createRequire(import.meta.url);
 
 
-const wasm = require('../pkg/my_project.js');
+const wasm = require('../pkg/vector_ta.js');
 
 
 function generateTestData(size) {

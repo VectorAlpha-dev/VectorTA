@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,7 +30,7 @@ class TestMinmax:
         high = test_data['high']
         low = test_data['low']
         
-        # Test with default order (3)
+        
         is_min, is_max, last_min, last_max = ta_indicators.minmax(high, low, 3)
         assert len(is_min) == len(high)
         assert len(is_max) == len(high)
@@ -49,11 +49,11 @@ class TestMinmax:
         assert len(last_min) == len(high)
         assert len(last_max) == len(high)
         
-        # Check last 5 values - Note: The Rust test expects NaN for is_min/is_max at end
-        # but this might be incorrect behavior. For now, we test that they exist.
+        
+        
         count = len(is_min)
         if count >= 5:
-            # Test that last_min and last_max have expected values
+            
             expected_last_five_min = [57876.0, 57876.0, 57876.0, 57876.0, 57876.0]
             expected_last_five_max = [60102.0, 60102.0, 60102.0, 60102.0, 60102.0]
             
@@ -115,11 +115,11 @@ class TestMinmax:
         assert len(last_min) == 8
         assert len(last_max) == 8
         
-        # Verify some expected local extrema
-        # Index 2: low[2]=35.0 should be a local minimum (lowest in neighborhood)
-        # Index 2: high[2]=60.0 should be a local maximum (highest in neighborhood)
-        assert not np.isnan(is_min[2])  # Should have found a minimum
-        assert not np.isnan(is_max[2])  # Should have found a maximum
+        
+        
+        
+        assert not np.isnan(is_min[2])  
+        assert not np.isnan(is_max[2])  
     
     def test_minmax_empty_input(self):
         """Test MINMAX fails with empty input"""
@@ -130,16 +130,16 @@ class TestMinmax:
     
     def test_minmax_streaming(self, test_data):
         """Test MINMAX streaming matches batch calculation - improved version"""
-        high = test_data['high'][:100]  # Use smaller dataset for streaming test
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         order = 3
         
-        # Batch calculation
+        
         batch_is_min, batch_is_max, batch_last_min, batch_last_max = ta_indicators.minmax(
             high, low, order=order
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.MinmaxStream(order=order)
         stream_is_min = []
         stream_is_max = []
@@ -158,23 +158,23 @@ class TestMinmax:
         stream_last_min = np.array(stream_last_min)
         stream_last_max = np.array(stream_last_max)
         
-        # Streaming needs to fill its circular buffer first (order * 2 + 1 values)
-        # After that, it should produce consistent results
+        
+        
         buffer_size = order * 2 + 1
         
-        # Check that streaming eventually produces non-NaN values
+        
         assert not np.all(np.isnan(stream_last_min[buffer_size:])), "Stream should produce some last_min values"
         assert not np.all(np.isnan(stream_last_max[buffer_size:])), "Stream should produce some last_max values"
         
-        # Check forward-fill behavior for last_min and last_max
+        
         for i in range(buffer_size, len(stream_last_min) - 1):
-            # If no new extrema detected, values should forward-fill
+            
             if np.isnan(stream_is_min[i]) and not np.isnan(stream_last_min[i]) and not np.isnan(stream_last_min[i-1]):
                 assert stream_last_min[i] == stream_last_min[i-1], f"last_min should forward-fill at index {i}"
             if np.isnan(stream_is_max[i]) and not np.isnan(stream_last_max[i]) and not np.isnan(stream_last_max[i-1]):
                 assert stream_last_max[i] == stream_last_max[i-1], f"last_max should forward-fill at index {i}"
             
-            # If new extrema detected, values should update
+            
             if not np.isnan(stream_is_min[i]):
                 assert stream_last_min[i] == stream_is_min[i], f"last_min should update to new minimum at index {i}"
             if not np.isnan(stream_is_max[i]):
@@ -188,7 +188,7 @@ class TestMinmax:
         result = ta_indicators.minmax_batch(
             high,
             low,
-            order_range=(3, 3, 0),  # Default order only
+            order_range=(3, 3, 0),  
         )
         
         assert 'is_min' in result
@@ -197,22 +197,22 @@ class TestMinmax:
         assert 'last_max' in result
         assert 'orders' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['is_min'].shape[0] == 1
         assert result['is_min'].shape[1] == len(high)
         
-        # Extract the single row and compare with single calculation
+        
         batch_is_min = result['is_min'][0]
         batch_is_max = result['is_max'][0]
         batch_last_min = result['last_min'][0]
         batch_last_max = result['last_max'][0]
         
-        # Compare with single calculation
+        
         single_is_min, single_is_max, single_last_min, single_last_max = ta_indicators.minmax(
             high, low, order=3
         )
         
-        # Arrays should be identical
+        
         np.testing.assert_array_equal(batch_is_min, single_is_min)
         np.testing.assert_array_equal(batch_is_max, single_is_max)
         np.testing.assert_array_equal(batch_last_min, single_last_min)
@@ -220,28 +220,28 @@ class TestMinmax:
     
     def test_minmax_batch_sweep(self, test_data):
         """Test MINMAX batch with parameter sweep"""
-        high = test_data['high'][:100]  # Use smaller dataset
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         
         result = ta_indicators.minmax_batch(
             high,
             low,
-            order_range=(2, 5, 1),  # Orders: 2, 3, 4, 5
+            order_range=(2, 5, 1),  
         )
         
-        # Should have 4 combinations
+        
         assert result['is_min'].shape[0] == 4
         assert result['is_max'].shape[0] == 4
         assert len(result['orders']) == 4
         assert list(result['orders']) == [2, 3, 4, 5]
         
-        # Verify each row corresponds to the correct order
+        
         for i, order in enumerate([2, 3, 4, 5]):
-            # Compare with single calculation
+            
             single_is_min, _, _, _ = ta_indicators.minmax(high, low, order=order)
             batch_is_min = result['is_min'][i]
             
-            # Check a few values match
+            
             for j in range(order, min(20, len(single_is_min))):
                 if not np.isnan(single_is_min[j]) and not np.isnan(batch_is_min[j]):
                     assert_close(single_is_min[j], batch_is_min[j], rtol=1e-9,
@@ -249,11 +249,11 @@ class TestMinmax:
     
     def test_minmax_kernel_selection(self, test_data):
         """Test MINMAX with different kernel selections - mirrors check_minmax_accuracy with kernels"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         order = 3
         
-        # Test different kernels
+        
         for kernel in ['auto', 'scalar', 'avx2', 'avx512']:
             try:
                 is_min, is_max, last_min, last_max = ta_indicators.minmax(
@@ -264,12 +264,12 @@ class TestMinmax:
                 assert len(last_min) == len(high)
                 assert len(last_max) == len(high)
                 
-                # Verify some values are not NaN after warmup
+                
                 assert not np.all(np.isnan(last_min[order:]))
                 assert not np.all(np.isnan(last_max[order:]))
                 
             except ValueError as e:
-                # AVX kernels might not be available on all systems
+                
                 if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
     
@@ -284,7 +284,7 @@ class TestMinmax:
     def test_minmax_mismatched_lengths(self):
         """Test MINMAX fails with mismatched high/low array lengths"""
         high = np.array([50.0, 55.0, 60.0, 55.0, 50.0])
-        low = np.array([40.0, 38.0, 35.0])  # Different length
+        low = np.array([40.0, 38.0, 35.0])  
         
         with pytest.raises(ValueError, match="Invalid order"):
             ta_indicators.minmax(high, low, order=2)
@@ -297,21 +297,21 @@ class TestMinmax:
         
         is_min, is_max, last_min, last_max = ta_indicators.minmax(high, low, order=order)
         
-        # Find first non-NaN index
+        
         first_valid_idx = 0
         for i in range(len(high)):
             if not (np.isnan(high[i]) or np.isnan(low[i])):
                 first_valid_idx = i
                 break
         
-        # During warmup period (first 'order' values after first valid), is_min and is_max should be NaN
-        # But the extrema detection actually needs order values on each side, so warmup is longer
+        
+        
         for i in range(first_valid_idx, min(first_valid_idx + order, len(is_min))):
             assert np.isnan(is_min[i]), f"Expected NaN at index {i} during warmup for is_min"
             assert np.isnan(is_max[i]), f"Expected NaN at index {i} during warmup for is_max"
         
-        # last_min and last_max should start propagating values after extrema are found
-        # They forward-fill, so once a value is set, it should persist or update
+        
+        
         has_min = False
         has_max = False
         for i in range(first_valid_idx + order, len(last_min)):
@@ -320,7 +320,7 @@ class TestMinmax:
             if not np.isnan(last_max[i]):
                 has_max = True
             
-            # Once we have a value, it should persist (forward-fill)
+            
             if has_min and i > 0 and np.isnan(is_min[i]):
                 assert last_min[i] == last_min[i-1], f"last_min should forward-fill at index {i}"
             if has_max and i > 0 and np.isnan(is_max[i]):

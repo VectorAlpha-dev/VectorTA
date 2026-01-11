@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestDpo:
         """Test DPO with partial parameters - mirrors check_dpo_partial_params"""
         close = test_data['close']
         
-        # Test with default period (5)
+        
         result = ta_indicators.dpo(close, 5)
         assert len(result) == len(close)
     
@@ -40,7 +40,7 @@ class TestDpo:
         result = ta_indicators.dpo(close, period=5)
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_last_five = [
             65.3999999999287,
             131.3999999999287,
@@ -49,7 +49,7 @@ class TestDpo:
             117.99999999992724,
         ]
         
-        # Match Rust test tolerance: absolute <= 1e-1 (no relaxed relative error)
+        
         assert_close(
             result[-5:],
             expected_last_five,
@@ -58,17 +58,17 @@ class TestDpo:
             msg="DPO last 5 values mismatch"
         )
         
-        # Compare full output with Rust.
-        # DPO can produce values extremely close to 0 where tiny FMA/rounding
-        # differences between build artifacts show up at ~1e-11. Keep this
-        # strict but avoid flaking on sub-ulp noise.
+        
+        
+        
+        
         compare_with_rust('dpo', result, 'close', {'period': 5}, rtol=1e-10, atol=2e-11)
     
     def test_dpo_default_candles(self, test_data):
         """Test DPO with default parameters - mirrors check_dpo_default_candles"""
         close = test_data['close']
         
-        # Default period is 5
+        
         result = ta_indicators.dpo(close, 5)
         assert len(result) == len(close)
     
@@ -97,11 +97,11 @@ class TestDpo:
         """Test DPO applied twice (re-input) - mirrors check_dpo_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.dpo(close, period=5)
         assert len(first_result) == len(close)
         
-        # Second pass - apply DPO to DPO output
+        
         second_result = ta_indicators.dpo(first_result, period=5)
         assert len(second_result) == len(first_result)
     
@@ -112,8 +112,8 @@ class TestDpo:
         result = ta_indicators.dpo(close, period=5)
         assert len(result) == len(close)
         
-        # After warmup period, no NaN values should exist
-        # Based on Rust test which checks after index 20
+        
+        
         if len(result) > 20:
             for i in range(20, len(result)):
                 assert not np.isnan(result[i]), f"Found unexpected NaN at index {i}"
@@ -124,14 +124,14 @@ class TestDpo:
         
         batch_result = ta_indicators.dpo_batch(
             close,
-            period_range=(5, 5, 0)  # Single period
+            period_range=(5, 5, 0)  
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.dpo(close, 5)
         
         assert batch_result['values'].shape == (1, len(close))
-        # Allow tiny FP noise between batch and single paths
+        
         assert_close(
             batch_result['values'][0],
             single_result,
@@ -142,19 +142,19 @@ class TestDpo:
     
     def test_dpo_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        close = test_data['close'][:200]  # Use smaller dataset for speed
+        close = test_data['close'][:200]  
         
-        # Multiple periods: 5, 10, 15
+        
         batch_result = ta_indicators.dpo_batch(
             close,
             period_range=(5, 15, 5)
         )
         
-        # Should have 3 rows * 200 cols
+        
         assert batch_result['values'].shape == (3, 200)
         assert len(batch_result['periods']) == 3
         
-        # Verify each row matches individual calculation
+        
         periods = [5, 10, 15]
         for i, period in enumerate(periods):
             single_result = ta_indicators.dpo(close, period)
@@ -172,10 +172,10 @@ class TestDpo:
         
         batch_result = ta_indicators.dpo_batch(
             close,
-            period_range=(5, 20, 5)  # 5, 10, 15, 20
+            period_range=(5, 20, 5)  
         )
         
-        # Should have 4 rows * 50 cols
+        
         assert batch_result['values'].shape == (4, 50)
         assert len(batch_result['periods']) == 4
         assert batch_result['periods'].tolist() == [5, 10, 15, 20]
@@ -184,7 +184,7 @@ class TestDpo:
         """Test DPO streaming functionality"""
         stream = ta_indicators.DpoStream(period=5)
         
-        # Feed data points one by one
+        
         test_data = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
         results = []
         
@@ -192,11 +192,11 @@ class TestDpo:
             result = stream.update(value)
             results.append(result)
         
-        # First period-1 values should be None (warmup)
+        
         for i in range(4):
             assert results[i] is None, f"Expected None at index {i}, got {results[i]}"
         
-        # After warmup, should have values
+        
         for i in range(4, len(results)):
             assert results[i] is not None, f"Expected value at index {i}, got None"
     
@@ -204,13 +204,13 @@ class TestDpo:
         """Test DPO with optional kernel parameter"""
         close = test_data['close']
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.dpo(close, 5)
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.dpo(close, 5, kernel="scalar")
         
-        # Results should be very close
+        
         assert_close(
             result_auto,
             result_scalar,
@@ -218,7 +218,7 @@ class TestDpo:
             msg="Auto vs scalar kernel results differ"
         )
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError):
             ta_indicators.dpo(close, 5, kernel="invalid_kernel")
     
@@ -233,7 +233,7 @@ class TestDpo:
         """Test DPO with empty input"""
         empty = np.array([])
         
-        # Should fail with empty input data error
+        
         with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.dpo(empty, 5)
 

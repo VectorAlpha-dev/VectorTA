@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -27,7 +27,7 @@ def _cuda_available() -> bool:
         x = np.arange(0, 128, dtype=np.float32)
         x[:16] = np.nan
         d = ti.srsi_cuda_batch_dev(x, (14, 14, 0), (14, 14, 0), (3, 3, 0), (3, 3, 0))
-        _ = cp.asarray(d["k"])  # ensure DeviceArrayF32Py materializes
+        _ = cp.asarray(d["k"])  
         return True
     except Exception as e:
         msg = str(e).lower()

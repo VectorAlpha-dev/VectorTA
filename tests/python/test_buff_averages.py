@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -28,7 +28,7 @@ class TestBuffAverages:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Call the buff_averages function with default parameters
+        
         fast_buff, slow_buff = ta_indicators.buff_averages(
             close,
             volume,
@@ -39,7 +39,7 @@ class TestBuffAverages:
         assert len(fast_buff) == len(close)
         assert len(slow_buff) == len(close)
         
-        # Expected values from PineScript (NEVER MODIFY!)
+        
         expected_fast = [
             58740.30855637,
             59132.28418702,
@@ -56,7 +56,7 @@ class TestBuffAverages:
             59196.26139533,
         ]
         
-        # Check last 6 values, use first 5 for comparison
+        
         assert_close(
             fast_buff[-6:-1],
             expected_fast,
@@ -76,11 +76,11 @@ class TestBuffAverages:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default parameters (None values should use defaults)
+        
         fast_buff, slow_buff = ta_indicators.buff_averages(
             close,
             volume
-            # Using default fast_period=5, slow_period=20
+            
         )
         
         assert len(fast_buff) == len(close)
@@ -98,15 +98,15 @@ class TestBuffAverages:
             slow_period=20
         )
         
-        # Find first non-NaN value in input
-        first_valid = next((i for i, x in enumerate(close) if not np.isnan(x)), 0)
-        warmup_period = first_valid + 20 - 1  # slow_period - 1
         
-        # Check warmup period has NaN values
+        first_valid = next((i for i, x in enumerate(close) if not np.isnan(x)), 0)
+        warmup_period = first_valid + 20 - 1  
+        
+        
         assert np.all(np.isnan(fast_buff[:warmup_period])), "Expected NaN in fast buffer warmup period"
         assert np.all(np.isnan(slow_buff[:warmup_period])), "Expected NaN in slow buffer warmup period"
         
-        # Check post-warmup has no NaN values
+        
         assert np.all(np.isfinite(fast_buff[warmup_period:])), "Found unexpected NaN in fast buffer after warmup"
         assert np.all(np.isfinite(slow_buff[warmup_period:])), "Found unexpected NaN in slow buffer after warmup"
     
@@ -152,7 +152,7 @@ class TestBuffAverages:
     def test_buff_averages_mismatched_lengths(self):
         """Test Buff Averages fails with mismatched data lengths - mirrors check_buff_averages_mismatched_lengths"""
         price_data = np.array([10.0, 20.0, 30.0])
-        volume_data = np.array([100.0, 200.0])  # Different length
+        volume_data = np.array([100.0, 200.0])  
         
         with pytest.raises(ValueError, match="mismatched|different length"):
             ta_indicators.buff_averages(price_data, volume_data)
@@ -161,21 +161,21 @@ class TestBuffAverages:
         """Test BuffAveragesStream for real-time updates - improved version"""
         stream = ta_indicators.BuffAveragesStream(fast_period=5, slow_period=20)
         
-        # Feed data until we get output
+        
         prices = test_data['close'][:50]
         volumes = test_data['volume'][:50]
         
         stream_results = []
         for i in range(len(prices)):
             result = stream.update(prices[i], volumes[i])
-            if i < 19:  # Before slow_period - 1
+            if i < 19:  
                 assert result is None, f"Should not have output before period at index {i}"
             else:
                 assert result is not None, f"Should have output after period at index {i}"
                 assert len(result) == 2, "Should return (fast_buff, slow_buff) tuple"
                 stream_results.append(result)
         
-        # Verify streaming matches batch calculation for the values we can compare
+        
         fast_buff_batch, slow_buff_batch = ta_indicators.buff_averages(
             prices,
             volumes,
@@ -183,9 +183,9 @@ class TestBuffAverages:
             slow_period=20
         )
         
-        # Compare last values from streaming with batch
+        
         for i, (stream_fast, stream_slow) in enumerate(stream_results[-5:]):
-            batch_idx = 45 + i  # Last 5 indices
+            batch_idx = 45 + i  
             assert_close(
                 stream_fast,
                 fast_buff_batch[batch_idx],
@@ -204,12 +204,12 @@ class TestBuffAverages:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Batch with single combination (default parameters)
+        
         result = ta_indicators.buff_averages_batch(
             close,
             volume,
-            fast_range=(5, 5, 1),  # Single value: 5
-            slow_range=(20, 20, 1)  # Single value: 20
+            fast_range=(5, 5, 1),  
+            slow_range=(20, 20, 1)  
         )
         
         assert 'fast' in result
@@ -217,17 +217,17 @@ class TestBuffAverages:
         assert 'fast_periods' in result
         assert 'slow_periods' in result
         
-        # Should have 1 combination
+        
         assert result['fast'].shape[0] == 1
         assert result['slow'].shape[0] == 1
         assert result['fast'].shape[1] == len(close)
         assert result['slow'].shape[1] == len(close)
         
-        # Extract the single rows
+        
         fast_row = result['fast'][0]
         slow_row = result['slow'][0]
         
-        # Should match regular calculation
+        
         fast_regular, slow_regular = ta_indicators.buff_averages(close, volume, 5, 20)
         
         assert_close(
@@ -246,18 +246,18 @@ class TestBuffAverages:
     
     def test_buff_averages_batch_multiple(self, test_data):
         """Test Buff Averages batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Multiple combinations: fast=[3,5], slow=[15,20]
+        
         result = ta_indicators.buff_averages_batch(
             close,
             volume,
-            fast_range=(3, 5, 2),   # 3, 5
-            slow_range=(15, 20, 5)  # 15, 20
+            fast_range=(3, 5, 2),   
+            slow_range=(15, 20, 5)  
         )
         
-        # Should have 2*2 = 4 combinations
+        
         expected_combos = [
             (3, 15), (3, 20),
             (5, 15), (5, 20)
@@ -268,12 +268,12 @@ class TestBuffAverages:
         assert len(result['fast_periods']) == 4
         assert len(result['slow_periods']) == 4
         
-        # Verify parameter combinations
+        
         for i, (fast_p, slow_p) in enumerate(expected_combos):
             assert result['fast_periods'][i] == fast_p
             assert result['slow_periods'][i] == slow_p
             
-            # Verify each row matches individual calculation
+            
             fast_single, slow_single = ta_indicators.buff_averages(
                 close, volume, fast_p, slow_p
             )
@@ -298,29 +298,29 @@ class TestBuffAverages:
                         11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0])
         volume = np.array([1.0] * 20)
         
-        # Step larger than range (should give single value)
+        
         result = ta_indicators.buff_averages_batch(
             data,
             volume,
-            fast_range=(5, 7, 10),  # Step > range, only 5
-            slow_range=(10, 10, 1)  # Single value
+            fast_range=(5, 7, 10),  
+            slow_range=(10, 10, 1)  
         )
         
         assert result['fast'].shape[0] == 1
         assert result['fast_periods'][0] == 5
         assert result['slow_periods'][0] == 10
         
-        # Zero step (should use step=1)
+        
         result = ta_indicators.buff_averages_batch(
             data,
             volume,
-            fast_range=(5, 5, 0),   # Zero step
-            slow_range=(10, 10, 0)  # Zero step
+            fast_range=(5, 5, 0),   
+            slow_range=(10, 10, 0)  
         )
         
         assert result['fast'].shape[0] == 1
         
-        # Empty data should fail
+        
         empty = np.array([])
         with pytest.raises(ValueError):
             ta_indicators.buff_averages_batch(
@@ -338,27 +338,27 @@ class TestBuffAverages:
         result = ta_indicators.buff_averages_batch(
             close,
             volume,
-            fast_range=(3, 5, 2),   # 3, 5
-            slow_range=(10, 20, 10) # 10, 20
+            fast_range=(3, 5, 2),   
+            slow_range=(10, 20, 10) 
         )
         
-        # Each combination should have different warmup period
+        
         combos = [(3, 10), (3, 20), (5, 10), (5, 20)]
         
         for i, (fast_p, slow_p) in enumerate(combos):
             fast_row = result['fast'][i]
             slow_row = result['slow'][i]
             
-            # Warmup period is slow_period - 1
+            
             warmup = slow_p - 1
             
-            # Check NaN in warmup period
+            
             assert np.all(np.isnan(fast_row[:warmup])), \
                 f"Expected NaN in fast warmup for combo ({fast_p}, {slow_p})"
             assert np.all(np.isnan(slow_row[:warmup])), \
                 f"Expected NaN in slow warmup for combo ({fast_p}, {slow_p})"
             
-            # Check values after warmup
+            
             assert np.all(np.isfinite(fast_row[warmup:])), \
                 f"Unexpected NaN after fast warmup for combo ({fast_p}, {slow_p})"
             assert np.all(np.isfinite(slow_row[warmup:])), \

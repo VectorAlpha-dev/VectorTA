@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestMsw:
         """Test MSW with partial parameters (None values) - mirrors check_msw_partial_params"""
         close = test_data['close']
         
-        # Test with default params (period=5)
-        sine, lead = ta_indicators.msw(close, 5)  # Using default
+        
+        sine, lead = ta_indicators.msw(close, 5)  
         assert isinstance(sine, np.ndarray)
         assert isinstance(lead, np.ndarray)
         assert len(sine) == len(close)
@@ -47,17 +47,17 @@ class TestMsw:
         assert len(sine) == len(close)
         assert len(lead) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             sine[-5:], 
             expected['last_5_sine'],
-            rtol=1e-1,  # MSW uses 1e-1 tolerance in Rust tests
+            rtol=1e-1,  
             msg="MSW sine last 5 values mismatch"
         )
         assert_close(
             lead[-5:], 
             expected['last_5_lead'],
-            rtol=1e-1,  # MSW uses 1e-1 tolerance in Rust tests
+            rtol=1e-1,  
             msg="MSW lead last 5 values mismatch"
         )
     
@@ -65,7 +65,7 @@ class TestMsw:
         """Test MSW with default parameters - mirrors check_msw_default_candles"""
         close = test_data['close']
         
-        # Default params: period=5
+        
         sine, lead = ta_indicators.msw(close, 5)
         assert len(sine) == len(close)
         assert len(lead) == len(close)
@@ -108,14 +108,14 @@ class TestMsw:
         assert len(sine) == len(close)
         assert len(lead) == len(close)
         
-        # First `period-1` values should be NaN
-        expected_warmup = expected['warmup_period']  # for period=5, warmup is 4
+        
+        expected_warmup = expected['warmup_period']  
         assert np.all(np.isnan(sine[:expected_warmup])), "Expected NaN in sine warmup period"
         assert np.all(np.isnan(lead[:expected_warmup])), "Expected NaN in lead warmup period"
         
-        # After warmup period, no NaN values should exist
+        
         if len(sine) > expected_warmup:
-            non_nan_start = max(expected_warmup, 240)  # Skip initial NaN values in data
+            non_nan_start = max(expected_warmup, 240)  
             if len(sine) > non_nan_start:
                 assert not np.any(np.isnan(sine[non_nan_start:])), "Found unexpected NaN in sine after warmup period"
                 assert not np.any(np.isnan(lead[non_nan_start:])), "Found unexpected NaN in lead after warmup period"
@@ -125,10 +125,10 @@ class TestMsw:
         close = test_data['close']
         period = 5
         
-        # Batch calculation
+        
         batch_sine, batch_lead = ta_indicators.msw(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.MswStream(period=period)
         stream_sine = []
         stream_lead = []
@@ -145,11 +145,11 @@ class TestMsw:
         stream_sine = np.array(stream_sine)
         stream_lead = np.array(stream_lead)
         
-        # Compare batch vs streaming
+        
         assert len(batch_sine) == len(stream_sine)
         assert len(batch_lead) == len(stream_lead)
         
-        # Check they match (allowing for floating point differences)
+        
         mask_sine = ~(np.isnan(batch_sine) | np.isnan(stream_sine))
         mask_lead = ~(np.isnan(batch_lead) | np.isnan(stream_lead))
         
@@ -173,17 +173,17 @@ class TestMsw:
         """Test MSW batch operation"""
         close = test_data['close']
         
-        # Test batch with period range from 5 to 30
+        
         result = ta_indicators.msw_batch(
             close,
-            period_range=(5, 30, 5)  # 5, 10, 15, 20, 25, 30
+            period_range=(5, 30, 5)  
         )
         
         assert 'sine' in result
         assert 'lead' in result
         assert 'periods' in result
         
-        # Should have 6 rows (one for each period)
+        
         expected_rows = 6
         assert result['sine'].shape[0] == expected_rows
         assert result['lead'].shape[0] == expected_rows
@@ -191,7 +191,7 @@ class TestMsw:
         assert result['lead'].shape[1] == len(close)
         assert len(result['periods']) == expected_rows
         
-        # Check periods are correct
+        
         expected_periods = [5, 10, 15, 20, 25, 30]
         assert list(result['periods']) == expected_periods
     
@@ -200,7 +200,7 @@ class TestMsw:
         close = test_data['close']
         period = 5
         
-        # Test with different kernels
+        
         for kernel in ['scalar', 'avx2', 'avx512', None]:
             try:
                 sine, lead = ta_indicators.msw(close, period=period, kernel=kernel)
@@ -209,7 +209,7 @@ class TestMsw:
                 assert len(sine) == len(close)
                 assert len(lead) == len(close)
             except ValueError as e:
-                # Some kernels might not be supported on this platform
+                
                 if "Unsupported kernel" not in str(e) and "kernel not compiled" not in str(e):
                     raise
     
@@ -229,13 +229,13 @@ class TestMsw:
         assert len(sine) == len(mixed_data)
         assert len(lead) == len(mixed_data)
         
-        # First values should be NaN due to input NaN
+        
         assert np.isnan(sine[0])
         assert np.isnan(sine[1])
         assert np.isnan(lead[0])
         assert np.isnan(lead[1])
         
-        # After warmup from first valid value (index 2), warmup ends at index 2 + period - 1 = 4
+        
         for i in range(4, len(sine)):
             assert not np.isnan(sine[i]), f"Unexpected NaN in sine at index {i}"
             assert not np.isnan(lead[i]), f"Unexpected NaN in lead at index {i}"
@@ -249,35 +249,35 @@ class TestMsw:
         assert len(sine) == len(simple_data)
         assert len(lead) == len(simple_data)
         
-        # Check warmup period
+        
         for i in range(period - 1):
             assert np.isnan(sine[i]), f"Expected NaN in sine at index {i}"
             assert np.isnan(lead[i]), f"Expected NaN in lead at index {i}"
         
-        # After warmup, all values should be valid
+        
         for i in range(period - 1, len(sine)):
             assert not np.isnan(sine[i]), f"Unexpected NaN in sine at index {i}"
             assert not np.isnan(lead[i]), f"Unexpected NaN in lead at index {i}"
             
-            # Sine and lead values should be between -1 and 1
+            
             assert -1.0 <= sine[i] <= 1.0, f"Sine value {sine[i]} at index {i} is out of range [-1, 1]"
             assert -1.0 <= lead[i] <= 1.0, f"Lead value {lead[i]} at index {i} is out of range [-1, 1]"
     
     def test_msw_batch_multiple_periods(self, test_data):
         """Test MSW batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 5, 10, 15
+        
         result = ta_indicators.msw_batch(
             close,
-            period_range=(5, 15, 5)  # 5, 10, 15
+            period_range=(5, 15, 5)  
         )
         
         assert 'sine' in result
         assert 'lead' in result
         assert 'periods' in result
         
-        # Should have 3 rows (one for each period)
+        
         expected_rows = 3
         assert result['sine'].shape[0] == expected_rows
         assert result['lead'].shape[0] == expected_rows
@@ -285,17 +285,17 @@ class TestMsw:
         assert result['lead'].shape[1] == len(close)
         assert len(result['periods']) == expected_rows
         
-        # Check periods are correct
+        
         expected_periods = [5, 10, 15]
         assert list(result['periods']) == expected_periods
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(expected_periods):
             single_sine, single_lead = ta_indicators.msw(close, period=period)
             batch_sine = result['sine'][i]
             batch_lead = result['lead'][i]
             
-            # Compare where both are not NaN
+            
             mask = ~(np.isnan(single_sine) | np.isnan(batch_sine))
             if np.any(mask):
                 assert_close(
@@ -318,32 +318,32 @@ class TestMsw:
         """Test MSW batch processing edge cases"""
         small_data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         
-        # Single value sweep
+        
         single_batch = ta_indicators.msw_batch(
             small_data,
-            period_range=(5, 5, 0)  # Just period=5
+            period_range=(5, 5, 0)  
         )
         
         assert single_batch['sine'].shape == (1, 10)
         assert single_batch['lead'].shape == (1, 10)
         assert list(single_batch['periods']) == [5]
         
-        # Step larger than range (should only get start value)
+        
         large_step = ta_indicators.msw_batch(
             small_data,
-            period_range=(3, 5, 10)  # Step larger than range
+            period_range=(3, 5, 10)  
         )
         
-        # Should only have period=3
+        
         assert large_step['sine'].shape == (1, 10)
         assert large_step['lead'].shape == (1, 10)
         assert list(large_step['periods']) == [3]
         
-        # Empty data should fail
+        
         with pytest.raises(ValueError, match="Empty data|All values are NaN"):
             ta_indicators.msw_batch(np.array([]), period_range=(5, 5, 0))
 
 
 if __name__ == "__main__":
-    # Run the tests
+    
     pytest.main([__file__, "-v"])

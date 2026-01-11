@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -29,9 +29,9 @@ def _cuda_available() -> bool:
     try:
         x = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         d = ti.macd_cuda_batch_dev(x, (3, 3, 0), (4, 4, 0), (2, 2, 0), "ema")
-        _ = cp.asarray(d["macd"])  # ensure CuPy can wrap device handle
+        _ = cp.asarray(d["macd"])  
         return True
-    except Exception as exc:  # probe failures
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "device" in msg:
             return False
@@ -57,7 +57,7 @@ class TestMacdCuda:
         macd_gpu = cp.asnumpy(cp.asarray(d["macd"]))[0]
         sig_gpu = cp.asnumpy(cp.asarray(d["signal"]))[0]
         hist_gpu = cp.asnumpy(cp.asarray(d["hist"]))[0]
-        # fp32 vs fp64 tolerance
+        
         assert_close(macd_gpu, macd_cpu, rtol=1e-4, atol=1e-5, msg="MACD mismatch")
         assert_close(sig_gpu, sig_cpu, rtol=1e-4, atol=1e-5, msg="Signal mismatch")
         assert_close(hist_gpu, hist_cpu, rtol=1e-4, atol=1e-5, msg="Hist mismatch")

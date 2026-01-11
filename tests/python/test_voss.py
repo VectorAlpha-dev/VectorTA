@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestVoss:
         """Test VOSS with partial parameters (using defaults) - mirrors check_voss_partial_params"""
         close = test_data['close']
         
-        # Test with only specifying predict parameter, others use defaults
+        
         voss_result, filt_result = ta_indicators.voss(close, predict=2)
         assert len(voss_result) == len(close)
         assert len(filt_result) == len(close)
@@ -48,7 +48,7 @@ class TestVoss:
         assert len(voss_result) == len(close)
         assert len(filt_result) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_voss_last_five = [
             -290.430249544605,
             -269.74949153549596,
@@ -64,12 +64,12 @@ class TestVoss:
             -235.78021136041997,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             voss_result[-5:],
             expected_voss_last_five,
             rtol=0.0,
-            atol=1e-6,  # Match Rust unit test tolerance (abs <= 1e-6)
+            atol=1e-6,  
             msg="VOSS last 5 values mismatch"
         )
         
@@ -77,7 +77,7 @@ class TestVoss:
             filt_result[-5:],
             expected_filt_last_five,
             rtol=0.0,
-            atol=1e-6,  # Match Rust unit test tolerance (abs <= 1e-6)
+            atol=1e-6,  
             msg="Filt last 5 values mismatch"
         )
     
@@ -85,7 +85,7 @@ class TestVoss:
         """Test VOSS with default parameters - mirrors check_voss_default_candles"""
         close = test_data['close']
         
-        # Default params: period=20, predict=3, bandwidth=0.25
+        
         voss_result, filt_result = ta_indicators.voss(close)
         assert len(voss_result) == len(close)
         assert len(filt_result) == len(close)
@@ -122,14 +122,14 @@ class TestVoss:
         """Test VOSS applied twice (re-input) - mirrors check_voss_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_voss, first_filt = ta_indicators.voss(
             close, period=10, predict=2, bandwidth=0.2
         )
         assert len(first_voss) == len(close)
         assert len(first_filt) == len(close)
         
-        # Second pass - apply VOSS to VOSS output
+        
         second_voss, second_filt = ta_indicators.voss(
             first_voss, period=10, predict=2, bandwidth=0.2
         )
@@ -147,47 +147,47 @@ class TestVoss:
         """Test VOSS with kernel parameter"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         voss_scalar, filt_scalar = ta_indicators.voss(
             close, period=20, predict=3, bandwidth=0.25, kernel="scalar"
         )
         
-        # Test with auto kernel (default)
+        
         voss_auto, filt_auto = ta_indicators.voss(
             close, period=20, predict=3, bandwidth=0.25
         )
         
-        # Results should be very close regardless of kernel
+        
         assert_close(voss_scalar, voss_auto, rtol=1e-10)
         assert_close(filt_scalar, filt_auto, rtol=1e-10)
     
     def test_voss_stream(self):
         """Test VOSS streaming functionality"""
-        # Create stream with default parameters
+        
         stream = ta_indicators.VossStream()
         
-        # Test with custom parameters
+        
         stream_custom = ta_indicators.VossStream(period=10, predict=2, bandwidth=0.2)
         
-        # Feed some values
+        
         test_values = [50.0, 51.0, 52.0, 51.5, 50.5, 49.5, 50.0, 51.0, 52.5, 53.0]
         
         results = []
-        for val in test_values * 5:  # Repeat to ensure we get past warmup
+        for val in test_values * 5:  
             result = stream_custom.update(val)
             if result is not None:
                 results.append(result)
         
-        # Should eventually start producing results
+        
         assert len(results) > 0
-        # Each result should be a tuple of (voss, filt)
+        
         assert all(isinstance(r, tuple) and len(r) == 2 for r in results)
     
     def test_voss_batch_single_parameter_set(self, test_data):
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set
+        
         result = ta_indicators.voss_batch(
             close,
             period_range=(20, 20, 0),
@@ -195,7 +195,7 @@ class TestVoss:
             bandwidth_range=(0.25, 0.25, 0.0)
         )
         
-        # Should match single calculation
+        
         single_voss, single_filt = ta_indicators.voss(close, period=20, predict=3, bandwidth=0.25)
         
         assert 'voss' in result
@@ -204,19 +204,19 @@ class TestVoss:
         assert 'predicts' in result
         assert 'bandwidths' in result
         
-        # Check shapes
+        
         assert result['voss'].shape == (1, len(close))
         assert result['filt'].shape == (1, len(close))
         
-        # Check values match single calculation
+        
         assert_close(result['voss'][0], single_voss, rtol=1e-10)
         assert_close(result['filt'][0], single_filt, rtol=1e-10)
     
     def test_voss_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 10, 12, 14
+        
         result = ta_indicators.voss_batch(
             close,
             period_range=(10, 14, 2),
@@ -224,14 +224,14 @@ class TestVoss:
             bandwidth_range=(0.25, 0.25, 0.0)
         )
         
-        # Should have 3 rows
+        
         assert result['voss'].shape == (3, 100)
         assert result['filt'].shape == (3, 100)
         assert len(result['periods']) == 3
         assert len(result['predicts']) == 3
         assert len(result['bandwidths']) == 3
         
-        # Verify each row matches individual calculation
+        
         periods = [10, 12, 14]
         for i, period in enumerate(periods):
             single_voss, single_filt = ta_indicators.voss(close, period=period, predict=3, bandwidth=0.25)
@@ -240,23 +240,23 @@ class TestVoss:
     
     def test_voss_batch_full_parameter_sweep(self, test_data):
         """Test full parameter sweep"""
-        close = test_data['close'][:50]  # Small dataset for speed
+        close = test_data['close'][:50]  
         
         result = ta_indicators.voss_batch(
             close,
-            period_range=(10, 12, 2),      # 2 periods
-            predict_range=(2, 3, 1),        # 2 predicts
-            bandwidth_range=(0.2, 0.3, 0.1) # 2 bandwidths
+            period_range=(10, 12, 2),      
+            predict_range=(2, 3, 1),        
+            bandwidth_range=(0.2, 0.3, 0.1) 
         )
         
-        # Should have 2 * 2 * 2 = 8 combinations
+        
         assert result['voss'].shape == (8, 50)
         assert result['filt'].shape == (8, 50)
         assert len(result['periods']) == 8
         assert len(result['predicts']) == 8
         assert len(result['bandwidths']) == 8
         
-        # Verify parameter combinations
+        
         expected_combos = [
             (10, 2, 0.2), (10, 2, 0.3),
             (10, 3, 0.2), (10, 3, 0.3),
@@ -273,19 +273,19 @@ class TestVoss:
         """Test edge cases for batch processing"""
         close = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         
-        # Step larger than range
+        
         result = ta_indicators.voss_batch(
             close,
-            period_range=(5, 7, 10),  # Step larger than range
+            period_range=(5, 7, 10),  
             predict_range=(2, 2, 0),
             bandwidth_range=(0.25, 0.25, 0.0)
         )
         
-        # Should only have period=5
+        
         assert result['voss'].shape == (1, 10)
         assert result['periods'][0] == 5
         
-        # Empty data should throw
+        
         with pytest.raises(ValueError):
             ta_indicators.voss_batch(
                 np.array([]),

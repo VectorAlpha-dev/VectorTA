@@ -1647,7 +1647,7 @@ const EXPECTED_OUTPUTS = {
             0.1320298011553359,
             -0.7969910390628968
         ],
-        warmupPeriod: 33  
+        warmupPeriod: 32  
     },
     lpc: {
         default_params: {

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,7 +30,7 @@ class TestVpci:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with partial params (short_range=3, long_range default=25)
+        
         vpci, vpcis = ta_indicators.vpci(close, volume, 3, 25)
         assert len(vpci) == len(close)
         assert len(vpcis) == len(close)
@@ -51,23 +51,23 @@ class TestVpci:
         assert len(vpci) == len(close)
         assert len(vpcis) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             vpci[-5:], 
             expected['last_5_vpci'],
-            rtol=5e-2,  # tightened tolerance
+            rtol=5e-2,  
             msg="VPCI last 5 values mismatch"
         )
         
         assert_close(
             vpcis[-5:], 
             expected['last_5_vpcis'],
-            rtol=5e-2,  # tightened tolerance
+            rtol=5e-2,  
             msg="VPCIS last 5 values mismatch"
         )
         
-        # Compare full output with Rust
-        # VPCI returns two outputs, so pass them as a dict
+        
+        
         compare_with_rust('vpci', {'vpci': vpci, 'vpcis': vpcis}, 'close', expected['default_params'])
     
     def test_vpci_default_params(self, test_data):
@@ -75,7 +75,7 @@ class TestVpci:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Default params: short_range=5, long_range=25
+        
         vpci, vpcis = ta_indicators.vpci(close, volume, 5, 25)
         assert len(vpci) == len(close)
         assert len(vpcis) == len(close)
@@ -142,11 +142,11 @@ class TestVpci:
         assert len(vpci) == len(close)
         assert len(vpcis) == len(close)
         
-        # First long_range-1 values should be NaN
+        
         assert all(np.isnan(vpci[:24]))
         assert all(np.isnan(vpcis[:24]))
         
-        # After warmup period, no NaN values should exist
+        
         if len(vpci) > 30:
             assert not any(np.isnan(vpci[30:]))
             assert not any(np.isnan(vpcis[30:]))
@@ -159,8 +159,8 @@ class TestVpci:
         result = ta_indicators.vpci_batch(
             close,
             volume,
-            short_range_tuple=(3, 7, 2),    # 3, 5, 7
-            long_range_tuple=(20, 30, 5)     # 20, 25, 30
+            short_range_tuple=(3, 7, 2),    
+            long_range_tuple=(20, 30, 5)     
         )
         
         assert 'vpci' in result
@@ -168,25 +168,25 @@ class TestVpci:
         assert 'short_ranges' in result
         assert 'long_ranges' in result
         
-        # Check dimensions
+        
         vpci_values = np.array(result['vpci'])
         vpcis_values = np.array(result['vpcis'])
         short_ranges = np.array(result['short_ranges'])
         long_ranges = np.array(result['long_ranges'])
         
-        expected_combos = 3 * 3  # 3 short values × 3 long values = 9 combinations
+        expected_combos = 3 * 3  
         assert vpci_values.shape == (expected_combos, len(close))
         assert vpcis_values.shape == (expected_combos, len(close))
         assert len(short_ranges) == expected_combos
         assert len(long_ranges) == expected_combos
         
-        # Check parameter combinations
-        assert list(short_ranges[:3]) == [3, 3, 3]  # First 3 have short=3
-        assert list(short_ranges[3:6]) == [5, 5, 5]  # Next 3 have short=5
-        assert list(short_ranges[6:9]) == [7, 7, 7]  # Last 3 have short=7
-        assert list(long_ranges[::3]) == [20, 20, 20]  # Every 3rd has long=20
-        assert list(long_ranges[1::3]) == [25, 25, 25]  # Every 3rd+1 has long=25
-        assert list(long_ranges[2::3]) == [30, 30, 30]  # Every 3rd+2 has long=30
+        
+        assert list(short_ranges[:3]) == [3, 3, 3]  
+        assert list(short_ranges[3:6]) == [5, 5, 5]  
+        assert list(short_ranges[6:9]) == [7, 7, 7]  
+        assert list(long_ranges[::3]) == [20, 20, 20]  
+        assert list(long_ranges[1::3]) == [25, 25, 25]  
+        assert list(long_ranges[2::3]) == [30, 30, 30]  
     
     def test_vpci_batch_single_param(self, test_data):
         """Test VPCI batch with single parameter combination"""
@@ -203,11 +203,11 @@ class TestVpci:
         vpci_values = np.array(result['vpci'])
         vpcis_values = np.array(result['vpcis'])
         
-        # Should have 1 row
+        
         assert vpci_values.shape == (1, len(close))
         assert vpcis_values.shape == (1, len(close))
         
-        # Should match single calculation
+        
         single_vpci, single_vpcis = ta_indicators.vpci(close, volume, 5, 25)
         assert_close(
             vpci_values[0],
@@ -227,13 +227,13 @@ class TestVpci:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default kernel (None)
+        
         vpci_default, vpcis_default = ta_indicators.vpci(close, volume, 5, 25)
         
-        # Test with explicit scalar kernel
+        
         vpci_scalar, vpcis_scalar = ta_indicators.vpci(close, volume, 5, 25, kernel='scalar')
         
-        # Results should be very close (same algorithm, different implementation)
+        
         assert_close(
             vpci_default,
             vpci_scalar,

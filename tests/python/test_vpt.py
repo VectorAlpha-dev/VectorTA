@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -40,10 +40,10 @@ class TestVPT:
         result = ta_indicators.vpt(price, volume)
         assert len(result) == len(price)
         
-        # First two values should be NaN (warmup through first_valid)
+        
         assert np.isnan(result[0])
         assert np.isnan(result[1])
-        # Rest should have values
+        
         assert not np.isnan(result[2])
     
     def test_vpt_accuracy_from_csv(self, test_data):
@@ -62,8 +62,8 @@ class TestVPT:
         ]
         
         assert len(result) >= 5
-        # Check last 5 values match expected
-        # Match Rust tolerance (abs diff < 1e-9)
+        
+        
         assert_close(
             result[-5:],
             expected_last_five,
@@ -99,7 +99,7 @@ class TestVPT:
     def test_vpt_mismatched_lengths(self):
         """Test VPT fails with mismatched input lengths"""
         price = np.array([1.0, 2.0, 3.0])
-        volume = np.array([100.0, 200.0])  # Different length
+        volume = np.array([100.0, 200.0])  
         
         with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.vpt(price, volume)
@@ -108,35 +108,35 @@ class TestVPT:
         """Test VPT streaming calculation"""
         stream = ta_indicators.VptStream()
         
-        # First value returns None
+        
         result = stream.update(100.0, 1000.0)
         assert result is None
         
-        # Second value returns NaN
+        
         result = stream.update(105.0, 1100.0)
         assert np.isnan(result)
         
-        # Third value should have a real value
+        
         result = stream.update(103.0, 1200.0)
         assert not np.isnan(result)
     
     def test_vpt_batch(self, test_data):
         """Test VPT batch processing"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
         result = ta_indicators.vpt_batch(close, volume)
         
         assert 'values' in result
-        # VPT has no parameters, so params should be empty
+        
         assert 'params' in result
         
-        # VPT has no parameters, so should have single row
-        values_2d = result['values']
-        assert values_2d.shape[0] == 1  # 1 row
-        assert values_2d.shape[1] == len(close)  # columns = data length
         
-        # Compare with single calculation
+        values_2d = result['values']
+        assert values_2d.shape[0] == 1  
+        assert values_2d.shape[1] == len(close)  
+        
+        
         single_result = ta_indicators.vpt(close, volume)
         assert_close(
             values_2d[0, :], 
@@ -150,15 +150,15 @@ class TestVPT:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.vpt(close, volume, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.vpt(close, volume)
         assert len(result_auto) == len(close)
         
-        # Results should be the same (VPT doesn't have SIMD optimization)
+        
         assert_close(
             result_scalar,
             result_auto,
@@ -171,7 +171,7 @@ class TestVPT:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Insert some NaN values
+        
         close_with_nan = close.copy()
         volume_with_nan = volume.copy()
         close_with_nan[10] = np.nan
@@ -180,9 +180,9 @@ class TestVPT:
         result = ta_indicators.vpt(close_with_nan, volume_with_nan)
         assert len(result) == len(close)
         
-        # First value should always be NaN
+        
         assert np.isnan(result[0])
         
-        # Values around NaN inputs should propagate NaN correctly
-        assert np.isnan(result[11])  # After NaN price
-        assert np.isnan(result[21])  # After NaN volume
+        
+        assert np.isnan(result[11])  
+        assert np.isnan(result[21])  

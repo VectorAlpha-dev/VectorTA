@@ -19,7 +19,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 
-import * as wasm from '../../pkg/my_project.js';
+import * as wasm from '../../pkg/vector_ta.js';
 
 
 const EXPECTED_LAST_5 = [

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -32,15 +32,15 @@ class TestChop:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with period specified, others default
+        
         result = ta_indicators.chop(high, low, close, period=30, scalar=100.0, drift=1)
         assert len(result) == len(close)
         assert isinstance(result, np.ndarray)
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:29]))
         
-        # Should have valid values after warmup
+        
         assert np.any(~np.isnan(result[29:]))
     
     def test_chop_accuracy(self, test_data):
@@ -49,7 +49,7 @@ class TestChop:
         low = test_data['low']
         close = test_data['close']
         
-        # Expected values from Rust tests
+        
         expected_last_5 = [
             49.98214330294626,
             48.90450693742312,
@@ -62,7 +62,7 @@ class TestChop:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected_last_5,
@@ -70,7 +70,7 @@ class TestChop:
             msg="CHOP last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         params = {'period': 14, 'scalar': 100.0, 'drift': 1}
         compare_with_rust('chop', result, 'hlc', params)
     
@@ -80,14 +80,14 @@ class TestChop:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: period=14, scalar=100.0, drift=1
+        
         result = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1)
         assert len(result) == len(close)
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:13]))
         
-        # Values after warmup should be finite
+        
         assert np.any(~np.isnan(result[13:]))
 
 
@@ -143,7 +143,7 @@ class TestChop:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with custom parameters
+        
         period = 20
         scalar = 50.0
         drift = 2
@@ -153,10 +153,10 @@ class TestChop:
         assert isinstance(result, np.ndarray)
         assert result.shape == close.shape
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:period-1]))
         
-        # Check that parameters affect the result
+        
         result_default = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1)
         valid_idx = ~(np.isnan(result) | np.isnan(result_default))
         assert not np.allclose(result[valid_idx], result_default[valid_idx]), \
@@ -172,12 +172,12 @@ class TestChop:
         result = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist if data is clean
+        
         if len(result) > 240:
-            # Check that not all values are NaN after index 240
+            
             assert not np.all(np.isnan(result[240:])), "All values are NaN after index 240"
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
     
     def test_chop_streaming(self, test_data):
@@ -189,10 +189,10 @@ class TestChop:
         scalar = 100.0
         drift = 1
         
-        # Batch calculation
+        
         batch_result = ta_indicators.chop(high, low, close, period=period, scalar=scalar, drift=drift)
         
-        # Streaming calculation
+        
         stream = ta_indicators.ChopStream(period=period, scalar=scalar, drift=drift)
         stream_values = []
         
@@ -202,10 +202,10 @@ class TestChop:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -220,9 +220,9 @@ class TestChop:
         
         result = ta_indicators.chop_batch(
             high, low, close,
-            period_range=(14, 14, 0),  # Default period only
-            scalar_range=(100.0, 100.0, 0.0),  # Default scalar only
-            drift_range=(1, 1, 0)  # Default drift only
+            period_range=(14, 14, 0),  
+            scalar_range=(100.0, 100.0, 0.0),  
+            drift_range=(1, 1, 0)  
         )
         
         assert 'values' in result
@@ -230,14 +230,14 @@ class TestChop:
         assert 'scalars' in result
         assert 'drifts' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         
-        # Compare with single calculation
+        
         single_result = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1)
         assert_close(
             default_row,
@@ -252,22 +252,22 @@ class TestChop:
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Parameter sweep
+        
         result = ta_indicators.chop_batch(
             high, low, close,
-            period_range=(10, 20, 5),      # 10, 15, 20
-            scalar_range=(50.0, 100.0, 50.0),  # 50, 100
-            drift_range=(1, 2, 1)           # 1, 2
+            period_range=(10, 20, 5),      
+            scalar_range=(50.0, 100.0, 50.0),  
+            drift_range=(1, 2, 1)           
         )
         
-        # Should have 3 * 2 * 2 = 12 combinations
+        
         expected_combos = 12
         assert result['values'].shape == (expected_combos, len(close))
         assert len(result['periods']) == expected_combos
         assert len(result['scalars']) == expected_combos
         assert len(result['drifts']) == expected_combos
         
-        # Verify all parameter combinations exist
+        
         periods_set = set(result['periods'])
         scalars_set = set(result['scalars'])
         drifts_set = set(result['drifts'])
@@ -276,10 +276,10 @@ class TestChop:
         assert scalars_set == {50.0, 100.0}
         assert drifts_set == {1, 2}
         
-        # Verify one specific combination matches single calculation
+        
         single_result = ta_indicators.chop(high, low, close, period=10, scalar=50.0, drift=1)
         
-        # Find the row with these parameters
+        
         for i in range(expected_combos):
             if (result['periods'][i] == 10 and
                 result['scalars'][i] == 50.0 and
@@ -300,16 +300,16 @@ class TestChop:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1, kernel="auto")
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1, kernel="scalar")
         
-        # Results should be very close regardless of kernel
+        
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10, atol=1e-10)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.chop(high, low, close, period=14, scalar=100.0, drift=1, kernel="invalid")
 

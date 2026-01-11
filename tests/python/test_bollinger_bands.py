@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestBollingerBands:
         """Test Bollinger Bands with partial parameters - mirrors check_bb_partial_params"""
         close = test_data['close']
         
-        # Test with period=22 (overriding default of 20)
+        
         upper, middle, lower = ta_indicators.bollinger_bands(
             close, 
             period=22,
@@ -45,14 +45,14 @@ class TestBollingerBands:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS.get('bollinger_bands', {})
         
-        # Use default parameters
+        
         upper, middle, lower = ta_indicators.bollinger_bands(close)
         
         assert len(upper) == len(close)
         assert len(middle) == len(close) 
         assert len(lower) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_middle = [
             59403.199999999975,
             59423.24999999998,
@@ -75,7 +75,7 @@ class TestBollingerBands:
             60426.83263083681,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             upper[-5:], 
             expected_upper,
@@ -99,7 +99,7 @@ class TestBollingerBands:
         """Test Bollinger Bands with default parameters - mirrors check_bb_default_candles"""
         close = test_data['close']
         
-        # Default params: period=20, devup=2.0, devdn=2.0, matype="sma", devtype=0
+        
         upper, middle, lower = ta_indicators.bollinger_bands(close)
         
         assert len(upper) == len(close)
@@ -138,11 +138,11 @@ class TestBollingerBands:
         """Test Bollinger Bands applied twice (re-input) - mirrors check_bb_reinput"""
         close = test_data['close']
         
-        # First pass with period=20
+        
         upper1, middle1, lower1 = ta_indicators.bollinger_bands(close, period=20)
         assert len(middle1) == len(close)
         
-        # Second pass - apply BB to middle band output with period=10
+        
         upper2, middle2, lower2 = ta_indicators.bollinger_bands(middle1, period=10)
         assert len(middle2) == len(middle1)
     
@@ -153,13 +153,13 @@ class TestBollingerBands:
         upper, middle, lower = ta_indicators.bollinger_bands(close, period=20)
         assert len(upper) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(upper) > 240:
             assert not np.any(np.isnan(upper[240:])), "Found unexpected NaN in upper band after warmup period"
             assert not np.any(np.isnan(middle[240:])), "Found unexpected NaN in middle band after warmup period"
             assert not np.any(np.isnan(lower[240:])), "Found unexpected NaN in lower band after warmup period"
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(upper[:19])), "Expected NaN in upper band warmup period"
         assert np.all(np.isnan(middle[:19])), "Expected NaN in middle band warmup period"
         assert np.all(np.isnan(lower[:19])), "Expected NaN in lower band warmup period"
@@ -171,7 +171,7 @@ class TestBollingerBands:
         devup = 2.0
         devdn = 2.0
         
-        # Batch calculation
+        
         batch_upper, batch_middle, batch_lower = ta_indicators.bollinger_bands(
             close, 
             period=period, 
@@ -179,7 +179,7 @@ class TestBollingerBands:
             devdn=devdn
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.BollingerBandsStream(period=period, devup=devup, devdn=devdn)
         stream_upper = []
         stream_middle = []
@@ -201,10 +201,10 @@ class TestBollingerBands:
         stream_middle = np.array(stream_middle)
         stream_lower = np.array(stream_lower)
         
-        # Compare batch vs streaming
+        
         assert len(batch_upper) == len(stream_upper)
         
-        # Compare values where both are not NaN
+        
         for i in range(len(batch_upper)):
             if np.isnan(batch_upper[i]) and np.isnan(stream_upper[i]):
                 continue
@@ -221,11 +221,11 @@ class TestBollingerBands:
         
         result = ta_indicators.bollinger_bands_batch(
             close,
-            period_range=(20, 20, 0),  # Default period only
-            devup_range=(2.0, 2.0, 0.0),  # Default devup only
-            devdn_range=(2.0, 2.0, 0.0),  # Default devdn only
-            matype="sma",  # Default matype
-            devtype_range=(0, 0, 0)  # Default devtype
+            period_range=(20, 20, 0),  
+            devup_range=(2.0, 2.0, 0.0),  
+            devdn_range=(2.0, 2.0, 0.0),  
+            matype="sma",  
+            devtype_range=(0, 0, 0)  
         )
         
         assert 'upper' in result
@@ -237,18 +237,18 @@ class TestBollingerBands:
         assert 'matypes' in result
         assert 'devtypes' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['upper'].shape[0] == 1
         assert result['upper'].shape[1] == len(close)
         assert result['middle'].shape[0] == 1
         assert result['lower'].shape[0] == 1
         
-        # Extract the single row
+        
         upper_row = result['upper'][0]
         middle_row = result['middle'][0]
         lower_row = result['lower'][0]
         
-        # Expected values from Rust tests
+        
         expected_middle = [
             59403.199999999975,
             59423.24999999998,
@@ -257,7 +257,7 @@ class TestBollingerBands:
             59351.299999999974,
         ]
         
-        # Check last 5 values match
+        
         assert_close(
             middle_row[-5:],
             expected_middle,
@@ -274,9 +274,9 @@ class TestBollingerBands:
     
     def test_bollinger_bands_different_matypes(self, test_data):
         """Test Bollinger Bands with different moving average types"""
-        close = test_data['close'][:100]  # Use smaller dataset for testing
+        close = test_data['close'][:100]  
         
-        # Test with EMA
+        
         upper_ema, middle_ema, lower_ema = ta_indicators.bollinger_bands(
             close, 
             period=20,
@@ -284,7 +284,7 @@ class TestBollingerBands:
         )
         assert len(upper_ema) == len(close)
         
-        # Test with SMA (default)
+        
         upper_sma, middle_sma, lower_sma = ta_indicators.bollinger_bands(
             close, 
             period=20,
@@ -292,66 +292,66 @@ class TestBollingerBands:
         )
         assert len(upper_sma) == len(close)
         
-        # Results should be different
+        
         assert not np.allclose(middle_ema[20:], middle_sma[20:], rtol=1e-8)
     
     def test_bollinger_bands_different_devtypes(self, test_data):
         """Test Bollinger Bands with different deviation types"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test with standard deviation (default)
+        
         upper0, middle0, lower0 = ta_indicators.bollinger_bands(
             close, 
             period=20,
             devtype=0
         )
         
-        # Test with mean absolute deviation
+        
         upper1, middle1, lower1 = ta_indicators.bollinger_bands(
             close, 
             period=20,
             devtype=1
         )
         
-        # Test with median absolute deviation
+        
         upper2, middle2, lower2 = ta_indicators.bollinger_bands(
             close, 
             period=20,
             devtype=2
         )
         
-        # Middle bands should be the same (same MA)
+        
         assert np.allclose(middle0[20:], middle1[20:], rtol=1e-8)
         assert np.allclose(middle0[20:], middle2[20:], rtol=1e-8)
         
-        # But band widths should be different
+        
         assert not np.allclose(upper0[20:], upper1[20:], rtol=1e-8)
         assert not np.allclose(upper0[20:], upper2[20:], rtol=1e-8)
     
     def test_bollinger_bands_batch_multiple_params(self, test_data):
         """Test Bollinger Bands batch with multiple parameter combinations"""
-        close = test_data['close'][:500]  # Use smaller dataset for speed
+        close = test_data['close'][:500]  
         
         result = ta_indicators.bollinger_bands_batch(
             close,
-            period_range=(10, 30, 10),  # 10, 20, 30
-            devup_range=(1.0, 3.0, 1.0),  # 1.0, 2.0, 3.0
-            devdn_range=(2.0, 2.0, 0.0),  # Just 2.0
+            period_range=(10, 30, 10),  
+            devup_range=(1.0, 3.0, 1.0),  
+            devdn_range=(2.0, 2.0, 0.0),  
             matype="sma",
             devtype_range=(0, 0, 0)
         )
         
-        # Should have 3 * 3 * 1 = 9 combinations
+        
         assert result['upper'].shape[0] == 9
         assert result['middle'].shape[0] == 9
         assert result['lower'].shape[0] == 9
         
-        # Check periods array
+        
         assert len(result['periods']) == 9
         expected_periods = [10, 10, 10, 20, 20, 20, 30, 30, 30]
         assert np.allclose(result['periods'], expected_periods)
         
-        # Check devups array
+        
         expected_devups = [1.0, 2.0, 3.0] * 3
         assert np.allclose(result['devups'], expected_devups)
 

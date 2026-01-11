@@ -7,13 +7,13 @@ import json
 import os
 import my_project
 
-# Ensure optimizations are enabled
+
 os.environ['PYTHONOPTIMIZE'] = '2'
 os.environ['NPY_RELAXED_STRIDES_CHECKING'] = '1'
 
 def benchmark_python_alma(data, iterations=100):
     """Benchmark Python ALMA binding."""
-    # Warmup
+    
     for _ in range(10):
         _ = my_project.alma(data, 9, 0.85, 6.0)
     
@@ -22,13 +22,13 @@ def benchmark_python_alma(data, iterations=100):
         start = time.perf_counter()
         _ = my_project.alma(data, 9, 0.85, 6.0)
         end = time.perf_counter()
-        times.append((end - start) * 1000)  # Convert to ms
+        times.append((end - start) * 1000)  
     
     return np.median(times)
 
 def get_rust_benchmark():
     """Run Rust benchmark and extract the time."""
-    # Run the Rust benchmark
+    
     cmd = [
         "cargo", "bench", 
         "--features", "nightly-avx",
@@ -41,18 +41,18 @@ def get_rust_benchmark():
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         output = result.stdout
         
-        # Parse the benchmark output
+        
         for line in output.split('\n'):
             if 'alma/1M/AVX-512' in line and 'ns/iter' in line:
-                # Extract the time value
+                
                 parts = line.split()
                 for i, part in enumerate(parts):
                     if 'ns/iter' in part:
-                        # The time is the previous part
+                        
                         time_str = parts[i-1].replace(',', '')
-                        return float(time_str) / 1_000_000  # Convert ns to ms
+                        return float(time_str) / 1_000_000  
         
-        # Fallback: try scalar version
+        
         cmd[-2] = "alma/1M/scalar"
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         output = result.stdout
@@ -75,25 +75,25 @@ def main():
     print("Direct Rust vs Python ALMA Performance Comparison")
     print("=" * 60)
     
-    # Test with different sizes
+    
     sizes = [10_000, 100_000, 1_000_000]
     
     for size in sizes:
         print(f"\nTesting with {size:,} elements:")
         print("-" * 40)
         
-        # Generate test data
+        
         data = np.random.randn(size).astype(np.float64)
         
-        # Ensure C-contiguous
+        
         if not data.flags['C_CONTIGUOUS']:
             data = np.ascontiguousarray(data)
         
-        # Benchmark Python
+        
         python_time = benchmark_python_alma(data, iterations=100)
         print(f"Python ALMA: {python_time:.3f} ms")
         
-        # For 1M elements, try to get Rust benchmark
+        
         if size == 1_000_000:
             print("\nAttempting to run Rust benchmark...")
             rust_time = get_rust_benchmark()
@@ -104,14 +104,14 @@ def main():
             else:
                 print("Could not get Rust benchmark time")
     
-    # Detailed analysis for 1M elements
+    
     print("\n" + "=" * 60)
     print("Detailed 1M Element Analysis")
     print("=" * 60)
     
     data_1m = np.random.randn(1_000_000).astype(np.float64)
     
-    # Time 1000 iterations for more accuracy
+    
     print("\nRunning 1000 iterations for accurate measurement...")
     times = []
     for _ in range(1000):

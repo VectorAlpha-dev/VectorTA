@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,8 +31,8 @@ class TestStochF:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with all default params (None)
-        k, d = ta_indicators.stochf(high, low, close)  # Using defaults
+        
+        k, d = ta_indicators.stochf(high, low, close)  
         assert len(k) == len(close)
         assert len(d) == len(close)
     
@@ -52,7 +52,7 @@ class TestStochF:
         assert len(k) == len(close)
         assert len(d) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_k = [
             80.6987399770905,
             40.88471849865952,
@@ -68,8 +68,8 @@ class TestStochF:
             28.205280425864817,
         ]
         
-        # Check last 5 values match expected
-        # Match Rust test tolerance: absolute error <= 1e-4
+        
+        
         assert_close(
             k[-5:],
             expected_k,
@@ -85,10 +85,10 @@ class TestStochF:
             msg="StochF D last 5 values mismatch"
         )
         
-        # Compare full output with Rust - skipped because stochf is not implemented in generate_references
-        # params = {'fastk_period': 5, 'fastd_period': 3, 'fastd_matype': 0}
-        # compare_with_rust('stochf_k', k, 'hlc', params)
-        # compare_with_rust('stochf_d', d, 'hlc', params)
+        
+        
+        
+        
     
     def test_stochf_default_candles(self, test_data):
         """Test StochF with default parameters - mirrors check_stochf_default_candles"""
@@ -96,7 +96,7 @@ class TestStochF:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: fastk_period=5, fastd_period=3, fastd_matype=0
+        
         k, d = ta_indicators.stochf(high, low, close, 5, 3, 0)
         assert len(k) == len(close)
         assert len(d) == len(close)
@@ -132,7 +132,7 @@ class TestStochF:
     def test_stochf_mismatched_lengths(self):
         """Test StochF fails with mismatched input lengths"""
         high = np.array([1.0, 2.0, 3.0])
-        low = np.array([1.0, 2.0])  # Different length
+        low = np.array([1.0, 2.0])  
         close = np.array([1.0, 2.0, 3.0])
         
         with pytest.raises(ValueError, match="Input arrays must have the same length"):
@@ -144,12 +144,12 @@ class TestStochF:
         low = test_data['low']
         close = test_data['close']
         
-        # First pass
+        
         k1, d1 = ta_indicators.stochf(high, low, close, 5, 3, 0)
         assert len(k1) == len(close)
         assert len(d1) == len(close)
         
-        # Second pass - apply StochF to StochF K output
+        
         k2, d2 = ta_indicators.stochf(k1, k1, k1, 5, 3, 0)
         assert len(k2) == len(k1)
         assert len(d2) == len(d1)
@@ -164,23 +164,23 @@ class TestStochF:
         assert len(k) == len(close)
         assert len(d) == len(close)
         
-        # After warmup period, no NaN values should exist
-        # Warmup for K is fastk_period - 1 = 4
-        # Warmup for D is fastk_period - 1 + fastd_period - 1 = 6
+        
+        
+        
         if len(k) > 10:
-            # Check K values after warmup
+            
             for i in range(10, len(k)):
                 assert not np.isnan(k[i]), f"Found unexpected NaN in K at index {i}"
             
-            # Check D values after warmup
+            
             for i in range(10, len(d)):
                 assert not np.isnan(d[i]), f"Found unexpected NaN in D at index {i}"
         
-        # First fastk_period-1 values should be NaN for K
+        
         for i in range(min(4, len(k))):
             assert np.isnan(k[i]), f"Expected NaN in K warmup period at index {i}"
         
-        # First fastk_period-1 + fastd_period-1 values should be NaN for D
+        
         for i in range(min(6, len(d))):
             assert np.isnan(d[i]), f"Expected NaN in D warmup period at index {i}"
     
@@ -197,14 +197,14 @@ class TestStochF:
         low = test_data['low']
         close = test_data['close']
         
-        # Using single parameter set
+        
         batch_result = ta_indicators.stochf_batch(
             high, low, close,
             fastk_range=(5, 5, 0),
             fastd_range=(3, 3, 0)
         )
         
-        # Should match single calculation
+        
         single_k, single_d = ta_indicators.stochf(high, low, close, 5, 3, 0)
         
         assert batch_result['k_values'].shape[0] == 1
@@ -227,24 +227,24 @@ class TestStochF:
     
     def test_stochf_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Multiple periods: fastk=[5,7,9], fastd=[3,3,3]
+        
         batch_result = ta_indicators.stochf_batch(
             high, low, close,
-            fastk_range=(5, 9, 2),      # 5, 7, 9
-            fastd_range=(3, 3, 0)       # 3
+            fastk_range=(5, 9, 2),      
+            fastd_range=(3, 3, 0)       
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert batch_result['k_values'].shape == (3, 100)
         assert batch_result['d_values'].shape == (3, 100)
         assert len(batch_result['fastk_periods']) == 3
         assert len(batch_result['fastd_periods']) == 3
         
-        # Verify each row matches individual calculation
+        
         fastk_periods = [5, 7, 9]
         for i, fastk in enumerate(fastk_periods):
             single_k, single_d = ta_indicators.stochf(high, low, close, fastk, 3, 0)
@@ -269,15 +269,15 @@ class TestStochF:
         
         result = ta_indicators.stochf_batch(
             high, low, close,
-            fastk_range=(5, 7, 2),      # 5, 7
-            fastd_range=(3, 4, 1)       # 3, 4
+            fastk_range=(5, 7, 2),      
+            fastd_range=(3, 4, 1)       
         )
         
-        # Should have 2 * 2 = 4 combinations
+        
         assert len(result['fastk_periods']) == 4
         assert len(result['fastd_periods']) == 4
         
-        # Check combinations
+        
         expected_combos = [
             (5, 3), (5, 4),
             (7, 3), (7, 4)
@@ -291,7 +291,7 @@ class TestStochF:
         """Test edge cases for batch processing"""
         data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         
-        # Single value sweep
+        
         single_batch = ta_indicators.stochf_batch(
             data, data, data,
             fastk_range=(5, 5, 1),
@@ -303,19 +303,19 @@ class TestStochF:
         assert len(single_batch['fastk_periods']) == 1
         assert len(single_batch['fastd_periods']) == 1
         
-        # Step larger than range
+        
         large_batch = ta_indicators.stochf_batch(
             data, data, data,
-            fastk_range=(5, 7, 10),  # Step larger than range
+            fastk_range=(5, 7, 10),  
             fastd_range=(3, 3, 0)
         )
         
-        # Should only have fastk=5
+        
         assert large_batch['k_values'].shape == (1, 10)
         assert large_batch['d_values'].shape == (1, 10)
         assert len(large_batch['fastk_periods']) == 1
         
-        # Empty data should throw
+        
         with pytest.raises(ValueError):
             ta_indicators.stochf_batch(
                 np.array([]), np.array([]), np.array([]),
@@ -329,32 +329,32 @@ class TestStochFStream:
         """Test basic streaming functionality"""
         stream = ta_indicators.StochfStream(5, 3, 0)
         
-        # First few updates should return None (warmup)
+        
         assert stream.update(10.0, 5.0, 7.0) is None
         assert stream.update(12.0, 6.0, 8.0) is None
         assert stream.update(15.0, 7.0, 10.0) is None
         assert stream.update(14.0, 8.0, 12.0) is None
         
-        # Fifth update should start returning values
+        
         result = stream.update(16.0, 9.0, 14.0)
         assert result is not None
         k, d = result
         assert isinstance(k, float)
         assert isinstance(d, float)
         assert not np.isnan(k)
-        # D might still be NaN during its warmup
+        
     
     def test_stochf_stream_with_default_params(self):
         """Test stream with default parameters"""
-        stream = ta_indicators.StochfStream(5, 3, 0)  # Explicit defaults
+        stream = ta_indicators.StochfStream(5, 3, 0)  
         
-        # Should work with explicit defaults
+        
         assert stream.update(10.0, 5.0, 7.0) is None
     
     def test_stochf_stream_invalid_params(self):
         """Test stream creation with invalid parameters"""
         with pytest.raises(ValueError):
-            ta_indicators.StochfStream(0, 3, 0)  # Zero fastk_period
+            ta_indicators.StochfStream(0, 3, 0)  
         
         with pytest.raises(ValueError):
-            ta_indicators.StochfStream(5, 0, 0)  # Zero fastd_period
+            ta_indicators.StochfStream(5, 0, 0)  

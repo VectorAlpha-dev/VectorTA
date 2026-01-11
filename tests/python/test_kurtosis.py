@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestKurtosis:
         """Test Kurtosis with partial parameters - mirrors check_kurtosis_partial_params"""
         close = test_data['close']
         
-        # Test with default period (5)
+        
         result = ta_indicators.kurtosis(close, 5)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestKurtosis:
         
         assert len(result) == len(hl2)
         
-        # Expected values from Rust test
+        
         expected_last_five = [
             -0.5438903789933454,
             -1.6848139264816433,
@@ -50,7 +50,7 @@ class TestKurtosis:
             -0.027802601135927585,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
@@ -58,14 +58,14 @@ class TestKurtosis:
             msg="Kurtosis last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('kurtosis', result, 'hl2', {'period': 5})
     
     def test_kurtosis_default_candles(self, test_data):
         """Test Kurtosis with default parameters - mirrors check_kurtosis_default_candles"""
         hl2 = test_data['hl2']
         
-        # Default period is 5
+        
         result = ta_indicators.kurtosis(hl2, 5)
         assert len(result) == len(hl2)
     
@@ -113,10 +113,10 @@ class TestKurtosis:
         result = ta_indicators.kurtosis(close, period=period)
         assert len(result) == len(close)
         
-        # First (period-1) values should be NaN for warmup
+        
         assert np.all(np.isnan(result[:period-1])), f"Expected NaN in first {period-1} warmup values"
         
-        # After warmup period (first 20 values), should not have NaN
+        
         if len(result) > 20:
             non_nan_count = np.count_nonzero(~np.isnan(result[20:]))
             assert non_nan_count == len(result[20:]), "Found unexpected NaN values after warmup"
@@ -126,10 +126,10 @@ class TestKurtosis:
         close = test_data['close']
         period = 5
         
-        # Batch calculation
+        
         batch_result = ta_indicators.kurtosis(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.KurtosisStream(period=period)
         stream_result = []
         
@@ -140,7 +140,7 @@ class TestKurtosis:
             else:
                 stream_result.append(value)
         
-        # Compare results
+        
         assert len(batch_result) == len(stream_result)
         
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
@@ -156,7 +156,7 @@ class TestKurtosis:
         """Test Kurtosis batch with default parameters - mirrors check_batch_default_row"""
         hl2 = test_data['hl2']
         
-        # Test batch with period range
+        
         result = ta_indicators.kurtosis_batch(hl2, period_range=(5, 5, 0))
         
         assert 'values' in result
@@ -165,13 +165,13 @@ class TestKurtosis:
         values = result['values']
         periods = result['periods']
         
-        # Should have 1 row (period=5)
+        
         assert values.shape[0] == 1
         assert values.shape[1] == len(hl2)
         assert len(periods) == 1
         assert periods[0] == 5
         
-        # Check last 5 values match expected
+        
         expected = [
             -0.5438903789933454,
             -1.6848139264816433,
@@ -191,7 +191,7 @@ class TestKurtosis:
         """Test Kurtosis batch with multiple periods"""
         close = test_data['close']
         
-        # Test batch with multiple periods
+        
         result = ta_indicators.kurtosis_batch(close, period_range=(5, 20, 5))
         
         assert 'values' in result
@@ -200,15 +200,15 @@ class TestKurtosis:
         values = result['values']
         periods = result['periods']
         
-        # Should have 4 rows (periods 5, 10, 15, 20)
+        
         assert values.shape[0] == 4
         assert values.shape[1] == len(close)
         assert len(periods) == 4
         assert list(periods) == [5, 10, 15, 20]
         
-        # Verify each row has appropriate NaN prefix
+        
         for i, period in enumerate(periods):
-            # First (period-1) values should be NaN
+            
             nan_count = np.sum(np.isnan(values[i, :period-1]))
             assert nan_count == period - 1, f"Expected {period-1} NaN values for period {period}"
     
@@ -216,11 +216,11 @@ class TestKurtosis:
         """Test Kurtosis batch with edge case parameters - matches ALMA pattern"""
         close = test_data['close']
         
-        # Single parameter (step = 0)
+        
         result1 = ta_indicators.kurtosis_batch(close, period_range=(5, 5, 0))
         assert result1['values'].shape[0] == 1, "Single parameter should give 1 row"
         
-        # Large step (only 2 values: 5, 50)
+        
         if len(close) > 50:
             result2 = ta_indicators.kurtosis_batch(close[:100], period_range=(5, 50, 45))
             assert result2['values'].shape[0] == 2, "Large step should give 2 rows"
@@ -228,9 +228,9 @@ class TestKurtosis:
     
     def test_kurtosis_batch_full_sweep(self, test_data):
         """Test Kurtosis batch full parameter sweep - matches ALMA pattern"""
-        close = test_data['close'][:50]  # Use smaller dataset for speed
+        close = test_data['close'][:50]  
         
-        # Multiple period values: 5, 7, 9
+        
         result = ta_indicators.kurtosis_batch(close, period_range=(5, 9, 2))
         
         assert 'values' in result
@@ -239,12 +239,12 @@ class TestKurtosis:
         values = result['values']
         periods = result['periods']
         
-        # Should have 3 rows
+        
         assert values.shape[0] == 3
         assert values.shape[1] == 50
         assert list(periods) == [5, 7, 9]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(periods):
             single_result = ta_indicators.kurtosis(close, period=period)
             assert_close(
@@ -258,15 +258,15 @@ class TestKurtosis:
         """Test Kurtosis with different kernel parameters"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.kurtosis(close, period=5, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.kurtosis(close, period=5, kernel='auto')
         assert len(result_auto) == len(close)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.kurtosis(close, period=5, kernel='invalid')
 

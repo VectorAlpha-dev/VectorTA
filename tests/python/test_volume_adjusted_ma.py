@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,7 +31,7 @@ class TestVolumeAdjustedMa:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default parameters (should work with defaults)
+        
         result = ta_indicators.VolumeAdjustedMa(close, volume, 13, 0.67, True, 0)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestVolumeAdjustedMa:
         volume = test_data['volume']
         expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
         
-        # Test with fast parameters (length=13)
+        
         result = ta_indicators.VolumeAdjustedMa(
             close,
             volume,
@@ -53,7 +53,7 @@ class TestVolumeAdjustedMa:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected['fast_values'],
@@ -61,7 +61,7 @@ class TestVolumeAdjustedMa:
             msg="VolumeAdjustedMa last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('volume_adjusted_ma', result, 'close_volume', expected['default_params'])
     
     def test_volume_adjusted_ma_slow(self, test_data):
@@ -70,7 +70,7 @@ class TestVolumeAdjustedMa:
         volume = test_data['volume']
         expected = EXPECTED_OUTPUTS['volume_adjusted_ma']
         
-        # Test with slow parameters (length=55)
+        
         result = ta_indicators.VolumeAdjustedMa(
             close,
             volume,
@@ -82,7 +82,7 @@ class TestVolumeAdjustedMa:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected['slow_values'],
@@ -95,7 +95,7 @@ class TestVolumeAdjustedMa:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Default params: length=13, vi_factor=0.67, strict=True, sample_period=0
+        
         result = ta_indicators.VolumeAdjustedMa(close, volume, 13, 0.67, True, 0)
         
         assert len(result) == len(close)
@@ -119,7 +119,7 @@ class TestVolumeAdjustedMa:
     def test_volume_adjusted_ma_mismatched_lengths(self):
         """Test VolumeAdjustedMa fails when price and volume have different lengths"""
         price = np.array([10.0, 20.0, 30.0])
-        volume = np.array([100.0, 200.0])  # Different length
+        volume = np.array([100.0, 200.0])  
         
         with pytest.raises(ValueError, match="length mismatch"):
             ta_indicators.VolumeAdjustedMa(price, volume)
@@ -137,11 +137,11 @@ class TestVolumeAdjustedMa:
         price = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
         volume = np.array([100.0, 200.0, 300.0, 400.0, 500.0])
         
-        # Zero vi_factor
+        
         with pytest.raises(ValueError, match="Invalid vi_factor"):
             ta_indicators.VolumeAdjustedMa(price, volume, length=2, vi_factor=0.0)
         
-        # Negative vi_factor
+        
         with pytest.raises(ValueError, match="Invalid vi_factor"):
             ta_indicators.VolumeAdjustedMa(price, volume, length=2, vi_factor=-1.0)
     
@@ -163,58 +163,58 @@ class TestVolumeAdjustedMa:
         
         assert len(result) == len(close)
         
-        # After warmup period, no NaN values should exist
-        warmup = expected['warmup_period']  # Should be 12 (length - 1)
         
-        # Check no NaN after warmup
+        warmup = expected['warmup_period']  
+        
+        
         if len(result) > warmup:
             assert not np.any(np.isnan(result[warmup+1:])), f"Found unexpected NaN after warmup period {warmup}"
         
-        # First warmup values should be NaN
+        
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
     
     def test_volume_adjusted_ma_strict_vs_non_strict(self, test_data):
         """Test VolumeAdjustedMa with strict=True vs strict=False"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Test with strict=True
+        
         result_strict = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         
-        # Test with strict=False
+        
         result_non_strict = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=False, sample_period=0)
         
         assert len(result_strict) == len(close)
         assert len(result_non_strict) == len(close)
         
-        # Results may differ but both should be valid
+        
         assert not np.all(np.isnan(result_strict[13:]))
         assert not np.all(np.isnan(result_non_strict[13:]))
     
     def test_volume_adjusted_ma_sample_period(self, test_data):
         """Test VolumeAdjustedMa with different sample periods"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Test with sample_period=0 (all bars)
+        
         result_all = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         
-        # Test with fixed sample_period
+        
         result_fixed = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=20)
         
         assert len(result_all) == len(close)
         assert len(result_fixed) == len(close)
         
-        # Results may differ but both should be valid
+        
         assert not np.all(np.isnan(result_all[13:]))
         assert not np.all(np.isnan(result_fixed[13:]))
     
     def test_volume_adjusted_ma_different_vi_factors(self, test_data):
         """Test VolumeAdjustedMa with different vi_factor values"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Test with different vi_factors
+        
         result1 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.5, strict=True, sample_period=0)
         result2 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=0.67, strict=True, sample_period=0)
         result3 = ta_indicators.VolumeAdjustedMa(close, volume, length=13, vi_factor=1.0, strict=True, sample_period=0)
@@ -223,7 +223,7 @@ class TestVolumeAdjustedMa:
         assert len(result2) == len(close)
         assert len(result3) == len(close)
         
-        # Results should differ with different vi_factors
+        
         assert not np.array_equal(result1[-10:], result2[-10:])
         assert not np.array_equal(result2[-10:], result3[-10:])
     
@@ -260,11 +260,11 @@ class TestVolumeAdjustedMa:
         strict = True
         sample_period = 0
         
-        # Batch calculation
+        
         batch_result = ta_indicators.VolumeAdjustedMa(close, volume, length=length, vi_factor=vi_factor, 
                                          strict=strict, sample_period=sample_period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.VolumeAdjustedMaStream(length=length, vi_factor=vi_factor, 
                                          strict=strict, sample_period=sample_period)
         stream_values = []
@@ -275,10 +275,10 @@ class TestVolumeAdjustedMa:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -293,10 +293,10 @@ class TestVolumeAdjustedMa:
         result = ta_indicators.VolumeAdjustedMa_batch(
             close,
             volume,
-            length_range=(13, 13, 0),  # Default length only
-            vi_factor_range=(0.67, 0.67, 0.0),  # Default vi_factor only
-            strict=True,  # Static value
-            sample_period_range=(0, 0, 0)  # Default sample_period only
+            length_range=(13, 13, 0),  
+            vi_factor_range=(0.67, 0.67, 0.0),  
+            strict=True,  
+            sample_period_range=(0, 0, 0)  
         )
         
         assert 'values' in result
@@ -304,15 +304,15 @@ class TestVolumeAdjustedMa:
         assert 'vi_factors' in result
         assert 'sample_periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['volume_adjusted_ma']['fast_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -322,15 +322,15 @@ class TestVolumeAdjustedMa:
     
     def test_volume_adjusted_ma_constant_volume(self):
         """Test VolumeAdjustedMa with constant volume"""
-        # Create price series with some variation
+        
         price = np.array([50.0, 51.0, 49.0, 52.0, 48.0, 53.0, 47.0, 54.0, 46.0, 55.0] * 5)
-        # Constant volume
+        
         volume = np.array([1000.0] * 50)
         
         result = ta_indicators.VolumeAdjustedMa(price, volume, length=5, vi_factor=0.67, strict=True, sample_period=0)
         
         assert len(result) == len(price)
-        # With constant volume, VolumeAdjustedMa should still produce valid results
+        
         assert not np.all(np.isnan(result[5:]))
 
 

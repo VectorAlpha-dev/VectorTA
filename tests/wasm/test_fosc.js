@@ -26,11 +26,10 @@ test.before(async () => {
     
     
     
-    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const esmImportPath = process.platform === 'win32'
         ? 'file:///' + pkgPath.replace(/\\/g, '/')
         : pkgPath;
-    const cjsFallbackPath = path.join(__dirname, 'my_project.cjs');
 
     try {
         wasm = await import(esmImportPath);
@@ -39,15 +38,15 @@ test.before(async () => {
         
         
         const msg = String(error && error.message || error);
-        const needsFallback = msg.includes("Cannot find package 'env'") || msg.includes('my_project_bg.wasm');
+        const needsFallback = msg.includes("Cannot find package 'env'") || msg.includes('vector_ta_bg.wasm');
         if (!needsFallback) {
             console.error('Failed to load WASM pkg module:', error);
             throw error;
         }
         
-        
-        const mod = await import(cjsFallbackPath);
-        wasm = mod.default ?? mod; 
+        const { createRequire } = await import('node:module');
+        const require = createRequire(import.meta.url);
+        wasm = require(pkgPath);
     }
 
     testData = loadTestData();

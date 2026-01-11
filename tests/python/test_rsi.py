@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestRsi:
         """Test RSI with default parameters - mirrors check_rsi_partial_params"""
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta_indicators.rsi(close, 14)
         assert len(result) == len(close)
     
@@ -42,22 +42,22 @@ class TestRsi:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-2,  # Using 1e-2 as per Rust test
+            rtol=1e-2,  
             msg="RSI last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('rsi', result, 'close', {'period': 14})
     
     def test_rsi_default_candles(self, test_data):
         """Test RSI with default parameters - mirrors check_rsi_default_candles"""
         close = test_data['close']
         
-        # Default period is 14
+        
         result = ta_indicators.rsi(close, 14)
         assert len(result) == len(close)
     
@@ -93,15 +93,15 @@ class TestRsi:
         """Test RSI applied twice (re-input) - mirrors check_rsi_reinput"""
         close = test_data['close']
         
-        # First pass with period 14
+        
         first_result = ta_indicators.rsi(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass with period 5 - apply RSI to RSI output
+        
         second_result = ta_indicators.rsi(first_result, period=5)
         assert len(second_result) == len(first_result)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(second_result) > 240:
             assert not np.any(np.isnan(second_result[240:])), "Found unexpected NaN after warmup period"
     
@@ -112,7 +112,7 @@ class TestRsi:
         result = ta_indicators.rsi(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
     
@@ -121,10 +121,10 @@ class TestRsi:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.rsi(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.RsiStream(period=period)
         stream_values = []
         
@@ -134,10 +134,10 @@ class TestRsi:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -151,20 +151,20 @@ class TestRsi:
         
         result = ta_indicators.rsi_batch(
             close,
-            period_range=(14, 14, 0),  # Default period only
+            period_range=(14, 14, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -183,15 +183,15 @@ class TestRsi:
         """Test RSI with different kernel selections"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.rsi(close, period=14, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel
+        
         result_auto = ta_indicators.rsi(close, period=14, kernel='auto')
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_scalar, result_auto, rtol=1e-10)
 
 

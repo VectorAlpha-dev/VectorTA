@@ -21,12 +21,12 @@ def run_memory_test() -> Dict[str, Tuple[int, int]]:
             check=True
         )
         
-        # Parse the output
+        
         lines = result.stdout.split('\n')
         results = {}
         
         for line in lines:
-            # Look for lines like: "ALMA   - Single: 78.12 KB, Batch[1]: 156.25 KB"
+            
             if " - Single: " in line and ", Batch[1]: " in line:
                 parts = line.split(" - ")
                 if len(parts) == 2:
@@ -36,7 +36,7 @@ def run_memory_test() -> Dict[str, Tuple[int, int]]:
                     single_str = memory_parts[0].replace("Single: ", "").strip()
                     batch_str = memory_parts[1].replace("Batch[1]: ", "").strip()
                     
-                    # Convert to bytes
+                    
                     single_bytes = parse_bytes(single_str)
                     batch_bytes = parse_bytes(batch_str)
                     
@@ -83,7 +83,7 @@ def analyze_results(results: Dict[str, Tuple[int, int]]) -> None:
         overhead_ratio = batch_mem / single_mem
         overhead_pct = (overhead_ratio - 1) * 100
         
-        # Categorize results
+        
         if overhead_pct > 50:
             issues.append((indicator, single_mem, batch_mem, overhead_pct))
         elif overhead_pct > 10:
@@ -91,7 +91,7 @@ def analyze_results(results: Dict[str, Tuple[int, int]]) -> None:
         else:
             good.append((indicator, single_mem, batch_mem, overhead_pct))
     
-    # Report issues
+    
     if issues:
         print("❌ HIGH OVERHEAD (>50%) - Likely zero-copy violations:")
         print("-" * 60)
@@ -101,7 +101,7 @@ def analyze_results(results: Dict[str, Tuple[int, int]]) -> None:
                   f"Overhead: {overhead:>5.0f}%")
         print()
     
-    # Report warnings
+    
     if warnings:
         print("⚠️  MODERATE OVERHEAD (10-50%) - May need optimization:")
         print("-" * 60)
@@ -111,7 +111,7 @@ def analyze_results(results: Dict[str, Tuple[int, int]]) -> None:
                   f"Overhead: {overhead:>5.0f}%")
         print()
     
-    # Report good implementations
+    
     if good:
         print("✅ EFFICIENT (<10% overhead) - Good implementations:")
         print("-" * 60)
@@ -121,7 +121,7 @@ def analyze_results(results: Dict[str, Tuple[int, int]]) -> None:
                   f"Overhead: {overhead:>5.0f}%")
         print()
     
-    # Summary
+    
     print("\n=== Summary ===")
     print(f"Total indicators tested: {len(results)}")
     print(f"High overhead issues: {len(issues)}")
@@ -149,7 +149,7 @@ def run_benchmarks() -> None:
     print("\n=== Running Performance Benchmarks ===\n")
     
     try:
-        # Run the simple benchmark
+        
         subprocess.run(
             ["cargo", "bench", "--bench", "benchmark_simple"],
             check=True
@@ -163,7 +163,7 @@ def main():
     print("Memory Efficiency Analysis Tool")
     print("=" * 40)
     
-    # First, ensure the memory test binary exists
+    
     print("\nBuilding memory efficiency test...")
     try:
         subprocess.run(
@@ -176,7 +176,7 @@ def main():
         print("Make sure benches/memory_efficiency_test.rs is properly configured")
         sys.exit(1)
     
-    # Run memory analysis
+    
     results = run_memory_test()
     if results:
         analyze_results(results)
@@ -184,7 +184,7 @@ def main():
         print("Error: No results from memory test")
         sys.exit(1)
     
-    # Optionally run benchmarks
+    
     if len(sys.argv) > 1 and sys.argv[1] == "--bench":
         run_benchmarks()
 

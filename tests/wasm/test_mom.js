@@ -28,7 +28,7 @@ test.before(async () => {
         
         const { createRequire } = await import('module');
         const require = createRequire(import.meta.url);
-        wasm = require('../../pkg/my_project.js');
+        wasm = require('../../pkg/vector_ta.js');
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         console.error('Error:', error);

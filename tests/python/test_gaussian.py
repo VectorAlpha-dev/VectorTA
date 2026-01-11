@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestGaussian:
         """Test Gaussian with partial parameters - mirrors check_gaussian_partial_params"""
         close = test_data['close']
         
-        # Test with default params: period=14, poles=4
+        
         result = ta_indicators.gaussian(close, 14, 4)
         assert len(result) == len(close)
     
@@ -37,12 +37,12 @@ class TestGaussian:
         """Test Gaussian matches expected values from Rust tests - mirrors check_gaussian_accuracy"""
         close = test_data['close']
         
-        # Using period=14, poles=4
+        
         result = ta_indicators.gaussian(close, 14, 4)
         
         assert len(result) == len(close)
         
-        # Expected last 5 values from Rust test
+        
         expected_last_five = [
             59221.90637814869,
             59236.15215167245,
@@ -51,26 +51,26 @@ class TestGaussian:
             59085.36983209433
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-4,  # Using 1e-4 as in Rust test
+            rtol=1e-4,  
             msg="Gaussian last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('gaussian', result, 'close', {'period': 14, 'poles': 4})
     
     def test_gaussian_default_candles(self, test_data):
         """Test Gaussian with default parameters - mirrors check_gaussian_default_candles"""
         close = test_data['close']
         
-        # Default params: period=14, poles=4
+        
         result = ta_indicators.gaussian(close, 14, 4)
         assert len(result) == len(close)
         
-        # Compare with Rust
+        
         compare_with_rust('gaussian', result, 'close', {'period': 14, 'poles': 4})
     
     def test_gaussian_zero_period(self):
@@ -105,11 +105,11 @@ class TestGaussian:
         """Test Gaussian with invalid poles - mirrors check_gaussian_invalid_poles"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # Test poles = 0
+        
         with pytest.raises(ValueError):
             ta_indicators.gaussian(data, period=3, poles=0)
         
-        # Test poles = 5 (> 4)
+        
         with pytest.raises(ValueError):
             ta_indicators.gaussian(data, period=3, poles=5)
     
@@ -131,29 +131,29 @@ class TestGaussian:
         """Test Gaussian with re-input of Gaussian result - mirrors check_gaussian_reinput"""
         close = test_data['close']
         
-        # First Gaussian pass with period=14, poles=4
+        
         first_result = ta_indicators.gaussian(close, 14, 4)
         
-        # Second Gaussian pass with period=10, poles=2 using first result as input
+        
         second_result = ta_indicators.gaussian(first_result, 10, 2)
         
         assert len(second_result) == len(first_result)
         
-        # Verify no NaN values after warmup period in second result
+        
         for i in range(240, len(second_result)):
             assert not np.isnan(second_result[i]), f"NaN found at index {i}"
     
     def test_gaussian_nan_handling(self, test_data):
         """Test Gaussian handling of NaN values - mirrors check_gaussian_nan_handling"""
-        # The Rust test doesn't actually test NaN inputs, it just verifies that
-        # the outputs are finite for regular data. Let's test with regular data
+        
+        
         close = test_data['close']
         
         result = ta_indicators.gaussian(close, period=14, poles=4)
         
         assert len(result) == len(close)
-        # Skip the first few values (poles) and check that remaining are finite
-        skip = 4  # poles
+        
+        skip = 4  
         for i in range(skip, len(result)):
             assert np.isfinite(result[i]), f"Non-finite value found at index {i}"
     
@@ -165,41 +165,41 @@ class TestGaussian:
         
         result = ta_indicators.gaussian(close, period=period, poles=poles)
         
-        # Gaussian filter produces actual values immediately when input has no NaNs
+        
         assert len(result) == len(close)
         
-        # Check that all values are finite (no NaN or Inf) when input is clean
+        
         assert np.all(np.isfinite(result)), "Expected all finite values for clean input data"
         
-        # Test with NaN in the middle (not at beginning) to avoid full propagation
+        
         close_with_nan = np.copy(close)
         nan_start = 100
         nan_end = 105
-        close_with_nan[nan_start:nan_end] = np.nan  # Add NaNs in the middle
+        close_with_nan[nan_start:nan_end] = np.nan  
         
         result_with_nan = ta_indicators.gaussian(close_with_nan, period=period, poles=poles)
         
-        # Before the NaN region, we should have valid values
+        
         assert np.all(np.isfinite(result_with_nan[:nan_start])), f"Expected finite values before NaN region"
         
-        # The NaN region and warmup after it should be NaN
-        # Due to recursive nature, NaNs propagate through the filter
+        
+        
         warmup_end = nan_end + period
         assert np.all(np.isnan(result_with_nan[nan_start:warmup_end])), f"Expected NaN values during and after NaN input"
         
-        # Note: Gaussian is a recursive filter, so NaN values can propagate indefinitely
-        # depending on the implementation. This is expected behavior for IIR filters.
+        
+        
     
     def test_gaussian_streaming(self, test_data):
         """Test Gaussian streaming vs batch calculation - mirrors check_gaussian_streaming"""
-        close = test_data['close'][:100]  # Use first 100 values for testing
+        close = test_data['close'][:100]  
         period = 14
         poles = 4
         
-        # Batch calculation
+        
         batch_result = ta_indicators.gaussian(close, period, poles)
         
-        # Streaming calculation
+        
         stream = ta_indicators.GaussianStream(period, poles)
         stream_results = []
         
@@ -209,7 +209,7 @@ class TestGaussian:
         
         stream_results = np.array(stream_results)
         
-        # Compare batch vs streaming
+        
         assert_close(
             stream_results[period:], 
             batch_result[period:],
@@ -221,9 +221,9 @@ class TestGaussian:
         """Test Gaussian batch computation."""
         close = test_data['close']
         
-        # Test period range 10-20 step 5, poles range 2-4 step 1
-        period_range = (10, 20, 5)  # periods: 10, 15, 20
-        poles_range = (2, 4, 1)     # poles: 2, 3, 4
+        
+        period_range = (10, 20, 5)  
+        poles_range = (2, 4, 1)     
         
         result = ta_indicators.gaussian_batch(close, period_range, poles_range)
         
@@ -232,14 +232,14 @@ class TestGaussian:
         assert 'periods' in result
         assert 'poles' in result
         
-        expected_periods = [10, 10, 10, 15, 15, 15, 20, 20, 20]  # 3 periods x 3 poles
+        expected_periods = [10, 10, 10, 15, 15, 15, 20, 20, 20]  
         expected_poles = [2, 3, 4, 2, 3, 4, 2, 3, 4]
         
         assert list(result['periods']) == expected_periods
         assert list(result['poles']) == expected_poles
-        assert result['values'].shape == (9, len(close))  # 3 periods x 3 poles = 9 rows
+        assert result['values'].shape == (9, len(close))  
         
-        # Check each row corresponds to individual Gaussian calculation
+        
         row_idx = 0
         for period in [10, 15, 20]:
             for poles in [2, 3, 4]:
@@ -257,15 +257,15 @@ class TestGaussian:
         close = test_data['close']
         period = 14
         
-        # Test all valid poles values (1-4)
+        
         for poles in [1, 2, 3, 4]:
             result = ta_indicators.gaussian(close, period, poles)
             assert len(result) == len(close)
             
-            # Verify warmup period - Rust implementation returns actual values during warmup
-            # not NaN values, so we just check that we get valid results
+            
+            
             assert len(result) == len(close)
-            # Check that after warmup we have valid non-NaN values
+            
             assert not np.isnan(result[period:]).any()
     
     def test_gaussian_kernel_parameter(self, test_data):
@@ -274,19 +274,19 @@ class TestGaussian:
         period = 14
         poles = 4
         
-        # Test with different kernel types
-        result_auto = ta_indicators.gaussian(close, period, poles)  # Default (auto)
+        
+        result_auto = ta_indicators.gaussian(close, period, poles)  
         result_scalar = ta_indicators.gaussian(close, period, poles, kernel='scalar')
         
-        # Results should be very close (within floating point tolerance)
+        
         valid_idx = ~np.isnan(result_auto)
         np.testing.assert_allclose(result_auto[valid_idx], result_scalar[valid_idx], rtol=1e-10)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError):
             ta_indicators.gaussian(close, period, poles, kernel='invalid')
         
-        # Test batch with kernel
+        
         batch_result = ta_indicators.gaussian_batch(
             close, 
             period_range=(10, 20, 5),

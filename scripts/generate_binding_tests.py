@@ -72,7 +72,7 @@ let testData;
 test.before(async () => {{
     // Load WASM module
     try {{
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         wasm = await import(wasmPath);
         await wasm.default();
     }} catch (error) {{
@@ -103,7 +103,7 @@ def generate_tests(indicator_name):
     indicator_upper = indicator_name.upper()
     indicator_title = indicator_name.title()
     
-    # Create Python test
+    
     python_test_path = Path(f'tests/python/test_{indicator_lower}.py')
     if python_test_path.exists():
         print(f"Python test already exists: {python_test_path}")
@@ -116,7 +116,7 @@ def generate_tests(indicator_name):
         python_test_path.write_text(python_content)
         print(f"Created: {python_test_path}")
     
-    # Create WASM test
+    
     wasm_test_path = Path(f'tests/wasm/test_{indicator_lower}.js')
     if wasm_test_path.exists():
         print(f"WASM test already exists: {wasm_test_path}")

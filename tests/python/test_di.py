@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -27,7 +27,7 @@ class TestDi:
         """Test DI matches expected values from Rust tests - mirrors check_di_accuracy"""
         expected = EXPECTED_OUTPUTS['di']
         
-        # Calculate DI with default parameters
+        
         plus_di, minus_di = ta_indicators.di(
             test_data['high'],
             test_data['low'],
@@ -35,12 +35,12 @@ class TestDi:
             expected['default_params']['period']
         )
         
-        # Check output length
+        
         assert len(plus_di) == len(test_data['close'])
         assert len(minus_di) == len(test_data['close'])
         
-        # Check last 5 values match expected
-        # Match Rust tolerance exactly: abs diff < 1e-6 (no looser rtol)
+        
+        
         assert_close(
             plus_di[-5:],
             expected['plus_last_5_values'],
@@ -58,7 +58,7 @@ class TestDi:
     
     def test_di_partial_params(self, test_data):
         """Test DI with partial parameters - mirrors check_di_partial_params"""
-        # Test with default period (14)
+        
         plus_di, minus_di = ta_indicators.di(
             test_data['high'],
             test_data['low'],
@@ -68,7 +68,7 @@ class TestDi:
         assert len(plus_di) == len(test_data['close'])
         assert len(minus_di) == len(test_data['close'])
         
-        # Test with custom period
+        
         plus_di_10, minus_di_10 = ta_indicators.di(
             test_data['high'],
             test_data['low'],
@@ -80,19 +80,19 @@ class TestDi:
     
     def test_di_errors(self):
         """Test error handling - mirrors check_di_with_zero_period and check_di_with_period_exceeding_data_length"""
-        # Test with zero period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.di(np.array([10.0, 11.0, 12.0]), 
                             np.array([9.0, 8.0, 7.0]),
                             np.array([9.5, 10.0, 11.0]), 0)
         
-        # Test with period exceeding data length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.di(np.array([10.0, 11.0, 12.0]), 
                             np.array([9.0, 8.0, 7.0]),
                             np.array([9.5, 10.0, 11.0]), 10)
         
-        # Test with empty data
+        
         with pytest.raises(ValueError, match="Empty data|Input data"):
             ta_indicators.di(np.array([]), np.array([]), np.array([]), 14)
     
@@ -105,11 +105,11 @@ class TestDi:
             14
         )
         
-        # Check warmup period has NaN
-        assert np.all(np.isnan(plus_di[:13]))  # First period-1 values
+        
+        assert np.all(np.isnan(plus_di[:13]))  
         assert np.all(np.isnan(minus_di[:13]))
         
-        # After warmup (beyond index 40), no NaN values should exist
+        
         if len(plus_di) > 40:
             assert not np.any(np.isnan(plus_di[40:]))
             assert not np.any(np.isnan(minus_di[40:]))
@@ -118,18 +118,18 @@ class TestDi:
         """Test DI streaming functionality"""
         stream = ta_indicators.DiStream(14)
         
-        # Test multiple updates
-        result = stream.update(10.0, 9.0, 9.5)
-        assert result is None  # Not enough data yet
         
-        # Feed more data
+        result = stream.update(10.0, 9.0, 9.5)
+        assert result is None  
+        
+        
         for i in range(20):
             high = 10.0 + i * 0.5
             low = 9.0 + i * 0.5
             close = 9.5 + i * 0.5
             result = stream.update(high, low, close)
             
-            if i >= 13:  # After warmup period
+            if i >= 13:  
                 assert result is not None
                 plus_di, minus_di = result
                 assert isinstance(plus_di, float)
@@ -139,7 +139,7 @@ class TestDi:
     
     def test_di_batch(self, test_data):
         """Test DI batch processing - mirrors check_batch_period_range"""
-        # Test batch with single period
+        
         result = ta_indicators.di_batch(
             test_data['high'],
             test_data['low'],
@@ -151,18 +151,18 @@ class TestDi:
         assert 'minus' in result
         assert 'periods' in result
         
-        # Check shape
+        
         assert result['plus'].shape == (1, len(test_data['close']))
         assert result['minus'].shape == (1, len(test_data['close']))
         assert len(result['periods']) == 1
         assert result['periods'][0] == 14
         
-        # Test batch with multiple periods
+        
         result_multi = ta_indicators.di_batch(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            (10, 20, 5)  # periods: 10, 15, 20
+            (10, 20, 5)  
         )
         
         assert result_multi['plus'].shape == (3, len(test_data['close']))
@@ -188,12 +188,12 @@ class TestDi:
     
     def test_di_default_candles(self, test_data):
         """Test DI with default parameters"""
-        # Default period is 14
+        
         plus_di, minus_di = ta_indicators.di(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            14  # Default period
+            14  
         )
         assert len(plus_di) == len(test_data['close'])
         assert len(minus_di) == len(test_data['close'])
@@ -201,7 +201,7 @@ class TestDi:
     def test_di_mismatched_lengths(self):
         """Test DI with mismatched array lengths"""
         high = np.array([10.0, 11.0, 12.0])
-        low = np.array([9.0, 8.0])  # Different length
+        low = np.array([9.0, 8.0])  
         close = np.array([9.5, 10.0, 11.0])
         
         with pytest.raises(ValueError):
@@ -209,7 +209,7 @@ class TestDi:
     
     def test_di_reinput(self, test_data):
         """Test DI applied twice (re-input) - mirrors check_di_with_slice_data_reinput"""
-        # First pass
+        
         first_plus, first_minus = ta_indicators.di(
             test_data['high'],
             test_data['low'],
@@ -217,7 +217,7 @@ class TestDi:
             14
         )
         
-        # Second pass - apply DI to DI output
+        
         second_plus, second_minus = ta_indicators.di(
             first_plus,
             first_minus,

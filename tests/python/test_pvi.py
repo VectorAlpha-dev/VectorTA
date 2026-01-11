@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestPvi:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default initial_value (None)
+        
         result = ta_indicators.pvi(close, volume)
         assert len(result) == len(close)
     
@@ -42,13 +42,13 @@ class TestPvi:
         assert len(result) == len(close_data)
         assert abs(result[0] - 1000.0) < 1e-6
         
-        # Validate PVI calculation logic:
-        # Index 0: initial value = 1000.0
-        # Index 1: volume[1] > volume[0], so PVI updates
-        # Index 2: volume[2] < volume[1], so PVI stays the same
-        # Index 3: volume[3] > volume[2], so PVI updates
-        # Index 4: volume[4] < volume[3], so PVI stays the same
-        # Index 5: volume[5] > volume[4], so PVI updates
+        
+        
+        
+        
+        
+        
+        
     
     def test_pvi_default_candles(self, test_data):
         """Test PVI with default candles - mirrors check_pvi_default_candles"""
@@ -100,10 +100,10 @@ class TestPvi:
         volume_data = np.array([500.0, 600.0, 500.0, 700.0, 680.0, 900.0])
         initial_value = 1000.0
         
-        # Batch calculation
+        
         batch_result = ta_indicators.pvi(close_data, volume_data, initial_value=initial_value)
         
-        # Streaming calculation
+        
         stream = ta_indicators.PviStream(initial_value=initial_value)
         stream_values = []
         for close, vol in zip(close_data, volume_data):
@@ -121,11 +121,11 @@ class TestPvi:
         close_data = np.array([100.0, 102.0, 101.0, 103.0, 103.0, 105.0])
         volume_data = np.array([500.0, 600.0, 500.0, 700.0, 680.0, 900.0])
         
-        # Test batch with multiple initial values
+        
         result = ta_indicators.pvi_batch(
             close_data,
             volume_data,
-            initial_value_range=(900.0, 1100.0, 100.0)  # 900, 1000, 1100
+            initial_value_range=(900.0, 1100.0, 100.0)  
         )
         
         assert 'values' in result
@@ -133,7 +133,7 @@ class TestPvi:
         assert result['values'].shape == (3, len(close_data))
         assert len(result['initial_values']) == 3
         
-        # Verify each row matches single calculation
+        
         for i, init_val in enumerate(result['initial_values']):
             single_result = ta_indicators.pvi(close_data, volume_data, initial_value=init_val)
             np.testing.assert_array_almost_equal(result['values'][i], single_result)

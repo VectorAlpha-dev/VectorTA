@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestPma:
         """Test PMA with default parameters - mirrors check_pma_default_candles"""
         close = test_data['close']
         
-        # Test with default params (no parameters for PMA)
+        
         predict, trigger = ta_indicators.pma(close)
         assert predict is not None
         assert trigger is not None
@@ -45,7 +45,7 @@ class TestPma:
         assert len(predict) == len(hl2)
         assert len(trigger) == len(hl2)
         
-        # Expected values from Rust test
+        
         expected_predict = [
             59208.18749999999,
             59233.83609693878,
@@ -61,12 +61,12 @@ class TestPma:
             59123.05019132652,
         ]
         
-        # Check last 5 values match expected
+        
         last5_predict = predict[-5:]
         last5_trigger = trigger[-5:]
         
         for i in range(5):
-            # Match Rust test tolerance exactly: absolute 1e-1
+            
             assert_close(
                 last5_predict[i],
                 expected_predict[i],
@@ -119,20 +119,20 @@ class TestPma:
         assert len(predict) == len(close)
         assert len(trigger) == len(close)
         
-        # First 6 values should be NaN (warmup period is first_valid_idx + 6)
-        # Since test data may have NaN values at the beginning, we need to find the first valid value
+        
+        
         first_valid = next((i for i, x in enumerate(close) if not np.isnan(x)), 0)
         expected_warmup = first_valid + 6
         
-        # Check that warmup period values are NaN
+        
         for i in range(min(expected_warmup, len(close))):
             assert np.isnan(predict[i]), f"Expected NaN in predict warmup at index {i}"
             assert np.isnan(trigger[i]), f"Expected NaN in trigger warmup at index {i}"
         
-        # After warmup period, no NaN values should exist
+        
         if len(close) > expected_warmup:
-            # Skip any initial NaN values in the data
-            non_nan_start = max(expected_warmup, 240)  # Skip initial NaN values in data
+            
+            non_nan_start = max(expected_warmup, 240)  
             if len(close) > non_nan_start:
                 for i in range(non_nan_start, len(close)):
                     assert not np.isnan(predict[i]), f"Found unexpected NaN in predict at index {i}"
@@ -146,15 +146,15 @@ class TestPma:
         assert len(predict) == len(mixed_data)
         assert len(trigger) == len(mixed_data)
 
-        # Warmup from first valid value (index 2):
-        # predict becomes valid at j0 = 2 + 6 = 8
-        # trigger requires 3 additional predicts -> first valid at 11 (not present here)
+        
+        
+        
         for i in range(len(mixed_data)):
             if i < 8:
                 assert np.isnan(predict[i]), f"Expected NaN in predict at index {i} during warmup"
             elif i == 8:
                 assert not np.isnan(predict[i]), "Expected valid predict at index 8"
-            # trigger remains NaN for all indices in this short series
+            
             assert np.isnan(trigger[i]), f"Expected NaN in trigger at index {i} due to insufficient predicts"
     
     def test_pma_simple_predictable_pattern(self):
@@ -165,17 +165,17 @@ class TestPma:
         assert len(predict) == len(simple_data)
         assert len(trigger) == len(simple_data)
         
-        # Check warmup period (first 6 values are NaN for predict)
+        
         for i in range(6):
             assert np.isnan(predict[i]), f"Expected NaN in predict at index {i}"
             assert np.isnan(trigger[i]), f"Expected NaN in trigger at index {i}"
         
-        # Predict starts at index 6, trigger needs 3 more values so starts at index 9
+        
         for i in range(6, min(9, len(simple_data))):
             assert not np.isnan(predict[i]), f"Unexpected NaN in predict at index {i}"
             assert np.isnan(trigger[i]), f"Expected NaN in trigger during warmup at index {i}"
         
-        # After index 9, both should be valid
+        
         for i in range(9, len(simple_data)):
             assert not np.isnan(predict[i]), f"Unexpected NaN in predict at index {i}"
             assert not np.isnan(trigger[i]), f"Unexpected NaN in trigger at index {i}"
@@ -184,23 +184,23 @@ class TestPma:
         """Test PMA batch operation with a single run (no parameter sweep for PMA)"""
         close = test_data['close']
         
-        # PMA has no parameters to sweep, so batch just returns a single run
+        
         result = ta_indicators.pma_batch(close)
         
         assert 'values' in result
         assert 'rows' in result
         assert 'cols' in result
         
-        # Should be 2D array with shape (2, len(close))
+        
         values = result['values']
         assert result['rows'] == 2
         assert result['cols'] == len(close)
         assert values.shape == (2, len(close))
         
-        # Compare with single run
+        
         single_predict, single_trigger = ta_indicators.pma(close)
         
-        # First row is predict, second row is trigger
+        
         np.testing.assert_array_almost_equal(
             values[0],
             single_predict,
@@ -216,10 +216,10 @@ class TestPma:
     
     def test_pma_stream(self):
         """Test PMA streaming functionality"""
-        # Create stream
+        
         stream = ta_indicators.PmaStream()
         
-        # Feed data points one by one (need at least 10 for trigger)
+        
         test_values = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0]
         results = []
         
@@ -227,12 +227,12 @@ class TestPma:
             result = stream.update(value)
             results.append(result)
         
-        # First 6 updates should return None (warmup period)
+        
         for i in range(6):
             assert results[i] is None, f"Expected None during warmup at index {i}"
         
-        # After warmup, should return (predict, trigger) tuples
-        # Predict valid from index 6, trigger valid from index 9
+        
+        
         for i in range(6, len(test_values)):
             assert results[i] is not None, f"Expected result after warmup at index {i}"
             assert isinstance(results[i], tuple), "Expected tuple result"
@@ -247,9 +247,9 @@ class TestPma:
     
     def test_pma_kernel_parameter(self, test_data):
         """Test PMA with different kernel parameters"""
-        close = test_data['close'][:1000]  # Use smaller dataset for testing
+        close = test_data['close'][:1000]  
         
-        # Test with different kernels
+        
         kernels = [None, 'auto', 'scalar']
         results = {}
         
@@ -260,7 +260,7 @@ class TestPma:
                 predict, trigger = ta_indicators.pma(close, kernel=kernel)
             results[kernel or 'default'] = (predict, trigger)
         
-        # All results should have the same structure
+        
         for kernel_name, (predict, trigger) in results.items():
             assert predict is not None, f"Missing predict for kernel {kernel_name}"
             assert trigger is not None, f"Missing trigger for kernel {kernel_name}"
@@ -271,7 +271,7 @@ class TestPma:
         """Test that Python bindings match Rust implementation"""
         close = test_data['close']
         predict, trigger = ta_indicators.pma(close)
-        # Compare predict values with Rust (Rust returns predict as 'values')
-        # compare_with_rust throws on error, returns True on success
+        
+        
         result = compare_with_rust('pma', predict)
-        assert result == True  # Will only reach here if no errors
+        assert result == True  

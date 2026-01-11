@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -27,7 +27,7 @@ class TestMom:
         """Test MOM with default parameters - mirrors check_mom_partial_params"""
         close = test_data['close']
         
-        # Test with default period (10)
+        
         result = ta_indicators.mom(close, 10)
         assert len(result) == len(close)
     
@@ -43,8 +43,8 @@ class TestMom:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
-        # Rust test uses absolute tolerance < 1e-1; keep bindings at most as lax
+        
+        
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -57,7 +57,7 @@ class TestMom:
         """Test MOM with default parameters - mirrors check_mom_default_candles"""
         close = test_data['close']
         
-        # Default period is 10
+        
         result = ta_indicators.mom(close, 10)
         assert len(result) == len(close)
     
@@ -96,11 +96,11 @@ class TestMom:
         result = ta_indicators.mom(close, period=10)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period values should be NaN (warmup period)
+        
         assert np.all(np.isnan(result[:10])), "Expected NaN in warmup period"
     
     def test_mom_streaming(self, test_data):
@@ -108,10 +108,10 @@ class TestMom:
         close = test_data['close']
         period = 10
         
-        # Batch calculation
+        
         batch_result = ta_indicators.mom(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.MomStream(period=period)
         stream_values = []
         
@@ -121,10 +121,10 @@ class TestMom:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -135,25 +135,25 @@ class TestMom:
         """Test MOM batch processing with multiple periods"""
         close = test_data['close']
         
-        # Test batch with multiple periods
+        
         result = ta_indicators.mom_batch(
             close,
-            period_range=(5, 15, 5)  # periods: 5, 10, 15
+            period_range=(5, 15, 5)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 rows (3 periods)
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == len(close)
         assert len(result['periods']) == 3
         assert list(result['periods']) == [5, 10, 15]
         
-        # Verify middle row (period=10) matches single calculation
+        
         single_result = ta_indicators.mom(close, period=10)
         assert_close(
-            result['values'][1],  # Second row (period=10)
+            result['values'][1],  
             single_result,
             rtol=1e-10,
             msg="MOM batch period=10 mismatch with single calculation"
@@ -163,19 +163,19 @@ class TestMom:
         """Test MOM batch with single period matches single calculation"""
         close = test_data['close']
         
-        # Batch with single period
+        
         batch_result = ta_indicators.mom_batch(
             close,
-            period_range=(10, 10, 0)  # Only period=10
+            period_range=(10, 10, 0)  
         )
         
-        # Single calculation
+        
         single_result = ta_indicators.mom(close, period=10)
         
         assert batch_result['values'].shape[0] == 1
         assert batch_result['values'].shape[1] == len(close)
         
-        # Should match exactly
+        
         assert_close(
             batch_result['values'][0],
             single_result,
@@ -192,19 +192,19 @@ class TestMom:
     
     def test_mom_batch_edge_cases(self, test_data):
         """Test edge cases for batch processing"""
-        close = test_data['close'][:50]  # Use smaller dataset
+        close = test_data['close'][:50]  
         
-        # Test with step larger than range
+        
         result = ta_indicators.mom_batch(
             close,
-            period_range=(10, 12, 10)  # Step larger than range
+            period_range=(10, 12, 10)  
         )
         
-        # Should only have period=10
+        
         assert result['values'].shape[0] == 1
         assert list(result['periods']) == [10]
         
-        # Test empty data should throw
+        
         with pytest.raises(ValueError):
             ta_indicators.mom_batch(
                 np.array([]),
@@ -213,19 +213,19 @@ class TestMom:
     
     def test_mom_warmup_period(self, test_data):
         """Test that MOM correctly handles warmup period"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         period = 10
         
         result = ta_indicators.mom(close, period=period)
         
-        # First `period` values should be NaN
+        
         assert np.all(np.isnan(result[:period])), f"Expected NaN in first {period} values"
         
-        # After warmup, values should be defined
+        
         assert not np.any(np.isnan(result[period:])), f"Unexpected NaN after index {period}"
         
-        # Verify the calculation for a specific point
-        # MOM(i) = close[i] - close[i-period]
+        
+        
         for i in range(period, min(period + 5, len(close))):
             expected = close[i] - close[i - period]
             assert_close(

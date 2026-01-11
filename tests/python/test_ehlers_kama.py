@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestEhlersKama:
         """Test Ehlers KAMA with partial parameters (None values) - mirrors test_ehlers_kama_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.ehlers_kama(close, 20)  # Using default
+        
+        result = ta_indicators.ehlers_kama(close, 20)  
         assert len(result) == len(close)
     
     def test_ehlers_kama_accuracy(self, test_data):
@@ -45,7 +45,7 @@ class TestEhlersKama:
         
         assert len(result) == len(close)
         
-        # Check last 6 values, first 5 match expected (Pine non-repainting alignment)
+        
         assert_close(
             result[-6:-1], 
             expected['last_5_values'],
@@ -53,14 +53,14 @@ class TestEhlersKama:
             msg="Ehlers KAMA last 5 values mismatch"
         )
         
-        # TODO: Enable once ehlers_kama is added to generate_references binary
-        # compare_with_rust('ehlers_kama', result, 'close', expected['default_params'])
+        
+        
     
     def test_ehlers_kama_default(self, test_data):
         """Test Ehlers KAMA with default parameters - mirrors test_ehlers_kama_default_candles"""
         close = test_data['close']
         
-        # Default params: period=20
+        
         result = ta_indicators.ehlers_kama(close, 20)
         assert len(result) == len(close)
     
@@ -106,16 +106,16 @@ class TestEhlersKama:
         result = ta_indicators.ehlers_kama(close, period=20)
         assert len(result) == len(close)
         
-        # First period-1 values should be NaN (warmup period)
+        
         assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
         
-        # After warmup period, values should not be NaN (if input has valid data)
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
     
     def test_ehlers_kama_not_enough_valid_data(self):
         """Test Ehlers KAMA fails with insufficient valid data"""
-        # Data with too many NaN values
+        
         data = np.array([np.nan, np.nan, np.nan, np.nan, 1.0, 2.0, 3.0])
         
         with pytest.raises(ValueError, match="Not enough valid data|Invalid period"):
@@ -123,22 +123,22 @@ class TestEhlersKama:
     
     def test_ehlers_kama_nan_prefix_handling(self):
         """Test Ehlers KAMA handles NaN prefix correctly"""
-        # Data with NaN prefix
+        
         data = np.array([np.nan, np.nan] + list(range(1, 21)))
         
         result = ta_indicators.ehlers_kama(data, period=5)
         assert len(result) == len(data)
         
-        # First NaN values should remain NaN
+        
         assert np.isnan(result[0])
         assert np.isnan(result[1])
         
-        # Warmup period starts after NaN prefix
-        # With period=5, first valid output is at index 2+4=6
+        
+        
         for i in range(6):
             assert np.isnan(result[i]), f"Expected NaN at index {i}"
         
-        # After warmup, should have valid values
+        
         assert not np.isnan(result[7]), "Expected valid value after warmup"
     
     def test_ehlers_kama_warmup_period_validation(self, test_data):
@@ -148,7 +148,7 @@ class TestEhlersKama:
         
         result = ta_indicators.ehlers_kama(close, period=period)
         
-        # Count NaN values at the start
+        
         nan_count = 0
         for val in result:
             if np.isnan(val):
@@ -156,20 +156,20 @@ class TestEhlersKama:
             else:
                 break
         
-        # Should have exactly period-1 NaN values
+        
         assert nan_count == period - 1, f"Expected {period-1} NaN values for warmup, got {nan_count}"
         
-        # First non-NaN should be at index period-1
+        
         assert not np.isnan(result[period-1]), f"Expected valid value at index {period-1}"
     
     def test_ehlers_kama_streaming(self, test_data):
         """Test Ehlers KAMA streaming functionality - mirrors check_ehlers_kama_streaming"""
-        close = test_data['close'][:50]  # Use a smaller subset for testing
+        close = test_data['close'][:50]  
         
-        # Calculate batch result
+        
         batch_result = ta_indicators.ehlers_kama(close, period=20)
         
-        # Calculate streaming result
+        
         stream = ta_indicators.EhlersKamaStream(period=20)
         stream_result = []
         
@@ -179,7 +179,7 @@ class TestEhlersKama:
         
         stream_result = np.array(stream_result)
         
-        # Compare results where both are not NaN
+        
         for i in range(len(close)):
             if np.isnan(batch_result[i]) and np.isnan(stream_result[i]):
                 continue
@@ -195,24 +195,24 @@ class TestEhlersKama:
         """Test Ehlers KAMA batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
         
-        # Test with default period only using tuple API
+        
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(20, 20, 0)  # Default period only
+            period_range=(20, 20, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 row (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['ehlers_kama']['last_5_values']
         
-        # Check last 6 values, first 5 match expected (Pine non-repainting alignment)
+        
         assert_close(
             default_row[-6:-1],
             expected,
@@ -222,20 +222,20 @@ class TestEhlersKama:
     
     def test_ehlers_kama_batch_multiple_periods(self, test_data):
         """Test Ehlers KAMA batch with multiple periods"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 10, 15, 20 using tuple API
+        
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(10, 20, 5)  # 10, 15, 20
+            period_range=(10, 20, 5)  
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
         assert len(result['periods']) == 3
         
-        # Verify each row matches individual calculation
+        
         periods = [10, 15, 20]
         for i, period in enumerate(periods):
             row_data = result['values'][i]
@@ -249,18 +249,18 @@ class TestEhlersKama:
     
     def test_ehlers_kama_batch_nan_handling(self, test_data):
         """Test batch processing with NaN values"""
-        # Create data with NaN prefix
+        
         data = np.array([np.nan, np.nan] + list(test_data['close'][2:52]))
         
         result = ta_indicators.ehlers_kama_batch(
             data,
-            period_range=(10, 20, 10)  # periods 10, 20
+            period_range=(10, 20, 10)  
         )
         
-        # Both parameter combinations should handle NaN correctly
+        
         for row_idx in range(2):
             row = result['values'][row_idx]
-            # First values should be NaN due to input NaN and warmup
+            
             assert np.isnan(row[0])
             assert np.isnan(row[1])
     
@@ -270,10 +270,10 @@ class TestEhlersKama:
         
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(10, 30, 10)  # 10, 20, 30
+            period_range=(10, 30, 10)  
         )
         
-        # Should have 3 combinations
+        
         assert len(result['periods']) == 3
         assert result['periods'][0] == 10
         assert result['periods'][1] == 20

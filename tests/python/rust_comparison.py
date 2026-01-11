@@ -14,12 +14,12 @@ def get_rust_output(indicator_name, source='close'):
     """
     project_root = Path(__file__).parent.parent.parent
 
-    # 1) Preferred path: call prebuilt binary directly
+    
     bin_hint = os.environ.get('RUST_REF_BIN', '').strip()
     candidates = []
     if bin_hint:
         candidates.append(Path(bin_hint))
-    # platform-aware default locations
+    
     candidates.append(project_root / 'target' / 'release' / ('generate_references.exe' if os.name == 'nt' else 'generate_references'))
     candidates.append(project_root / 'target-py' / 'release' / ('generate_references.exe' if os.name == 'nt' else 'generate_references'))
 
@@ -30,7 +30,7 @@ def get_rust_output(indicator_name, source='close'):
                 raise RuntimeError(f"Failed to generate reference for {indicator_name}: {result.stderr}")
             return json.loads(result.stdout)
 
-    # 2) Fallback: build and run via Cargo
+    
     build_result = subprocess.run(
         ['cargo', 'build', '--release', '--bin', 'generate_references'],
         cwd=project_root,
@@ -54,24 +54,24 @@ def compare_with_rust(indicator_name, python_output, source='close', params=None
     """Compare Python binding output with native Rust output"""
     rust_data = get_rust_output(indicator_name, source)
     
-    # Handle indicators with multiple outputs (like ACOSC)
+    
     if isinstance(python_output, dict):
-        # For indicators like ACOSC that return multiple arrays
+        
         for key, py_values in python_output.items():
             if key not in rust_data:
                 raise KeyError(f"Key '{key}' not found in Rust output for {indicator_name}")
             rust_values = [float('nan') if v is None else v for v in rust_data[key]]
             rust_array = np.array(rust_values, dtype=np.float64)
             
-            # Compare lengths
+            
             if len(py_values) != len(rust_array):
                 raise ValueError(f"Length mismatch for {key}: Python={len(py_values)}, Rust={len(rust_array)}")
             
-            # Compare values
+            
             try:
                 np.testing.assert_allclose(py_values, rust_array, rtol=rtol, atol=atol)
             except AssertionError as e:
-                # Find first mismatch for better error reporting
+                
                 for i in range(len(py_values)):
                     if np.isnan(py_values[i]) and np.isnan(rust_array[i]):
                         continue
@@ -82,28 +82,28 @@ def compare_with_rust(indicator_name, python_output, source='close', params=None
                 raise
         return True
     
-    # Handle single output indicators
-    # Convert None values to NaN for proper numpy comparison
+    
+    
     rust_values = [float('nan') if v is None else v for v in rust_data['values']]
     rust_output = np.array(rust_values, dtype=np.float64)
     
-    # Verify parameters match if provided
+    
     if params:
         rust_params = rust_data['params']
         for key, value in params.items():
             if key in rust_params and rust_params[key] != value:
                 raise ValueError(f"Parameter mismatch for {key}: Rust={rust_params[key]}, Python={value}")
     
-    # Compare lengths
+    
     if len(python_output) != len(rust_output):
         raise ValueError(f"Length mismatch: Python={len(python_output)}, Rust={len(rust_output)}")
     
-    # Compare values
+    
     try:
         np.testing.assert_allclose(python_output, rust_output, rtol=rtol, atol=atol, equal_nan=True)
         return True
     except AssertionError as e:
-        # Find first mismatch for better error reporting
+        
         for i in range(len(python_output)):
             if np.isnan(python_output[i]) and np.isnan(rust_output[i]):
                 continue

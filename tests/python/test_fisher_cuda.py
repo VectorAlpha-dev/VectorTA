@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -24,14 +24,14 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "fisher_cuda_batch_dev"):
         return False
     try:
-        # quick smoke test
+        
         high = np.array([np.nan, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
         low = high - 1.0
         h = ti.fisher_cuda_batch_dev(high, low, (3, 3, 0))
-        _ = cp.asarray(h["fisher"])  # ensure CuPy can wrap the handle
-        _ = cp.asarray(h["signal"])  # ensure CuPy can wrap the handle
+        _ = cp.asarray(h["fisher"])  
+        _ = cp.asarray(h["signal"])  
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

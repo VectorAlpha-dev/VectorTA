@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,11 +29,11 @@ class TestKama:
         """Test KAMA with default parameters - mirrors check_kama_partial_params"""
         close = test_data['close']
         
-        # Test with default period (30)
+        
         result = ta_indicators.kama(close, 30)
         assert len(result) == len(close)
         
-        # Test with kernel parameter
+        
         result_with_kernel = ta_indicators.kama(close, 30, kernel="scalar")
         assert len(result_with_kernel) == len(close)
     
@@ -49,7 +49,7 @@ class TestKama:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -57,14 +57,14 @@ class TestKama:
             msg="KAMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('kama', result, 'close', expected['default_params'])
     
     def test_kama_default_candles(self, test_data):
         """Test KAMA with default parameters - mirrors check_kama_default_candles"""
         close = test_data['close']
         
-        # Default period: 30
+        
         result = ta_indicators.kama(close, 30)
         assert len(result) == len(close)
     
@@ -110,11 +110,11 @@ class TestKama:
         result = ta_indicators.kama(close, period=30)
         assert len(result) == len(close)
         
-        # After warmup period (30), no NaN values should exist
+        
         if len(result) > 30:
             assert not np.any(np.isnan(result[30:])), "Found unexpected NaN after warmup period"
         
-        # First period values should be NaN
+        
         assert np.all(np.isnan(result[:30])), "Expected NaN in warmup period"
     
     def test_kama_streaming(self, test_data):
@@ -122,10 +122,10 @@ class TestKama:
         close = test_data['close']
         period = 30
         
-        # Batch calculation
+        
         batch_result = ta_indicators.kama(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.KamaStream(period=period)
         stream_values = []
         
@@ -135,10 +135,10 @@ class TestKama:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -151,21 +151,21 @@ class TestKama:
         
         result = ta_indicators.kama_batch(
             close,
-            period_range=(30, 30, 0)  # Default period only
+            period_range=(30, 30, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['kama']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -177,20 +177,20 @@ class TestKama:
         """Test KAMA batch with multiple periods"""
         close = test_data['close']
         
-        # Test period range
+        
         result = ta_indicators.kama_batch(
             close,
-            period_range=(10, 40, 10)  # periods: 10, 20, 30, 40
+            period_range=(10, 40, 10)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         assert np.array_equal(result['periods'], [10, 20, 30, 40])
         
-        # Check result shape
+        
         assert result['values'].shape == (4, len(close))
         
-        # Verify each combination matches individual calculation
+        
         for i, period in enumerate(result['periods']):
             individual_result = ta_indicators.kama(close, period)
             batch_row = result['values'][i]
@@ -201,34 +201,34 @@ class TestKama:
         """Test KAMA batch with single period"""
         close = test_data['close']
         
-        # Test single period (step=0 or start==end)
+        
         result = ta_indicators.kama_batch(close, (30, 30, 0))
         
         assert 'values' in result
         assert 'periods' in result
         assert np.array_equal(result['periods'], [30])
         
-        # Check shape
+        
         assert result['values'].shape == (1, len(close))
         
-        # Verify matches individual calculation
+        
         individual_result = ta_indicators.kama(close, 30)
         assert_close(result['values'][0], individual_result, atol=1e-9, 
                     msg="Single period mismatch")
     
     def test_kama_batch_edge_cases(self):
         """Test KAMA batch edge cases"""
-        # Test with empty data - batch treats empty as all NaN
+        
         empty = np.array([])
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.kama_batch(empty, (10, 20, 10))
         
-        # Test with all NaN data
+        
         all_nan = np.full(100, np.nan)
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.kama_batch(all_nan, (10, 20, 10))
         
-        # Test with period exceeding data length
+        
         small_data = np.array([1.0, 2.0, 3.0])
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.kama_batch(small_data, (5, 10, 5))
@@ -239,26 +239,26 @@ class TestKama:
         
         result = ta_indicators.kama_batch(data, (5, 15, 5))
         
-        # Each row should have proper warmup
+        
         for i, period in enumerate(result['periods']):
             row = result['values'][i]
-            # First 'period' values should be NaN
+            
             assert np.all(np.isnan(row[:period])), f"Expected NaN warmup for period {period}"
-            # After warmup should have values
+            
             assert np.all(~np.isnan(row[period:])), f"Expected values after warmup for period {period}"
     
     def test_kama_different_periods(self, test_data):
         """Test KAMA with various period values"""
         close = test_data['close']
         
-        # Test various period values
+        
         for period in [5, 10, 20, 50]:
             result = ta_indicators.kama(close, period)
             assert len(result) == len(close)
             
-            # Verify warmup period
+            
             assert np.all(np.isnan(result[:period]))
-            # Verify we have values after warmup
+            
             if period < len(close):
                 assert np.all(~np.isnan(result[period:]))
     
@@ -266,12 +266,12 @@ class TestKama:
         """Test KAMA with two values input"""
         data = np.array([1.0, 2.0])
         
-        # Should work with period=1 since we have 2 values (need period+1)
+        
         result = ta_indicators.kama(data, 1)
         assert len(result) == 2
-        # First value should be NaN (warmup)
+        
         assert np.isnan(result[0])
-        # Second value should be valid
+        
         assert np.isfinite(result[1])
     
     def test_kama_warmup_period(self, test_data):
@@ -279,20 +279,20 @@ class TestKama:
         close = test_data['close'][:50]
         
         test_cases = [
-            (5, 5),    # period=5, warmup=5
-            (10, 10),  # period=10, warmup=10
-            (20, 20),  # period=20, warmup=20
-            (30, 30),  # period=30, warmup=30
+            (5, 5),    
+            (10, 10),  
+            (20, 20),  
+            (30, 30),  
         ]
         
         for period, expected_warmup in test_cases:
             result = ta_indicators.kama(close, period)
             
-            # Check NaN values up to warmup period
+            
             for i in range(expected_warmup):
                 assert np.isnan(result[i]), f"Expected NaN at index {i} for period={period}"
             
-            # Check valid values after warmup
+            
             if expected_warmup < len(result):
                 assert not np.isnan(result[expected_warmup]), \
                     f"Expected valid value at index {expected_warmup} for period={period}"
@@ -310,29 +310,29 @@ class TestKama:
         """Test KAMA with different kernel parameters"""
         close = test_data['close'][:100]
         
-        # Test with different kernels
+        
         kernels = ["scalar", "auto"]
         period = 30
         
         for kernel in kernels:
             result = ta_indicators.kama(close, period, kernel=kernel)
             assert len(result) == len(close)
-            # Verify warmup period
+            
             assert np.all(np.isnan(result[:period]))
-            # Verify we have values after warmup
+            
             assert np.all(~np.isnan(result[period:]))
         
-        # Test batch with kernel
+        
         batch_result = ta_indicators.kama_batch(close, (10, 30, 10), kernel="scalar")
         assert batch_result['values'].shape == (3, len(close))
         
-        # Invalid kernel should raise error
+        
         with pytest.raises(ValueError):
             ta_indicators.kama(close, period, kernel="invalid_kernel")
     
     def test_kama_stream_error_handling(self):
         """Test KAMA stream error handling"""
-        # Test with invalid period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.KamaStream(0)
     
@@ -340,17 +340,17 @@ class TestKama:
         """Test that batch metadata is consistent with results"""
         close = test_data['close'][:100]
         
-        # Test various period ranges
+        
         test_cases = [
-            (5, 15, 5),    # periods: 5, 10, 15
-            (10, 10, 0),   # single period: 10
-            (20, 40, 10),  # periods: 20, 30, 40
+            (5, 15, 5),    
+            (10, 10, 0),   
+            (20, 40, 10),  
         ]
         
         for start, end, step in test_cases:
             result = ta_indicators.kama_batch(close, (start, end, step))
             
-            # Check periods array matches expected
+            
             if step == 0 or start == end:
                 expected_periods = [start]
             else:
@@ -362,14 +362,14 @@ class TestKama:
     
     def test_kama_batch_performance(self, test_data):
         """Test that batch computation works correctly (performance is secondary)"""
-        close = test_data['close'][:1000]  # Use first 1000 values
+        close = test_data['close'][:1000]  
         
-        # Test 5 periods
+        
         result = ta_indicators.kama_batch(close, (10, 50, 10))
-        assert len(result['periods']) == 5  # periods: 10, 20, 30, 40, 50
+        assert len(result['periods']) == 5  
         assert result['values'].shape == (5, len(close))
         
-        # Verify each combination
+        
         for i, period in enumerate(result['periods']):
             individual_result = ta_indicators.kama(close, period)
             batch_row = result['values'][i]
@@ -378,14 +378,14 @@ class TestKama:
     
     def test_kama_zero_copy_verification(self, test_data):
         """Verify KAMA uses zero-copy operations"""
-        # This test ensures the Python binding doesn't make unnecessary copies
+        
         close = test_data['close'][:100]
         
-        # The result should be computed directly without intermediate copies
+        
         result = ta_indicators.kama(close, 30)
         assert len(result) == len(close)
         
-        # Batch should also use zero-copy
+        
         batch_result = ta_indicators.kama_batch(close, (10, 30, 10))
         assert batch_result['values'].shape == (3, len(close))
 

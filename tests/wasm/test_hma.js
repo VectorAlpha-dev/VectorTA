@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { 
     loadTestData, 
     assertArrayClose, 
@@ -24,26 +25,16 @@ let wasm;
 let testData;
 
 test.before(async () => {
+    const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');
     try {
-        const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
         const importPath = process.platform === 'win32'
             ? 'file:///' + pkgPath.replace(/\\/g, '/')
             : pkgPath;
         wasm = await import(importPath);
+        if (wasm && wasm.default) wasm = wasm.default;
     } catch (e1) {
-        
-        try {
-            const { pathToFileURL } = await import('url');
-            const localPath = path.join(__dirname, 'my_project.js');
-            
-            const { createRequire } = await import('module');
-            const require = createRequire(pathToFileURL(import.meta.url));
-            wasm = require(localPath);
-        } catch (e2) {
-            console.error('Failed to load WASM module. pkg error:', e1);
-            console.error('Local fallback error:', e2);
-            throw e2;
-        }
+        const require = createRequire(import.meta.url);
+        wasm = require(pkgPath);
     }
 
     testData = loadTestData();

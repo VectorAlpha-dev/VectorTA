@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -27,18 +27,18 @@ class TestMean_Ad:
         """Test MEAN_AD with partial parameters - mirrors check_mean_ad_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.mean_ad(close, 5)  # Using defaults
+        
+        result = ta_indicators.mean_ad(close, 5)  
         assert len(result) == len(close)
     
     def test_mean_ad_accuracy(self, test_data):
         """Test MEAN_AD matches expected values from Rust tests - mirrors check_mean_ad_accuracy"""
-        # Test with hl2 source like in Rust
+        
         hl2 = (test_data['high'] + test_data['low']) / 2
         result = ta_indicators.mean_ad(hl2, period=5)
         
         expected = EXPECTED_OUTPUTS['mean_ad']['last_5_values']
-        # Match Rust tolerance: absolute 1e-1; do not use relative tolerance
+        
         assert_close(result[-5:], expected, rtol=0, atol=1e-1,
                     msg="mean_ad last 5 values mismatch")
     
@@ -47,10 +47,10 @@ class TestMean_Ad:
         result = ta_indicators.mean_ad(test_data['close'], period=5)
         assert len(result) == len(test_data['close'])
         
-        # Check warmup period (first + 2 * period - 2 values should be NaN)
-        # For period=5, warmup should be 8 values (0 + 2*5 - 2 = 8)
+        
+        
         assert np.all(np.isnan(result[:8]))
-        assert not np.any(np.isnan(result[240:]))  # No NaN after warmup
+        assert not np.any(np.isnan(result[240:]))  
     
     def test_mean_ad_zero_period(self):
         """Test MEAN_AD fails with zero period - mirrors check_mean_ad_zero_period"""
@@ -94,12 +94,12 @@ class TestMean_Ad:
         result = ta_indicators.mean_ad(close, period=5)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period + period - 2 values should be NaN (warmup = first + 2*period - 2)
-        # For period=5 and first=0, warmup is 8
+        
+        
         assert np.all(np.isnan(result[:8])), "Expected NaN in warmup period"
     
     def test_mean_ad_streaming(self, test_data):
@@ -107,10 +107,10 @@ class TestMean_Ad:
         close = test_data['close']
         period = 5
         
-        # Batch calculation
+        
         batch_result = ta_indicators.mean_ad(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.MeanAdStream(period=period)
         stream_values = []
         
@@ -120,10 +120,10 @@ class TestMean_Ad:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -132,27 +132,27 @@ class TestMean_Ad:
     
     def test_mean_ad_batch(self, test_data):
         """Test batch processing - mirrors check_batch_default_row"""
-        # Use hl2 source to match expected values
+        
         hl2 = (test_data['high'] + test_data['low']) / 2
         
         result = ta_indicators.mean_ad_batch(
             hl2,
-            period_range=(5, 5, 0)  # Default period only
+            period_range=(5, 5, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(hl2)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['mean_ad']['last_5_values']
         
-        # Check last 5 values match
-        # Match Rust tolerance: absolute 1e-1; do not use relative tolerance
+        
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -165,10 +165,10 @@ class TestMean_Ad:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Using single parameter
+        
         batch_result = ta_indicators.mean_ad_batch(close, period_range=(5, 5, 0))
         
-        # Should match single calculation
+        
         single_result = ta_indicators.mean_ad(close, 5)
         
         assert batch_result['values'].shape == (1, len(close))
@@ -177,16 +177,16 @@ class TestMean_Ad:
     
     def test_mean_ad_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 5, 10, 15
+        
         batch_result = ta_indicators.mean_ad_batch(close, period_range=(5, 15, 5))
         
-        # Should have 3 rows * 100 cols
+        
         assert batch_result['values'].shape == (3, 100)
         assert list(batch_result['periods']) == [5, 10, 15]
         
-        # Verify each row matches individual calculation
+        
         periods = [5, 10, 15]
         for i, period in enumerate(periods):
             row_data = batch_result['values'][i]
@@ -197,22 +197,22 @@ class TestMean_Ad:
     def test_mean_ad_batch_edge_cases(self, test_data):
         """Test edge cases for batch processing"""
         
-        # Test with minimum data
+        
         min_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         result = ta_indicators.mean_ad_batch(min_data, period_range=(2, 3, 1))
         
         assert result['values'].shape == (2, 5)
         assert list(result['periods']) == [2, 3]
         
-        # Test with large step (step > range)
+        
         close = test_data['close'][:50]
         large_step_result = ta_indicators.mean_ad_batch(close, period_range=(5, 7, 10))
         
-        # Should only have period=5
+        
         assert large_step_result['values'].shape == (1, 50)
         assert list(large_step_result['periods']) == [5]
         
-        # Empty data should throw
+        
         with pytest.raises(ValueError, match="All values are NaN|Empty data provided"):
             ta_indicators.mean_ad_batch(np.array([]), period_range=(5, 5, 0))
 

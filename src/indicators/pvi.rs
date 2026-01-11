@@ -342,7 +342,11 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
 
     
     let chosen = match Kernel::Auto {
-        Kernel::Auto => Kernel::Scalar,
+        Kernel::Auto => match detect_best_kernel() {
+            #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+            Kernel::Avx512 => Kernel::Avx2,
+            other => other,
+        },
         other => other,
     };
     let initial = input.get_initial_value();

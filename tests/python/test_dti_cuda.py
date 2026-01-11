@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional
+except ImportError:  
     cp = None
 
 try:
@@ -27,13 +27,13 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "dti_cuda_batch_dev"):
         return False
     try:
-        # probe a tiny launch
+        
         h = np.array([np.nan, 11.0, 12.0, 13.0, 14.0], dtype=np.float32)
         l = h - 1.0
         handle, meta = ti.dti_cuda_batch_dev(h, l, (3, 3, 0), (2, 2, 0), (2, 2, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - probing path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -51,7 +51,7 @@ class TestDtiCuda:
         low = test_data["low"].astype(np.float64)
         r, s, u = 14, 10, 5
 
-        # CPU baseline aligned to FP32 input semantics
+        
         cpu = ti.dti(high.astype(np.float32).astype(np.float64),
                      low.astype(np.float32).astype(np.float64), r, s, u)
 
@@ -75,14 +75,14 @@ class TestDtiCuda:
         high_tm = np.zeros((T, N), dtype=np.float64)
         low_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            # create distinct series while preserving high >= low
+            
             base = (1.0 + 0.02 * j)
             high_tm[:, j] = high * base
             low_tm[:, j] = (low * base).clip(max=high_tm[:, j] - 1e-6)
 
         r, s, u = 14, 10, 5
 
-        # CPU baseline aligned to FP32 input
+        
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.dti(

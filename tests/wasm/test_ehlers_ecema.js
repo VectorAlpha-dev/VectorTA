@@ -28,13 +28,13 @@ let HAS_WASM_MEMORY = false;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
         
-        const wasmBgPath = path.join(path.dirname(importPath.replace('file:///', '/')), 'my_project_bg.wasm');
+        const wasmBgPath = path.join(path.dirname(importPath.replace('file:///', '/')), 'vector_ta_bg.wasm');
         const wasmBytes = fs.readFileSync(wasmBgPath);
         if (typeof wasm.initSync === 'function') {
             wasmInst = wasm.initSync(wasmBytes);

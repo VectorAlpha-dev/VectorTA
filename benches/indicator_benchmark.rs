@@ -117,7 +117,7 @@ use my_project::indicators::{
     },
     cci_cycle::{cci_cycle, cci_cycle_with_kernel, CciCycleBatchBuilder, CciCycleInput},
     fvg_trailing_stop::{fvg_trailing_stop, fvg_trailing_stop_with_kernel, FvgTrailingStopInput},
-    halftrend::{halftrend, halftrend_with_kernel, HalfTrendInput},
+    halftrend::{halftrend, halftrend_with_kernel, HalfTrendBatchBuilder, HalfTrendData, HalfTrendInput},
     net_myrsi::{net_myrsi, net_myrsi_with_kernel, NetMyrsiBatchBuilder, NetMyrsiInput},
     reverse_rsi::{reverse_rsi, reverse_rsi_with_kernel, ReverseRsiBatchBuilder, ReverseRsiInput},
 };
@@ -165,7 +165,7 @@ use my_project::indicators::{
     cmo::{cmo as cmo_raw, cmo_with_kernel, CmoBatchBuilder, CmoInput},
     coppock::{coppock as coppock_raw, CoppockInput},
     cora_wave::{cora_wave as cora_wave_raw, CoraWaveBatchBuilder, CoraWaveInput},
-    correl_hl::{correl_hl as correl_hl_raw, CorrelHlInput},
+    correl_hl::{correl_hl as correl_hl_raw, CorrelHlBatchBuilder, CorrelHlData, CorrelHlInput},
     correlation_cycle::{
         correlation_cycle as correlation_cycle_raw, correlation_cycle_with_kernel,
         CorrelationCycleBatchBuilder, CorrelationCycleInput,
@@ -184,21 +184,25 @@ use my_project::indicators::{
     dx::{dx as dx_raw, DxBatchBuilder, DxInput},
     efi::{efi as efi_raw, efi_with_kernel, EfiInput},
     emd::{emd as emd_raw, EmdInput},
-    emv::{emv as emv_raw, emv_with_kernel, EmvInput},
+    emv::{emv as emv_raw, emv_with_kernel, EmvBatchBuilder, EmvData, EmvInput},
     er::{er as er_raw, er_with_kernel, ErBatchBuilder, ErInput},
-    eri::{eri as eri_raw, eri_with_kernel, EriInput},
+    eri::{eri as eri_raw, eri_with_kernel, EriBatchBuilder, EriData, EriInput},
     fisher::{fisher as fisher_raw, FisherInput},
     fosc::{fosc as fosc_raw, fosc_with_kernel, FoscInput},
     gatorosc::{gatorosc as gatorosc_raw, GatorOscInput},
     ift_rsi::{ift_rsi as ift_rsi_raw, ift_rsi_with_kernel, IftRsiInput},
-    kaufmanstop::{kaufmanstop as kaufmanstop_raw, kaufmanstop_with_kernel, KaufmanstopInput},
+    kaufmanstop::{
+        kaufmanstop as kaufmanstop_raw, kaufmanstop_with_kernel, KaufmanstopBatchBuilder,
+        KaufmanstopData, KaufmanstopInput,
+    },
     kdj::{kdj as kdj_raw, kdj_with_kernel, KdjInput},
     keltner::{keltner as keltner_raw, keltner_with_kernel, KeltnerInput},
     kst::{kst as kst_raw, KstBatchBuilder, KstInput},
-    kurtosis::{kurtosis as kurtosis_raw, kurtosis_with_kernel, KurtosisInput},
+    kurtosis::{kurtosis as kurtosis_raw, kurtosis_with_kernel, KurtosisBatchBuilder, KurtosisInput},
     kvo::{kvo as kvo_raw, kvo_with_kernel, KvoBatchBuilder, KvoInput},
     linearreg_angle::{
-        linearreg_angle as linearreg_angle_raw, linearreg_angle_with_kernel, Linearreg_angleInput,
+        linearreg_angle as linearreg_angle_raw, linearreg_angle_with_kernel, Linearreg_angleBatchBuilder,
+        Linearreg_angleInput,
     },
     linearreg_intercept::{
         linearreg_intercept as linearreg_intercept_raw, LinearRegInterceptInput,
@@ -2032,6 +2036,71 @@ make_hlc_batch_wrappers!(
     my_project::indicators::stochf::StochfData
 );
 
+make_hl_batch_wrappers!(
+    correl_hl_batch,
+    CorrelHlBatchBuilder,
+    CorrelHlInputS,
+    CorrelHlData
+);
+
+make_ohlcv_batch_wrappers!(
+    emv_batch,
+    EmvBatchBuilder,
+    EmvInputS,
+    EmvData
+);
+
+make_triple_from_input_wrappers!(
+    eri_batch,
+    EriBatchBuilder,
+    EriInputS,
+    |input: &EriInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        let (h, l, s) = match &input.data {
+            EriData::Candles { candles, source } => (
+                &candles.high[..],
+                &candles.low[..],
+                source_type(candles, source),
+            ),
+            EriData::Slices { high, low, source } => (*high, *low, *source),
+        };
+        Ok((h, l, s))
+    }
+);
+
+make_triple_from_input_wrappers!(
+    halftrend_batch,
+    HalfTrendBatchBuilder,
+    HalfTrendInputS,
+    |input: &HalfTrendInputS| -> anyhow::Result<(&[f64], &[f64], &[f64])> {
+        let (h, l, c) = match &input.data {
+            HalfTrendData::Candles(candles) => (&candles.high[..], &candles.low[..], &candles.close[..]),
+            HalfTrendData::Slices { high, low, close } => (*high, *low, *close),
+        };
+        Ok((h, l, c))
+    }
+);
+
+make_hl_batch_wrappers!(
+    kaufmanstop_batch,
+    KaufmanstopBatchBuilder,
+    KaufmanstopInputS,
+    KaufmanstopData
+);
+
+make_batch_wrappers!(
+    kurtosis_batch,
+    KurtosisBatchBuilder,
+    KurtosisInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
+make_batch_wrappers!(
+    linearreg_angle_batch,
+    Linearreg_angleBatchBuilder,
+    LinearregAngleInputS;
+    ScalarBatch, Avx2Batch, Avx512Batch
+);
+
 // TTM Squeeze batch wrappers (HLC inputs)
 make_hlc_batch_wrappers!(
     ttm_squeeze_batch,
@@ -2200,7 +2269,6 @@ fn cci_batch_scalarbatch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
     my_project::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
-        .period_range(14, 54, 20)
         .apply_slice(slice)?;
     Ok(())
 }
@@ -2209,7 +2277,6 @@ fn cci_batch_avx2batch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
     my_project::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::Avx2Batch)
-        .period_range(14, 54, 20)
         .apply_slice(slice)?;
     Ok(())
 }
@@ -2218,7 +2285,6 @@ fn cci_batch_avx512batch(input: &CciInputS) -> anyhow::Result<()> {
     let slice: &[f64] = input.as_ref();
     my_project::indicators::cci::CciBatchBuilder::new()
         .kernel(Kernel::Avx512Batch)
-        .period_range(14, 54, 20)
         .apply_slice(slice)?;
     Ok(())
 }
@@ -2484,7 +2550,7 @@ make_triple_with_builder_wrappers!(
         };
         Ok((h, l, c))
     },
-    |b: AdxBatchBuilder| b.period_range(10, 30, 5)
+    |b: AdxBatchBuilder| b
 );
 
 // ADX batch "dev" sweep matching CUDA's 1m_x_250: 250 periods (8..2000 step 8).
@@ -2523,7 +2589,7 @@ make_triple_with_builder_and_method_wrappers!(
         };
         Ok((h, l, c))
     },
-    |b: DxBatchBuilder| b.period_range(10, 30, 5),
+    |b: DxBatchBuilder| b,
     apply_hlc
 );
 
@@ -3274,6 +3340,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    linearreg_angle_batch => LinearregAngleInputS; Some(14);
+    linearreg_angle_batch_scalarbatch,
+    linearreg_angle_batch_avx2batch,
+    linearreg_angle_batch_avx512batch,
+);
+
+bench_variants!(
     cmo => CmoInputS; Some(14);
     cmo_scalar,
     cmo_avx2,
@@ -3301,6 +3374,13 @@ bench_variants!(
     correl_hl_scalar,
     correl_hl_avx2,
     correl_hl_avx512
+);
+
+bench_variants!(
+    correl_hl_batch => CorrelHlInputS; Some(9);
+    correl_hl_batch_scalarbatch,
+    correl_hl_batch_avx2batch,
+    correl_hl_batch_avx512batch,
 );
 
 bench_variants!(
@@ -4099,6 +4179,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    eri_batch => EriInputS; Some(13);
+    eri_batch_scalarbatch,
+    eri_batch_avx2batch,
+    eri_batch_avx512batch,
+);
+
+bench_variants!(
     zscore => ZscoreInputS; Some(14);
     zscore_scalar,
     zscore_avx2,
@@ -4139,6 +4226,13 @@ bench_variants!(
     emv_scalar,
     emv_avx2,
     emv_avx512,
+);
+
+bench_variants!(
+    emv_batch => EmvInputS; None;
+    emv_batch_scalarbatch,
+    emv_batch_avx2batch,
+    emv_batch_avx512batch,
 );
 
 bench_variants!(
@@ -4775,6 +4869,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    halftrend_batch => HalfTrendInputS; Some(100);
+    halftrend_batch_scalarbatch,
+    halftrend_batch_avx2batch,
+    halftrend_batch_avx512batch,
+);
+
+bench_variants!(
     ift_rsi => IftRsiInputS; None;
     ift_rsi_scalar,
     ift_rsi_avx2,
@@ -4884,6 +4985,13 @@ bench_variants!(
 );
 
 bench_variants!(
+    kurtosis_batch => KurtosisInputS; Some(5);
+    kurtosis_batch_scalarbatch,
+    kurtosis_batch_avx2batch,
+    kurtosis_batch_avx512batch,
+);
+
+bench_variants!(
     adxr => AdxrInputS; None;
     adxr_scalar,
     adxr_avx2,
@@ -4909,6 +5017,13 @@ bench_variants!(
     kaufmanstop_scalar,
     kaufmanstop_avx2,
     kaufmanstop_avx512,
+);
+
+bench_variants!(
+    kaufmanstop_batch => KaufmanstopInputS; Some(22);
+    kaufmanstop_batch_scalarbatch,
+    kaufmanstop_batch_avx2batch,
+    kaufmanstop_batch_avx512batch,
 );
 
 bench_variants!(
@@ -5231,6 +5346,7 @@ bench_variants!(
 	    benches_cci_cycle,
 	    benches_cci_cycle_batch,
 	    benches_correl_hl,
+	    benches_correl_hl_batch,
 	    benches_sar,
 	    benches_safezonestop_batch,
 	    benches_natr,
@@ -5241,11 +5357,12 @@ bench_variants!(
     benches_stoch,
     benches_stoch_batch,
     benches_fisher_batch,
-    benches_fvg_trailing_stop,
-    benches_gatorosc,
-    benches_halftrend,
-    benches_ift_rsi,
-    benches_kdj,
+	    benches_fvg_trailing_stop,
+	    benches_gatorosc,
+	    benches_halftrend,
+	    benches_halftrend_batch,
+	    benches_ift_rsi,
+	    benches_kdj,
     benches_keltner,
     benches_keltner_batch,
     benches_kvo,
@@ -5261,11 +5378,12 @@ bench_variants!(
     benches_acosc,
     benches_cfo,
     benches_cfo_batch,
-    benches_correlation_cycle,
-    benches_correlation_cycle_batch,
-    benches_kaufmanstop,
-    benches_cksp,
-    benches_cksp_batch,
+	    benches_correlation_cycle,
+	    benches_correlation_cycle_batch,
+	    benches_kaufmanstop,
+	    benches_kaufmanstop_batch,
+	    benches_cksp,
+	    benches_cksp_batch,
     benches_aso,
     benches_alphatrend,
     benches_vpci,
@@ -5282,11 +5400,12 @@ bench_variants!(
     benches_coppock_batch,
     benches_cvi,
     benches_cvi_batch,
-    benches_damiani_volatmeter,
-    benches_damiani_volatmeter_batch,
-    benches_linearreg_angle,
-    benches_nvi,
-    benches_pvi,
+	    benches_damiani_volatmeter,
+	    benches_damiani_volatmeter_batch,
+	    benches_linearreg_angle,
+	    benches_linearreg_angle_batch,
+	    benches_nvi,
+	    benches_pvi,
     benches_dti,
     benches_pvi_batch,
     benches_aso_batch,
@@ -5339,10 +5458,11 @@ bench_variants!(
     benches_buff_averages_batch,
     benches_bandpass_batch,
     benches_decycler_batch,
-    benches_zscore,
-    benches_mab,
-    benches_eri,
-    benches_zscore_batch,
+	    benches_zscore,
+	    benches_mab,
+	    benches_eri,
+	    benches_eri_batch,
+	    benches_zscore_batch,
     benches_var,
     benches_var_batch,
     benches_deviation,
@@ -5351,10 +5471,11 @@ bench_variants!(
     benches_supertrend_batch,
     benches_bollinger_bands_batch,
     benches_linearreg_slope_batch,
-    benches_stddev_batch,
-    benches_macz,
-    benches_emv,
-    benches_macz_batch,
+	    benches_stddev_batch,
+	    benches_macz,
+	    benches_emv,
+	    benches_emv_batch,
+	    benches_macz_batch,
     benches_cwma,
     benches_cwma_batch,
     benches_cora_wave_batch,
@@ -5505,10 +5626,11 @@ bench_variants!(
     benches_percentile_nearest_rank,
     benches_percentile_nearest_rank_batch,
     benches_ppo,
-    benches_donchian,
-    benches_donchian_batch,
-    benches_kurtosis,
-    benches_net_myrsi,
+	    benches_donchian,
+	    benches_donchian_batch,
+	    benches_kurtosis,
+	    benches_kurtosis_batch,
+	    benches_net_myrsi,
     benches_net_myrsi_batch,
     benches_kvo_batch,
     benches_bollinger_bands_width,

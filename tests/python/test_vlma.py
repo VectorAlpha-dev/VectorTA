@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestVlma:
         """Test VLMA with partial parameters - mirrors check_vlma_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.vlma(close)  # Using defaults
+        
+        result = ta_indicators.vlma(close)  
         assert len(result) == len(close)
     
     def test_vlma_accuracy(self, test_data):
@@ -47,7 +47,7 @@ class TestVlma:
         
         assert len(result) == len(close)
         
-        # Expected values from Rust test
+        
         expected_last_five = [
             59376.252799490234,
             59343.71066624187,
@@ -56,11 +56,11 @@ class TestVlma:
             59167.4483022233,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-1,  # Less strict tolerance for VLMA
+            rtol=1e-1,  
             msg="VLMA last 5 values mismatch"
         )
     
@@ -68,11 +68,11 @@ class TestVlma:
         """Test VLMA fails with zero or inverted periods - mirrors check_vlma_zero_or_inverted_periods"""
         input_data = np.array([10.0, 20.0, 30.0, 40.0])
         
-        # Test min_period > max_period
+        
         with pytest.raises(ValueError, match="min_period.*is greater than max_period"):
             ta_indicators.vlma(input_data, min_period=10, max_period=5)
         
-        # Test zero max_period
+        
         with pytest.raises(ValueError, match="(Invalid period|greater than max_period)"):
             ta_indicators.vlma(input_data, min_period=5, max_period=0)
     
@@ -101,7 +101,7 @@ class TestVlma:
         """Test VLMA can process its own output - mirrors check_vlma_slice_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.vlma(
             close,
             min_period=5,
@@ -110,7 +110,7 @@ class TestVlma:
             devtype=1
         )
         
-        # Second pass - apply VLMA to VLMA output
+        
         second_result = ta_indicators.vlma(
             first_result,
             min_period=5,
@@ -125,7 +125,7 @@ class TestVlma:
         """Test VLMA streaming functionality"""
         close = test_data['close']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.vlma(
             close,
             min_period=5,
@@ -134,7 +134,7 @@ class TestVlma:
             devtype=0
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.VlmaStream(
             min_period=5,
             max_period=50,
@@ -150,7 +150,7 @@ class TestVlma:
             else:
                 stream_values.append(float('nan'))
         
-        # Compare results (allowing for NaN differences in warmup)
+        
         for i in range(len(batch_result)):
             if not np.isnan(batch_result[i]) and not np.isnan(stream_values[i]):
                 assert abs(batch_result[i] - stream_values[i]) < 1e-9, \
@@ -160,29 +160,29 @@ class TestVlma:
         """Test VLMA batch processing functionality"""
         close = test_data['close']
         
-        # Test batch with parameter ranges
+        
         result = ta_indicators.vlma_batch(
             close,
-            min_period_range=(5, 15, 5),  # 5, 10, 15
-            max_period_range=(30, 50, 10),  # 30, 40, 50
-            devtype_range=(0, 2, 1),  # 0, 1, 2
+            min_period_range=(5, 15, 5),  
+            max_period_range=(30, 50, 10),  
+            devtype_range=(0, 2, 1),  
             matype="sma"
         )
         
-        # Check structure
+        
         assert 'values' in result
         assert 'min_periods' in result
         assert 'max_periods' in result
         assert 'devtypes' in result
         
-        # Check dimensions
-        expected_rows = 3 * 3 * 3  # 3 min_periods * 3 max_periods * 3 devtypes
+        
+        expected_rows = 3 * 3 * 3  
         assert result['values'].shape == (expected_rows, len(close))
         assert len(result['min_periods']) == expected_rows
         assert len(result['max_periods']) == expected_rows
         assert len(result['devtypes']) == expected_rows
         
-        # Verify first row matches single calculation
+        
         single_result = ta_indicators.vlma(
             close,
             min_period=5,
@@ -202,15 +202,15 @@ class TestVlma:
         """Test VLMA with different kernel selections"""
         close = test_data['close']
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.vlma(close, kernel="auto")
         assert len(result_auto) == len(close)
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.vlma(close, kernel="scalar")
         assert len(result_scalar) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(
             result_auto,
             result_scalar,
@@ -222,7 +222,7 @@ class TestVlma:
         """Test VLMA with different moving average types"""
         close = test_data['close']
         
-        # Test with different MA types
+        
         matypes = ["sma", "ema", "wma"]
         
         for matype in matypes:
@@ -239,7 +239,7 @@ class TestVlma:
         """Test VLMA with different deviation types"""
         close = test_data['close']
         
-        # Test with different deviation types (0=std, 1=mad, 2=median)
+        
         for devtype in [0, 1, 2]:
             result = ta_indicators.vlma(
                 close,

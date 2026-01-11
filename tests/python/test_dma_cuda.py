@@ -8,10 +8,10 @@ import numpy as np
 
 try:
     import cupy as cp
-except Exception:  # pragma: no cover - optional/fragile dependency in CI images
-    # In many environments SciPy/CuPy/Numpy ABI mismatches raise non-ImportError
-    # exceptions during import. Treat any failure as "CUDA not available" so the
-    # test class can be cleanly skipped via the marker below.
+except Exception:  
+    
+    
+    
     cp = None
 
 try:
@@ -41,7 +41,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

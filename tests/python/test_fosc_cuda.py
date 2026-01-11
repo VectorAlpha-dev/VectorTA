@@ -6,12 +6,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -28,9 +28,9 @@ def _cuda_available() -> bool:
     try:
         x = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         handle = ti.fosc_cuda_batch_dev(x, period_range=(3, 3, 0))
-        _ = cp.asarray(handle)  # ensure CuPy can wrap the handle
+        _ = cp.asarray(handle)  
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg:
             return False
@@ -40,7 +40,7 @@ def _cuda_available() -> bool:
 @pytest.mark.skipif(not _cuda_available(), reason="CUDA not available or cuda bindings not built")
 class TestFoscCuda:
     def test_fosc_cuda_batch_matches_cpu(self):
-        # Create a synthetic series with NaNs at the front
+        
         n = 4096
         price = np.full(n, np.nan, dtype=np.float64)
         for i in range(5, n):
@@ -54,7 +54,7 @@ class TestFoscCuda:
         handle = ti.fosc_cuda_batch_dev(price.astype(np.float32), period_range=sweep)
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
 
-        # Slightly relaxed tolerance (fp32 vs fp64)
+        
         assert_close(gpu_vals, cpu_vals, rtol=8e-4, atol=8e-4, msg="FOSC CUDA batch mismatch")
 
     def test_fosc_cuda_many_series_one_param_matches_cpu(self):
@@ -67,7 +67,7 @@ class TestFoscCuda:
                 data_tm[t, s] = np.sin(x * 0.0019) + 0.00021 * x
 
         period = 14
-        # CPU baseline per series
+        
         cpu_tm = np.full_like(data_tm, np.nan)
         for s in range(N):
             cpu_tm[:, s] = ti.fosc(data_tm[:, s], period)

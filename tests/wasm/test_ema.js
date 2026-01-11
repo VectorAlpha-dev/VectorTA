@@ -26,7 +26,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
@@ -38,7 +38,7 @@ test.before(async () => {
             }
         } catch (initErr) {
             
-            const wasmBinPath = path.join(__dirname, '../../pkg/my_project_bg.wasm');
+            const wasmBinPath = path.join(__dirname, '../../pkg/vector_ta_bg.wasm');
             const bytes = fs.readFileSync(wasmBinPath);
             if (typeof wasm.initSync === 'function') {
                 wasm.initSync(bytes);

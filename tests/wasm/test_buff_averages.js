@@ -26,35 +26,30 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
+        const wasmBinPath = path.join(__dirname, '../../pkg/vector_ta_bg.wasm');
         const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
-        wasm = await import(importPath);
-        
-        
-        
-        try {
-            const wasmBinPath = path.join(path.dirname(importPath.replace(/^file:\/\
-            if (typeof wasm.initSync === 'function' && fs.existsSync(wasmBinPath)) {
-                const bytes = fs.readFileSync(wasmBinPath);
-                wasm.initSync(bytes);
-            } else if (typeof wasm.default === 'function') {
-                await wasm.default();
-            }
-        } catch (e) {
-            const msg = String(e?.message || e).toLowerCase();
-            const likelyFileUrlFetch = msg.includes('fetch failed') || msg.includes('not implemented');
-            if (!likelyFileUrlFetch) throw e;
-            const localPath = path.join(__dirname, 'my_project.cjs');
-            
-            const require = createRequire(import.meta.url);
-            
-            wasm = require(localPath);
+        const imported = await import(importPath);
+
+        const wasmModule = (imported.default && typeof imported.default === 'object') ? imported.default : imported;
+        if (typeof imported.default === 'function') {
+            await imported.default();
+        } else if (typeof wasmModule.default === 'function') {
+            await wasmModule.default();
+        } else if (typeof wasmModule.initSync === 'function' && fs.existsSync(wasmBinPath)) {
+            wasmModule.initSync(fs.readFileSync(wasmBinPath));
         }
+        wasm = wasmModule;
     } catch (error) {
-        console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
-        throw error;
+        try {
+            const require = createRequire(import.meta.url);
+            wasm = require(path.join(__dirname, '../../pkg/vector_ta.js'));
+        } catch {
+            console.error('Failed to load WASM module. Run "wasm-pack build --target nodejs --out-name vector_ta --features wasm" first');
+            throw error;
+        }
     }
     
     testData = loadTestData();

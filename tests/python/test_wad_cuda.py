@@ -4,12 +4,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -27,10 +27,10 @@ def _cuda_available() -> bool:
         close = np.linspace(100.0, 101.0, 16, dtype=np.float32)
         high = close + 0.2
         low = close - 0.2
-        handle = ti.wad_cuda_batch_dev(high, low, close)  # returns DeviceArrayF32 handle
-        _ = cp.asarray(handle)  # ensure CUDA interop works
+        handle = ti.wad_cuda_batch_dev(high, low, close)  
+        _ = cp.asarray(handle)  
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg:
             return False

@@ -22,11 +22,11 @@ def halftrend_compat(*args, **kwargs):
     """Compatibility wrapper that returns tuple format from dict format."""
     result = ta_indicators.halftrend_tuple(*args, **kwargs)
     if isinstance(result, dict):
-        # New dict format
+        
         return (result['halftrend'], result['trend'], result['atr_high'], 
                 result['atr_low'], result['buy_signal'], result['sell_signal'])
     else:
-        # Already tuple format (shouldn't happen but for safety)
+        
         return result
 
 
@@ -42,7 +42,7 @@ class TestHalfTrend:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['halftrend']
         
-        # Test with default parameters - returns tuple
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(
             high, low, close,
             expected['default_params']['amplitude'],
@@ -50,7 +50,7 @@ class TestHalfTrend:
             expected['default_params']['atr_period']
         )
         
-        # Check that we got all expected outputs with correct types
+        
         assert isinstance(halftrend, np.ndarray), "halftrend should be numpy array"
         assert isinstance(trend, np.ndarray), "trend should be numpy array"
         assert isinstance(atr_high, np.ndarray), "atr_high should be numpy array"
@@ -58,7 +58,7 @@ class TestHalfTrend:
         assert isinstance(buy_signal, np.ndarray), "buy_signal should be numpy array"
         assert isinstance(sell_signal, np.ndarray), "sell_signal should be numpy array"
         
-        # Check array lengths
+        
         assert len(halftrend) == len(high), "HalfTrend length mismatch"
         assert len(trend) == len(high), "Trend length mismatch"
         assert len(atr_high) == len(high), "ATR High length mismatch"
@@ -66,7 +66,7 @@ class TestHalfTrend:
         assert len(buy_signal) == len(high), "Buy signal length mismatch"
         assert len(sell_signal) == len(high), "Sell signal length mismatch"
         
-        # Test specific values from Rust tests
+        
         test_indices = expected['test_indices']
         expected_halftrend = expected['expected_halftrend']
         expected_trend = expected['expected_trend']
@@ -85,15 +85,15 @@ class TestHalfTrend:
                 msg=f"Trend mismatch at index {idx}"
             )
         
-        # Note: compare_with_rust would be used here once halftrend is added to generate_references binary
-        # compare_with_rust('halftrend', {
-        #     'halftrend': halftrend,
-        #     'trend': trend,
-        #     'atr_high': atr_high,
-        #     'atr_low': atr_low,
-        #     'buy_signal': buy_signal,
-        #     'sell_signal': sell_signal
-        # }, 'ohlc', expected['default_params'])
+        
+        
+        
+        
+        
+        
+        
+        
+        
     
     def test_halftrend_dict_api(self, test_data):
         """Test new dict-based API returns correct structure."""
@@ -101,10 +101,10 @@ class TestHalfTrend:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Call with dict API
+        
         result = ta_indicators.halftrend(high, low, close, 2, 2.0, 100)
         
-        # Verify it's a dict with expected keys
+        
         assert isinstance(result, dict), "Should return dict"
         expected_keys = ['halftrend', 'trend', 'atr_high', 'atr_low', 'buy_signal', 'sell_signal']
         for key in expected_keys:
@@ -118,7 +118,7 @@ class TestHalfTrend:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Call the tuple version if available
+        
         if hasattr(ta_indicators, 'halftrend_tuple'):
             result = ta_indicators.halftrend_tuple(high, low, close, 2, 2.0, 100)
             assert isinstance(result, tuple), "halftrend_tuple should return tuple"
@@ -132,7 +132,7 @@ class TestHalfTrend:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with all default params (using explicit defaults since Python doesn't have None options)
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = halftrend_compat(
             high, low, close,
             amplitude=2,
@@ -149,7 +149,7 @@ class TestHalfTrend:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: amplitude=2, channel_deviation=2.0, atr_period=100
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(
             high, low, close, 2, 2.0, 100
         )
@@ -161,7 +161,7 @@ class TestHalfTrend:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with custom parameters
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(
             high, low, close,
             amplitude=3,
@@ -169,11 +169,11 @@ class TestHalfTrend:
             atr_period=50
         )
         
-        # Check that output exists and has correct length
+        
         assert halftrend is not None
         assert len(halftrend) == len(high)
         
-        # Check for non-NaN values after warmup (amplitude=3, atr_period=50, so warmup=50)
+        
         warmup_period = 50
         non_nan_count = np.sum(~np.isnan(halftrend[warmup_period:]))
         assert non_nan_count > 0, "Should have non-NaN values after warmup period"
@@ -192,15 +192,15 @@ class TestHalfTrend:
             atr_period=100
         )
         
-        # Use expected warmup period from test data
+        
         expected_warmup = expected['warmup_period']
         
-        # Check NaN values in warmup period
+        
         for i in range(expected_warmup):
             assert np.isnan(halftrend[i]), f"Expected NaN at index {i} during warmup"
             assert np.isnan(trend[i]), f"Expected NaN in trend at index {i} during warmup"
         
-        # Check valid values after warmup
+        
         if len(halftrend) > expected_warmup + 10:
             for i in range(expected_warmup, expected_warmup + 10):
                 assert not np.isnan(halftrend[i]), f"Unexpected NaN at index {i} after warmup"
@@ -208,15 +208,15 @@ class TestHalfTrend:
     
     def test_halftrend_warmup_period(self, test_data):
         """Test HALFTREND warmup period calculation."""
-        high = test_data['high'][:500]  # Use smaller dataset for testing
+        high = test_data['high'][:500]  
         low = test_data['low'][:500]
         close = test_data['close'][:500]
         
-        # Test with different parameter combinations
+        
         test_cases = [
-            {'amplitude': 2, 'atr_period': 100, 'expected_warmup': 99},  # max(2, 100) - 1
-            {'amplitude': 50, 'atr_period': 20, 'expected_warmup': 49},  # max(50, 20) - 1
-            {'amplitude': 10, 'atr_period': 10, 'expected_warmup': 9},   # max(10, 10) - 1
+            {'amplitude': 2, 'atr_period': 100, 'expected_warmup': 99},  
+            {'amplitude': 50, 'atr_period': 20, 'expected_warmup': 49},  
+            {'amplitude': 10, 'atr_period': 10, 'expected_warmup': 9},   
         ]
         
         for case in test_cases:
@@ -227,7 +227,7 @@ class TestHalfTrend:
                 atr_period=case['atr_period']
             )
             
-            # Verify NaN count matches expected warmup
+            
             nan_count = np.sum(np.isnan(halftrend[:case['expected_warmup'] + 1]))
             assert nan_count >= case['expected_warmup'], \
                 f"Expected at least {case['expected_warmup']} NaN values for amplitude={case['amplitude']}, atr_period={case['atr_period']}"
@@ -240,19 +240,19 @@ class TestHalfTrend:
         
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(high, low, close, 2, 2.0, 100)
         
-        # Buy and sell signals should be mostly NaN
+        
         buy_nan_count = np.sum(np.isnan(buy_signal))
         sell_nan_count = np.sum(np.isnan(sell_signal))
         
-        # Most values should be NaN (signals only occur at trend changes)
+        
         assert buy_nan_count > len(high) * 0.95, "Buy signals should be sparse (mostly NaN)"
         assert sell_nan_count > len(high) * 0.95, "Sell signals should be sparse (mostly NaN)"
         
-        # Count actual signals (non-NaN values)
+        
         buy_signal_count = np.sum(~np.isnan(buy_signal))
         sell_signal_count = np.sum(~np.isnan(sell_signal))
         
-        # Should have at least some signals
+        
         assert buy_signal_count > 0, "Should have at least one buy signal"
         assert sell_signal_count > 0, "Should have at least one sell signal"
     
@@ -269,7 +269,7 @@ class TestHalfTrend:
         low = np.array([1, 2])
         close = np.array([1, 2, 3])
         
-        # PyO3 raises TypeError when arrays have mismatched shapes during conversion
+        
         with pytest.raises((ValueError, TypeError), match="Mismatched|lengths|size|Not enough valid|ndarray"):
             ta_indicators.halftrend_tuple(high, low, close, 2, 2.0, 100)
     
@@ -280,7 +280,7 @@ class TestHalfTrend:
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.halftrend_tuple(
                 data, data, data,
-                amplitude=0,  # Invalid: must be > 0
+                amplitude=0,  
                 channel_deviation=2.0,
                 atr_period=100
             )
@@ -289,21 +289,21 @@ class TestHalfTrend:
         """Test HALFTREND fails with invalid channel deviation."""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # Test with negative channel deviation
+        
         with pytest.raises(ValueError, match="Invalid channel_deviation"):
             ta_indicators.halftrend_tuple(
                 data, data, data,
                 amplitude=2,
-                channel_deviation=-1.0,  # Invalid: must be > 0
+                channel_deviation=-1.0,  
                 atr_period=100
             )
         
-        # Test with zero channel deviation
+        
         with pytest.raises(ValueError, match="Invalid channel_deviation"):
             ta_indicators.halftrend_tuple(
                 data, data, data,
                 amplitude=2,
-                channel_deviation=0.0,  # Invalid: must be > 0
+                channel_deviation=0.0,  
                 atr_period=100
             )
     
@@ -316,7 +316,7 @@ class TestHalfTrend:
                 data, data, data,
                 amplitude=2,
                 channel_deviation=2.0,
-                atr_period=0  # Invalid: must be > 0
+                atr_period=0  
             )
     
     def test_halftrend_period_exceeds_length(self):
@@ -326,7 +326,7 @@ class TestHalfTrend:
         with pytest.raises(ValueError, match="Not enough|Invalid period|exceeds"):
             ta_indicators.halftrend_tuple(
                 small_data, small_data, small_data,
-                amplitude=10,  # Exceeds data length
+                amplitude=10,  
                 channel_deviation=2.0,
                 atr_period=100
             )
@@ -357,7 +357,7 @@ class TestHalfTrend:
         low = np.full(n, np.nan)
         close = np.full(n, np.nan)
         
-        # Add one valid value (not enough for calculation)
+        
         high[5] = 1.0
         low[5] = 1.0
         close[5] = 1.0
@@ -373,7 +373,7 @@ class TestHalfTrend:
             ta_indicators.halftrend_tuple(
                 data, data, data,
                 amplitude=2,
-                channel_deviation=np.nan,  # Invalid: NaN
+                channel_deviation=np.nan,  
                 atr_period=2
             )
     
@@ -384,7 +384,7 @@ class TestHalfTrend:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['halftrend']
         
-        # Test batch with single default parameter combination
+        
         result = ta_indicators.halftrend_batch(
             high, low, close,
             amplitude_start=expected['default_params']['amplitude'],
@@ -398,7 +398,7 @@ class TestHalfTrend:
             atr_period_step=0
         )
         
-        # Check that batch output has expected structure (ALMA format)
+        
         assert 'values' in result, "Missing values in batch output"
         assert 'series' in result, "Missing series in batch output"
         assert 'rows' in result, "Missing rows in batch output"
@@ -407,15 +407,15 @@ class TestHalfTrend:
         assert result['cols'] == len(high), "Batch cols should match input length"
         assert result['rows'] == 1, "Should have 1 row for single parameter combination"
         
-        # Verify batch data shape (stacked 2D array with 6 series)
+        
         assert result['values'].shape == (6, result['cols']), \
             "Values batch shape mismatch - should be (6, cols) for single param"
         
-        # Extract halftrend and trend series from batch output
-        halftrend_row = result['values'][0, :]  # First series is halftrend
-        trend_row = result['values'][1, :]      # Second series is trend
         
-        # Verify specific values match expected
+        halftrend_row = result['values'][0, :]  
+        trend_row = result['values'][1, :]      
+        
+        
         for i, idx in enumerate(expected['test_indices']):
             assert_close(
                 halftrend_row[idx],
@@ -432,38 +432,38 @@ class TestHalfTrend:
     
     def test_halftrend_batch_multiple_params(self, test_data):
         """Test HALFTREND batch processing with multiple parameter combinations."""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with multiple amplitude values
+        
         result = ta_indicators.halftrend_batch(
             high, low, close,
             amplitude_start=2,
             amplitude_end=4,
-            amplitude_step=1,  # Will test 2, 3, 4
+            amplitude_step=1,  
             channel_deviation_start=2.0,
             channel_deviation_end=2.5,
-            channel_deviation_step=0.5,  # Will test 2.0, 2.5
+            channel_deviation_step=0.5,  
             atr_period_start=50,
             atr_period_end=50,
-            atr_period_step=0  # Keep ATR period fixed
+            atr_period_step=0  
         )
         
-        # Should have 3 * 2 * 1 = 6 parameter combinations
+        
         expected_combos = 6
         assert result['rows'] == expected_combos, f"Expected {expected_combos} combinations"
         assert result['cols'] == 100, "Cols should match input length"
         
-        # Verify shape of values array
+        
         assert result['values'].shape == (expected_combos * 6, 100), \
             "Values shape should be (combos*6, cols)"
         
-        # Verify parameter combinations if metadata is available
+        
         if 'combos' in result:
             assert len(result['combos']) == expected_combos
             
-            # Expected combinations
+            
             expected_params = [
                 {'amplitude': 2, 'channel_deviation': 2.0, 'atr_period': 50},
                 {'amplitude': 2, 'channel_deviation': 2.5, 'atr_period': 50},
@@ -473,7 +473,7 @@ class TestHalfTrend:
                 {'amplitude': 4, 'channel_deviation': 2.5, 'atr_period': 50},
             ]
             
-            # Verify each combination
+            
             for i, expected in enumerate(expected_params):
                 combo = result['combos'][i]
                 assert combo['amplitude'] == expected['amplitude'], f"Amplitude mismatch at combo {i}"
@@ -490,12 +490,12 @@ class TestHalfTrend:
         channel_deviation = 2.0
         atr_period = 100
         
-        # Batch calculation
+        
         batch_ht, batch_trend, batch_ah, batch_al, batch_bs, batch_ss = ta_indicators.halftrend_tuple(
             high, low, close, amplitude, channel_deviation, atr_period
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.HalfTrendStream(amplitude, channel_deviation, atr_period)
         stream_results = []
         
@@ -503,10 +503,10 @@ class TestHalfTrend:
             result = stream.update(high[i], low[i], close[i])
             stream_results.append(result)
         
-        # Compare batch vs streaming after warmup
+        
         warmup = EXPECTED_OUTPUTS['halftrend']['warmup_period']
         
-        # Count how many values match within tolerance
+        
         matches = 0
         comparisons = 0
         
@@ -515,23 +515,23 @@ class TestHalfTrend:
                 stream_ht, stream_trend, stream_ah, stream_al, stream_bs, stream_ss = stream_results[i]
                 comparisons += 1
                 
-                # Try tighter tolerance first, fall back to relaxed if needed
+                
                 try:
-                    # Aim for better accuracy where possible
+                    
                     assert_close(stream_ht, batch_ht[i], rtol=1e-5, atol=1e-5,
                                msg=f"HalfTrend streaming mismatch at index {i}")
                     assert_close(stream_trend, batch_trend[i], rtol=1e-5, atol=1e-5,
                                msg=f"Trend streaming mismatch at index {i}")
                     matches += 1
                 except AssertionError:
-                    # Some differences are expected due to streaming implementation
-                    # Use more relaxed tolerance for edge cases
+                    
+                    
                     assert_close(stream_ht, batch_ht[i], rtol=1e-2, atol=1e-2,
                                msg=f"HalfTrend streaming mismatch at index {i}")
                     assert_close(stream_trend, batch_trend[i], rtol=1e-2, atol=1e-2,
                                msg=f"Trend streaming mismatch at index {i}")
         
-        # Ensure at least some values match with tight tolerance
+        
         assert matches > comparisons * 0.3, \
             f"Too few exact matches in streaming: {matches}/{comparisons}"
     
@@ -541,23 +541,23 @@ class TestHalfTrend:
         low = test_data['low']
         close = test_data['close']
         
-        # First pass
+        
         ht1, tr1, ah1, al1, bs1, ss1 = ta_indicators.halftrend_tuple(
             high, low, close,
             amplitude=2, channel_deviation=2.0, atr_period=100
         )
         assert len(ht1) == len(high)
         
-        # Second pass - apply HalfTrend to HalfTrend output
-        # Using the halftrend output as all three inputs (high, low, close)
+        
+        
         ht2, tr2, ah2, al2, bs2, ss2 = ta_indicators.halftrend_tuple(
             ht1, ht1, ht1,
             amplitude=2, channel_deviation=2.0, atr_period=100
         )
         assert len(ht2) == len(ht1)
         
-        # Check that values changed (re-smoothing should alter the values)
-        # Skip the warmup period and check differences in valid data
+        
+        
         differences = 0
         for i in range(200, min(300, len(ht2))):
             if not np.isnan(ht1[i]) and not np.isnan(ht2[i]):
@@ -572,44 +572,44 @@ class TestHalfTrend:
         low = test_data['low'][:100].copy()
         close = test_data['close'][:100].copy()
         
-        # Insert some NaN values at various positions
+        
         nan_indices = [10, 25, 40, 55, 70, 85]
         for idx in nan_indices:
             high[idx] = np.nan
             low[idx] = np.nan
             close[idx] = np.nan
         
-        # Should still compute where possible
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(
             high, low, close, 2, 2.0, 20
         )
         
         assert len(halftrend) == len(high)
         
-        # The indicator should handle NaN values gracefully and continue calculating
-        # It may not preserve NaN at exact positions since it uses moving windows
-        # Just verify that we have some valid values after the warmup period
-        warmup = 20  # max(amplitude=2, atr_period=20)
+        
+        
+        
+        warmup = 20  
         valid_count = np.sum(~np.isnan(halftrend[warmup:]))
         assert valid_count > 0, "Should have valid values after warmup despite intermittent NaNs"
     
     def test_halftrend_large_dataset(self, test_data):
         """Test HALFTREND performance with large dataset."""
-        # Create a large synthetic dataset
+        
         size = 10000
         high = np.random.randn(size) * 10 + 100
         low = high - np.abs(np.random.randn(size))
         close = (high + low) / 2 + np.random.randn(size) * 0.1
         
-        # Should complete without errors
+        
         halftrend, trend, atr_high, atr_low, buy_signal, sell_signal = ta_indicators.halftrend_tuple(
             high, low, close, 5, 2.0, 50
         )
         
         assert len(halftrend) == size
         
-        # Verify warmup and valid data regions
-        warmup = 49  # max(5, 50) - 1
+        
+        warmup = 49  
         nan_count = np.sum(np.isnan(halftrend[:warmup]))
         valid_count = np.sum(~np.isnan(halftrend[warmup:]))
         
@@ -622,7 +622,7 @@ class TestHalfTrend:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test cases with various parameter combinations
+        
         test_cases = [
             {'amplitude': 1, 'channel_deviation': 0.5, 'atr_period': 2},
             {'amplitude': 50, 'channel_deviation': 5.0, 'atr_period': 50},
@@ -640,10 +640,10 @@ class TestHalfTrend:
             assert len(halftrend) == len(high), \
                 f"Length mismatch for params {params}"
             
-            # Check warmup calculation
+            
             expected_warmup = max(params['amplitude'], params['atr_period']) - 1
             
-            # Verify some NaN in warmup, some values after
+            
             if expected_warmup < len(high):
                 has_nan_in_warmup = np.any(np.isnan(halftrend[:expected_warmup]))
                 has_values_after = np.any(~np.isnan(halftrend[expected_warmup:]))

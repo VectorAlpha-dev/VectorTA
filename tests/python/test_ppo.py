@@ -9,7 +9,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -28,8 +28,8 @@ class TestPpo:
         """Test PPO with partial parameters (None values) - mirrors check_ppo_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.ppo(close)  # Using defaults
+        
+        result = ta_indicators.ppo(close)  
         assert len(result) == len(close)
     
     def test_ppo_accuracy(self, test_data):
@@ -46,7 +46,7 @@ class TestPpo:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -54,14 +54,14 @@ class TestPpo:
             msg="PPO last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('ppo', result, 'close', expected['default_params'])
     
     def test_ppo_default_candles(self, test_data):
         """Test PPO with default parameters - mirrors check_ppo_default_candles"""
         close = test_data['close']
         
-        # Default params: fast_period=12, slow_period=26, ma_type='sma'
+        
         result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert len(result) == len(close)
     
@@ -100,7 +100,7 @@ class TestPpo:
         result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert len(result) == len(close)
         
-        # After warmup period (30), no NaN values should exist
+        
         if len(result) > 30:
             assert not np.any(np.isnan(result[30:])), "Found unexpected NaN after warmup period"
     
@@ -111,10 +111,10 @@ class TestPpo:
         slow_period = 26
         ma_type = 'sma'
         
-        # Batch calculation
+        
         batch_result = ta_indicators.ppo(close, fast_period=fast_period, slow_period=slow_period, ma_type=ma_type)
         
-        # Streaming calculation
+        
         stream = ta_indicators.PpoStream(fast_period=fast_period, slow_period=slow_period, ma_type=ma_type)
         stream_values = []
         
@@ -124,10 +124,10 @@ class TestPpo:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -140,9 +140,9 @@ class TestPpo:
         
         result = ta_indicators.ppo_batch(
             close,
-            fast_period_range=(12, 12, 0),  # Default fast period only
-            slow_period_range=(26, 26, 0),  # Default slow period only
-            ma_type='sma'  # Default ma_type
+            fast_period_range=(12, 12, 0),  
+            slow_period_range=(26, 26, 0),  
+            ma_type='sma'  
         )
         
         assert 'values' in result
@@ -150,16 +150,16 @@ class TestPpo:
         assert 'slow_periods' in result
         assert 'ma_types' in result
         
-        # Check dimensions
-        assert result['values'].shape[0] == 1  # Single parameter combination
+        
+        assert result['values'].shape[0] == 1  
         assert result['values'].shape[1] == len(close)
         
-        # Check parameters
+        
         assert result['fast_periods'][0] == 12
         assert result['slow_periods'][0] == 26
         assert result['ma_types'][0] == 'sma'
         
-        # Compare with single calculation
+        
         single_result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert_close(
             result['values'][0], 
@@ -174,19 +174,19 @@ class TestPpo:
         
         result = ta_indicators.ppo_batch(
             close,
-            fast_period_range=(10, 14, 2),  # 10, 12, 14
-            slow_period_range=(24, 28, 2),  # 24, 26, 28
+            fast_period_range=(10, 14, 2),  
+            slow_period_range=(24, 28, 2),  
             ma_type='ema'
         )
         
-        # Should have 3 * 3 = 9 combinations
+        
         assert result['values'].shape[0] == 9
         assert result['values'].shape[1] == len(close)
         assert len(result['fast_periods']) == 9
         assert len(result['slow_periods']) == 9
         assert len(result['ma_types']) == 9
         
-        # Verify parameter combinations
+        
         expected_combinations = [
             (10, 24), (10, 26), (10, 28),
             (12, 24), (12, 26), (12, 28),
@@ -202,15 +202,15 @@ class TestPpo:
         """Test PPO with different kernel parameters"""
         close = test_data['close']
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.ppo(close, kernel=None)
         assert len(result_auto) == len(close)
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.ppo(close, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(
             result_auto, 
             result_scalar, 
@@ -234,12 +234,12 @@ class TestPpo:
             )
             assert len(results[ma_type]) == len(close)
         
-        # Results should be different for different MA types
+        
         assert not np.array_equal(results['sma'], results['ema'])
         assert not np.array_equal(results['sma'], results['wma'])
         assert not np.array_equal(results['ema'], results['wma'])
 
 
 if __name__ == "__main__":
-    # Run tests in this file
+    
     pytest.main([__file__, "-v"])

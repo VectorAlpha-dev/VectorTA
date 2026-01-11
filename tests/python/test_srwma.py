@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestSrwma:
         """Test SRWMA with partial parameters (None values) - mirrors check_srwma_partial_params"""
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta_indicators.srwma(close, 14)
         assert len(result) == len(close)
     
@@ -37,7 +37,7 @@ class TestSrwma:
         """Test SRWMA matches expected values from Rust tests - mirrors check_srwma_accuracy"""
         close = test_data['close']
         
-        # Expected values from Rust test
+        
         expected_last_five = [
             59344.28384704595,
             59282.09151629659,
@@ -50,14 +50,14 @@ class TestSrwma:
         
         assert len(result) == len(close)
         
-        # Add debug output
+        
         print(f"\nSRWMA test_accuracy debug:")
         print(f"Input length: {len(close)}")
         print(f"Output length: {len(result)}")
         print(f"Actual last 5: {result[-5:]}")
         print(f"Expected last 5: {expected_last_five}")
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
@@ -65,7 +65,7 @@ class TestSrwma:
             msg="SRWMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('srwma', result, 'close', {'period': 14})
     
     def test_srwma_zero_period(self):
@@ -96,12 +96,12 @@ class TestSrwma:
         result = ta_indicators.srwma(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (50), no NaN values should exist
+        
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
         
-        # Check warmup period - SRWMA needs period + 1 values before producing output
-        # First period+1 values should be NaN
+        
+        
         assert np.all(np.isnan(result[:15])), "Expected NaN in warmup period (first period+1 values)"
     
     def test_srwma_streaming(self, test_data):
@@ -109,10 +109,10 @@ class TestSrwma:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.srwma(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.SrwmaStream(period=period)
         stream_values = []
         
@@ -122,10 +122,10 @@ class TestSrwma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -138,17 +138,17 @@ class TestSrwma:
         
         result = ta_indicators.srwma_batch(
             close,
-            period_range=(14, 14, 0),  # Default period only
+            period_range=(14, 14, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected_last_five = [
             59344.28384704595,
@@ -158,7 +158,7 @@ class TestSrwma:
             59110.03801260874,
         ]
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected_last_five,
@@ -177,8 +177,8 @@ class TestSrwma:
         """Test SRWMA with period < 2"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # SRWMA might allow period=1, so check for specific behavior
-        # Based on the code, period=0 is invalid, but period=1 might be valid
+        
+        
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.srwma(data, period=0)
     
@@ -186,15 +186,15 @@ class TestSrwma:
         """Test SRWMA with different kernel selections"""
         close = test_data['close']
         
-        # Test scalar kernel
+        
         result_scalar = ta_indicators.srwma(close, period=14, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test auto kernel
+        
         result_auto = ta_indicators.srwma(close, period=14, kernel='auto')
         assert len(result_auto) == len(close)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.srwma(close, period=14, kernel='invalid_kernel')
     
@@ -204,27 +204,27 @@ class TestSrwma:
         
         result = ta_indicators.srwma_batch(
             close,
-            period_range=(10, 20, 2),  # periods: 10, 12, 14, 16, 18, 20
+            period_range=(10, 20, 2),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 6 combinations
+        
         assert result['values'].shape[0] == 6
         assert result['values'].shape[1] == len(close)
         
-        # Check periods array
+        
         expected_periods = [10, 12, 14, 16, 18, 20]
         assert np.array_equal(result['periods'], expected_periods)
         
-        # Verify each row has appropriate warmup period
+        
         for i, period in enumerate(expected_periods):
             row = result['values'][i]
-            # Check that we have NaN values in the warmup period (period + 1)
+            
             warmup_end = period + 1
             assert np.all(np.isnan(row[:warmup_end])), f"Expected NaN in warmup for period {period}"
-            # Check that we have valid values after warmup (if data is long enough)
+            
             if len(row) > warmup_end + 10:
                 assert not np.all(np.isnan(row[warmup_end:warmup_end+10])), f"Expected valid values after warmup for period {period}"
     
@@ -235,25 +235,25 @@ class TestSrwma:
         result = ta_indicators.srwma(data, period=2)
         assert len(result) == len(data)
         
-        # First 3 values (period + 1) should be NaN
+        
         assert np.all(np.isnan(result[:3]))
-        # Remaining values should be valid
+        
         assert not np.any(np.isnan(result[3:]))
     
     def test_srwma_with_leading_nans(self):
         """Test SRWMA correctly handles data that starts with NaN values"""
-        # Create data with 5 leading NaNs
+        
         data = np.array([np.nan] * 5 + [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         
         result = ta_indicators.srwma(data, period=3)
         assert len(result) == len(data)
         
-        # First non-NaN is at index 5, so warmup ends at 5 + 3 + 1 = 9
+        
         assert np.all(np.isnan(result[:9])), "Expected NaN in warmup period including leading NaNs"
-        # Should have valid values starting from index 9
+        
         assert not np.any(np.isnan(result[9:])), "Expected valid values after warmup"
         
-        # Test with different kernels to ensure they all handle it correctly
+        
         for kernel in ['scalar', 'auto']:
             result_k = ta_indicators.srwma(data, period=3, kernel=kernel)
             assert np.all(np.isnan(result_k[:9])), f"Kernel {kernel}: Expected NaN in warmup"
@@ -263,15 +263,15 @@ class TestSrwma:
         """Test SRWMA with reinput - mirrors check_srwma_reinput"""
         close = test_data['close']
         
-        # First pass with period 14
+        
         first_result = ta_indicators.srwma(close, period=14)
         
-        # Second pass with the output of the first, using period 5
+        
         second_result = ta_indicators.srwma(first_result, period=5)
         
         assert len(second_result) == len(first_result)
         
-        # After sufficient warmup, all values should be finite
+        
         for i in range(50, len(second_result)):
             assert np.isfinite(second_result[i])
 

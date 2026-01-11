@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -34,7 +34,7 @@ class TestRocp:
         
         assert len(result) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_last_five = [
             -0.0022551709049293996,
             -0.005561903481650759,
@@ -43,7 +43,7 @@ class TestRocp:
             -0.015045927020537019,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected_last_five,
@@ -51,14 +51,14 @@ class TestRocp:
             msg="ROCP last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('rocp', result, 'close', {'period': period})
     
     def test_rocp_partial_params(self, test_data):
         """Test ROCP with default parameters"""
         close = test_data['close']
         
-        # Default period is 10
+        
         result = ta_indicators.rocp(close, period=10)
         assert len(result) == len(close)
     
@@ -97,8 +97,8 @@ class TestRocp:
         result = ta_indicators.rocp(close, period=9)
         assert len(result) == len(close)
         
-        # Check that after warmup period, we have valid values
-        # Skip first 240 values to ensure we're past any NaN prefix
+        
+        
         if len(result) > 240:
             for i, val in enumerate(result[240:]):
                 assert not np.isnan(val), f"Found unexpected NaN at index {240 + i}"
@@ -108,10 +108,10 @@ class TestRocp:
         close = test_data['close']
         period = 9
         
-        # Batch calculation
+        
         batch_result = ta_indicators.rocp(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.RocpStream(period=period)
         stream_result = []
         
@@ -121,7 +121,7 @@ class TestRocp:
         
         assert len(batch_result) == len(stream_result)
         
-        # Compare results (allowing for some difference due to streaming vs batch)
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -131,10 +131,10 @@ class TestRocp:
         """Test ROCP batch processing"""
         close = test_data['close']
         
-        # Test batch with multiple periods
+        
         result = ta_indicators.rocp_batch(
             close,
-            period_range=(9, 15, 2)  # periods: 9, 11, 13, 15
+            period_range=(9, 15, 2)  
         )
         
         assert 'values' in result
@@ -143,13 +143,13 @@ class TestRocp:
         values = result['values']
         periods = result['periods']
         
-        # Should have 4 rows (4 different periods)
+        
         assert values.shape[0] == 4
         assert values.shape[1] == len(close)
         assert len(periods) == 4
         assert list(periods) == [9, 11, 13, 15]
         
-        # Verify first row matches single calculation with period=9
+        
         single_result = ta_indicators.rocp(close, period=9)
         assert_close(values[0], single_result, rtol=1e-9)
 

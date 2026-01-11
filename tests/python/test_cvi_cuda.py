@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional
+except ImportError:  
     cp = None
 
 try:
@@ -30,7 +30,7 @@ def _cuda_available() -> bool:
         handle = ti.cvi_cuda_batch_dev(h, l, (10, 10, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # detection path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
@@ -56,7 +56,7 @@ class TestCviCuda:
         gpu = cp.asnumpy(cp.asarray(handle))
         assert gpu.shape == (len(periods), high.shape[0])
 
-        # Compare each row to CPU
+        
         for row, p in enumerate(periods):
             cpu = ti.cvi(high, low, p)
             assert_close(gpu[row], cpu, rtol=1e-6, atol=2e-3,
@@ -65,12 +65,12 @@ class TestCviCuda:
     def test_many_series_one_param_matches_cpu(self, dataset):
         T = 1024
         N = 4
-        # Synthesize time-major high/low from close
+        
         close = dataset["close"][:T].astype(np.float64)
         data_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
             data_tm[:, j] = close * (1.0 + 0.01 * j)
-        # create high/low with small offsets
+        
         x = np.arange(T, dtype=np.float64)
         off = (0.004 * (0.002 * x)).reshape(T, 1)
         high_tm = data_tm + (0.10 + np.abs(off))
@@ -78,12 +78,12 @@ class TestCviCuda:
 
         period = 14
 
-        # CPU baseline per series
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.cvi(high_tm[:, j], low_tm[:, j], period)
 
-        # CUDA
+        
         handle = ti.cvi_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32).ravel(),
             low_tm.astype(np.float32).ravel(),

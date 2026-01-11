@@ -3,7 +3,7 @@ const { parentPort, workerData } = require('worker_threads');
 
 
 function loadWasmInWorker() {
-    const wasm = require('../pkg/my_project.js');
+    const wasm = require('../pkg/vector_ta.js');
     return wasm;
 }
 

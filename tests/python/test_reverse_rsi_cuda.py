@@ -4,7 +4,7 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(handle)
         assert meta["rsi_lengths"][0] == 3
         return True
-    except Exception as exc:  # pragma: no cover - probing path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -49,7 +49,7 @@ class TestReverseRsiCuda:
         rlen_range = (7, 21, 7)
         lvl_range = (30.0, 70.0, 20.0)
 
-        # CPU baseline aligned to FP32 input (to match GPU input semantics)
+        
         cpu = ti.reverse_rsi_batch(
             close.astype(np.float32).astype(np.float64), rlen_range, lvl_range
         )
@@ -77,7 +77,7 @@ class TestReverseRsiCuda:
         rsi_length = 14
         rsi_level = 55.0
 
-        # CPU baseline aligned to FP32 input
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.reverse_rsi(

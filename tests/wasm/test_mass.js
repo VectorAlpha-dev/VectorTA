@@ -23,7 +23,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 
-import * as talib from '../../pkg/my_project.js';
+import * as talib from '../../pkg/vector_ta.js';
 
 describe('Mass Index', () => {
     let testData;

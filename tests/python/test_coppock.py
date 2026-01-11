@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -28,7 +28,7 @@ class TestCoppock:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['coppock']
         
-        # Use default parameters from expected outputs
+        
         result = ta_indicators.coppock(
             close, 
             expected['default_params']['short'],
@@ -38,7 +38,7 @@ class TestCoppock:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         for i, expected_val in enumerate(expected['last_5_values']):
             assert_close(result[-(5-i)], expected_val, rtol=1e-8)
     
@@ -46,7 +46,7 @@ class TestCoppock:
         """Test COPPOCK with default parameters"""
         close = test_data['close']
         
-        # Test with default parameters
+        
         result = ta_indicators.coppock(close, 11, 14, 10)
         assert len(result) == len(close)
     
@@ -54,11 +54,11 @@ class TestCoppock:
         """Test COPPOCK with default MA type"""
         close = test_data['close']
         
-        # Test without specifying ma_type (should default to "wma")
+        
         result = ta_indicators.coppock(close, 11, 14, 10)
         assert len(result) == len(close)
         
-        # Test with explicit ma_type
+        
         result_sma = ta_indicators.coppock(close, 11, 14, 10, "sma")
         assert len(result_sma) == len(close)
     
@@ -108,10 +108,10 @@ class TestCoppock:
         result = ta_indicators.coppock(close, short, long, ma)
         assert len(result) == len(close)
         
-        # Warmup period: max(short, long) + (ma - 1)
-        warmup = max(short, long) + (ma - 1)  # 14 + 9 = 23
         
-        # After warmup period, no NaN values should exist
+        warmup = max(short, long) + (ma - 1)  
+        
+        
         if len(result) > warmup:
             non_nan_portion = result[warmup:]
             assert not np.any(np.isnan(non_nan_portion)), f"Found NaN after warmup period {warmup}"
@@ -120,10 +120,10 @@ class TestCoppock:
         """Test CoppockStream produces same results as batch"""
         close = test_data['close']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.coppock(close, 11, 14, 10)
         
-        # Streaming calculation
+        
         stream = ta_indicators.CoppockStream(11, 14, 10, "wma")
         stream_result = []
         
@@ -134,7 +134,7 @@ class TestCoppock:
         stream_result = np.array(stream_result)
         assert len(stream_result) == len(batch_result)
         
-        # Compare results (allowing for NaN equality)
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -144,34 +144,34 @@ class TestCoppock:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set: short=11, long=14, ma=10
+        
         batch_result = ta_indicators.coppock_batch(
             close,
-            (11, 11, 0),    # short range
-            (14, 14, 0),    # long range
-            (10, 10, 0)     # ma range
+            (11, 11, 0),    
+            (14, 14, 0),    
+            (10, 10, 0)     
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.coppock(close, 11, 14, 10)
         
         assert 'values' in batch_result
-        batch_values = batch_result['values'][0]  # First row
+        batch_values = batch_result['values'][0]  
         
-        # Allow tiny FP differences between batch and single.
-        # Use absolute tolerance tighter than Rust's 1e-7 reference threshold.
+        
+        
         np.testing.assert_allclose(batch_values, single_result, rtol=0.0, atol=1e-9)
     
     def test_coppock_batch_multiple_params(self, test_data):
         """Test batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple parameters
+        
         batch_result = ta_indicators.coppock_batch(
             close,
-            (10, 12, 2),    # short: 10, 12
-            (14, 16, 2),    # long: 14, 16
-            (8, 10, 2)      # ma: 8, 10
+            (10, 12, 2),    
+            (14, 16, 2),    
+            (8, 10, 2)      
         )
         
         assert 'values' in batch_result
@@ -179,7 +179,7 @@ class TestCoppock:
         assert 'longs' in batch_result
         assert 'ma_periods' in batch_result
         
-        # Should have 2 * 2 * 2 = 8 combinations
+        
         assert batch_result['values'].shape == (8, 100)
         assert len(batch_result['shorts']) == 8
         assert len(batch_result['longs']) == 8
@@ -189,20 +189,20 @@ class TestCoppock:
         """Test COPPOCK with different kernel selections"""
         close = test_data['close']
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.coppock(close, 11, 14, 10)
         
-        # Test with explicit scalar kernel
+        
         result_scalar = ta_indicators.coppock(close, 11, 14, 10, kernel="scalar")
         
-        # Results should be very close
+        
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10)
     
     def test_coppock_invalid_ma_type(self, test_data):
         """Test COPPOCK fails with invalid MA type"""
         close = test_data['close']
         
-        # Should raise an error for unknown MA type
+        
         with pytest.raises(Exception, match="Unknown moving average type|Underlying MA error"):
             ta_indicators.coppock(close, 11, 14, 10, "invalid_ma")
     
@@ -210,15 +210,15 @@ class TestCoppock:
         """Test COPPOCK fails with negative periods"""
         close = test_data['close']
         
-        # Negative short period
+        
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, -11, 14, 10)
         
-        # Negative long period
+        
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, 11, -14, 10)
         
-        # Negative MA period
+        
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, 11, 14, -10)
     
@@ -232,34 +232,34 @@ class TestCoppock:
         
         result = ta_indicators.coppock(close, short, long, ma)
         
-        # Warmup period formula: first_valid + max(short, long) + (ma_period - 1)
-        # For real data, first_valid is typically 0
+        
+        
         expected_warmup = max(short, long) + (ma - 1)
         
-        # Check NaN pattern in warmup period
+        
         for i in range(min(expected_warmup - 1, len(result))):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
         
-        # Should have valid values after warmup
+        
         if len(result) > expected_warmup:
             assert not np.isnan(result[expected_warmup]), f"Expected valid value at index {expected_warmup}"
     
     def test_coppock_supported_ma_types(self, test_data):
         """Test COPPOCK with supported MA types"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         
-        # Only test MA types that are actually supported
+        
         supported_ma_types = ['sma', 'ema', 'wma']
         
         results = {}
         for ma_type in supported_ma_types:
             result = ta_indicators.coppock(close, 11, 14, 10, ma_type)
             assert len(result) == len(close)
-            # Each MA type should produce different results
+            
             assert not np.all(np.isnan(result))
             results[ma_type] = result
         
-        # Verify different MA types produce different results
+        
         assert not np.allclose(results['sma'], results['ema'], equal_nan=True)
         assert not np.allclose(results['wma'], results['ema'], equal_nan=True)
 

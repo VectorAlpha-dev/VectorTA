@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,7 +30,7 @@ class TestCorrelHl:
         high = test_data['high']
         low = test_data['low']
         
-        # Test with default period (9)
+        
         result = ta_indicators.correl_hl(high, low, period=9)
         assert len(result) == len(high)
     
@@ -43,7 +43,7 @@ class TestCorrelHl:
         
         assert len(result) == len(high)
         
-        # Expected values from Rust tests
+        
         expected_last_5 = [
             0.04589155420456278,
             0.6491664099299647,
@@ -52,11 +52,11 @@ class TestCorrelHl:
             0.8460608423095615,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_5,
-            rtol=1e-7,  # CORREL_HL uses 1e-7 tolerance in Rust tests
+            rtol=1e-7,  
             msg="CORREL_HL last 5 values mismatch"
         )
     
@@ -124,7 +124,7 @@ class TestCorrelHl:
         
         result = ta_indicators.correl_hl(single_high, single_low, period=1)
         assert len(result) == 1
-        # With period=1, correlation is undefined (returns 0.0 or NaN)
+        
         assert np.isnan(result[0]) or abs(result[0]) < np.finfo(float).eps
     
     def test_correl_hl_all_nan_input(self):
@@ -144,23 +144,23 @@ class TestCorrelHl:
         result = ta_indicators.correl_hl(high, low, period=period)
         assert len(result) == len(high)
         
-        # Find first valid index where both high and low are not NaN
+        
         first_valid_idx = 0
         for i in range(len(high)):
             if not np.isnan(high[i]) and not np.isnan(low[i]):
                 first_valid_idx = i
                 break
         
-        # Calculate warmup period: first_valid_idx + period - 1
+        
         warmup_period = first_valid_idx + period - 1
         
-        # First warmup_period values should be NaN
+        
         assert all(np.isnan(result[:warmup_period])), f"Expected NaN in first {warmup_period} values"
         
-        # After warmup period, should have valid values
+        
         if len(result) > warmup_period:
             assert not all(np.isnan(result[warmup_period:])), "Expected valid values after warmup period"
-            # Verify no NaN after warmup (unless there are NaN in input)
+            
             for i in range(warmup_period, len(result)):
                 if not np.isnan(high[i]) and not np.isnan(low[i]):
                     assert not np.isnan(result[i]), f"Unexpected NaN at index {i} after warmup"
@@ -169,14 +169,14 @@ class TestCorrelHl:
         """Test CORREL_HL streaming functionality - compare with batch calculation"""
         period = 5
         
-        # Test data
+        
         high_values = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
         low_values = np.array([0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0])
         
-        # Batch calculation
+        
         batch_result = ta_indicators.correl_hl(high_values, low_values, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.CorrelHlStream(period=period)
         stream_results = []
         for h, l in zip(high_values, low_values):
@@ -185,13 +185,13 @@ class TestCorrelHl:
         
         stream_results = np.array(stream_results)
         
-        # First period-1 updates should return None/NaN (warmup period)
+        
         assert all(np.isnan(stream_results[:period-1])), f"Expected NaN during warmup (first {period-1} values)"
         
-        # After warmup, should get valid values
+        
         assert all(not np.isnan(v) for v in stream_results[period-1:]), "Expected valid values after warmup"
         
-        # Compare batch vs streaming where both are valid
+        
         for i in range(len(batch_result)):
             if not np.isnan(batch_result[i]) and not np.isnan(stream_results[i]):
                 assert_close(batch_result[i], stream_results[i], rtol=1e-10, 
@@ -199,52 +199,52 @@ class TestCorrelHl:
     
     def test_correl_hl_batch_single_period(self, test_data):
         """Test CORREL_HL batch with single period"""
-        high = test_data['high'][:100]  # Use smaller subset for batch test
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         
         result = ta_indicators.correl_hl_batch(high, low, period_range=(9, 9, 1))
         
-        # Check structure
+        
         assert 'values' in result
         assert 'periods' in result
         
-        # Check dimensions
+        
         values = result['values']
         periods = result['periods']
         
-        assert values.shape == (1, 100)  # 1 period combination, 100 data points
+        assert values.shape == (1, 100)  
         assert len(periods) == 1
         assert periods[0] == 9
         
-        # Compare with single calculation
+        
         single_result = ta_indicators.correl_hl(high, low, period=9)
         np.testing.assert_array_almost_equal(values[0], single_result, decimal=10)
     
     def test_correl_hl_batch_multiple_periods(self, test_data):
         """Test CORREL_HL batch with multiple periods"""
-        high = test_data['high'][:50]  # Use smaller subset
+        high = test_data['high'][:50]  
         low = test_data['low'][:50]
         
         result = ta_indicators.correl_hl_batch(high, low, period_range=(5, 15, 5))
         
-        # Check structure
+        
         assert 'values' in result
         assert 'periods' in result
         
-        # Check dimensions
+        
         values = result['values']
         periods = result['periods']
         
-        assert values.shape == (3, 50)  # 3 periods (5, 10, 15), 50 data points
+        assert values.shape == (3, 50)  
         assert len(periods) == 3
         assert list(periods) == [5, 10, 15]
         
-        # Verify each row has correct warmup period
+        
         for i, period in enumerate(periods):
             row = values[i]
-            # First period-1 values should be NaN
+            
             assert all(np.isnan(row[:period-1]))
-            # After warmup should have valid values
+            
             assert not all(np.isnan(row[period-1:]))
     
     def test_correl_hl_kernel_support(self, test_data):
@@ -252,15 +252,15 @@ class TestCorrelHl:
         high = test_data['high']
         low = test_data['low']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.correl_hl(high, low, period=9, kernel='scalar')
         assert len(result_scalar) == len(high)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.correl_hl(high, low, period=9, kernel=None)
         assert len(result_auto) == len(high)
         
-        # Results should be very close regardless of kernel
+        
         np.testing.assert_array_almost_equal(result_scalar, result_auto, decimal=10)
 
 

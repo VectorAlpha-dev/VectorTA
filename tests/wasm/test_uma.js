@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import * as wasm from '../../pkg/my_project.js';
+import * as wasm from '../../pkg/vector_ta.js';
 import { 
     loadTestData, 
     assertClose

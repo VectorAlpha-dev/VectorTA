@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestRsx:
         """Test RSX with partial parameters (None values) - mirrors check_rsx_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.rsx(close, 14)  # Using default period
+        
+        result = ta_indicators.rsx(close, 14)  
         assert len(result) == len(close)
     
     def test_rsx_accuracy(self, test_data):
@@ -45,22 +45,22 @@ class TestRsx:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-1,  # RSX uses 1e-1 tolerance in Rust tests
+            rtol=1e-1,  
             msg="RSX last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('rsx', result, 'close', expected['default_params'])
     
     def test_rsx_default_candles(self, test_data):
         """Test RSX with default parameters - mirrors check_rsx_default_candles"""
         close = test_data['close']
         
-        # Default params: period=14
+        
         result = ta_indicators.rsx(close, 14)
         assert len(result) == len(close)
     
@@ -89,11 +89,11 @@ class TestRsx:
         """Test RSX applied twice (re-input) - mirrors check_rsx_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.rsx(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass - apply RSX to RSX output
+        
         second_result = ta_indicators.rsx(first_result, period=14)
         assert len(second_result) == len(first_result)
     
@@ -104,7 +104,7 @@ class TestRsx:
         result = ta_indicators.rsx(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (50), no NaN values should exist
+        
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
     
@@ -113,10 +113,10 @@ class TestRsx:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.rsx(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.RsxStream(period=period)
         stream_values = []
         
@@ -126,10 +126,10 @@ class TestRsx:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -142,13 +142,13 @@ class TestRsx:
         
         result = ta_indicators.rsx_batch(
             close,
-            period_range=(14, 100, 1)  # Default range from Rust
+            period_range=(14, 100, 1)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Find the row with period=14 (default)
+        
         periods = result['periods']
         default_idx = None
         for i, p in enumerate(periods):
@@ -158,16 +158,16 @@ class TestRsx:
         
         assert default_idx is not None, "Default period (14) not found in batch results"
         
-        # Extract the row with default period
+        
         values_2d = result['values']
         default_row = values_2d[default_idx]
         expected = EXPECTED_OUTPUTS['rsx']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-1,  # RSX uses 1e-1 tolerance
+            rtol=1e-1,  
             msg="RSX batch default row mismatch"
         )
     
@@ -182,15 +182,15 @@ class TestRsx:
         """Test RSX with explicit kernel parameter"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.rsx(close, period=14, kernel="scalar")
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.rsx(close, period=14, kernel="auto")
         assert len(result_auto) == len(close)
         
-        # Results should be very close
+        
         assert_close(result_scalar, result_auto, rtol=1e-9, atol=1e-9)
 
 

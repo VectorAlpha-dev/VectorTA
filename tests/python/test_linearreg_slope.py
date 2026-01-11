@@ -7,13 +7,13 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,7 +31,7 @@ class TestLinearRegSlope:
         """Test LINEARREG_SLOPE with default parameters - mirrors check_linearreg_slope_partial_params"""
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta_indicators.linearreg_slope(close, 14)
         assert len(result) == len(close)
     
@@ -43,11 +43,11 @@ class TestLinearRegSlope:
         
         assert len(result) == len(input_data)
         
-        # Check warmup period (first 4 values should be NaN)
+        
         for i in range(4):
             assert np.isnan(result[i]), f"Expected NaN at index {i}, got {result[i]}"
         
-        # Check expected values after warmup (from Rust test output)
+        
         expected_values = [-3.8, -4.6, -4.4, -3.3, -1.5, 0.3]
         
         for i, expected in enumerate(expected_values, start=4):
@@ -89,11 +89,11 @@ class TestLinearRegSlope:
         result = ta_indicators.linearreg_slope(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
     
     def test_linearreg_slope_all_nan_input(self):
@@ -105,13 +105,13 @@ class TestLinearRegSlope:
     
     def test_linearreg_slope_streaming(self, test_data):
         """Test LINEARREG_SLOPE streaming matches batch calculation - mirrors streaming tests"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.linearreg_slope(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.LinearRegSlopeStream(period=period)
         stream_values = []
         
@@ -121,10 +121,10 @@ class TestLinearRegSlope:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -133,27 +133,27 @@ class TestLinearRegSlope:
     
     def test_linearreg_slope_batch_single(self, test_data):
         """Test LINEARREG_SLOPE batch processing with single parameter set"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
         result = ta_indicators.linearreg_slope_batch(
             close,
-            period_range=(14, 14, 0)  # Default period only
+            period_range=(14, 14, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         assert len(result['periods']) == 1
         assert result['periods'][0] == 14
         
-        # Extract the single row and compare with single calculation
+        
         batch_row = result['values'][0]
         single_result = ta_indicators.linearreg_slope(close, period=14)
         
-        # Compare values
+        
         for i in range(len(close)):
             if np.isnan(single_result[i]) and np.isnan(batch_row[i]):
                 continue
@@ -162,27 +162,27 @@ class TestLinearRegSlope:
     
     def test_linearreg_slope_batch_multiple(self, test_data):
         """Test LINEARREG_SLOPE batch processing with multiple periods"""
-        close = test_data['close'][:50]  # Use smaller dataset for speed
+        close = test_data['close'][:50]  
         
         result = ta_indicators.linearreg_slope_batch(
             close,
-            period_range=(10, 20, 5)  # periods: 10, 15, 20
+            period_range=(10, 20, 5)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 combinations
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == len(close)
         assert len(result['periods']) == 3
         
-        # Verify periods
+        
         expected_periods = [10, 15, 20]
         for i, period in enumerate(expected_periods):
             assert result['periods'][i] == period
             
-            # Verify each row matches individual calculation
+            
             batch_row = result['values'][i]
             single_result = ta_indicators.linearreg_slope(close, period=period)
             
@@ -194,24 +194,24 @@ class TestLinearRegSlope:
     
     def test_linearreg_slope_linear_data(self):
         """Test LINEARREG_SLOPE with perfectly linear data"""
-        # Create perfectly linear data: y = 2x + 10
+        
         linear_data = np.array([2*i + 10 for i in range(20)], dtype=np.float64)
         
         result = ta_indicators.linearreg_slope(linear_data, period=14)
         
-        # After warmup, all slopes should be exactly 2.0
+        
         for i in range(13, len(result)):
             assert_close(result[i], 2.0, rtol=1e-9, atol=1e-9,
                         msg=f"Expected slope=2.0 for linear data at index {i}")
     
     def test_linearreg_slope_constant_data(self):
         """Test LINEARREG_SLOPE with constant data"""
-        # Create constant data
+        
         constant_data = np.full(20, 100.0)
         
         result = ta_indicators.linearreg_slope(constant_data, period=10)
         
-        # After warmup, all slopes should be exactly 0.0
+        
         for i in range(9, len(result)):
             assert_close(result[i], 0.0, rtol=1e-9, atol=1e-9,
                         msg=f"Expected slope=0.0 for constant data at index {i}")
@@ -222,19 +222,19 @@ class TestLinearRegSlope:
         
         result = ta_indicators.linearreg_slope_batch(
             close,
-            period_range=(5, 15, 5)  # periods: 5, 10, 15
+            period_range=(5, 15, 5)  
         )
         
-        # Check that each row has correct warmup period
+        
         periods = [5, 10, 15]
         for row_idx, period in enumerate(periods):
             row = result['values'][row_idx]
             
-            # Check NaN in warmup period
+            
             for i in range(period - 1):
                 assert np.isnan(row[i]), f"Expected NaN at index {i} for period {period}"
             
-            # Check non-NaN after warmup
+            
             for i in range(period - 1, len(row)):
                 assert not np.isnan(row[i]), f"Unexpected NaN at index {i} for period {period}"
 

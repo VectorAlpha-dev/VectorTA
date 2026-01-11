@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -28,7 +28,7 @@ class TestLinearRegIntercept:
         """Test Linear Regression Intercept with partial parameters (None values) - mirrors check_linreg_partial_params"""
         close = test_data['close']
         
-        # Test with default params (period=14)
+        
         result = ta_indicators.linearreg_intercept(close, 14)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestLinearRegIntercept:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -53,7 +53,7 @@ class TestLinearRegIntercept:
         """Test Linear Regression Intercept with default parameters - mirrors check_linreg_default_candles"""
         close = test_data['close']
         
-        # Default params: period=14
+        
         result = ta_indicators.linearreg_intercept(close, 14)
         assert len(result) == len(close)
     
@@ -98,23 +98,23 @@ class TestLinearRegIntercept:
         
         result = ta_indicators.linearreg_intercept(data, period=1)
         
-        # Period=1 should return the input values directly
+        
         assert_close(result, data, rtol=1e-10, msg="Period=1 should return input values")
     
     def test_linearreg_intercept_linear_trend(self):
         """Test Linear Regression Intercept with perfect linear data - property test"""
-        # Create perfect linear data: y = 2x + 10
+        
         data = np.array([2.0 * i + 10.0 for i in range(50)])
         period = 10
         
         result = ta_indicators.linearreg_intercept(data, period=period)
         
-        # For perfect linear data, the intercept should equal the value at the start of each window
-        # After warmup, check a few values
+        
+        
         warmup = period - 1
         for i in range(warmup + 5, warmup + 10):
             window_start = i - period + 1
-            expected = data[window_start]  # For perfect linear regression
+            expected = data[window_start]  
             assert_close(result[i], expected, rtol=1e-9, 
                         msg=f"Linear trend mismatch at index {i}")
     
@@ -126,10 +126,10 @@ class TestLinearRegIntercept:
         
         assert len(result) == len(close)
         
-        # Check that after warmup period, no unexpected NaN values exist
-        # Warmup = first + period - 1
+        
+        
         non_nan_start = next((i for i, val in enumerate(close) if not np.isnan(val)), 0)
-        expected_valid_start = non_nan_start + 14 - 1  # first + period - 1
+        expected_valid_start = non_nan_start + 14 - 1  
         
         if expected_valid_start < len(result):
             for i in range(expected_valid_start, min(expected_valid_start + 40, len(result))):
@@ -139,18 +139,18 @@ class TestLinearRegIntercept:
         """Test Linear Regression Intercept with reinput - mirrors check_linreg_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.linearreg_intercept(close, period=14)
         
-        # Second pass using output as input
+        
         second_result = ta_indicators.linearreg_intercept(first_result, period=14)
         
         assert len(second_result) == len(first_result)
         
-        # Find first non-NaN value in second result
+        
         start = next((i for i, v in enumerate(second_result) if not np.isnan(v)), len(second_result))
         
-        # Verify no unexpected NaN values after start
+        
         for i in range(start, len(second_result)):
             assert not np.isnan(second_result[i]), f"Unexpected NaN at index {i} after reinput"
     
@@ -158,15 +158,15 @@ class TestLinearRegIntercept:
         """Test Linear Regression Intercept with different kernel parameters"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.linearreg_intercept(close, period=14, kernel="scalar")
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.linearreg_intercept(close, period=14)
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_scalar[-5:], result_auto[-5:], rtol=1e-10)
 
 
@@ -175,7 +175,7 @@ class TestLinearRegInterceptStream:
         """Test Linear Regression Intercept streaming functionality"""
         stream = ta_indicators.LinearRegInterceptStream(period=5)
         
-        # Test data
+        
         data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
         results = []
         
@@ -183,11 +183,11 @@ class TestLinearRegInterceptStream:
             result = stream.update(value)
             results.append(result)
         
-        # First period-1 values should be None
+        
         for i in range(4):
             assert results[i] is None
         
-        # After warmup, should have values
+        
         for i in range(4, len(results)):
             assert results[i] is not None
             assert not np.isnan(results[i])
@@ -196,10 +196,10 @@ class TestLinearRegInterceptStream:
         """Test Linear Regression Intercept stream with period=1"""
         stream = ta_indicators.LinearRegInterceptStream(period=1)
         
-        # Test data
+        
         data = [1.0, 2.0, 3.0, 4.0, 5.0]
         
-        # Period=1 should return values immediately
+        
         for val in data:
             result = stream.update(val)
             assert result is not None
@@ -209,13 +209,13 @@ class TestLinearRegInterceptStream:
         """Test Linear Regression Intercept stream handles NaN correctly"""
         stream = ta_indicators.LinearRegInterceptStream(period=3)
         
-        # Update with some values
+        
         assert stream.update(1.0) is None
         assert stream.update(2.0) is None
         result = stream.update(3.0)
         assert result is not None
         
-        # Continue with more values
+        
         result = stream.update(4.0)
         assert result is not None
         assert not np.isnan(result)
@@ -230,34 +230,34 @@ class TestLinearRegInterceptBatch:
         """Test Linear Regression Intercept batch processing"""
         close = test_data['close']
         
-        # Test batch with period range
+        
         result = ta_indicators.linearreg_intercept_batch(
             close,
-            period_range=(10, 20, 5)  # 10, 15, 20
+            period_range=(10, 20, 5)  
         )
         
-        # Check structure
+        
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 combinations
+        
         assert len(result['periods']) == 3
         assert list(result['periods']) == [10, 15, 20]
         
-        # Values should be shaped (3, len(close))
+        
         assert result['values'].shape == (3, len(close))
     
     def test_batch_single_period(self, test_data):
         """Test Linear Regression Intercept batch with single period"""
         close = test_data['close']
         
-        # Single period (step=0 or start==end)
+        
         result = ta_indicators.linearreg_intercept_batch(
             close,
             period_range=(14, 14, 0)
         )
         
-        # Should have 1 combination
+        
         assert len(result['periods']) == 1
         assert result['periods'][0] == 14
         assert result['values'].shape == (1, len(close))
@@ -266,7 +266,7 @@ class TestLinearRegInterceptBatch:
         """Test Linear Regression Intercept batch with kernel parameter"""
         close = test_data['close']
         
-        # Test with explicit kernel
+        
         result = ta_indicators.linearreg_intercept_batch(
             close,
             period_range=(10, 15, 5),
@@ -274,4 +274,4 @@ class TestLinearRegInterceptBatch:
         )
         
         assert 'values' in result
-        assert result['values'].shape[0] == 2  # Two periods: 10, 15
+        assert result['values'].shape[0] == 2  

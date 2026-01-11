@@ -3055,9 +3055,29 @@ pub fn frama_js(
             fc: Some(fc),
         },
     );
-    let mut out = vec![0.0; close.len()];
-    frama_into_slice(&mut out, &input, detect_best_kernel())
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let ((h, l, c), window, sc, fc, first, len, _warm, _chosen) =
+        frama_prepare(&input, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    let mut out = vec![f64::NAN; len];
+
+    
+    
+    
+    
+    let mut stream = FramaStream::try_new(FramaParams {
+        window: Some(window),
+        sc: Some(sc),
+        fc: Some(fc),
+    })
+    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+    for i in first..len {
+        if let Some(v) = stream.update(h[i], l[i], c[i]) {
+            out[i] = v;
+        }
+    }
+
     Ok(out)
 }
 
@@ -3083,10 +3103,65 @@ pub fn frama_batch_js(
         fc: (fc_start, fc_end, fc_step),
     };
 
-    match frama_batch_with_kernel(high, low, close, &range, Kernel::ScalarBatch) {
-        Ok(output) => Ok(output.values),
-        Err(e) => Err(JsValue::from_str(&e.to_string())),
+    let combos = expand_grid(&range);
+    if combos.is_empty() {
+        return Err(JsValue::from_str(
+            &FramaError::InvalidRange {
+                start: window_start,
+                end: window_end,
+                step: window_step,
+            }
+            .to_string(),
+        ));
     }
+
+    let cols = close.len();
+    let rows = combos.len();
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| JsValue::from_str(&FramaError::ArithmeticOverflow { context: "rows*cols" }.to_string()))?;
+    let mut out = vec![f64::NAN; total];
+
+    for (row, p) in combos.iter().enumerate() {
+        let window = p.window.unwrap_or(10);
+        let sc = p.sc.unwrap_or(300);
+        let fc = p.fc.unwrap_or(1);
+
+        let row_out = &mut out[row * cols..(row + 1) * cols];
+        let input = FramaInput::from_slices(
+            high,
+            low,
+            close,
+            FramaParams {
+                window: Some(window),
+                sc: Some(sc),
+                fc: Some(fc),
+            },
+        );
+        let ((h, l, c), window, sc, fc, first, len, _warm, _chosen) =
+            frama_prepare(&input, Kernel::Scalar).map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        if row_out.len() != len {
+            return Err(JsValue::from_str(
+                &FramaError::OutputLengthMismatch { expected: len, got: row_out.len() }.to_string(),
+            ));
+        }
+
+        let mut stream = FramaStream::try_new(FramaParams {
+            window: Some(window),
+            sc: Some(sc),
+            fc: Some(fc),
+        })
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        for i in first..len {
+            if let Some(v) = stream.update(h[i], l[i], c[i]) {
+                row_out[i] = v;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(feature = "wasm")]

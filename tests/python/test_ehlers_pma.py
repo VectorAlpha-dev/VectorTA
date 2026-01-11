@@ -16,11 +16,11 @@ class TestEhlersPma:
 
     def test_ehlers_pma_accuracy(self, test_data):
         """Test Ehlers PMA matches expected values from Rust tests - mirrors check_ehlers_pma_accuracy"""
-        # Use close source to match Rust test (not hl2)
+        
         close = test_data['close']
         predict, trigger = rb.ehlers_pma(close)
         
-        # Reference values from Rust tests (using close source with TradingView parity)
+        
         expected_predict_last_five = [
             59161.97066327,
             59240.51785714,
@@ -39,7 +39,7 @@ class TestEhlersPma:
         assert len(predict) == len(close)
         assert len(trigger) == len(close)
         
-        # The expected values are exactly the last 5 values of our output
+        
         np.testing.assert_allclose(
             predict[-5:],
             expected_predict_last_five,
@@ -58,7 +58,7 @@ class TestEhlersPma:
         """Test Ehlers PMA with default parameters - mirrors check_ehlers_pma_default_candles"""
         close = test_data['close']
         
-        # Ehlers PMA has no parameters, just test it runs
+        
         predict, trigger = rb.ehlers_pma(close)
         assert len(predict) == len(close)
         assert len(trigger) == len(close)
@@ -99,26 +99,26 @@ class TestEhlersPma:
         assert len(predict) == len(close)
         assert len(trigger) == len(close)
         
-        # After warmup period, no NaN values should exist
+        
         if len(predict) > 20:
-            # Check predict values after warmup (13 with 1-bar lag)
+            
             assert not np.any(np.isnan(predict[20:])), "Found unexpected NaN in predict after warmup"
-            # Check trigger values after warmup (16 with 1-bar lag)
+            
             assert not np.any(np.isnan(trigger[20:])), "Found unexpected NaN in trigger after warmup"
-        # Warmup NaN lengths must mirror Rust tests
-        # Predict warmup: first 13 values are NaN
+        
+        
         assert np.all(np.isnan(predict[:13])), "Expected NaN in predict warmup period (first 13)"
-        # Trigger warmup: first 16 values are NaN
+        
         assert np.all(np.isnan(trigger[:16])), "Expected NaN in trigger warmup period (first 16)"
     
     def test_ehlers_pma_streaming(self, test_data):
         """Test Ehlers PMA streaming matches batch calculation - mirrors check_ehlers_pma_streaming"""
-        close = test_data['close'][:100]  # Use first 100 values for speed
+        close = test_data['close'][:100]  
         
-        # Batch calculation
+        
         batch_predict, batch_trigger = rb.ehlers_pma(close)
         
-        # Streaming calculation
+        
         stream = rb.EhlersPmaStream()
         stream_values = []
         
@@ -126,7 +126,7 @@ class TestEhlersPma:
             result = stream.update(price)
             stream_values.append(result)
         
-        # Convert stream results to arrays
+        
         stream_predict = []
         stream_trigger = []
         for result in stream_values:
@@ -141,9 +141,9 @@ class TestEhlersPma:
         stream_predict = np.array(stream_predict)
         stream_trigger = np.array(stream_trigger)
         
-        # Compare batch vs streaming after warmup
-        # Note: Streaming has 1 additional lag due to implementation
-        for i in range(17, len(close)):  # Start after warmup
+        
+        
+        for i in range(17, len(close)):  
             if not np.isnan(batch_predict[i]) and not np.isnan(stream_predict[i]):
                 np.testing.assert_allclose(
                     batch_predict[i], 
@@ -163,21 +163,21 @@ class TestEhlersPma:
         """Test Ehlers PMA batch processing - mirrors batch functionality"""
         close = test_data['close']
         
-        # Ehlers PMA batch with no parameters (since it has none to sweep)
+        
         result = rb.ehlers_pma_batch(close)
         
         assert 'values' in result
-        assert 'lines' in result  # Multi-output indicator
+        assert 'lines' in result  
         
-        # Should have 1 combination (no parameters to vary)
-        assert result['values'].shape[0] == 2  # predict and trigger rows
+        
+        assert result['values'].shape[0] == 2  
         assert result['values'].shape[1] == len(close)
         
-        # Extract predict and trigger rows
+        
         predict_row = result['values'][0]
         trigger_row = result['values'][1]
         
-        # Reference values from Rust tests
+        
         expected_predict_last_five = [
             59161.97066327,
             59240.51785714,
@@ -193,7 +193,7 @@ class TestEhlersPma:
             59220.78227041,
         ]
         
-        # Check last 5 values match expected
+        
         np.testing.assert_allclose(
             predict_row[-5:],
             expected_predict_last_five,

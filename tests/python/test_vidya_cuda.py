@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
             long_period_range=(5, 5, 0),
             alpha_range=(0.2, 0.2, 0.0),
         )
-        _ = cp.asarray(handle)  # ensure CuPy can wrap the handle
+        _ = cp.asarray(handle)  
         return True
     except Exception as e:
         msg = str(e).lower()
@@ -50,10 +50,10 @@ class TestVidyaCuda:
         close = test_data['close']
         sp, lp, a = 2, 10, 0.2
 
-        # CPU baseline
+        
         cpu = ti.vidya(close, sp, lp, a)
 
-        # CUDA single-combo batch
+        
         handle = ti.vidya_cuda_batch_dev(
             close.astype(np.float32),
             short_period_range=(sp, sp, 0),
@@ -75,7 +75,7 @@ class TestVidyaCuda:
 
         sp, lp, a = 2, 14, 0.2
 
-        # CPU baseline per series
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.vidya(data_tm[:, j], sp, lp, a)

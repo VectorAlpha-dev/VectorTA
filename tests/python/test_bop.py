@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -32,7 +32,7 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # BOP has no parameters, just OHLC inputs
+        
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == len(close)
     
@@ -53,7 +53,7 @@ class TestBop:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -62,8 +62,8 @@ class TestBop:
             msg="BOP last 5 values mismatch"
         )
         
-        # BOP doesn't use a single source like other indicators, it uses all OHLC data
-        # so we skip the Rust comparison which expects a single source parameter
+        
+        
     
     def test_bop_default_candles(self, test_data):
         """Test BOP with default parameters - mirrors check_bop_default_candles"""
@@ -85,7 +85,7 @@ class TestBop:
     def test_bop_with_inconsistent_lengths(self):
         """Test BOP fails with inconsistent input lengths - mirrors check_bop_with_inconsistent_lengths"""
         open_data = np.array([1.0, 2.0, 3.0])
-        high = np.array([1.5, 2.5])  # Wrong length
+        high = np.array([1.5, 2.5])  
         low = np.array([0.8, 1.8, 2.8])
         close = np.array([1.2, 2.2, 3.2])
         
@@ -101,7 +101,7 @@ class TestBop:
         
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == 1
-        # (11.0 - 10.0) / (12.0 - 9.5) = 1.0 / 2.5 = 0.4
+        
         assert_close(result[0], 0.4, rtol=0.0, atol=1e-10, msg="BOP single value calculation")
     
     def test_bop_with_slice_data_reinput(self, test_data):
@@ -111,16 +111,16 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.bop(open_data, high, low, close)
         assert len(first_result) == len(close)
         
-        # Second pass - use first result as close, zeros for others
+        
         dummy = np.zeros_like(first_result)
         second_result = ta_indicators.bop(dummy, dummy, dummy, first_result)
         assert len(second_result) == len(first_result)
         
-        # All values should be 0.0 since (first_result - 0) / (0 - 0) = 0.0
+        
         for i, val in enumerate(second_result):
             assert_close(val, 0.0, atol=1e-15, 
                         msg=f"Expected BOP=0.0 for dummy data at idx {i}")
@@ -135,11 +135,11 @@ class TestBop:
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == len(close)
         
-        # BOP should not produce NaN values after any warmup period
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after index 240"
         
-        # Actually, BOP has no warmup period - it calculates from the first value
+        
         assert not np.any(np.isnan(result)), "BOP should not produce any NaN values"
     
     def test_bop_streaming(self, test_data):
@@ -149,10 +149,10 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.bop(open_data, high, low, close)
         
-        # Streaming calculation
+        
         stream = ta_indicators.BopStream()
         stream_values = []
         
@@ -162,10 +162,10 @@ class TestBop:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare all values
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             assert_close(b, s, rtol=1e-12, atol=1e-12, 
                         msg=f"BOP streaming mismatch at index {i}")
@@ -177,7 +177,7 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # BOP has no parameters, but we still provide batch API for consistency
+        
         result = ta_indicators.bop_batch(open_data, high, low, close)
         
         assert 'values' in result
@@ -185,17 +185,17 @@ class TestBop:
         assert 'cols' in result
         assert 'params' in result
         
-        # Should have 1 row (no parameters to sweep)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         assert result['rows'] == 1
         assert result['cols'] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['bop']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -204,7 +204,7 @@ class TestBop:
             msg="BOP batch default row mismatch"
         )
         
-        # Verify it matches the regular BOP calculation
+        
         regular_result = ta_indicators.bop(open_data, high, low, close)
         assert_close(
             default_row,
@@ -215,15 +215,15 @@ class TestBop:
     
     def test_bop_zero_range_handling(self):
         """Test BOP when high equals low (zero range)"""
-        # When high == low, BOP should return 0.0
+        
         open_data = np.array([10.0, 20.0, 30.0])
         high = np.array([15.0, 25.0, 35.0])
-        low = np.array([15.0, 25.0, 35.0])  # Same as high
+        low = np.array([15.0, 25.0, 35.0])  
         close = np.array([15.0, 25.0, 35.0])
         
         result = ta_indicators.bop(open_data, high, low, close)
         
-        # All values should be 0.0 since denominator is 0
+        
         for i, val in enumerate(result):
             assert_close(val, 0.0, atol=1e-15, 
                         msg=f"Expected BOP=0.0 when high=low at idx {i}")
@@ -235,19 +235,19 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with explicit scalar kernel
+        
         result_scalar = ta_indicators.bop(open_data, high, low, close, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.bop(open_data, high, low, close, kernel='auto')
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_scalar, result_auto, rtol=1e-12, 
                     msg="BOP results should match across kernels")
         
-        # Test batch kernels
+        
         result_batch = ta_indicators.bop_batch(open_data, high, low, close, kernel='scalar')
         assert result_batch['values'].shape[0] == 1
         assert result_batch['values'].shape[1] == len(close)
@@ -256,20 +256,20 @@ class TestBop:
         """Test BOP with all NaN values - mirrors ALMA's test"""
         all_nan = np.full(100, np.nan)
         
-        # BOP should handle all NaN gracefully - likely returning all NaN
+        
         result = ta_indicators.bop(all_nan, all_nan, all_nan, all_nan)
         assert len(result) == 100
         assert np.all(np.isnan(result)), "Expected all NaN output for all NaN input"
     
     def test_bop_with_nan_in_middle(self, test_data):
         """Test BOP handles NaN values in the middle of data"""
-        # Create copies and inject NaN values
+        
         open_data = test_data['open'].copy()
         high = test_data['high'].copy()
         low = test_data['low'].copy()
         close = test_data['close'].copy()
         
-        # Inject NaN in the middle (indices 100-110)
+        
         open_data[100:110] = np.nan
         high[100:110] = np.nan
         low[100:110] = np.nan
@@ -278,10 +278,10 @@ class TestBop:
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == len(close)
         
-        # Check that NaN appears where expected
+        
         assert np.all(np.isnan(result[100:110])), "Expected NaN where input has NaN"
         
-        # Check that values before and after NaN region are calculated
+        
         if not np.isnan(result[99]):
             assert not np.isnan(result[99]), "Value before NaN region should be calculated"
         if len(result) > 110 and not np.isnan(result[110]):
@@ -289,7 +289,7 @@ class TestBop:
     
     def test_bop_with_leading_nan(self):
         """Test BOP with leading NaN values (warmup period simulation)"""
-        # Create data with leading NaN values
+        
         size = 100
         nan_period = 10
         
@@ -298,7 +298,7 @@ class TestBop:
         low = np.full(size, 90.0)
         close = np.full(size, 105.0)
         
-        # Set first 10 values to NaN
+        
         open_data[:nan_period] = np.nan
         high[:nan_period] = np.nan
         low[:nan_period] = np.nan
@@ -307,11 +307,11 @@ class TestBop:
         result = ta_indicators.bop(open_data, high, low, close)
         assert len(result) == size
         
-        # First 10 values should be NaN
+        
         assert np.all(np.isnan(result[:nan_period])), "Expected NaN for leading NaN inputs"
         
-        # After NaN period, values should be calculated
-        # BOP = (105 - 100) / (110 - 90) = 5/20 = 0.25
+        
+        
         expected_value = 0.25
         for i in range(nan_period, size):
             assert_close(result[i], expected_value, rtol=0.0, atol=1e-10, 
@@ -324,26 +324,26 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with invalid kernel name
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.bop(open_data, high, low, close, kernel='invalid_kernel')
         
-        # Test batch with invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.bop_batch(open_data, high, low, close, kernel='invalid_kernel')
     
     def test_bop_batch_error_conditions(self, test_data):
         """Test BOP batch API error conditions"""
-        # Test with mismatched lengths
+        
         open_data = test_data['open'][:100]
-        high = test_data['high'][:50]  # Wrong length
+        high = test_data['high'][:50]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
         with pytest.raises(ValueError, match="Input lengths mismatch"):
             ta_indicators.bop_batch(open_data, high, low, close)
         
-        # Test with empty data
+        
         empty = np.array([])
         with pytest.raises(ValueError, match="Input data is empty"):
             ta_indicators.bop_batch(empty, empty, empty, empty)
@@ -357,7 +357,7 @@ class TestBop:
         low = test_data['low']
         close = test_data['close']
         
-        # Small dataset
+        
         small_size = 100
         small_open = open_data[:small_size]
         small_high = high[:small_size]
@@ -369,46 +369,46 @@ class TestBop:
             ta_indicators.bop(small_open, small_high, small_low, small_close)
         small_time = time.perf_counter() - start
         
-        # Large dataset (full)
+        
         start = time.perf_counter()
         for _ in range(100):
             ta_indicators.bop(open_data, high, low, close)
         large_time = time.perf_counter() - start
         
-        # Performance should scale roughly linearly with data size
+        
         size_ratio = len(close) / small_size
         time_ratio = large_time / small_time
         
-        # Allow for some overhead - ratio should be within reasonable bounds
+        
         assert time_ratio < size_ratio * 2, \
             f"Performance scaling issue: time ratio {time_ratio:.2f} vs size ratio {size_ratio:.2f}"
 
 
     def test_bop_formula_edge_cases(self):
         """Test BOP formula edge cases and boundary conditions"""
-        # Test when close == open (BOP should be 0)
+        
         open_data = np.array([100.0, 200.0, 300.0])
         high = np.array([110.0, 210.0, 310.0])
         low = np.array([90.0, 190.0, 290.0])
-        close = np.array([100.0, 200.0, 300.0])  # Same as open
+        close = np.array([100.0, 200.0, 300.0])  
         
         result = ta_indicators.bop(open_data, high, low, close)
         for i, val in enumerate(result):
             assert_close(val, 0.0, atol=1e-15, 
                         msg=f"Expected BOP=0 when close==open at index {i}")
         
-        # Test maximum BOP (close at high, open at low)
-        open_data = np.array([90.0, 190.0, 290.0])  # At low
-        close = np.array([110.0, 210.0, 310.0])     # At high
+        
+        open_data = np.array([90.0, 190.0, 290.0])  
+        close = np.array([110.0, 210.0, 310.0])     
         
         result = ta_indicators.bop(open_data, high, low, close)
         for i, val in enumerate(result):
             assert_close(val, 1.0, atol=1e-15, 
                         msg=f"Expected BOP=1 when close=high and open=low at index {i}")
         
-        # Test minimum BOP (close at low, open at high)
-        open_data = np.array([110.0, 210.0, 310.0])  # At high
-        close = np.array([90.0, 190.0, 290.0])       # At low
+        
+        open_data = np.array([110.0, 210.0, 310.0])  
+        close = np.array([90.0, 190.0, 290.0])       
         
         result = ta_indicators.bop(open_data, high, low, close)
         for i, val in enumerate(result):

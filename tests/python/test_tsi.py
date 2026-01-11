@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -28,7 +28,7 @@ class TestTsi:
         """Test TSI with partial parameters (None values) - mirrors check_tsi_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (25, 13)
+        
         result = ta_indicators.tsi(close, 25, 13)
         assert len(result) == len(close)
     
@@ -40,7 +40,7 @@ class TestTsi:
         
         assert len(result) == len(close)
         
-        # Expected last 5 values from Rust tests
+        
         expected_last_five = [
             -17.757654061849838,
             -17.367527062626184,
@@ -49,7 +49,7 @@ class TestTsi:
             -17.61825617316731,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
@@ -61,7 +61,7 @@ class TestTsi:
         """Test TSI with default parameters - mirrors check_tsi_default_candles"""
         close = test_data['close']
         
-        # Default params: long_period=25, short_period=13
+        
         result = ta_indicators.tsi(close, 25, 13)
         assert len(result) == len(close)
     
@@ -93,11 +93,11 @@ class TestTsi:
         """Test TSI applied twice (re-input) - mirrors check_tsi_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.tsi(close, long_period=25, short_period=13)
         assert len(first_result) == len(close)
         
-        # Second pass - apply TSI to TSI output
+        
         second_result = ta_indicators.tsi(first_result, long_period=25, short_period=13)
         assert len(second_result) == len(first_result)
     
@@ -108,13 +108,13 @@ class TestTsi:
         result = ta_indicators.tsi(close, long_period=25, short_period=13)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First values should be NaN during warmup
-        # Warmup = first_valid + long + short
-        warmup = 25 + 13  # Assuming first valid at 0
+        
+        
+        warmup = 25 + 13  
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
     
     def test_tsi_all_nan_input(self):
@@ -130,10 +130,10 @@ class TestTsi:
         long_period = 25
         short_period = 13
         
-        # Batch calculation
+        
         batch_result = ta_indicators.tsi(close, long_period=long_period, short_period=short_period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.TsiStream(long_period=long_period, short_period=short_period)
         stream_values = []
         
@@ -143,10 +143,10 @@ class TestTsi:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -160,19 +160,19 @@ class TestTsi:
         
         result = ta_indicators.tsi_batch(
             close,
-            long_period_range=(25, 25, 0),  # Default long period only
-            short_period_range=(13, 13, 0)  # Default short period only
+            long_period_range=(25, 25, 0),  
+            short_period_range=(13, 13, 0)  
         )
         
         assert 'values' in result
         assert 'long_periods' in result
         assert 'short_periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected_last_five = [
             -17.757654061849838,
@@ -182,7 +182,7 @@ class TestTsi:
             -17.61825617316731,
         ]
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected_last_five,
@@ -196,19 +196,19 @@ class TestTsi:
         
         result = ta_indicators.tsi_batch(
             close,
-            long_period_range=(20, 30, 5),  # 20, 25, 30
-            short_period_range=(10, 15, 5)  # 10, 15
+            long_period_range=(20, 30, 5),  
+            short_period_range=(10, 15, 5)  
         )
         
         assert 'values' in result
         assert 'long_periods' in result
         assert 'short_periods' in result
         
-        # Should have 3*2 = 6 combinations
+        
         assert result['values'].shape[0] == 6
         assert result['values'].shape[1] == len(close)
         
-        # Check we have correct parameter combinations
+        
         expected_longs = [20, 20, 25, 25, 30, 30]
         expected_shorts = [10, 15, 10, 15, 10, 15]
         
@@ -217,42 +217,42 @@ class TestTsi:
     
     def test_tsi_mid_series_nan(self):
         """Test TSI handles mid-series NaN values correctly"""
-        # Create data with NaN gap in the middle
+        
         data = np.array([
             100.0, 102.0, 101.0, 103.0, 104.0,
-            np.nan, np.nan,  # Mid-series NaN gap
+            np.nan, np.nan,  
             105.0, 106.0, 107.0, 108.0, 109.0, 
             110.0, 111.0, 112.0, 113.0, 114.0, 
             115.0, 116.0, 117.0
         ])
         
-        # TSI should handle the gap and continue after
+        
         result = ta_indicators.tsi(data, long_period=5, short_period=3)
         assert len(result) == len(data)
         
-        # Should have NaN during gap
+        
         assert np.isnan(result[5])
         assert np.isnan(result[6])
         
-        # Should recover after gap (with new warmup)
-        # Check that we eventually get non-NaN values
+        
+        
         valid_after_gap = result[10:]
         valid_count = np.sum(~np.isnan(valid_after_gap))
         assert valid_count > 0, "TSI should recover after mid-series NaN gap"
     
     def test_tsi_constant_data(self):
         """Test TSI with constant data (zero momentum)"""
-        # Constant data should produce NaN (0/0 case)
+        
         constant = np.full(50, 100.0)
         result = ta_indicators.tsi(constant, long_period=10, short_period=5)
         
-        # All values after warmup should be NaN (momentum is 0)
+        
         warmup = 10 + 5
         assert np.all(np.isnan(result[warmup:])), "TSI should be NaN for constant prices"
     
     def test_tsi_step_data(self):
         """Test TSI with step function data"""
-        # Step function: constant then jump
+        
         data = np.concatenate([
             np.full(25, 100.0),
             np.full(25, 150.0)
@@ -261,12 +261,12 @@ class TestTsi:
         result = ta_indicators.tsi(data, long_period=10, short_period=5)
         assert len(result) == len(data)
         
-        # Should detect the momentum change
-        # After the step, TSI should show positive momentum
+        
+        
         last_values = result[-5:]
         valid_last = last_values[~np.isnan(last_values)]
         if len(valid_last) > 0:
-            # After initial jump momentum, should trend back toward 0
+            
             assert np.all(valid_last >= -100) and np.all(valid_last <= 100), \
                 "TSI values should be in [-100, 100] range"
     
@@ -274,8 +274,8 @@ class TestTsi:
         """Test TSI with different kernel options"""
         close = test_data['close']
         
-        # Test different kernel options (if exposed in Python)
-        kernels = ['scalar', 'avx2', 'avx512', None]  # None for auto-detect
+        
+        kernels = ['scalar', 'avx2', 'avx512', None]  
         
         for kernel in kernels:
             try:
@@ -285,22 +285,22 @@ class TestTsi:
                     result = ta_indicators.tsi(close, 25, 13, kernel=kernel)
                 assert len(result) == len(close)
             except (TypeError, ValueError):
-                # Kernel might not be supported on this platform
+                
                 pass
     
     def test_tsi_edge_cases(self):
         """Test TSI edge cases"""
-        # Minimum valid data
+        
         min_data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         result = ta_indicators.tsi(min_data, long_period=3, short_period=2)
         assert len(result) == len(min_data)
         
-        # Long period equals short period
+        
         data = np.random.randn(100) * 10 + 100
         result = ta_indicators.tsi(data, long_period=10, short_period=10)
         assert len(result) == len(data)
         
-        # Very small periods
+        
         result = ta_indicators.tsi(data, long_period=2, short_period=1)
         assert len(result) == len(data)
 

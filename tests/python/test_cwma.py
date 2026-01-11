@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestCwma:
         """Test CWMA with partial parameters - mirrors check_cwma_partial_params"""
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta_indicators.cwma(close, 14)
         assert len(result) == len(close)
     
@@ -38,29 +38,29 @@ class TestCwma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['cwma']
         
-        # Use default period of 14
+        
         result = ta_indicators.cwma(close, period=expected['default_params']['period'])
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-5,  # Python bindings have different precision than Rust
-            atol=1.0,   # Allow absolute difference for accumulated FP errors
+            rtol=1e-5,  
+            atol=1.0,   
             msg="CWMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust with reasonable tolerance
-        # CWMA uses cubic weighting which can accumulate small floating point differences
+        
+        
         compare_with_rust('cwma', result, 'close', expected['default_params'], rtol=5e-5, atol=1e-6)
     
     def test_cwma_default_candles(self, test_data):
         """Test CWMA with default parameters - mirrors check_cwma_default_candles"""
         close = test_data['close']
         
-        # Default period is 14
+        
         result = ta_indicators.cwma(close, 14)
         assert len(result) == len(close)
     
@@ -96,15 +96,15 @@ class TestCwma:
         """Test CWMA applied twice (re-input) - mirrors check_cwma_reinput"""
         close = test_data['close']
         
-        # First pass with period 80
+        
         first_result = ta_indicators.cwma(close, period=80)
         assert len(first_result) == len(close)
         
-        # Second pass with period 60 - apply CWMA to CWMA output
+        
         second_result = ta_indicators.cwma(first_result, period=60)
         assert len(second_result) == len(first_result)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(second_result) > 240:
             assert not np.any(np.isnan(second_result[240:])), "Found unexpected NaN after warmup period"
     
@@ -116,11 +116,11 @@ class TestCwma:
         result = ta_indicators.cwma(close, period=period)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN (warmup period)
+        
         warmup_length = period - 1
         assert np.all(np.isnan(result[:warmup_length])), f"Expected NaN in warmup period (first {warmup_length} values)"
         assert not np.isnan(result[warmup_length]), f"Expected valid value at index {warmup_length}"
@@ -130,10 +130,10 @@ class TestCwma:
         close = test_data['close']
         period = 9
         
-        # Batch calculation
+        
         batch_result = ta_indicators.cwma(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.CwmaStream(period=period)
         stream_values = []
         
@@ -143,10 +143,10 @@ class TestCwma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -160,26 +160,26 @@ class TestCwma:
         
         result = ta_indicators.cwma_batch(
             close,
-            period_range=(14, 14, 0),  # Default period only
+            period_range=(14, 14, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         assert result['periods'][0] == 14
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected['last_5_values'],
-            rtol=1e-4,  # Batch operations have different precision
-            atol=10.0,  # Allow higher absolute difference for batch
+            rtol=1e-4,  
+            atol=10.0,  
             msg="CWMA batch default row mismatch"
         )
     
@@ -201,14 +201,14 @@ class TestCwma:
         """Test CWMA handles leading NaN values correctly"""
         close = test_data['close'].copy()
         
-        # Inject NaN values at the start
+        
         close[:10] = np.nan
         
         result = ta_indicators.cwma(close, period=14)
         assert len(result) == len(close)
         
-        # First 10 + warmup period (13) should be NaN
-        expected_nans = 10 + 13  # leading NaNs + warmup
+        
+        expected_nans = 10 + 13  
         assert np.all(np.isnan(result[:expected_nans])), f"Expected NaN in first {expected_nans} values"
         assert not np.isnan(result[expected_nans]), f"Expected valid value at index {expected_nans}"
     
@@ -216,7 +216,7 @@ class TestCwma:
         """Test CWMA handles NaN values scattered throughout data"""
         close = test_data['close'].copy()
         
-        # Inject NaN values at various positions
+        
         close[50:55] = np.nan
         close[100] = np.nan
         close[150:152] = np.nan
@@ -224,41 +224,41 @@ class TestCwma:
         result = ta_indicators.cwma(close, period=14)
         assert len(result) == len(close)
         
-        # NaN regions should propagate through the window
-        # Check that NaN regions are handled (exact behavior depends on implementation)
-        # At minimum, the indicator should not crash
+        
+        
+        
     
     @pytest.mark.skip(reason="Known issue: batch implementation doesn't properly initialize NaN values")
     def test_cwma_batch_multiple_periods(self, test_data):
         """Test CWMA batch with multiple period values"""
-        close = test_data['close'][:200]  # Use subset for speed
+        close = test_data['close'][:200]  
         
         result = ta_indicators.cwma_batch(
             close,
-            period_range=(10, 20, 5),  # periods: 10, 15, 20
+            period_range=(10, 20, 5),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 combinations
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == len(close)
         assert list(result['periods']) == [10, 15, 20]
         
-        # Verify each row has correct warmup period
+        
         for i, period in enumerate(result['periods']):
             row_data = result['values'][i]
             warmup = int(period) - 1
             
-            # Check warmup period has NaN values
+            
             for j in range(min(warmup, len(row_data))):
                 assert np.isnan(row_data[j]), f"Expected NaN at index {j} for period {period}"
             
-            # Check after warmup has valid values (not uninitialized memory)
+            
             if warmup < len(row_data):
                 assert not np.isnan(row_data[warmup]), f"Expected valid value at index {warmup} for period {period}"
-                # Check values are reasonable (not uninitialized garbage)
+                
                 valid_values = row_data[warmup:]
                 valid_values = valid_values[~np.isnan(valid_values)]
                 if len(valid_values) > 0:
@@ -268,7 +268,7 @@ class TestCwma:
         """Test CWMA batch processing edge cases"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
         
-        # Single value with step=0
+        
         result = ta_indicators.cwma_batch(
             data,
             period_range=(5, 5, 0),
@@ -276,23 +276,23 @@ class TestCwma:
         assert result['values'].shape[0] == 1
         assert result['periods'][0] == 5
         
-        # Step larger than range
+        
         result = ta_indicators.cwma_batch(
             data,
             period_range=(3, 5, 10),
         )
-        assert result['values'].shape[0] == 1  # Only period=3
+        assert result['values'].shape[0] == 1  
         assert result['periods'][0] == 3
     
     def test_cwma_warmup_validation(self):
         """Test CWMA warmup period is exactly period - 1"""
-        data = np.arange(1.0, 101.0)  # 100 values
+        data = np.arange(1.0, 101.0)  
         
         test_periods = [2, 3, 5, 10, 14, 20, 30]
         for period in test_periods:
             result = ta_indicators.cwma(data, period=period)
             
-            # Count leading NaN values
+            
             nan_count = 0
             for val in result:
                 if np.isnan(val):
@@ -304,7 +304,7 @@ class TestCwma:
             assert nan_count == expected_warmup, \
                 f"Period {period}: Expected {expected_warmup} NaN values, got {nan_count}"
             
-            # Verify first non-NaN is at correct index
+            
             assert not np.isnan(result[expected_warmup]), \
                 f"Period {period}: Expected valid value at index {expected_warmup}"
             if expected_warmup > 0:

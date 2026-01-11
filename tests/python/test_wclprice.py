@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -44,7 +44,7 @@ class TestWclprice:
         result = ta_indicators.wclprice(high, low, close)
         assert len(result) == len(close)
         
-        # Check some values are reasonable (should be between low and high)
+        
         for i in range(len(result)):
             if not np.isnan(result[i]):
                 assert low[i] <= result[i] <= high[i], f"WCLPRICE value {result[i]} at index {i} is outside range [{low[i]}, {high[i]}]"
@@ -91,45 +91,45 @@ class TestWclprice:
         
         result = ta_indicators.wclprice(high, low, close)
         
-        # First value should be NaN
+        
         assert np.isnan(result[0])
-        # Second value should be calculated
+        
         expected = (59000.0 + 58950.0 + 2.0 * 58975.0) / 4.0
         assert_close(result[1], expected, rtol=1e-8, msg="WCLPRICE calculation incorrect")
     
     def test_wclprice_formula(self):
         """Test WCLPRICE formula (high + low + 2*close) / 4"""
-        # Test with simple values
+        
         high = np.array([100.0])
         low = np.array([90.0])
         close = np.array([95.0])
         
         result = ta_indicators.wclprice(high, low, close)
-        expected = (100.0 + 90.0 + 2.0 * 95.0) / 4.0  # = 95.0
+        expected = (100.0 + 90.0 + 2.0 * 95.0) / 4.0  
         
         assert_close(result[0], expected, rtol=1e-10, msg="WCLPRICE formula incorrect")
     
     def test_wclprice_mismatched_lengths(self):
         """Test WCLPRICE handles mismatched input lengths"""
         high = np.array([100.0, 101.0, 102.0])
-        low = np.array([90.0, 91.0])  # Shorter
+        low = np.array([90.0, 91.0])  
         close = np.array([95.0, 96.0, 97.0])
         
-        # Should process up to the shortest length
+        
         result = ta_indicators.wclprice(high, low, close)
-        assert len(result) == 2  # min(3, 2, 3) = 2
+        assert len(result) == 2  
     
     def test_wclprice_stream(self):
         """Test WCLPRICE streaming functionality"""
         stream = ta_indicators.WclpriceStream()
         
-        # Test normal update
+        
         result = stream.update(100.0, 90.0, 95.0)
         expected = (100.0 + 90.0 + 2.0 * 95.0) / 4.0
         assert result is not None
         assert_close(result, expected, rtol=1e-10, msg="Stream update incorrect")
         
-        # Test NaN handling
+        
         result_nan = stream.update(np.nan, 90.0, 95.0)
         assert result_nan is None
         
@@ -141,24 +141,24 @@ class TestWclprice:
     
     def test_wclprice_batch(self, test_data):
         """Test WCLPRICE batch functionality"""
-        high = test_data['high'][:100]  # Use smaller dataset for batch test
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
         batch_result = ta_indicators.wclprice_batch(high, low, close)
         
-        # Check batch result structure - ALMA-compatible format
+        
         assert 'values' in batch_result
         assert 'periods' in batch_result
         assert 'offsets' in batch_result
         assert 'sigmas' in batch_result
         
-        # WCLPRICE has no parameters, so param arrays are placeholders
-        # Values is a 2D array with shape (1, 100), flatten for comparison
+        
+        
         batch_values = batch_result['values'].flatten() if batch_result['values'].ndim > 1 else batch_result['values']
         assert len(batch_values) == 100
         
-        # Compare with single calculation
+        
         single_result = ta_indicators.wclprice(high, low, close)
         assert_close(
             batch_values,
@@ -173,13 +173,13 @@ class TestWclprice:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with default kernel (None)
+        
         result_default = ta_indicators.wclprice(high, low, close, kernel=None)
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.wclprice(high, low, close, kernel="scalar")
         
-        # Results should be identical
+        
         assert_close(
             result_default,
             result_scalar,
@@ -187,7 +187,7 @@ class TestWclprice:
             msg="Different kernels produce different results"
         )
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.wclprice(high, low, close, kernel="invalid_kernel")
 

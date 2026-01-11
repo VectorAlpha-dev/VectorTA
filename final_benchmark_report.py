@@ -10,22 +10,22 @@ print("=" * 70)
 print("Measuring Python binding overhead for ma.rs after optimization")
 print()
 
-# Generate consistent test data
+
 np.random.seed(42)
 data = np.random.randn(1_000_000).astype(np.float64)
 
-# Configuration
+
 ITERATIONS = 100
 MA_TYPES = ["sma", "ema", "wma", "alma", "hma"]
 PERIOD = 14
 
 def benchmark_python(ma_type, iterations=ITERATIONS):
     """Benchmark Python binding performance"""
-    # Warmup
+    
     for _ in range(10):
         _ = ta.ma(data, ma_type, PERIOD)
     
-    # Benchmark
+    
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
@@ -50,7 +50,7 @@ for ma_type in MA_TYPES:
     python_results[ma_type] = result
     print(f"{ma_type:>6}: {result['median']:6.2f} ms (min: {result['min']:5.2f}, max: {result['max']:6.2f}, p95: {result['p95']:6.2f})")
 
-# Get Rust benchmarks from previous run
+
 print("\n2. RUST NATIVE PERFORMANCE (from benchmark run)")
 print("-" * 70)
 rust_results = {
@@ -63,7 +63,7 @@ rust_results = {
 for ma_type, time_ms in rust_results.items():
     print(f"{ma_type:>6}: {time_ms:6.2f} ms")
 
-# Calculate overhead
+
 print("\n3. PYTHON BINDING OVERHEAD ANALYSIS")
 print("-" * 70)
 print("MA Type | Rust (ms) | Python (ms) | Overhead % | Status")
@@ -81,7 +81,7 @@ for ma_type in MA_TYPES:
     
     print(f"{ma_type:>7} | {rust_time:9.2f} | {python_time:11.2f} | {overhead:10.1f}% | {status}")
 
-# Test kernel selection
+
 print("\n4. KERNEL SELECTION PERFORMANCE")
 print("-" * 70)
 kernels = [
@@ -103,7 +103,7 @@ for kernel, name in kernels:
     except Exception as e:
         print(f"{name:>7}: Error - {e}")
 
-# Summary
+
 print("\n5. OPTIMIZATION SUMMARY")
 print("=" * 70)
 print(f"Target: <10% Python binding overhead")
@@ -117,7 +117,7 @@ else:
     failing = [ma for ma in MA_TYPES if ((python_results[ma]['median'] - rust_results[ma]) / rust_results[ma]) * 100 >= 10]
     print(f"PARTIAL SUCCESS: {len(failing)} MA types exceed 10% overhead: {', '.join(failing)}")
 
-# Compare with original implementation estimates
+
 print("\n6. IMPROVEMENT FROM ORIGINAL IMPLEMENTATION")
 print("-" * 70)
 print("Original implementation used inefficient patterns:")

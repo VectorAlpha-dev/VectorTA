@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestUI:
         """Test UI with partial parameters - mirrors check_ui_partial_params"""
         close = test_data['close']
         
-        # Test with default params
+        
         result = ta_indicators.ui(close, period=14, scalar=100.0)
         assert len(result) == len(close)
     
@@ -41,7 +41,7 @@ class TestUI:
         
         assert len(result) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_last_five = [
             3.514342861283708,
             3.304986039846459,
@@ -50,7 +50,7 @@ class TestUI:
             2.909612553474519,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_five,
@@ -58,12 +58,12 @@ class TestUI:
             msg="UI last 5 values mismatch"
         )
         
-        # Check warmup period (first period-1 values should be NaN)
+        
         period = 14
         for i in range(period - 1):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup period"
         
-        # Compare full output with Rust
+        
         params = {'period': 14, 'scalar': 100.0}
         compare_with_rust('ui', result, 'close', params)
     
@@ -71,7 +71,7 @@ class TestUI:
         """Test UI with default parameters - mirrors check_ui_default_candles"""
         close = test_data['close']
         
-        # Default params: period=14, scalar=100.0
+        
         result = ta_indicators.ui(close, period=14, scalar=100.0)
         assert len(result) == len(close)
     
@@ -114,19 +114,19 @@ class TestUI:
         """Test UI with different scalar values"""
         close = test_data['close']
         
-        # Test with scalar = 50.0
+        
         result1 = ta_indicators.ui(close, period=14, scalar=50.0)
         assert len(result1) == len(close)
         
-        # Test with scalar = 200.0
+        
         result2 = ta_indicators.ui(close, period=14, scalar=200.0)
         assert len(result2) == len(close)
         
-        # Results should be different with different scalars
-        # Values should scale linearly with scalar
-        # UI with scalar=200 should be roughly 2x UI with scalar=100
+        
+        
+        
         result_default = ta_indicators.ui(close, period=14, scalar=100.0)
-        for i in range(14*2-2, len(close)):  # After warmup
+        for i in range(14*2-2, len(close)):  
             if not np.isnan(result_default[i]) and not np.isnan(result2[i]):
                 ratio = result2[i] / result_default[i]
                 assert abs(ratio - 2.0) < 0.01, f"Scalar scaling incorrect at index {i}"
@@ -135,29 +135,29 @@ class TestUI:
         """Test UI with different kernel parameters"""
         close = test_data['close']
         
-        # Test with default kernel (None)
+        
         result1 = ta_indicators.ui(close, period=14, scalar=100.0, kernel=None)
         assert len(result1) == len(close)
         
-        # Test with explicit scalar kernel
+        
         result2 = ta_indicators.ui(close, period=14, scalar=100.0, kernel="scalar")
         assert len(result2) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result1, result2, rtol=1e-10, msg="Kernel results mismatch")
     
     def test_ui_batch_operations(self, test_data):
         """Test UI batch operations"""
         close = test_data['close']
         
-        # Test batch with single parameter combination
+        
         batch_result = ta_indicators.ui_batch(
             close,
             period_range=(14, 14, 1),
             scalar_range=(100.0, 100.0, 0.0)
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.ui(close, period=14, scalar=100.0)
         
         assert 'values' in batch_result
@@ -167,7 +167,7 @@ class TestUI:
         batch_values = batch_result['values']
         assert batch_values.shape == (1, len(close))
         
-        # First row should match single calculation
+        
         assert_close(
             batch_values[0], 
             single_result, 
@@ -177,9 +177,9 @@ class TestUI:
     
     def test_ui_batch_multiple_periods(self, test_data):
         """Test UI batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 10, 12, 14
+        
         batch_result = ta_indicators.ui_batch(
             close,
             period_range=(10, 14, 2),
@@ -190,7 +190,7 @@ class TestUI:
         assert len(batch_result['periods']) == 3
         assert list(batch_result['periods']) == [10, 12, 14]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate([10, 12, 14]):
             single_result = ta_indicators.ui(close, period=period, scalar=100.0)
             assert_close(
@@ -202,9 +202,9 @@ class TestUI:
     
     def test_ui_batch_multiple_scalars(self, test_data):
         """Test UI batch with multiple scalar values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple scalars: 50.0, 100.0, 150.0
+        
         batch_result = ta_indicators.ui_batch(
             close,
             period_range=(14, 14, 1),
@@ -221,11 +221,11 @@ class TestUI:
     
     def test_ui_streaming(self):
         """Test UI streaming functionality"""
-        # Create stream with period=5 for easier testing
+        
         stream = ta_indicators.UiStream(period=5, scalar=100.0)
         
-        # The stream needs more values than the regular function due to how it builds the window
-        # Need period*3-2 = 13 values for first output with period=5
+        
+        
         data = [10.0, 12.0, 8.0, 15.0, 11.0, 9.0, 13.0, 10.0, 14.0, 12.0, 11.0, 13.0, 15.0, 14.0, 16.0]
         
         results = []
@@ -233,11 +233,11 @@ class TestUI:
             result = stream.update(value)
             results.append(result)
         
-        # Should eventually produce some non-None values
+        
         non_none_count = sum(1 for r in results if r is not None)
         assert non_none_count > 0, f"Stream should produce some non-None values. Results: {results}"
         
-        # Verify all non-None results are reasonable
+        
         for i, result in enumerate(results):
             if result is not None:
                 assert result >= 0, f"UI at index {i} should be non-negative, got {result}"
@@ -247,14 +247,14 @@ class TestUI:
         """Test UI handles NaN values correctly"""
         close = test_data['close'].copy()
         
-        # Insert some NaN values
+        
         close[50:55] = np.nan
         
-        # Should still compute successfully
+        
         result = ta_indicators.ui(close, period=14, scalar=100.0)
         assert len(result) == len(close)
         
-        # Check that we have some valid values after the NaN region
+        
         valid_count = np.sum(~np.isnan(result[60:]))
         assert valid_count > 0, "Should have valid values after NaN region"
 

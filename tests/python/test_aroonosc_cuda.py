@@ -3,8 +3,8 @@ import pytest
 import numpy as np
 
 try:
-    import cupy as cp  # used to pull DeviceArrayF32 via cuda array interface
-except Exception:  # pragma: no cover
+    import cupy as cp  
+except Exception:  
     cp = None
 
 try:
@@ -33,16 +33,16 @@ def test_aroonosc_cuda_batch_dev_matches_cpu():
     low = td["low"].astype(np.float32)
 
     handle = ti.aroonosc_cuda_batch_dev(high, low, (10, 30, 5), device_id=0)
-    gpu = cp.asnumpy(cp.asarray(handle))  # shape: (rows, len)
+    gpu = cp.asnumpy(cp.asarray(handle))  
 
-    # Build CPU reference for the same sweep
+    
     rows = (30 - 10) // 5 + 1
     expect = []
     for L in range(10, 31, 5):
         expect.append(ti.aroonosc(high.astype(np.float64), low.astype(np.float64), L))
     expect = np.vstack(expect).astype(np.float32)
 
-    # Compare with relaxed tolerance due to FP32 device math
+    
     assert gpu.shape == expect.shape
     tol = 8e-4
     assert np.allclose(np.nan_to_num(gpu, nan=0.0), np.nan_to_num(expect, nan=0.0), rtol=tol, atol=tol)

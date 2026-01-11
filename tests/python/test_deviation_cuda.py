@@ -7,12 +7,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -26,13 +26,13 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, "deviation_cuda_batch_dev"):
         return False
-    # smoke test a tiny launch
+    
     try:
         data = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float32)
         handle, meta = ti.deviation_cuda_batch_dev(data, period_range=(3, 3, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False

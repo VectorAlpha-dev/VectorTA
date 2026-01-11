@@ -7,7 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 
 KEEP_PREFIXES = (b"///", b"//!")
@@ -56,10 +56,10 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
     in_double_quote = False
     in_backtick = False
 
-    # Rust raw strings: b?r####" ... "####, tracked by hash count when active.
+    
     rust_raw_hashes: Optional[int] = None
 
-    # C++ raw strings: R"delim(... )delim"
+    
     cpp_raw_delim: Optional[bytes] = None
 
     while i < n:
@@ -70,13 +70,13 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                 in_line_comment = False
                 out.append(b)
             else:
-                # swallow comment bytes (including \r if CRLF)
+                
                 pass
             i += 1
             continue
 
         if in_block_comment:
-            # We are not stripping block comments, just need to avoid starting line comments inside.
+            
             out.append(b)
             if b == ord("*") and i + 1 < n and data[i + 1] == ord("/"):
                 out.append(data[i + 1])
@@ -89,7 +89,7 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
         if rust_raw_hashes is not None:
             out.append(b)
             if b == ord('"'):
-                # Check for closing hashes.
+                
                 hashes = rust_raw_hashes
                 if hashes == 0:
                     rust_raw_hashes = None
@@ -104,12 +104,12 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
 
         if cpp_raw_delim is not None:
             out.append(b)
-            # Look for )delim"
+            
             if b == ord(")") and cpp_raw_delim is not None:
                 delim = cpp_raw_delim
                 tail = b")" + delim + b'"'
                 if data[i : i + len(tail)] == tail:
-                    # we already wrote ')', write rest and exit raw string
+                    
                     out.extend(data[i + 1 : i + len(tail)])
                     i += len(tail)
                     cpp_raw_delim = None
@@ -150,7 +150,7 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
             i += 1
             continue
 
-        # NORMAL state
+        
         if b == ord("/") and i + 1 < n:
             nxt = data[i + 1]
             if nxt == ord("*"):
@@ -160,7 +160,7 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                 i += 2
                 continue
             if nxt == ord("/"):
-                # preserve doc-style prefixes (mostly Rust/TS directives)
+                
                 if i + 3 <= n and data[i : i + 3] == b"///":
                     out.extend(b"///")
                     i += 3
@@ -173,12 +173,12 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                 i += 2
                 continue
 
-        # Rust raw string start: optional b then r then hashes then "
+        
         if b in (ord("b"), ord("r")):
             start_i = i
             j = i
 
-            # Optional leading 'b'
+            
             if data[j] == ord("b"):
                 if j + 1 < n and data[j + 1] == ord("r"):
                     j += 2
@@ -193,7 +193,7 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                     hashes += 1
                     j += 1
                 if j < n and data[j] == ord('"'):
-                    # Ensure we aren't in an identifier like `driver`
+                    
                     prev = data[start_i - 1] if start_i > 0 else None
                     if prev is None or not _is_ascii_ident_char(prev):
                         out.extend(data[start_i : j + 1])
@@ -201,9 +201,9 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                         rust_raw_hashes = hashes
                         continue
 
-        # C++ raw string start: R"delim(
+        
         if b == ord("R") and i + 1 < n and data[i + 1] == ord('"'):
-            # Parse delimiter until '('
+            
             j = i + 2
             while j < n and data[j] != ord("(") and data[j] != ord("\n") and data[j] != ord("\r"):
                 j += 1
@@ -236,6 +236,154 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
     return bytes(out)
 
 
+def _is_encoding_cookie(line: bytes) -> bool:
+    
+    
+    
+    
+    s = line.lstrip()
+    if not s.startswith(b"#"):
+        return False
+    s_lower = s.lower()
+    return b"coding:" in s_lower or b"coding=" in s_lower
+
+
+def _split_first_two_lines(data: bytes) -> tuple[bytes, bytes, int]:
+    
+    n = len(data)
+    if n == 0:
+        return b"", b"", 0
+
+    def take_line(start: int) -> tuple[bytes, int]:
+        if start >= n:
+            return b"", start
+        i = start
+        while i < n and data[i] != ord("\n"):
+            i += 1
+        if i < n and data[i] == ord("\n"):
+            i += 1
+        return data[start:i], i
+
+    l1, off1 = take_line(0)
+    l2, off2 = take_line(off1)
+    return l1, l2, off2
+
+
+def _strip_hash_comments_python(data: bytes) -> bytes:
+    
+    
+    
+    
+    line1, line2, start_off = _split_first_two_lines(data)
+
+    out = bytearray()
+    preserved_off = 0
+
+    if line1.startswith(b"#!"):
+        out.extend(line1)
+        preserved_off = len(line1)
+        if _is_encoding_cookie(line2):
+            out.extend(line2)
+            preserved_off += len(line2)
+    else:
+        if _is_encoding_cookie(line1):
+            out.extend(line1)
+            preserved_off = len(line1)
+        if preserved_off == len(line1) and _is_encoding_cookie(line2):
+            out.extend(line2)
+            preserved_off += len(line2)
+
+    i = preserved_off
+    n = len(data)
+
+    in_single = False
+    in_double = False
+    in_triple_single = False
+    in_triple_double = False
+
+    while i < n:
+        b = data[i]
+
+        if in_triple_single:
+            out.append(b)
+            if b == ord("'") and i + 2 < n and data[i + 1] == ord("'") and data[i + 2] == ord("'"):
+                out.extend(b"''")
+                i += 3
+                in_triple_single = False
+                continue
+            i += 1
+            continue
+
+        if in_triple_double:
+            out.append(b)
+            if b == ord('"') and i + 2 < n and data[i + 1] == ord('"') and data[i + 2] == ord('"'):
+                out.extend(b'""')
+                i += 3
+                in_triple_double = False
+                continue
+            i += 1
+            continue
+
+        if in_single:
+            out.append(b)
+            if b == ord("\\") and i + 1 < n:
+                out.append(data[i + 1])
+                i += 2
+                continue
+            if b == ord("'"):
+                in_single = False
+            i += 1
+            continue
+
+        if in_double:
+            out.append(b)
+            if b == ord("\\") and i + 1 < n:
+                out.append(data[i + 1])
+                i += 2
+                continue
+            if b == ord('"'):
+                in_double = False
+            i += 1
+            continue
+
+        
+        if b == ord("#"):
+            
+            while i < n and data[i] != ord("\n"):
+                i += 1
+            if i < n and data[i] == ord("\n"):
+                out.append(ord("\n"))
+                i += 1
+            continue
+
+        if b == ord("'"):
+            if i + 2 < n and data[i + 1] == ord("'") and data[i + 2] == ord("'"):
+                out.extend(b"'''")
+                i += 3
+                in_triple_single = True
+                continue
+            out.append(b)
+            i += 1
+            in_single = True
+            continue
+
+        if b == ord('"'):
+            if i + 2 < n and data[i + 1] == ord('"') and data[i + 2] == ord('"'):
+                out.extend(b'"""')
+                i += 3
+                in_triple_double = True
+                continue
+            out.append(b)
+            i += 1
+            in_double = True
+            continue
+
+        out.append(b)
+        i += 1
+
+    return bytes(out)
+
+
 def _strip_file(path: Path) -> tuple[bool, int]:
     original = path.read_bytes()
     stripped = _strip_double_slash_comments_c_like(original)
@@ -260,6 +408,7 @@ def main(argv: list[str]) -> int:
 
     exts = set(args.ext) if args.ext else {
         ".rs",
+        ".py",
         ".c",
         ".h",
         ".cc",
@@ -290,7 +439,10 @@ def main(argv: list[str]) -> int:
             if not path.is_file():
                 continue
             original = path.read_bytes()
-            stripped = _strip_double_slash_comments_c_like(original)
+            if rel.lower().endswith(".py"):
+                stripped = _strip_hash_comments_python(original)
+            else:
+                stripped = _strip_double_slash_comments_c_like(original)
             if stripped == original:
                 continue
 

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,14 +31,14 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with partial params (using defaults for some)
+        
         k, d, j = ta_indicators.kdj(
             high, low, close,
-            fast_k_period=9,  # default
-            slow_k_period=4,  # custom
-            slow_k_ma_type="sma",  # default
-            slow_d_period=3,  # default
-            slow_d_ma_type="sma"  # default
+            fast_k_period=9,  
+            slow_k_period=4,  
+            slow_k_ma_type="sma",  
+            slow_d_period=3,  
+            slow_d_ma_type="sma"  
         )
         
         assert len(k) == len(close)
@@ -51,7 +51,7 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default parameters
+        
         k, d, j = ta_indicators.kdj(
             high, low, close,
             fast_k_period=9,
@@ -61,7 +61,7 @@ class TestKdj:
             slow_d_ma_type="sma"
         )
         
-        # Expected values from Rust tests
+        
         expected_k = [
             58.04341315415984,
             61.56034740940419,
@@ -84,8 +84,8 @@ class TestKdj:
             43.91587565743079,
         ]
         
-        # Check last 5 values match expected
-        # Rust unit tests use absolute tolerance 1e-4; do not exceed it
+        
+        
         assert_close(k[-5:], expected_k, rtol=0.0, atol=1e-4, msg="KDJ K last 5 values mismatch")
         assert_close(d[-5:], expected_d, rtol=0.0, atol=1e-4, msg="KDJ D last 5 values mismatch")
         assert_close(j[-5:], expected_j, rtol=0.0, atol=1e-4, msg="KDJ J last 5 values mismatch")
@@ -109,31 +109,31 @@ class TestKdj:
             slow_d_ma_type="sma"
         )
         
-        # Find first valid index in data
+        
         first_valid = 0
         for i in range(len(high)):
             if not (np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i])):
                 first_valid = i
                 break
         
-        # Calculate warmup periods
+        
         k_warmup = first_valid + fast_k + slow_k - 2
         d_warmup = k_warmup + slow_d - 1
-        j_warmup = d_warmup  # J warmup equals D warmup
+        j_warmup = d_warmup  
         
-        # Verify K warmup
+        
         for i in range(min(k_warmup, len(k))):
             assert np.isnan(k[i]), f"Expected NaN in K warmup at index {i}"
         if k_warmup < len(k):
             assert not np.isnan(k[k_warmup]), f"Expected valid value in K after warmup at index {k_warmup}"
         
-        # Verify D warmup
+        
         for i in range(min(d_warmup, len(d))):
             assert np.isnan(d[i]), f"Expected NaN in D warmup at index {i}"
         if d_warmup < len(d):
             assert not np.isnan(d[d_warmup]), f"Expected valid value in D after warmup at index {d_warmup}"
         
-        # Verify J warmup
+        
         for i in range(min(j_warmup, len(j))):
             assert np.isnan(j[i]), f"Expected NaN in J warmup at index {i}"
         if j_warmup < len(j):
@@ -145,7 +145,7 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # All default params
+        
         k, d, j = ta_indicators.kdj(high, low, close)
         
         assert len(k) == len(close)
@@ -158,7 +158,7 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # Test various MA type combinations
+        
         ma_types = ["sma", "ema", "wma"]
         
         for slow_k_ma in ma_types:
@@ -176,7 +176,7 @@ class TestKdj:
                 assert len(d) == len(close), f"D length mismatch with MA types {slow_k_ma}/{slow_d_ma}"
                 assert len(j) == len(close), f"J length mismatch with MA types {slow_k_ma}/{slow_d_ma}"
                 
-                # Verify we have some valid values after warmup
+                
                 valid_k = k[~np.isnan(k)]
                 assert len(valid_k) > 0, f"No valid K values with MA types {slow_k_ma}/{slow_d_ma}"
     
@@ -214,7 +214,7 @@ class TestKdj:
         """Test KDJ fails with all-NaN data - mirrors check_kdj_all_nan"""
         input_data = np.array([np.nan, np.nan, np.nan])
         
-        # With 3 values and period 9, it will fail with Invalid period first
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.kdj(input_data, input_data, input_data)
     
@@ -222,7 +222,7 @@ class TestKdj:
         """Test KDJ fails with larger all-NaN dataset"""
         input_data = np.full(100, np.nan)
         
-        # With 100 NaN values and period 9, it should detect all NaN
+        
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.kdj(input_data, input_data, input_data)
     
@@ -235,14 +235,14 @@ class TestKdj:
     
     def test_kdj_partial_nan(self, test_data):
         """Test KDJ handles partial NaN data correctly"""
-        # Create synthetic data with controlled NaN placement
+        
         size = 100
         np.random.seed(42)
         close = 100 + np.cumsum(np.random.randn(size) * 0.5)
         high = close + np.abs(np.random.randn(size) * 0.3)
         low = close - np.abs(np.random.randn(size) * 0.3)
         
-        # Inject a very small NaN gap early
+        
         high[15] = np.nan
         low[15] = np.nan
         close[15] = np.nan
@@ -253,17 +253,17 @@ class TestKdj:
         assert len(d) == len(close)
         assert len(j) == len(close)
         
-        # Should have valid values before the NaN gap (after initial warmup)
-        # With fast_k=9, slow_k=3, slow_d=3, warmup is 9+3+3-3=12
+        
+        
         assert np.any(~np.isnan(k[12:15])), "Should have valid values before NaN gap"
         
-        # Should have NaN at the gap
+        
         assert not np.isnan(k[15]), "K may remain valid at NaN gap due to smoothing"
         assert 0.0 <= k[15] <= 100.0
         
-        # Note: The current implementation doesn't recover from NaN gaps
-        # This is expected behavior - once a NaN is encountered in the rolling window,
-        # it propagates through the MA calculations
+        
+        
+        
     
     def test_kdj_nan_handling(self, test_data):
         """Test KDJ handles NaN values correctly - mirrors check_kdj_nan_handling"""
@@ -273,7 +273,7 @@ class TestKdj:
         
         k, d, j = ta_indicators.kdj(high, low, close)
         
-        # Check that after warmup period, no NaN values exist
+        
         if len(k) > 50:
             for i in range(50, len(k)):
                 assert not np.isnan(k[i]), f"Expected no NaN in K after index 50 at {i}"
@@ -284,19 +284,19 @@ class TestKdj:
         """Test KDJ with extreme values for numerical stability"""
         size = 50
         
-        # Very large values
+        
         large_high = np.full(size, 1e10)
         large_low = np.full(size, 1e10 - 100)
         large_close = np.full(size, 1e10 - 50)
         
         k, d, j = ta_indicators.kdj(large_high, large_low, large_close)
         
-        # Should not produce infinity or invalid values
+        
         valid_k = k[~np.isnan(k)]
         assert np.all(np.isfinite(valid_k)), "K should be finite for large values"
         assert np.all((valid_k >= 0) & (valid_k <= 100)), "K should be in [0, 100] range"
         
-        # Very small values (but positive)
+        
         small_high = np.full(size, 1e-10)
         small_low = np.full(size, 1e-10 - 1e-12)
         small_close = np.full(size, 1e-10 - 5e-13)
@@ -317,10 +317,10 @@ class TestKdj:
             slow_d_ma_type="sma"
         )
         
-        # Feed enough data for warmup
-        # Need: fast_k (9) + slow_k (3) + slow_d (3) - 2 = 13 values minimum
+        
+        
         values = []
-        for i in range(20):  # Feed 20 values to ensure we get output
+        for i in range(20):  
             high = 10.0 + i * 1.0
             low = 5.0 + i * 1.0
             close = 7.0 + i * 1.0
@@ -332,10 +332,10 @@ class TestKdj:
             if result is not None:
                 results.append(result)
         
-        # After feeding 20 values, we should have results
+        
         assert len(results) >= 1
         
-        # Each result should be a tuple of (k, d, j)
+        
         for result in results:
             assert len(result) == 3
             k, d, j = result
@@ -349,17 +349,17 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # Test batch with parameter ranges
+        
         result = ta_indicators.kdj_batch(
             high, low, close,
-            fast_k_range=(5, 15, 5),  # 5, 10, 15
-            slow_k_range=(3, 6, 3),    # 3, 6
+            fast_k_range=(5, 15, 5),  
+            slow_k_range=(3, 6, 3),    
             slow_k_ma_type="sma",
-            slow_d_range=(3, 6, 3),    # 3, 6
+            slow_d_range=(3, 6, 3),    
             slow_d_ma_type="sma"
         )
         
-        # Check result structure
+        
         assert 'k' in result
         assert 'd' in result
         assert 'j' in result
@@ -367,27 +367,27 @@ class TestKdj:
         assert 'slow_k_periods' in result
         assert 'slow_d_periods' in result
         
-        # Should have 3 * 2 * 2 = 12 parameter combinations
-        expected_combos = 3 * 2 * 2  # (fast_k: 3 values) * (slow_k: 2 values) * (slow_d: 2 values)
+        
+        expected_combos = 3 * 2 * 2  
         assert result['k'].shape[0] == expected_combos
         assert result['d'].shape[0] == expected_combos
         assert result['j'].shape[0] == expected_combos
         
-        # Each row should have same length as input
+        
         assert result['k'].shape[1] == len(close)
         assert result['d'].shape[1] == len(close)
         assert result['j'].shape[1] == len(close)
         
-        # Verify warmup periods for each combination
+        
         for i in range(expected_combos):
             fast_k = result['fast_k_periods'][i]
             slow_k = result['slow_k_periods'][i]
             slow_d = result['slow_d_periods'][i]
             
-            # Calculate expected warmup
+            
             expected_warmup = fast_k + slow_k + slow_d - 3
             
-            # Check that we have NaN in warmup period
+            
             k_row = result['k'][i]
             if expected_warmup > 0:
                 assert np.isnan(k_row[0]), f"Expected NaN in warmup for combo {i}"
@@ -401,7 +401,7 @@ class TestKdj:
         for kernel in [None, "scalar"]:
             result = ta_indicators.kdj_batch(
                 high, low, close,
-                fast_k_range=(9, 9, 0),  # Single value
+                fast_k_range=(9, 9, 0),  
                 slow_k_range=(3, 3, 0),
                 slow_k_ma_type="sma",
                 slow_d_range=(3, 3, 0),
@@ -418,7 +418,7 @@ class TestKdj:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with different kernels
+        
         for kernel in [None, "scalar"]:
             k, d, j = ta_indicators.kdj(
                 high, low, close,

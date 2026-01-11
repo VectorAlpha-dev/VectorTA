@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,7 +30,7 @@ class TestSafeZoneStop:
         high = test_data['high']
         low = test_data['low']
         
-        # Test with period=14, other params use defaults
+        
         result = ta_indicators.safezonestop(high, low, period=14, mult=2.5, max_lookback=3, direction="short")
         assert len(result) == len(high)
     
@@ -43,7 +43,7 @@ class TestSafeZoneStop:
         
         assert len(result) == len(high)
         
-        # Expected values from Rust tests
+        
         expected_last_5 = [
             45331.180007991,
             45712.94455308232,
@@ -52,7 +52,7 @@ class TestSafeZoneStop:
             46461.767660969635,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_5,
@@ -65,7 +65,7 @@ class TestSafeZoneStop:
         high = test_data['high']
         low = test_data['low']
         
-        # Default params: period=22, mult=2.5, max_lookback=3, direction="long"
+        
         result = ta_indicators.safezonestop(high, low, period=22, mult=2.5, max_lookback=3, direction="long")
         assert len(result) == len(high)
     
@@ -80,7 +80,7 @@ class TestSafeZoneStop:
     def test_safezonestop_mismatched_lengths(self):
         """Test SafeZoneStop fails with mismatched lengths - mirrors check_safezonestop_mismatched_lengths"""
         high = np.array([10.0, 20.0, 30.0])
-        low = np.array([5.0, 15.0])  # Different length
+        low = np.array([5.0, 15.0])  
         
         with pytest.raises(ValueError, match="Mismatched lengths"):
             ta_indicators.safezonestop(high, low, period=22, mult=2.5, max_lookback=3, direction="long")
@@ -101,7 +101,7 @@ class TestSafeZoneStop:
         result = ta_indicators.safezonestop(high, low, period=22, mult=2.5, max_lookback=3, direction="long")
         assert len(result) == len(high)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             for i in range(240, len(result)):
                 assert not np.isnan(result[i]), f"Found unexpected NaN at index {i}"
@@ -119,22 +119,22 @@ class TestSafeZoneStop:
         high = test_data['high']
         low = test_data['low']
         
-        # First pass
+        
         first_result = ta_indicators.safezonestop(high, low, period=22, mult=2.5, max_lookback=3, direction="long")
         assert len(first_result) == len(high)
         
-        # Second pass - apply SafeZoneStop to its own output (use as both high and low)
+        
         second_result = ta_indicators.safezonestop(
             first_result, first_result, 
             period=22, mult=2.5, max_lookback=3, direction="long"
         )
         assert len(second_result) == len(first_result)
         
-        # Values should be different from first pass
-        # Find indices where both are not NaN
+        
+        
         valid_indices = np.where(~np.isnan(first_result) & ~np.isnan(second_result))[0]
         if len(valid_indices) > 0:
-            # Check that at least some values changed
+            
             assert not np.allclose(
                 first_result[valid_indices], 
                 second_result[valid_indices],
@@ -143,20 +143,20 @@ class TestSafeZoneStop:
     
     def test_safezonestop_streaming(self, test_data):
         """Test SafeZoneStop streaming matches batch calculation"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         period = 22
         mult = 2.5
         max_lookback = 3
         direction = "long"
         
-        # Batch calculation
+        
         batch_result = ta_indicators.safezonestop(
             high, low, 
             period=period, mult=mult, max_lookback=max_lookback, direction=direction
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.SafeZoneStopStream(
             period=period, mult=mult, max_lookback=max_lookback, direction=direction
         )
@@ -168,23 +168,23 @@ class TestSafeZoneStop:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            # Streaming uses a circular buffer which causes differences
-            # after the buffer wraps around (index 26+ with buffer size 26)
-            # The differences grow over time due to lost historical data
+            
+            
+            
             if i < 26:
-                # Before buffer wrap, should match exactly
+                
                 assert_close(b, s, rtol=1e-9, atol=1e-9, 
                             msg=f"SafeZoneStop streaming mismatch at index {i}")
             else:
-                # After buffer wrap, allow larger differences
-                # SafeZoneStop's Wilder smoothing needs full history
+                
+                
                 assert_close(b, s, rtol=0.05, atol=100.0, 
                             msg=f"SafeZoneStop streaming mismatch at index {i}")
     
@@ -193,16 +193,16 @@ class TestSafeZoneStop:
         high = test_data['high']
         low = test_data['low']
         
-        # Single parameter combination
+        
         batch_result = ta_indicators.safezonestop_batch(
             high, low,
-            (22, 22, 0),    # period range
-            (2.5, 2.5, 0),  # mult range
-            (3, 3, 0),      # max_lookback range
-            "long"          # direction
+            (22, 22, 0),    
+            (2.5, 2.5, 0),  
+            (3, 3, 0),      
+            "long"          
         )
         
-        # Should match single calculation
+        
         single_result = ta_indicators.safezonestop(high, low, 22, 2.5, 3, "long")
         
         assert batch_result['values'].shape == (1, len(high))
@@ -215,25 +215,25 @@ class TestSafeZoneStop:
     
     def test_safezonestop_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         
-        # Multiple periods: 14, 22, 30
+        
         batch_result = ta_indicators.safezonestop_batch(
             high, low,
-            (14, 30, 8),    # period range
-            (2.5, 2.5, 0),  # mult range
-            (3, 3, 0),      # max_lookback range
-            "long"          # direction
+            (14, 30, 8),    
+            (2.5, 2.5, 0),  
+            (3, 3, 0),      
+            "long"          
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert batch_result['values'].shape == (3, 100)
         assert len(batch_result['periods']) == 3
         assert len(batch_result['mults']) == 3
         assert len(batch_result['max_lookbacks']) == 3
         
-        # Verify each row matches individual calculation
+        
         periods = [14, 22, 30]
         for i, period in enumerate(periods):
             single_result = ta_indicators.safezonestop(high, low, period, 2.5, 3, "long")
@@ -251,13 +251,13 @@ class TestSafeZoneStop:
         
         batch_result = ta_indicators.safezonestop_batch(
             high, low,
-            (14, 22, 8),      # 2 periods
-            (2.0, 3.0, 0.5),  # 3 mults
-            (2, 4, 1),        # 3 max_lookbacks
-            "short"           # direction
+            (14, 22, 8),      
+            (2.0, 3.0, 0.5),  
+            (2, 4, 1),        
+            "short"           
         )
         
-        # Should have 2 * 3 * 3 = 18 combinations
+        
         assert batch_result['values'].shape == (18, 50)
         assert len(batch_result['periods']) == 18
         assert len(batch_result['mults']) == 18
@@ -265,11 +265,11 @@ class TestSafeZoneStop:
     
     def test_safezonestop_stream(self):
         """Test SafeZoneStop streaming functionality"""
-        # Create stream with default parameters
+        
         stream = ta_indicators.SafeZoneStopStream(22, 2.5, 3, "long")
         
-        # Feed some data
-        high_values = [10.0, 11.0, 12.0, 13.0, 14.0] * 5  # 25 values
+        
+        high_values = [10.0, 11.0, 12.0, 13.0, 14.0] * 5  
         low_values = [9.0, 10.0, 11.0, 12.0, 13.0] * 5
         
         results = []
@@ -277,10 +277,10 @@ class TestSafeZoneStop:
             result = stream.update(h, l)
             results.append(result)
         
-        # First period-1 values should be None (NaN)
+        
         assert all(r is None for r in results[:21])
         
-        # After warmup, should get values
+        
         assert results[-1] is not None
     
     def test_safezonestop_stream_invalid_direction(self):
@@ -293,15 +293,15 @@ class TestSafeZoneStop:
         high = test_data['high'][:1000]
         low = test_data['low'][:1000]
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.safezonestop(high, low, 22, 2.5, 3, "long", kernel="scalar")
         assert len(result_scalar) == len(high)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.safezonestop(high, low, 22, 2.5, 3, "long")
         assert len(result_auto) == len(high)
         
-        # Results should be very close (within floating point precision)
+        
         assert_close(result_scalar, result_auto, rtol=1e-10)
 
     def test_safezonestop_batch_edge_cases(self):
@@ -309,7 +309,7 @@ class TestSafeZoneStop:
         high = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], dtype=np.float64)
         low = np.array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], dtype=np.float64)
         
-        # Single value sweep
+        
         single_batch = ta_indicators.safezonestop_batch(
             high, low,
             (5, 5, 1),
@@ -320,14 +320,14 @@ class TestSafeZoneStop:
         
         assert single_batch['values'].shape == (1, 10)
         
-        # Step larger than range
+        
         large_batch = ta_indicators.safezonestop_batch(
             high, low,
-            (5, 7, 10),  # Step larger than range
+            (5, 7, 10),  
             (2.5, 2.5, 0),
             (3, 3, 0),
             "short"
         )
         
-        # Should only have period=5
+        
         assert large_batch['values'].shape == (1, 10)

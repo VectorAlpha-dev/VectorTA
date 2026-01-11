@@ -8,7 +8,7 @@ import { loadTestData, EXPECTED_OUTPUTS, assertArrayClose, assertClose } from '.
 import { compareWithRust } from './rust-comparison.js';
 
 
-import * as wasm from '../../pkg/my_project.js';
+import * as wasm from '../../pkg/vector_ta.js';
 
 test.describe('MAC-Z WASM Binding Tests', () => {
     let testData;

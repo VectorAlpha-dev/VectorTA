@@ -7,12 +7,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -37,11 +37,11 @@ def _cuda_available() -> bool:
             (13, 13, 0),
             (8, 8, 0),
         )
-        _ = cp.asarray(out["jaw"])  # ensure device handle is usable
+        _ = cp.asarray(out["jaw"])  
         _ = cp.asarray(out["teeth"])
         _ = cp.asarray(out["lips"])
         return True
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -85,7 +85,7 @@ class TestAlligatorCuda:
         assert_close(lips_gpu, lips_cpu, rtol=1e-5, atol=1e-6, msg="lips mismatch")
 
     def test_alligator_cuda_many_series_one_param_matches_cpu(self, test_data):
-        # time-major (rows=t, cols=series)
+        
         cols = 3
         rows = 2048
         data_tm = np.full((rows, cols), np.nan, dtype=np.float64)
@@ -96,7 +96,7 @@ class TestAlligatorCuda:
 
         params = dict(jaw_period=13, jaw_offset=8, teeth_period=8, teeth_offset=5, lips_period=5, lips_offset=3)
 
-        # CPU reference (convert to row-major per-series)
+        
         jaw_cpu = np.full_like(data_tm, np.nan)
         teeth_cpu = np.full_like(data_tm, np.nan)
         lips_cpu = np.full_like(data_tm, np.nan)

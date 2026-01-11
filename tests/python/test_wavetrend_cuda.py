@@ -8,7 +8,7 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -38,7 +38,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle["wt1"])
         return True
-    except Exception as exc:  # pragma: no cover - defensive path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -109,7 +109,7 @@ class TestWavetrendCuda:
         handle = ti.wavetrend_cuda_batch_dev(
             close.astype(np.float32), channel, average, ma, factor
         )
-        channels = np.array(handle["channel_lengths"])  # host arrays
+        channels = np.array(handle["channel_lengths"])  
         averages = np.array(handle["average_lengths"])
         mas = np.array(handle["ma_lengths"])
         factors = np.array(handle["factors"])

@@ -19,7 +19,7 @@ REM Disable LTO for WASM builds to avoid cdylib issues
 set CARGO_PROFILE_RELEASE_LTO=off
 
 REM Build with wasm-pack
-wasm-pack build --target nodejs --features wasm
+wasm-pack build --target nodejs --out-name vector_ta --features wasm
 
 if %errorlevel% equ 0 (
     echo.

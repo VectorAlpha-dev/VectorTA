@@ -13,7 +13,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -32,7 +32,7 @@ class TestCg:
         """Test CG with partial parameters - mirrors check_cg_partial_params"""
         close = test_data['close']
         
-        # Test with custom period
+        
         result = ta_indicators.cg(close, period=12)
         assert len(result) == len(close)
     
@@ -48,22 +48,22 @@ class TestCg:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-4,  # CG uses 1e-4 tolerance in Rust tests
+            rtol=1e-4,  
             msg="CG last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('cg', result, 'close', expected['default_params'])
     
     def test_cg_default_candles(self, test_data):
         """Test CG with default parameters - mirrors check_cg_default_candles"""
         close = test_data['close']
         
-        # Default period is 10
+        
         result = ta_indicators.cg(close, 10)
         assert len(result) == len(close)
     
@@ -102,10 +102,10 @@ class TestCg:
         result = ta_indicators.cg(close, period=10)
         assert len(result) == len(close)
         
-        # After warmup period, check for valid values
+        
         check_idx = 240
         if len(result) > check_idx:
-            # Find first non-NaN value after check_idx
+            
             found_valid = False
             for i in range(check_idx, len(result)):
                 if not np.isnan(result[i]):
@@ -113,8 +113,8 @@ class TestCg:
                     break
             assert found_valid, f"All CG values from index {check_idx} onward are NaN."
         
-        # First period values should be NaN (CG starts at first + period)
-        # With default period=10, first 10 values should be NaN
+        
+        
         assert np.all(np.isnan(result[:10])), "Expected NaN in warmup period"
     
     def test_cg_streaming(self, test_data):
@@ -122,10 +122,10 @@ class TestCg:
         close = test_data['close']
         period = 10
         
-        # Batch calculation
+        
         batch_result = ta_indicators.cg(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.CgStream(period=period)
         stream_values = []
         
@@ -135,10 +135,10 @@ class TestCg:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -151,45 +151,45 @@ class TestCg:
         
         result = ta_indicators.cg_batch(
             close,
-            period_range=(10, 10, 0),  # Default period only
+            period_range=(10, 10, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['cg']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
-            rtol=1e-4,  # CG uses 1e-4 tolerance
+            rtol=1e-4,  
             msg="CG batch default row mismatch"
         )
     
     def test_cg_batch_multiple_periods(self, test_data):
         """Test CG batch with multiple period values"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple periods: 10, 12, 14
+        
         result = ta_indicators.cg_batch(
             close,
             period_range=(10, 14, 2),
         )
         
-        # Should have 3 rows
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
         assert len(result['periods']) == 3
         assert list(result['periods']) == [10, 12, 14]
         
-        # Verify first row matches single calculation
+        
         single_result = ta_indicators.cg(close, period=10)
         assert_close(
             result['values'][0],
@@ -207,18 +207,18 @@ class TestCg:
     
     def test_cg_kernel_parameter(self, test_data):
         """Test CG with different kernel parameters"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.cg(close, period=10, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel
+        
         result_auto = ta_indicators.cg(close, period=10, kernel='auto')
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
-        # (since AVX implementations currently fall back to scalar)
+        
+        
         assert_close(
             result_scalar,
             result_auto,
@@ -233,11 +233,11 @@ class TestCg:
         
         result = ta_indicators.cg(close, period=period)
         
-        # CG requires period + 1 valid points, outputs start at first + period
-        # So with period=10, first 10 values should be NaN
+        
+        
         assert np.all(np.isnan(result[:period])), f"Expected NaN in first {period} values"
         
-        # Value at index period should be valid (if input has enough data)
+        
         if len(close) > period:
             assert not np.isnan(result[period]), f"Expected valid value at index {period}"
     
@@ -245,20 +245,20 @@ class TestCg:
         """Test CG with very small period"""
         close = test_data['close'][:20]
         
-        # Period of 2 (minimum sensible value)
+        
         result = ta_indicators.cg(close, period=2)
         assert len(result) == len(close)
         
-        # First 2 values should be NaN
+        
         assert np.all(np.isnan(result[:2]))
-        # Third value onwards should be valid
+        
         assert not np.isnan(result[2])
     
     def test_cg_batch_empty_range(self, test_data):
         """Test CG batch with single value range"""
         close = test_data['close'][:50]
         
-        # Step of 0 means single value
+        
         result = ta_indicators.cg_batch(
             close,
             period_range=(12, 12, 0),
@@ -271,7 +271,7 @@ class TestCg:
         """Test CG batch with kernel parameter"""
         close = test_data['close'][:50]
         
-        # Test batch with scalar kernel
+        
         result = ta_indicators.cg_batch(
             close,
             period_range=(10, 12, 2),
@@ -285,20 +285,20 @@ class TestCg:
         """Test CG handles NaN values injected at specific positions"""
         close = test_data['close'][:100].copy()
         
-        # Inject NaN values at specific positions  
+        
         close[20:25] = np.nan
         
-        # Should still compute after NaN region
+        
         result = ta_indicators.cg(close, period=10)
         assert len(result) == len(close)
         
-        # CG continues computing despite NaN in the window
-        # It returns 0.0 when denom is too small (all NaN window)
-        # First 10 values should be NaN (warmup period)
+        
+        
+        
         assert np.all(np.isnan(result[:10]))
         
-        # Check that computation continues after NaN injection
-        # Some values during NaN window will be 0.0 due to division protection
+        
+        
         has_non_nan_after_injection = False
         for i in range(30, len(result)):
             if not np.isnan(result[i]) and result[i] != 0.0:
@@ -311,13 +311,13 @@ class TestCg:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['cg']
         
-        # Run batch with default params only
+        
         result = ta_indicators.cg_batch(
             close,
             period_range=(10, 10, 0),
         )
         
-        # Verify the output matches expected
+        
         assert_close(
             result['values'][0][-5:],
             expected['last_5_values'],
@@ -329,52 +329,52 @@ class TestCg:
         """Test comprehensive batch parameter sweep like ALMA"""
         close = test_data['close']
         
-        # Test sweep of multiple periods
+        
         result = ta_indicators.cg_batch(
             close,
-            period_range=(5, 20, 5),  # 5, 10, 15, 20
+            period_range=(5, 20, 5),  
         )
         
-        # Should have 4 combinations
+        
         assert result['values'].shape[0] == 4
         assert result['values'].shape[1] == len(close)
         assert list(result['periods']) == [5, 10, 15, 20]
         
-        # Verify each row has correct warmup
+        
         for i, period in enumerate(result['periods']):
             row = result['values'][i]
-            # First period values should be NaN
+            
             assert np.all(np.isnan(row[:period]))
-            # After warmup should have values
+            
             if len(close) > period:
                 assert not np.isnan(row[period])
     
     def test_cg_numerical_stability(self):
         """Test CG with extreme values for numerical stability"""
-        # Test with very large values
+        
         large_data = np.array([1e15, 1e15, 1e15, 1e15, 1e15, 1e15])
         result_large = ta_indicators.cg(large_data, period=2)
         assert len(result_large) == len(large_data)
-        # CG with constant values should produce consistent output
-        assert not np.isnan(result_large[2])  # After warmup
         
-        # Test with very small values
+        assert not np.isnan(result_large[2])  
+        
+        
         small_data = np.array([1e-15, 1e-15, 1e-15, 1e-15, 1e-15, 1e-15])
         result_small = ta_indicators.cg(small_data, period=2)
         assert len(result_small) == len(small_data)
-        assert not np.isnan(result_small[2])  # After warmup
+        assert not np.isnan(result_small[2])  
     
     def test_cg_full_dataset(self, test_data):
         """Test CG with full dataset instead of slices"""
-        close = test_data['close']  # Use full dataset
+        close = test_data['close']  
         
         result = ta_indicators.cg(close, period=10)
         assert len(result) == len(close)
         
-        # Verify warmup period (first 10 values should be NaN)
+        
         assert np.all(np.isnan(result[:10]))
         
-        # After warmup, all values should be valid
+        
         assert not np.any(np.isnan(result[10:]))
     
     @pytest.mark.skipif(sys.platform != "win32", reason="Poison detection only in debug builds")
@@ -382,23 +382,23 @@ class TestCg:
         """Test for uninitialized memory patterns (debug builds only)"""
         close = test_data['close'][:100]
         
-        # Run single and batch calculations
+        
         single_result = ta_indicators.cg(close, period=10)
         batch_result = ta_indicators.cg_batch(
             close,
             period_range=(5, 15, 5),
         )
         
-        # Check for poison patterns in single result
+        
         for i, val in enumerate(single_result):
             if not np.isnan(val):
-                # Check for common poison patterns
+                
                 val_bits = np.float64(val).view(np.uint64)
                 assert val_bits != 0x1111111111111111, f"Found poison value at index {i}"
                 assert val_bits != 0x2222222222222222, f"Found poison value at index {i}"
                 assert val_bits != 0x3333333333333333, f"Found poison value at index {i}"
         
-        # Check for poison patterns in batch result
+        
         for row_idx in range(batch_result['values'].shape[0]):
             for col_idx in range(batch_result['values'].shape[1]):
                 val = batch_result['values'][row_idx, col_idx]

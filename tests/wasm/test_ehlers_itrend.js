@@ -26,7 +26,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
@@ -87,7 +87,7 @@ test('Ehlers ITrend empty input', () => {
     const empty = new Float64Array([]);
     
     assert.throws(() => {
-        wasm.ehlers_itrend_js(empty, undefined, undefined);
+        wasm.ehlers_itrend_js(empty, 10, 50);
     }, /Input data is empty/);
 });
 
@@ -97,7 +97,7 @@ test('Ehlers ITrend all NaN input', () => {
     allNaN.fill(NaN);
     
     assert.throws(() => {
-        wasm.ehlers_itrend_js(allNaN, undefined, undefined);
+        wasm.ehlers_itrend_js(allNaN, 10, 50);
     }, /All values are NaN/);
 });
 

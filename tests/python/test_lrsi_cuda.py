@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -46,9 +46,9 @@ class TestLrsiCuda:
         high = test_data['high']
         low = test_data['low']
         alpha = 0.2
-        # CPU baseline
+        
         cpu = ti.lrsi(high, low, alpha)
-        # CUDA single-combo batch
+        
         handle = ti.lrsi_cuda_batch_dev(high.astype(np.float32), low.astype(np.float32), (alpha, alpha, 0.0))
         gpu = cp.asnumpy(cp.asarray(handle))[0]
         assert_close(gpu, cpu, rtol=1e-5, atol=1e-5, msg="LRSI CUDA batch vs CPU mismatch")
@@ -65,11 +65,11 @@ class TestLrsiCuda:
             high_tm[:, j] = high * scale
             low_tm[:, j] = low * scale
         alpha = 0.2
-        # CPU per series
+        
         cpu_tm = np.zeros_like(high_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.lrsi(high_tm[:, j], low_tm[:, j], alpha)
-        # CUDA
+        
         handle = ti.lrsi_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32), low_tm.astype(np.float32), alpha
         )

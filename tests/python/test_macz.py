@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -27,13 +27,13 @@ class TestMacz:
     def test_macz_partial_params(self, test_data):
         """Test MAC-Z with partial parameters (default values) - mirrors check_macz_partial_params"""
         close = test_data['close']
-        volume = test_data.get('volume')  # May be None
+        volume = test_data.get('volume')  
         
-        # Test with minimum required params
+        
         result = ta_indicators.macz(close, volume)
         assert len(result) == len(close)
         
-        # Test with some explicit params
+        
         result = ta_indicators.macz(
             close, 
             volume,
@@ -64,7 +64,7 @@ class TestMacz:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected with tight tolerance
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -73,7 +73,7 @@ class TestMacz:
             msg="MAC-Z last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('macz', result, 'close', expected['default_params'])
 
     def test_macz_default_candles(self, test_data):
@@ -81,7 +81,7 @@ class TestMacz:
         close = test_data['close']
         volume = test_data.get('volume')
         
-        # Default params from Rust
+        
         result = ta_indicators.macz(
             close,
             volume,
@@ -134,11 +134,11 @@ class TestMacz:
         data = np.array([1.0, 2.0, 3.0] * 20)
         volume = np.array([100.0, 200.0, 300.0] * 20)
         
-        # A out of range (> 2.0)
+        
         with pytest.raises(ValueError, match="A out of range"):
             ta_indicators.macz(data, volume, a=3.0)
         
-        # A out of range (< -2.0)
+        
         with pytest.raises(ValueError, match="A out of range"):
             ta_indicators.macz(data, volume, a=-3.0)
     
@@ -147,11 +147,11 @@ class TestMacz:
         data = np.array([1.0, 2.0, 3.0] * 20)
         volume = np.array([100.0, 200.0, 300.0] * 20)
         
-        # B out of range (> 2.0)
+        
         with pytest.raises(ValueError, match="B out of range"):
             ta_indicators.macz(data, volume, b=3.0)
         
-        # B out of range (< -2.0)
+        
         with pytest.raises(ValueError, match="B out of range"):
             ta_indicators.macz(data, volume, b=-3.0)
     
@@ -160,11 +160,11 @@ class TestMacz:
         data = np.array([1.0, 2.0, 3.0] * 20)
         volume = np.array([100.0, 200.0, 300.0] * 20)
         
-        # Gamma out of range (>= 1.0)
+        
         with pytest.raises(ValueError, match="Invalid gamma"):
             ta_indicators.macz(data, volume, gamma=1.5)
         
-        # Gamma out of range (< 0.0)
+        
         with pytest.raises(ValueError, match="Invalid gamma"):
             ta_indicators.macz(data, volume, gamma=-0.1)
 
@@ -190,12 +190,12 @@ class TestMacz:
         
         assert len(result) == len(close)
         
-        # After warmup period, no NaN values should exist
+        
         warmup = expected['warmup_period']
         if len(result) > warmup:
             assert not np.any(np.isnan(result[warmup:])), "Found unexpected NaN after warmup period"
         
-        # First warmup values should be NaN
+        
         assert np.all(np.isnan(result[:warmup])), "Expected NaN in warmup period"
 
     def test_macz_streaming(self, test_data):
@@ -204,7 +204,7 @@ class TestMacz:
         volume = test_data.get('volume')
         expected = EXPECTED_OUTPUTS['macz']['default_params']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.macz(
             close,
             volume,
@@ -219,7 +219,7 @@ class TestMacz:
             gamma=expected['gamma']
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.MaczStream(
             fast_length=expected['fast_length'],
             slow_length=expected['slow_length'],
@@ -240,15 +240,15 @@ class TestMacz:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are finite (skip any NaNs during warmup)
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) or np.isnan(s):
                 continue
-            # Use relaxed tolerance for streaming due to accumulated rounding over thousands of iterations
-            # The relative tolerance of 1e-5 is reasonable for financial calculations
+            
+            
             assert_close(b, s, rtol=1e-5, atol=1e-8,
                         msg=f"MAC-Z streaming mismatch at index {i}")
     
@@ -260,15 +260,15 @@ class TestMacz:
         result = ta_indicators.macz_batch(
             close,
             volume,
-            fast_length_range=(12, 12, 0),  # Default fast only
-            slow_length_range=(25, 25, 0),  # Default slow only
-            signal_length_range=(9, 9, 0),  # Default signal only
-            lengthz_range=(20, 20, 0),  # Default lengthz only
-            length_stdev_range=(25, 25, 0),  # Default stdev only
-            a_range=(1.0, 1.0, 0.0),  # Default A only
-            b_range=(1.0, 1.0, 0.0),  # Default B only
-            use_lag_range=(False, False, False),  # Default use_lag only
-            gamma_range=(0.02, 0.02, 0.0)  # Default gamma only
+            fast_length_range=(12, 12, 0),  
+            slow_length_range=(25, 25, 0),  
+            signal_length_range=(9, 9, 0),  
+            lengthz_range=(20, 20, 0),  
+            length_stdev_range=(25, 25, 0),  
+            a_range=(1.0, 1.0, 0.0),  
+            b_range=(1.0, 1.0, 0.0),  
+            use_lag_range=(False, False, False),  
+            gamma_range=(0.02, 0.02, 0.0)  
         )
         
         assert 'values' in result
@@ -276,15 +276,15 @@ class TestMacz:
         assert 'slow_lengths' in result
         assert 'signal_lengths' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['macz']['last_5_values']
         
-        # Check last 5 values match with tight tolerance
+        
         assert_close(
             default_row[-5:],
             expected,

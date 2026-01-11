@@ -28,7 +28,7 @@ test.before(async () => {
     
     
     
-    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const esmImportPath = process.platform === 'win32'
         ? 'file:///' + pkgPath.replace(/\\/g, '/')
         : pkgPath;
@@ -41,9 +41,7 @@ test.before(async () => {
         if (!wasm || !wasm.__wasm) throw new Error('no __wasm in ESM module');
     } catch (err) {
         const require = createRequire(import.meta.url);
-        const localCjsPath = path.join(__dirname, 'my_project.js');
-        
-        wasm = require(localCjsPath);
+        wasm = require(pkgPath);
     }
 
     testData = loadTestData();

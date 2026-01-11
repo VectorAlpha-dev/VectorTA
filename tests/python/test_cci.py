@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,20 +29,20 @@ class TestCci:
         """Test CCI with partial parameters (None values) - mirrors check_cci_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.cci(close, 14)  # Using default period
+        
+        result = ta_indicators.cci(close, 14)  
         assert len(result) == len(close)
         
-        # Test with different sources
+        
         high = test_data['high']
         low = test_data['low']
         
-        # Create hl2 source
+        
         hl2 = (high + low) / 2
         result_hl2 = ta_indicators.cci(hl2, 20)
         assert len(result_hl2) == len(hl2)
         
-        # Create hlc3 source (default in Rust)
+        
         hlc3 = (high + low + close) / 3
         result_hlc3 = ta_indicators.cci(hlc3, 9)
         assert len(result_hlc3) == len(hlc3)
@@ -54,7 +54,7 @@ class TestCci:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['cci']
         
-        # Create hlc3 source (default in Rust)
+        
         hlc3 = (high + low + close) / 3
         
         result = ta_indicators.cci(
@@ -64,8 +64,8 @@ class TestCci:
         
         assert len(result) == len(hlc3)
         
-        # Check last 5 values match expected
-        # Match Rust test tolerance exactly: absolute 1e-6
+        
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -74,12 +74,12 @@ class TestCci:
             msg="CCI last 5 values mismatch"
         )
         
-        # Verify warmup period
+        
         period = expected['default_params']['period']
         for i in range(period - 1):
             assert np.isnan(result[i]), f"Expected NaN at index {i} for initial period warm-up"
         
-        # Compare full output with Rust
+        
         compare_with_rust('cci', result, 'hlc3', expected['default_params'])
     
     def test_cci_default_candles(self, test_data):
@@ -88,10 +88,10 @@ class TestCci:
         low = test_data['low']
         close = test_data['close']
         
-        # Create hlc3 source (default in Rust)
+        
         hlc3 = (high + low + close) / 3
         
-        # Default params: period=14
+        
         result = ta_indicators.cci(hlc3, 14)
         assert len(result) == len(hlc3)
     
@@ -127,16 +127,16 @@ class TestCci:
         """Test CCI applied twice (re-input) - mirrors check_cci_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.cci(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass - apply CCI to CCI output
+        
         second_result = ta_indicators.cci(first_result, period=14)
         assert len(second_result) == len(first_result)
         
-        # After warmup period (28), no NaN values should exist
-        # Note: CCI warmup is period-1, so after two passes it's (14-1)*2 = 26, but we use 28 for safety
+        
+        
         if len(second_result) > 28:
             for i in range(28, len(second_result)):
                 assert not np.isnan(second_result[i]), f"Expected no NaN after index 28, found NaN at index {i}"
@@ -148,11 +148,11 @@ class TestCci:
         result = ta_indicators.cci(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period"
     
     def test_cci_streaming(self, test_data):
@@ -160,10 +160,10 @@ class TestCci:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.cci(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.CciStream(period=period)
         stream_values = []
         
@@ -173,10 +173,10 @@ class TestCci:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -189,27 +189,27 @@ class TestCci:
         low = test_data['low']
         close = test_data['close']
         
-        # Create hlc3 source
+        
         hlc3 = (high + low + close) / 3
         
         result = ta_indicators.cci_batch(
             hlc3,
-            period_range=(14, 14, 0)  # Default period only
+            period_range=(14, 14, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(hlc3)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['cci']['last_5_values']
         
-        # Check last 5 values match
-        # Match Rust test tolerance exactly: absolute 1e-6
+        
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -227,23 +227,23 @@ class TestCci:
     
     def test_cci_batch_sweep(self, test_data):
         """Test CCI batch with multiple periods"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
         result = ta_indicators.cci_batch(
             close,
-            period_range=(10, 20, 2)  # 10, 12, 14, 16, 18, 20
+            period_range=(10, 20, 2)  
         )
         
-        # Should have 6 combinations
+        
         assert result['values'].shape[0] == 6
         assert result['values'].shape[1] == len(close)
         assert len(result['periods']) == 6
         
-        # Verify periods
+        
         expected_periods = [10, 12, 14, 16, 18, 20]
         assert list(result['periods']) == expected_periods
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(expected_periods):
             row_data = result['values'][i]
             single_result = ta_indicators.cci(close, period)
@@ -258,21 +258,21 @@ class TestCci:
         """Test CCI batch accepts kernel parameter"""
         close = test_data['close'][:50]
         
-        # Test with explicit scalar kernel
+        
         result_scalar = ta_indicators.cci_batch(
             close,
             period_range=(14, 14, 0),
             kernel='scalar'
         )
         
-        # Test with auto kernel
+        
         result_auto = ta_indicators.cci_batch(
             close,
             period_range=(14, 14, 0),
             kernel='auto'
         )
         
-        # Results should be similar (may use different kernels)
+        
         assert_close(
             result_scalar['values'][0],
             result_auto['values'][0],
@@ -284,16 +284,16 @@ class TestCci:
         """Test CCI with different kernel parameters"""
         close = test_data['close'][:100]
         
-        # Test with explicit scalar kernel
+        
         result_scalar = ta_indicators.cci(close, 14, kernel='scalar')
         
-        # Test with auto kernel
+        
         result_auto = ta_indicators.cci(close, 14, kernel='auto')
         
-        # Test without kernel parameter (should default to auto)
+        
         result_default = ta_indicators.cci(close, 14)
         
-        # All results should be similar
+        
         assert_close(result_scalar, result_auto, rtol=1e-9, msg="Scalar vs auto mismatch")
         assert_close(result_auto, result_default, rtol=1e-9, msg="Auto vs default mismatch")
     
@@ -306,27 +306,27 @@ class TestCci:
     
     def test_cci_large_period(self, test_data):
         """Test CCI with very large period"""
-        close = test_data['close'][:200]  # Use subset for large period test
+        close = test_data['close'][:200]  
         
-        # Test with large period (100)
+        
         result = ta_indicators.cci(close, period=100)
         assert len(result) == len(close)
         
-        # First 99 values should be NaN
+        
         assert np.all(np.isnan(result[:99])), "Expected NaN in warmup period for large period"
         
-        # After warmup should have values
+        
         assert not np.isnan(result[99]), "Expected valid value after warmup"
     
     def test_cci_extreme_values(self):
         """Test CCI with extreme input values for numerical stability"""
-        # Test with very large values
+        
         large_data = np.array([1e10, 1e10 + 1, 1e10 + 2, 1e10 + 3, 1e10 + 4])
         result_large = ta_indicators.cci(large_data, period=3)
         assert len(result_large) == len(large_data)
         assert not np.any(np.isinf(result_large)), "CCI should not produce infinite values"
         
-        # Test with very small values
+        
         small_data = np.array([1e-10, 2e-10, 3e-10, 4e-10, 5e-10])
         result_small = ta_indicators.cci(small_data, period=3)
         assert len(result_small) == len(small_data)
@@ -334,11 +334,11 @@ class TestCci:
     
     def test_cci_constant_values(self):
         """Test CCI with constant input values"""
-        # When all prices are equal, CCI should be 0 (no deviation)
+        
         constant_data = np.full(100, 50.0)
         result = ta_indicators.cci(constant_data, period=14)
         
-        # After warmup, all values should be 0
+        
         for i in range(13, len(result)):
             assert abs(result[i]) < 1e-9, f"CCI should be ~0 for constant prices, got {result[i]} at index {i}"
     
@@ -346,7 +346,7 @@ class TestCci:
         """Test CCI batch with edge case parameters"""
         close = test_data['close'][:50]
         
-        # Test with step size of 0 (single period)
+        
         result_single = ta_indicators.cci_batch(
             close,
             period_range=(14, 14, 0)
@@ -355,12 +355,12 @@ class TestCci:
         assert len(result_single['periods']) == 1
         assert result_single['periods'][0] == 14
         
-        # Test with step larger than range
+        
         result_large_step = ta_indicators.cci_batch(
             close,
-            period_range=(10, 12, 5)  # Step > range
+            period_range=(10, 12, 5)  
         )
-        # Should only have period=10
+        
         assert result_large_step['values'].shape[0] == 1
         assert result_large_step['periods'][0] == 10
 

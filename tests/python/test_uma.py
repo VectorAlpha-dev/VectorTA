@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestUma:
         """Test UMA with partial parameters (None values) - mirrors check_uma_partial_params"""
         data = np.arange(100, dtype=np.float64) + 100.0
         
-        # Test with all default params - note: volume is None
-        result = ta_indicators.uma(data, 1.0, 5, 50, 4, None)  # Using defaults without volume
+        
+        result = ta_indicators.uma(data, 1.0, 5, 50, 4, None)  
         assert len(result) == len(data)
     
     def test_uma_accuracy(self, test_data):
@@ -44,19 +44,19 @@ class TestUma:
             min_length=expected['default_params']['min_length'],
             max_length=expected['default_params']['max_length'],
             smooth_length=expected['default_params']['smooth_length'],
-            volume=None  # No volume data
+            volume=None  
         )
         
         assert len(result) == len(close)
         
-        # Get valid values
+        
         valid_values = result[~np.isnan(result)]
         
-        # Check last 5 values match expected
+        
         assert_close(
             valid_values[-5:] if len(valid_values) >= 5 else valid_values, 
             expected['last_5_values'] if len(valid_values) >= 5 else expected['last_5_values'][:len(valid_values)],
-            rtol=0.01,  # 1% tolerance matching Rust tests
+            rtol=0.01,  
             msg="UMA last 5 values mismatch"
         )
     
@@ -64,8 +64,8 @@ class TestUma:
         """Test UMA with default parameters - mirrors check_uma_default_candles"""
         close = test_data['close']
         
-        # Default params: accelerator=1.0, min_length=5, max_length=50, smooth_length=4
-        result = ta_indicators.uma(close, 1.0, 5, 50, 4, None)  # Without volume
+        
+        result = ta_indicators.uma(close, 1.0, 5, 50, 4, None)  
         assert len(result) == len(close)
     
     def test_uma_zero_max_length(self):
@@ -118,17 +118,17 @@ class TestUma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['uma']
         
-        result = ta_indicators.uma(close, 1.0, 5, 50, 4, None)  # Without volume
+        result = ta_indicators.uma(close, 1.0, 5, 50, 4, None)  
         assert len(result) == len(close)
         
-        # After warmup period (53), values should be valid
+        
         warmup = expected['warmup_period']
         if len(result) > warmup + 10:
-            # Check we have valid values after warmup
+            
             valid_count = np.sum(~np.isnan(result[warmup + 10:]))
             assert valid_count > 0, "Should have valid values after warmup period"
         
-        # First warmup values should be NaN (with some tolerance for off-by-one)
+        
         nan_count = np.sum(np.isnan(result[:warmup]))
         assert nan_count >= warmup - 1, f"Expected at least {warmup-1} NaN values in warmup period, got {nan_count}"
     
@@ -140,7 +140,7 @@ class TestUma:
         max_length = 50
         smooth_length = 4
         
-        # Batch calculation
+        
         batch_result = ta_indicators.uma(
             close, 
             accelerator=accelerator, 
@@ -150,7 +150,7 @@ class TestUma:
             volume=None
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.UmaStream(
             accelerator=accelerator,
             min_length=min_length,
@@ -160,21 +160,21 @@ class TestUma:
         stream_values = []
         
         for price in close:
-            result = stream.update(price)  # No volume parameter for update
+            result = stream.update(price)  
             stream_values.append(result if result is not None else np.nan)
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # UMA streaming has inherent differences from batch due to dynamic length buffer
-        # We compare the overall trend rather than exact values
+        
+        
         batch_valid = batch_result[~np.isnan(batch_result)]
         stream_valid = stream_values[~np.isnan(stream_values)]
         
         if len(batch_valid) >= 5 and len(stream_valid) >= 5:
-            # Compare last 5 values with relaxed tolerance (10% for UMA's dynamic nature)
+            
             for i, (b, s) in enumerate(zip(batch_valid[-5:], stream_valid[-5:])):
                 relative_diff = abs(b - s) / max(abs(b), 1.0)
                 assert relative_diff < 0.1, f"UMA streaming mismatch at index {i}: batch={b}, stream={s}"
@@ -184,7 +184,7 @@ class TestUma:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Batch calculation with volume
+        
         batch_result = ta_indicators.uma(
             close, 
             accelerator=1.0,
@@ -194,7 +194,7 @@ class TestUma:
             volume=volume
         )
         
-        # Streaming calculation with volume
+        
         stream = ta_indicators.UmaStream(
             accelerator=1.0,
             min_length=5,
@@ -210,10 +210,10 @@ class TestUma:
         
         stream_values = np.array(stream_values)
         
-        # Basic sanity checks
+        
         assert len(batch_result) == len(stream_values)
         
-        # Check we have valid values
+        
         assert not np.all(np.isnan(stream_values)), "Stream should produce some valid values"
     
     def test_uma_batch(self, test_data):
@@ -222,11 +222,11 @@ class TestUma:
         
         result = ta_indicators.uma_batch(
             close,
-            accelerator_range=(1.0, 1.0, 0.0),  # Default accelerator only
-            min_length_range=(5, 5, 0),  # Default min_length only
-            max_length_range=(50, 50, 0),  # Default max_length only
-            smooth_length_range=(4, 4, 0),  # Default smooth_length only
-            volume=None  # No volume
+            accelerator_range=(1.0, 1.0, 0.0),  
+            min_length_range=(5, 5, 0),  
+            max_length_range=(50, 50, 0),  
+            smooth_length_range=(4, 4, 0),  
+            volume=None  
         )
         
         assert 'values' in result
@@ -234,66 +234,66 @@ class TestUma:
         assert 'rows' in result
         assert 'cols' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['rows'] == 1
         assert result['cols'] == len(close)
         
-        # Extract the single row from the 2D array
+        
         values_2d = result['values']
         if values_2d.ndim == 2:
             default_row = values_2d[0]
         else:
-            # If it's already 1D (single row), use it directly
+            
             default_row = values_2d
         
         expected = EXPECTED_OUTPUTS['uma']
         
-        # Get valid values from the result
+        
         valid_values = default_row[~np.isnan(default_row)]
         
-        # Check last 5 values match with tolerance
+        
         if len(valid_values) >= 5:
-            # Note: batch may produce slightly different results, so use relaxed tolerance
+            
             assert_close(
                 valid_values[-5:],
                 expected['last_5_values'],
-                rtol=0.1,  # 10% tolerance for batch vs single
+                rtol=0.1,  
                 msg="UMA batch default row mismatch"
             )
     
     def test_uma_batch_multiple_params(self, test_data):
         """Test UMA batch processing with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use subset for faster test
+        close = test_data['close'][:100]  
         
         result = ta_indicators.uma_batch(
             close,
-            accelerator_range=(1.0, 2.0, 0.5),  # 3 values: 1.0, 1.5, 2.0
-            min_length_range=(5, 10, 5),  # 2 values: 5, 10
-            max_length_range=(30, 30, 0),  # 1 value: 30
-            smooth_length_range=(4, 4, 0),  # 1 value: 4
-            volume=None  # No volume
+            accelerator_range=(1.0, 2.0, 0.5),  
+            min_length_range=(5, 10, 5),  
+            max_length_range=(30, 30, 0),  
+            smooth_length_range=(4, 4, 0),  
+            volume=None  
         )
         
-        # Should have 3 * 2 * 1 * 1 = 6 combinations
+        
         assert result['rows'] == 6
         assert result['cols'] == len(close)
         
-        # Check shape of values array
+        
         values_2d = result['values']
         if values_2d.ndim == 2:
             assert values_2d.shape[0] == 6
             assert values_2d.shape[1] == len(close)
             
-            # Check that all rows have some valid values
+            
             for row in range(6):
                 row_values = values_2d[row]
                 valid_count = np.sum(~np.isnan(row_values))
                 assert valid_count > 0, f"Row {row} should have some valid values"
         else:
-            # If flat, check total size
+            
             assert len(values_2d) == 6 * len(close)
         
-        # Verify combos array
+        
         assert len(result['combos']) == 6
         for combo in result['combos']:
             assert 'accelerator' in combo
@@ -310,7 +310,7 @@ class TestUma:
     
     def test_uma_with_leading_nans(self):
         """Test UMA handles leading NaN values correctly"""
-        # Create data with 10 leading NaNs
+        
         data = np.concatenate([
             np.full(10, np.nan),
             np.arange(100, dtype=np.float64) + 100.0
@@ -327,27 +327,27 @@ class TestUma:
         
         assert len(result) == len(data)
         
-        # Should have valid values after NaNs and warmup
-        valid_count = np.sum(~np.isnan(result[70:]))  # Well after warmup
+        
+        valid_count = np.sum(~np.isnan(result[70:]))  
         assert valid_count > 0, "Should handle NaN prefix and produce valid values"
     
     def test_uma_different_parameters(self):
         """Test UMA with various parameter combinations"""
         data = np.arange(100, dtype=np.float64) + 100.0
         
-        # Test with higher accelerator
+        
         result1 = ta_indicators.uma(data, accelerator=2.0, min_length=5, max_length=50, smooth_length=4, volume=None)
         assert len(result1) == len(data)
         
-        # Test with different length range
+        
         result2 = ta_indicators.uma(data, accelerator=1.0, min_length=10, max_length=30, smooth_length=4, volume=None)
         assert len(result2) == len(data)
         
-        # Test with different smooth_length
+        
         result3 = ta_indicators.uma(data, accelerator=1.0, min_length=5, max_length=50, smooth_length=8, volume=None)
         assert len(result3) == len(data)
         
-        # Results should be different with different parameters
+        
         valid1 = result1[~np.isnan(result1)]
         valid2 = result2[~np.isnan(result2)]
         valid3 = result3[~np.isnan(result3)]
@@ -357,12 +357,12 @@ class TestUma:
     
     def test_uma_with_volume(self):
         """Test UMA with volume data"""
-        # Use data with both ups and downs to make volume effect more visible
-        np.random.seed(42)  # For reproducibility
-        data = 100.0 + np.cumsum(np.random.randn(100) * 2)  # Random walk
-        volume = 1000.0 + np.random.rand(100) * 1000.0  # Random volumes
         
-        # Test with volume
+        np.random.seed(42)  
+        data = 100.0 + np.cumsum(np.random.randn(100) * 2)  
+        volume = 1000.0 + np.random.rand(100) * 1000.0  
+        
+        
         result_with_vol = ta_indicators.uma(
             data, 
             accelerator=1.0, 
@@ -372,7 +372,7 @@ class TestUma:
             volume=volume
         )
         
-        # Test without volume
+        
         result_no_vol = ta_indicators.uma(
             data, 
             accelerator=1.0, 
@@ -385,17 +385,17 @@ class TestUma:
         assert len(result_with_vol) == len(data)
         assert len(result_no_vol) == len(data)
         
-        # Results should be different when using volume
+        
         valid_with = result_with_vol[~np.isnan(result_with_vol)]
         valid_without = result_no_vol[~np.isnan(result_no_vol)]
         
         if len(valid_with) > 0 and len(valid_without) > 0:
-            # Volume should affect the calculation when using slice data
-            # Note: With monotonically increasing price and volume data,
-            # MFI and RSI may produce very similar values
-            # We use a more relaxed tolerance for this specific test case
+            
+            
+            
+            
             diff = abs(valid_with[-1] - valid_without[-1])
-            # Just check they're not exactly identical (which would indicate volume is ignored)
+            
             assert diff > 1e-10, f"Volume should affect UMA calculation (diff={diff})"
 
 

@@ -25,7 +25,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const wasmUrl = new URL(`file:///${wasmPath.replace(/\\/g, '/')}`).href;
         wasm = await import(wasmUrl);
         

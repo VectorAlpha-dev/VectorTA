@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -32,7 +32,7 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Default mode is 3 (Camarilla)
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_)
         
         assert len(r4) == len(close)
@@ -45,7 +45,7 @@ class TestPivot:
         assert len(s3) == len(close)
         assert len(s4) == len(close)
         
-        # Spot-check Camarilla outputs for last few points
+        
         expected_r4 = [59466.5, 59357.55, 59243.6, 59334.85, 59170.35]
         assert_close(
             r4[-5:],
@@ -61,12 +61,12 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Mode 0 is Standard
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_, mode=0)
         
         assert len(r2) == len(close)
-        # In Standard mode, only r2, r1, s1, s2 are calculated
-        # r4, r3, s3, s4 should be NaN
+        
+        
         assert np.all(np.isnan(r4)), "r4 should be NaN in Standard mode"
         assert np.all(np.isnan(r3)), "r3 should be NaN in Standard mode"
         assert np.all(np.isnan(s3)), "s3 should be NaN in Standard mode"
@@ -79,11 +79,11 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Mode 1 is Fibonacci
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_, mode=1)
         
         assert len(r3) == len(close)
-        # In Fibonacci mode, r4 and s4 should be NaN
+        
         assert np.all(np.isnan(r4)), "r4 should be NaN in Fibonacci mode"
         assert np.all(np.isnan(s4)), "s4 should be NaN in Fibonacci mode"
     
@@ -94,11 +94,11 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Mode 2 is Demark
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_, mode=2)
         
         assert len(r1) == len(close)
-        # In Demark mode, only r1, s1, and pp are calculated
+        
         assert np.all(np.isnan(r4)), "r4 should be NaN in Demark mode"
         assert np.all(np.isnan(r3)), "r3 should be NaN in Demark mode"
         assert np.all(np.isnan(r2)), "r2 should be NaN in Demark mode"
@@ -113,11 +113,11 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Mode 4 is Woodie
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_, mode=4)
         
         assert len(r4) == len(close)
-        # In Woodie mode, all levels are calculated
+        
     
     def test_pivot_nan_values(self):
         """Test Pivot with NaN values - mirrors check_pivot_nan_values"""
@@ -129,7 +129,7 @@ class TestPivot:
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(high, low, close, open_, mode=3)
         assert len(pp) == len(high)
         
-        # Values should be NaN where any input is NaN
+        
         assert np.isnan(pp[1]), "PP should be NaN when high is NaN"
         assert np.isnan(pp[2]), "PP should be NaN when low is NaN"
     
@@ -156,7 +156,7 @@ class TestPivot:
     def test_pivot_mismatched_lengths(self):
         """Test Pivot with mismatched input lengths"""
         high = np.array([10.0, 20.0])
-        low = np.array([9.0, 18.0, 25.0])  # Different length
+        low = np.array([9.0, 18.0, 25.0])  
         close = np.array([9.5, 19.0])
         open_ = np.array([9.2, 18.5])
         
@@ -170,22 +170,22 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Batch calculation for comparison
+        
         r4_batch, r3_batch, r2_batch, r1_batch, pp_batch, s1_batch, s2_batch, s3_batch, s4_batch = \
             ta_indicators.pivot(high, low, close, open_, mode=3)
         
-        # Streaming calculation
+        
         stream = ta_indicators.PivotStream(mode=3)
         
-        # Get the last non-NaN index for comparison
+        
         last_idx = -1
         
-        # Get last values from streaming
+        
         r4_s, r3_s, r2_s, r1_s, pp_s, s1_s, s2_s, s3_s, s4_s = stream.update(
             high[last_idx], low[last_idx], close[last_idx], open_[last_idx]
         )
         
-        # Compare last values (allowing for single-point calculation differences)
+        
         assert_close(r4_s, r4_batch[last_idx], rtol=1e-5, msg="Streaming r4 mismatch")
         assert_close(r3_s, r3_batch[last_idx], rtol=1e-5, msg="Streaming r3 mismatch")
         assert_close(r2_s, r2_batch[last_idx], rtol=1e-5, msg="Streaming r2 mismatch")
@@ -203,13 +203,13 @@ class TestPivot:
         close = test_data['close']
         open_ = test_data['open']
         
-        # Test batch with all 5 modes
+        
         result = ta_indicators.pivot_batch(
             high, low, close, open_,
-            mode_range=(0, 4, 1)  # All modes: 0, 1, 2, 3, 4
+            mode_range=(0, 4, 1)  
         )
         
-        # Check that all 9 level arrays are present
+        
         levels = ['r4', 'r3', 'r2', 'r1', 'pp', 's1', 's2', 's3', 's4']
         for level in levels:
             assert level in result, f"Missing {level} in result"
@@ -218,30 +218,30 @@ class TestPivot:
         assert 'rows_per_level' in result
         assert 'cols' in result
         
-        assert result['rows_per_level'] == 5  # 5 modes
+        assert result['rows_per_level'] == 5  
         assert result['cols'] == len(close)
         
-        # Each level should be shaped (5, len(close))
+        
         for level in levels:
             assert result[level].shape == (5, len(close)), f"{level} has wrong shape"
         
-        # Test single mode batch
+        
         single_result = ta_indicators.pivot_batch(
             high, low, close, open_,
-            mode_range=(3, 3, 1)  # Only Camarilla mode
+            mode_range=(3, 3, 1)  
         )
         
         assert single_result['rows_per_level'] == 1
         
-        # Extract and verify Camarilla values match single calculation
+        
         r4_single, r3_single, r2_single, r1_single, pp_single, s1_single, s2_single, s3_single, s4_single = \
             ta_indicators.pivot(high, low, close, open_, mode=3)
         
-        # Extract first row from batch (each level is a separate array)
+        
         batch_r4 = single_result['r4'][0]
         batch_pp = single_result['pp'][0]
         
-        # Check a few values
+        
         for i in range(min(10, len(close))):
             assert_close(batch_r4[i], r4_single[i], rtol=1e-10, 
                         msg=f"Batch r4[{i}] mismatch")
@@ -250,12 +250,12 @@ class TestPivot:
     
     def test_pivot_kernel_param(self, test_data):
         """Test Pivot with kernel parameter"""
-        high = test_data['high'][:100]  # Use smaller dataset
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         open_ = test_data['open'][:100]
         
-        # Test with different kernels
+        
         for kernel in ['scalar', 'auto']:
             r4, r3, r2, r1, pp, s1, s2, s3, s4 = ta_indicators.pivot(
                 high, low, close, open_, mode=3, kernel=kernel

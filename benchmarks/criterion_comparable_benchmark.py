@@ -15,11 +15,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Callable, Any
 import subprocess
 
-# Add parent directory to path
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import my_project
 
-# Disable multi-threading for consistent results
+
 os.environ['OMP_NUM_THREADS'] = '1'
 os.environ['MKL_NUM_THREADS'] = '1'
 os.environ['NUMEXPR_NUM_THREADS'] = '1'
@@ -34,22 +34,22 @@ class CriterionComparableBenchmark:
         self.rust_results = {}
         self.python_results = {}
         
-        # Benchmark parameters matching Criterion
-        self.warmup_target_ns = 150_000_000  # 150ms in nanoseconds
-        self.sample_count = 10  # Number of samples to take
-        self.min_iterations = 10  # Minimum iterations per sample
+        
+        self.warmup_target_ns = 150_000_000  
+        self.sample_count = 10  
+        self.min_iterations = 10  
         
     def load_csv_data(self) -> Dict[str, np.ndarray]:
         """Load CSV data once, outside of timing loops."""
         csv_path = Path(__file__).parent.parent / 'src/data/1MillionCandles.csv'
         
-        # Pre-allocate arrays for better performance
+        
         with open(csv_path, 'r') as f:
-            f.readline()  # Skip header
-            # Count lines first
+            f.readline()  
+            
             line_count = sum(1 for _ in f)
         
-        # Allocate arrays
+        
         timestamps = np.empty(line_count, dtype=np.int64)
         opens = np.empty(line_count, dtype=np.float64)
         highs = np.empty(line_count, dtype=np.float64)
@@ -57,9 +57,9 @@ class CriterionComparableBenchmark:
         closes = np.empty(line_count, dtype=np.float64)
         volumes = np.empty(line_count, dtype=np.float64)
         
-        # Load data
+        
         with open(csv_path, 'r') as f:
-            f.readline()  # Skip header
+            f.readline()  
             import csv
             reader = csv.reader(f)
             valid_count = 0
@@ -76,7 +76,7 @@ class CriterionComparableBenchmark:
                     except ValueError:
                         continue
         
-        # Trim to actual size and ensure C-contiguous
+        
         data = {
             'timestamps': np.ascontiguousarray(timestamps[:valid_count]),
             'open': np.ascontiguousarray(opens[:valid_count]),
@@ -99,7 +99,7 @@ class CriterionComparableBenchmark:
         print("\nParsing Criterion JSON results...")
         print("-" * 80)
         
-        # Map of indicator names to their benchmark paths
+        
         indicators_to_find = [
             'alma', 'alligator', 'alphatrend', 'aroonosc', 'avsl', 'bollinger_bands', 'ao', 'dma', 'range_filter', 'sama', 'buff_averages', 'vpwma', 'volume_adjusted_ma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'dpo', 'er', 'edcf', 'ehlers_ecema', 'ehlers_itrend', 'ehlers_kama', 'ema', 'epma', 'eri',
@@ -109,13 +109,13 @@ class CriterionComparableBenchmark:
             'supersmoother_3_pole', 'supersmoother', 'supertrend', 'ultosc', 'swma', 'tema', 'tilson', 'tradjema',
             'trendflex', 'ttm_trend', 'trima', 'uma', 'vidya', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
             'cg', 'cfo', 'chandelier_exit', 'coppock', 'correl_hl', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'dm', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi',
-            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama', 'squeeze_momentum'  # Added missing indicators
+            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama', 'squeeze_momentum'  
         ]
         
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
         target_size = size_map.get(self.data_size, '1m')
         
-        # Also add batch indicators to find
+        
         batch_indicators = ['alma_batch', 'aroonosc_batch', 'avsl_batch', 'bollinger_bands_batch', 'ao_batch', 'ad_batch', 'dma_batch', 'range_filter_batch', 'sama_batch', 'buff_averages_batch', 'volume_adjusted_ma_batch', 'vpwma_batch', 'vwmacd_batch', 'wilders_batch', 'vwap_batch', 'willr_batch', 'voss_batch', 'wma_batch', 'zlema_batch', 
                            'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'deviation_batch', 'dti_batch', 'dm_batch', 'edcf_batch', 'ehlers_ecema_batch', 'ehlers_itrend_batch', 'ehlers_pma_batch', 'eri_batch', 'tema_batch', 'uma_batch', 'chandelier_exit_batch', 'percentile_nearest_rank_batch', 
                            'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'rocp_batch', 'stochf_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'acosc_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
@@ -128,11 +128,11 @@ class CriterionComparableBenchmark:
             if self.filter_indicator and not indicator.startswith(self.filter_indicator):
                 continue
                 
-            # Try to find the best kernel result
+            
             best_time = float('inf')
             best_kernel = None
             
-            # Try different directory name patterns
+            
             possible_dirs = [indicator, f"{indicator}_bench"]
             
             for dir_name in possible_dirs:
@@ -140,7 +140,7 @@ class CriterionComparableBenchmark:
                 if not dir_path.exists():
                     continue
                     
-                # Check each kernel variant (for batch operations, check batch kernels)
+                
                 if indicator.endswith('_batch'):
                     kernels_to_check = ['avx512batch', 'avx2batch', 'scalarbatch', '']
                 else:
@@ -148,15 +148,15 @@ class CriterionComparableBenchmark:
                     
                 for kernel in kernels_to_check:
                     if kernel:
-                        # The directory structure is: indicator/indicator_kernel/size/new/estimates.json
+                        
                         bench_name = f"{indicator}_{kernel}"
                         json_path = dir_path / bench_name / target_size / 'new' / 'estimates.json'
                     else:
-                        # For indicators without kernel suffix, check if they have a direct structure
-                        # Some indicators might be in: indicator/scalar/size/new/estimates.json
+                        
+                        
                         json_path = dir_path / 'scalar' / target_size / 'new' / 'estimates.json'
                         if not json_path.exists():
-                            # Try the base path without kernel subdirectory
+                            
                             json_path = dir_path / target_size / 'new' / 'estimates.json'
                     
                     if json_path.exists():
@@ -181,12 +181,12 @@ class CriterionComparableBenchmark:
         Benchmark a function using Criterion-like methodology.
         Returns median time in milliseconds.
         """
-        # Disable garbage collection during measurement
+        
         gc_was_enabled = gc.isenabled()
         gc.disable()
         
         try:
-            # Warmup phase - run until we've accumulated at least 150ms
+            
             warmup_elapsed = 0
             warmup_iterations = 0
             
@@ -197,11 +197,11 @@ class CriterionComparableBenchmark:
                 warmup_elapsed += (end - start)
                 warmup_iterations += 1
             
-            # Sampling phase - take multiple samples
+            
             samples = []
             
             for _ in range(self.sample_count):
-                # Each sample measures multiple iterations
+                
                 iterations = max(self.min_iterations, warmup_iterations // 10)
                 
                 start = time.perf_counter_ns()
@@ -209,16 +209,16 @@ class CriterionComparableBenchmark:
                     func()
                 end = time.perf_counter_ns()
                 
-                # Calculate time per iteration
+                
                 time_per_iter = (end - start) / iterations
                 samples.append(time_per_iter)
             
-            # Return median (like Criterion does)
+            
             median_ns = np.median(samples)
-            return median_ns / 1_000_000  # Convert to ms
+            return median_ns / 1_000_000  
             
         finally:
-            # Re-enable GC if it was enabled
+            
             if gc_was_enabled:
                 gc.enable()
     
@@ -229,13 +229,13 @@ class CriterionComparableBenchmark:
         
         data = self.load_csv_data()
         
-        # Pre-allocate output buffers for each indicator
+        
         output_buffers = {
             'single': np.empty_like(data['close']),
-            'multi': np.empty((4, len(data['close'])), dtype=np.float64),  # For indicators with multiple outputs
+            'multi': np.empty((4, len(data['close'])), dtype=np.float64),  
         }
         
-        # Define indicators with their functions
+        
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
             ('avsl', lambda: my_project.avsl(data['close'], 14, 10.0)),
@@ -432,12 +432,12 @@ class CriterionComparableBenchmark:
             ('vama', lambda: my_project.vama(data['close'], 9, 2.0)),
         ]
         
-        # Filter if requested
+        
         if self.filter_indicator:
             indicators = [(name, func) for name, func in indicators 
                          if name.startswith(self.filter_indicator)]
         
-        # Run benchmarks
+        
         for name, func in indicators:
             try:
                 median_time = self.benchmark_function(func, name)
@@ -446,7 +446,7 @@ class CriterionComparableBenchmark:
             except Exception as e:
                 print(f"  {name}: FAILED - {str(e)[:50]}...")
         
-        # Also run batch operations
+        
         print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
             ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 240, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
@@ -600,7 +600,7 @@ class CriterionComparableBenchmark:
             ('pvi_batch', lambda: my_project.pvi_batch(data['close'], data['volume'], (1000.0, 1000.0, 0.0))),
         ]
         
-        # Filter batch tests if indicator filter is active
+        
         if self.filter_indicator:
             batch_indicators = [(name, func) for name, func in batch_indicators 
                                if name.startswith(self.filter_indicator)]
@@ -631,7 +631,7 @@ class CriterionComparableBenchmark:
                 overhead_ms = python_time - rust_time
                 overhead_pct = (python_time / rust_time - 1) * 100
                 
-                # Status based on overhead percentage
+                
                 if overhead_pct <= 15:
                     status = "EXCELLENT"
                 elif overhead_pct <= 30:
@@ -654,7 +654,7 @@ class CriterionComparableBenchmark:
             else:
                 print(f"{indicator:25} {python_time:12.2f} {'N/A':>12} {'N/A':>12}")
         
-        # Summary statistics
+        
         if comparisons:
             avg_overhead = np.mean([c['overhead_pct'] for c in comparisons])
             median_overhead = np.median([c['overhead_pct'] for c in comparisons])
@@ -662,7 +662,7 @@ class CriterionComparableBenchmark:
             print(f"Average overhead: {avg_overhead:.1f}%")
             print(f"Median overhead: {median_overhead:.1f}%")
         
-        # Batch vs Single analysis
+        
         print("\n\n" + "=" * 80)
         print("BATCH vs SINGLE ANALYSIS")
         print("=" * 80)
@@ -694,7 +694,7 @@ class CriterionComparableBenchmark:
                     'overhead_pct': overhead_pct
                 })
         
-        # Save results
+        
         results = {
             'methodology': 'criterion-comparable',
             'warmup_ms': self.warmup_target_ns / 1_000_000,
@@ -740,13 +740,13 @@ def main():
         filter_indicator=args.filter
     )
     
-    # Parse Criterion results
+    
     benchmark.parse_criterion_json()
     
-    # Run Python benchmarks
+    
     benchmark.run_python_benchmarks()
     
-    # Compare results
+    
     benchmark.compare_results()
 
 

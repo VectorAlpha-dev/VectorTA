@@ -26,7 +26,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
@@ -125,21 +125,21 @@ test('DEC_OSC empty input', () => {
 
 test('DEC_OSC invalid k', () => {
     
-    const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
+    const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
     
     
     assert.throws(() => {
-        wasm.dec_osc_js(data, 2, 0.0);
+        wasm.dec_osc_js(data, 3, 0.0);
     }, /Invalid K/);
     
     
     assert.throws(() => {
-        wasm.dec_osc_js(data, 2, -1.0);
+        wasm.dec_osc_js(data, 3, -1.0);
     }, /Invalid K/);
     
     
     assert.throws(() => {
-        wasm.dec_osc_js(data, 2, NaN);
+        wasm.dec_osc_js(data, 3, NaN);
     }, /Invalid K/);
 });
 

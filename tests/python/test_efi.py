@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestEfi:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with default period (13)
+        
         result = ta_indicators.efi(close, volume, 13)
         assert len(result) == len(close)
     
@@ -42,13 +42,13 @@ class TestEfi:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         expected_last_five = [
             -44604.382026531224,
             -39811.02321812391,
             -36599.9671820205,
             -29903.28014503471,
-            -55406.382981  # Updated to match actual calculation
+            -55406.382981  
         ]
         
         assert_close(
@@ -82,15 +82,15 @@ class TestEfi:
         result = ta_indicators.efi(close, volume, 13)
         assert len(result) == len(close)
         
-        # First value should be NaN (need at least 2 values for difference)
+        
         assert np.isnan(result[0])
         
-        # After sufficient data, no NaN values should exist
-        # Check that we have non-NaN values after warmup
+        
+        
         non_nan_start = next((i for i, v in enumerate(result) if not np.isnan(v)), None)
         assert non_nan_start is not None, "All values are NaN"
         
-        # After index 50, no NaN values should exist
+        
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found NaN values after warmup period"
     
@@ -100,10 +100,10 @@ class TestEfi:
         volume = test_data['volume']
         period = 13
         
-        # Batch calculation
+        
         batch_result = ta_indicators.efi(close, volume, period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.EfiStream(period)
         stream_result = []
         
@@ -113,7 +113,7 @@ class TestEfi:
         
         assert len(batch_result) == len(stream_result)
         
-        # Compare results (allowing for floating point differences)
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -121,10 +121,10 @@ class TestEfi:
     
     def test_efi_batch_single_parameter(self, test_data):
         """Test batch calculation with single parameter set"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Single period
+        
         result = ta_indicators.efi_batch(
             close,
             volume,
@@ -134,21 +134,21 @@ class TestEfi:
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 row x 100 cols
+        
         assert result['values'].shape == (1, 100)
         assert len(result['periods']) == 1
         assert result['periods'][0] == 13
         
-        # Should match single calculation
+        
         single_result = ta_indicators.efi(close, volume, 13)
         assert_close(result['values'][0], single_result, rtol=1e-10)
     
     def test_efi_batch_multiple_periods(self, test_data):
         """Test batch calculation with multiple periods"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         volume = test_data['volume'][:100]
         
-        # Multiple periods: 10, 15, 20
+        
         result = ta_indicators.efi_batch(
             close,
             volume,
@@ -159,7 +159,7 @@ class TestEfi:
         assert len(result['periods']) == 3
         assert list(result['periods']) == [10, 15, 20]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate([10, 15, 20]):
             single_result = ta_indicators.efi(close, volume, period)
             assert_close(
@@ -179,7 +179,7 @@ class TestEfi:
     def test_efi_mismatched_lengths(self):
         """Test EFI with mismatched price and volume lengths"""
         price = np.array([1.0, 2.0, 3.0])
-        volume = np.array([100.0, 200.0])  # Different length
+        volume = np.array([100.0, 200.0])  
         
         with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.efi(price, volume, 2)
@@ -196,13 +196,13 @@ class TestEfi:
         close = test_data['close'][:1000]
         volume = test_data['volume'][:1000]
         
-        # Test with different kernels
+        
         result_auto = ta_indicators.efi(close, volume, 13)
         result_scalar = ta_indicators.efi(close, volume, 13, kernel="scalar")
         
-        # Results should be very close (within floating point precision)
+        
         assert_close(result_auto, result_scalar, rtol=1e-10)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError):
             ta_indicators.efi(close, volume, 13, kernel="invalid_kernel")

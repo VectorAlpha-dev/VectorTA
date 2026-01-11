@@ -26,7 +26,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32' 
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
@@ -206,10 +206,13 @@ test('HighPass leading NaN input', () => {
     const result = wasm.highpass_js(close, 48);
     assert.strictEqual(result.length, close.length);
     
-    
-    
-    for (let i = 0; i < result.length; i++) {
-        assert(isNaN(result[i]), `Expected NaN at index ${i} due to IIR filter NaN propagation`);
+    // HighPass starts from the first non-NaN sample, keeping the leading prefix as NaN.
+    // After the first valid sample, the output should be finite for a fully-finite suffix.
+    for (let i = 0; i < 5; i++) {
+        assert(isNaN(result[i]), `Expected NaN at index ${i} for leading-NaN prefix`);
+    }
+    for (let i = 5; i < result.length; i++) {
+        assert(!isNaN(result[i]), `Unexpected NaN at index ${i} after first valid sample`);
     }
 });
 

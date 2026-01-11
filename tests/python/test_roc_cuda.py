@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -25,7 +25,7 @@ def _cuda_available() -> bool:
         return False
     try:
         x = np.arange(0, 128, dtype=np.float32)
-        x[:10] = np.nan  # warmup
+        x[:10] = np.nan  
         handle = ti.roc_cuda_batch_dev(x, (10, 10, 0))
         _ = cp.asarray(handle)
         return True
@@ -46,7 +46,7 @@ class TestRocCuda:
         handle = ti.roc_cuda_batch_dev(close.astype(np.float32), (period, period, 0))
         gpu_row = cp.asnumpy(cp.asarray(handle))[0]
 
-        # Mixed tolerance: absolute + relative
+        
         assert_close(gpu_row, cpu, rtol=1e-3, atol=5e-4, msg="ROC CUDA batch vs CPU mismatch")
 
     def test_roc_cuda_many_series_one_param_matches_cpu(self):

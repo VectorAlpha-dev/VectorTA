@@ -35,7 +35,7 @@ class TestDTI:
         
         assert isinstance(result, np.ndarray)
         assert len(result) == len(high)
-        # DTI should be bounded between -100 and 100
+        
         valid_values = result[~np.isnan(result)]
         assert np.all(valid_values >= -100.0)
         assert np.all(valid_values <= 100.0)
@@ -61,7 +61,7 @@ class TestDTI:
         ], dtype=np.float64)
 
         last5 = result[-5:]
-        # Match Rust tolerance: <= 1e-6 (no looser tolerance allowed)
+        
         np.testing.assert_allclose(last5, expected_last_five, rtol=0.0, atol=1e-6)
         
     def test_dti_warmup_period(self):
@@ -71,10 +71,10 @@ class TestDTI:
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # DTI needs at least 2 values (first valid index + 1)
-        # First value is always NaN
+        
+        
         assert np.isnan(result[0])
-        # Should have values after warmup
+        
         assert not np.all(np.isnan(result[2:]))
         
     def test_dti_parameter_validation(self):
@@ -82,7 +82,7 @@ class TestDTI:
         high = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
         low = np.array([9.0, 10.0, 11.0, 12.0, 13.0])
         
-        # Test zero period
+        
         with pytest.raises(Exception):
             ta.dti(high, low, r=0, s=10, u=5)
             
@@ -92,7 +92,7 @@ class TestDTI:
         with pytest.raises(Exception):
             ta.dti(high, low, r=14, s=10, u=0)
             
-        # Test period exceeding data length
+        
         with pytest.raises(Exception):
             ta.dti(high, low, r=10, s=5, u=3)
             
@@ -128,16 +128,16 @@ class TestDTI:
         result = ta.dti(high, low, r=3, s=2, u=2)
         
         assert len(result) == len(high)
-        # DTI starts from first valid index, intermediate NaNs are skipped
-        assert np.isnan(result[0])  # First value is NaN (warmup)
-        assert not np.isnan(result[2])  # DTI continues through intermediate NaN
+        
+        assert np.isnan(result[0])  
+        assert not np.isnan(result[2])  
         
     def test_dti_different_parameters(self):
         """Test DTI with various parameter combinations"""
         high = np.random.randn(100) + 100
         low = high - np.abs(np.random.randn(100))
         
-        # Test different r, s, u combinations
+        
         params = [
             (5, 3, 2),
             (10, 5, 3),
@@ -162,10 +162,10 @@ class TestDTI:
             u_range=(5, 5, 0)
         )
         
-        # Validate batch output shape
+        
         assert result['values'].shape == (1, len(high))
         
-        # Should match single calculation
+        
         single_result = ta.dti(high, low, r=14, s=10, u=5)
         np.testing.assert_array_almost_equal(
             result['values'][0], single_result, decimal=10
@@ -178,16 +178,16 @@ class TestDTI:
         
         result = ta.dti_batch(
             high, low,
-            r_range=(10, 20, 5),    # 10, 15, 20
-            s_range=(8, 12, 2),     # 8, 10, 12
-            u_range=(4, 6, 1)       # 4, 5, 6
+            r_range=(10, 20, 5),    
+            s_range=(8, 12, 2),     
+            u_range=(4, 6, 1)       
         )
         
-        # Should have 3 * 3 * 3 = 27 combinations
-        # Validate batch output shape
+        
+        
         assert result['values'].shape == (27, len(high))
         
-        # Check parameter arrays
+        
         assert 'r' in result
         assert 's' in result
         assert 'u' in result
@@ -200,10 +200,10 @@ class TestDTI:
         high = np.random.randn(100) + 100
         low = high - np.abs(np.random.randn(100))
         
-        # Create stream
+        
         stream = ta.DtiStream(r=14, s=10, u=5)
         
-        # Process values one by one
+        
         stream_results = []
         for h, l in zip(high, low):
             result = stream.update(h, l)
@@ -211,10 +211,10 @@ class TestDTI:
             
         stream_results = np.array(stream_results)
         
-        # Compare with batch calculation
+        
         batch_result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # Check streaming consistency with batch
+        
         assert_close(stream_results[-50:], batch_result[-50:], rtol=1e-10)
         
     def test_dti_kernel_parameter(self):
@@ -222,7 +222,7 @@ class TestDTI:
         high = np.random.randn(1000) + 100
         low = high - np.abs(np.random.randn(1000))
         
-        # Test with different kernels
+        
         kernels = [None, 'scalar', 'avx2', 'avx512']
         
         results = []
@@ -234,10 +234,10 @@ class TestDTI:
                     result = ta.dti(high, low, r=14, s=10, u=5)
                 results.append(result)
             except:
-                # Some kernels might not be available
+                
                 pass
                 
-        # All available kernels should produce same results
+        
         if len(results) > 1:
             for i in range(1, len(results)):
                 np.testing.assert_array_almost_equal(
@@ -246,47 +246,47 @@ class TestDTI:
                 
     def test_dti_trend_detection(self):
         """Test DTI's ability to detect trends"""
-        # Create uptrend data
+        
         time = np.arange(100)
         high = 100 + time * 0.5 + np.random.randn(100) * 0.1
         low = high - 1 - np.random.randn(100) * 0.1
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # In uptrend, DTI should be mostly positive
+        
         valid_values = result[~np.isnan(result)]
         assert np.mean(valid_values[20:]) > 0
         
-        # Create downtrend data
+        
         high = 100 - time * 0.5 + np.random.randn(100) * 0.1
         low = high - 1 - np.random.randn(100) * 0.1
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # In downtrend, DTI should be mostly negative
+        
         valid_values = result[~np.isnan(result)]
         assert np.mean(valid_values[20:]) < 0
         
     def test_dti_edge_values(self):
         """Test DTI with edge case values"""
-        # Test with constant values
+        
         high = np.full(50, 100.0)
         low = np.full(50, 99.0)
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # With constant values, DTI should converge to 0
+        
         valid_values = result[~np.isnan(result)]
         assert np.all(np.abs(valid_values[20:]) < 1e-10)
         
-        # Test with single spike
+        
         high = np.full(50, 100.0)
         low = np.full(50, 99.0)
-        high[25] = 110.0  # Single spike
+        high[25] = 110.0  
         
         result = ta.dti(high, low, r=14, s=10, u=5)
         
-        # Should react to spike and then decay back
+        
         assert len(result) == len(high)
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,8 +31,8 @@ class TestKvo:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with defaults (short_period=2, long_period=5)
-        result = ta_indicators.kvo(high, low, close, volume)  # Using defaults
+        
+        result = ta_indicators.kvo(high, low, close, volume)  
         assert len(result) == len(close)
     
     def test_kvo_accuracy(self, test_data):
@@ -42,12 +42,12 @@ class TestKvo:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Using default parameters: short_period=2, long_period=5
+        
         result = ta_indicators.kvo(high, low, close, volume, short_period=2, long_period=5)
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected from Rust tests
+        
         expected_last_five = [
             -246.42698280402647,
             530.8651474164992,
@@ -59,7 +59,7 @@ class TestKvo:
         assert_close(
             result[-5:], 
             expected_last_five,
-            rtol=1e-1,  # KVO uses less precision in tests
+            rtol=1e-1,  
             msg="KVO last 5 values mismatch"
         )
     
@@ -70,7 +70,7 @@ class TestKvo:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Default params: short_period=2, long_period=5
+        
         result = ta_indicators.kvo(high, low, close, volume)
         assert len(result) == len(close)
     
@@ -119,7 +119,7 @@ class TestKvo:
         result = ta_indicators.kvo(high, low, close, volume)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             non_nan_count = np.count_nonzero(~np.isnan(result[240:]))
             assert non_nan_count == len(result) - 240, "Found unexpected NaN values after warmup"
@@ -131,23 +131,23 @@ class TestKvo:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Create streaming instance with explicit params for clarity
+        
         stream = ta_indicators.KvoStream(short_period=2, long_period=5)
         
-        # Process each point
+        
         stream_results = []
         for i in range(len(close)):
             result = stream.update(high[i], low[i], close[i], volume[i])
             stream_results.append(result if result is not None else np.nan)
         
-        # Compare with batch calculation
+        
         batch_results = ta_indicators.kvo(high, low, close, volume, short_period=2, long_period=5)
         
-        # Verify first value is NaN for streaming (warmup period)
+        
         assert np.isnan(stream_results[0]), "First streaming value should be NaN during warmup"
         
-        # The streaming results should match batch results after warmup
-        # Both should have NaN at the same positions
+        
+        
         for i in range(len(stream_results)):
             if np.isnan(batch_results[i]):
                 assert np.isnan(stream_results[i]), f"Expected NaN at index {i} in streaming"
@@ -161,12 +161,12 @@ class TestKvo:
     
     def test_kvo_batch(self, test_data):
         """Test KVO batch functionality"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Test batch with single parameter set - using consistent naming
+        
         result = ta_indicators.kvo_batch(
             high, low, close, volume,
             short_range=(2, 2, 0),
@@ -174,10 +174,10 @@ class TestKvo:
         )
         
         assert 'values' in result
-        assert 'shorts' in result  # Updated from Python binding
-        assert 'longs' in result   # Updated from Python binding
+        assert 'shorts' in result  
+        assert 'longs' in result   
         
-        # Should match single calculation
+        
         single_result = ta_indicators.kvo(high, low, close, volume, short_period=2, long_period=5)
         batch_values = result['values'].flatten()
         
@@ -186,24 +186,24 @@ class TestKvo:
     
     def test_kvo_batch_multiple_params(self, test_data):
         """Test KVO batch with multiple parameter combinations"""
-        high = test_data['high'][:50]  # Use smaller dataset for speed
+        high = test_data['high'][:50]  
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         volume = test_data['volume'][:50]
         
-        # Multiple parameter combinations - using consistent naming
+        
         result = ta_indicators.kvo_batch(
             high, low, close, volume,
-            short_range=(2, 3, 1),    # 2, 3
-            long_range=(5, 6, 1)      # 5, 6
+            short_range=(2, 3, 1),    
+            long_range=(5, 6, 1)      
         )
         
-        # Should have 2 * 2 = 4 combinations
-        assert result['values'].shape == (4, 50)
-        assert len(result['shorts']) == 4  # Updated from Python binding
-        assert len(result['longs']) == 4   # Updated from Python binding
         
-        # Check first combination matches single calculation
+        assert result['values'].shape == (4, 50)
+        assert len(result['shorts']) == 4  
+        assert len(result['longs']) == 4   
+        
+        
         first_row = result['values'][0, :]
         single_result = ta_indicators.kvo(high, low, close, volume, short_period=2, long_period=5)
         
@@ -224,15 +224,15 @@ class TestKvo:
         close = test_data['close']
         volume = test_data['volume']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.kvo(high, low, close, volume, kernel='scalar')
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.kvo(high, low, close, volume)
         assert len(result_auto) == len(close)
         
-        # Results should be very close (within floating point precision)
+        
         assert_close(result_scalar, result_auto, rtol=1e-14,
                     msg="Scalar vs auto kernel results differ")
     
@@ -243,22 +243,22 @@ class TestKvo:
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
         
-        # Test with clean data (no NaN)
+        
         result = ta_indicators.kvo(high, low, close, volume, short_period=2, long_period=5)
         
-        # First value (index 0) should be NaN (before first_valid_idx + 1)
+        
         assert np.isnan(result[0]), "First value should be NaN during warmup"
         
-        # Second value (index 1) should be valid (at first_valid_idx + 1)
+        
         assert not np.isnan(result[1]), "Second value should be valid after warmup"
         
-        # Test with NaN at beginning
+        
         high_nan = high.copy()
         low_nan = low.copy()
         close_nan = close.copy()
         volume_nan = volume.copy()
         
-        # Insert NaN values at indices 0-4
+        
         for i in range(5):
             high_nan[i] = np.nan
             low_nan[i] = np.nan
@@ -268,23 +268,23 @@ class TestKvo:
         result_nan = ta_indicators.kvo(high_nan, low_nan, close_nan, volume_nan, 
                                        short_period=2, long_period=5)
         
-        # Warmup should be first_valid_idx (5) + 1 = 6
+        
         for i in range(6):
             assert np.isnan(result_nan[i]), f"Expected NaN at index {i} during warmup with NaN input"
         
-        # Values should be valid after warmup
+        
         assert not np.isnan(result_nan[6]), "Expected valid value at index 6 after warmup"
     
     def test_kvo_batch_edge_cases(self):
         """Test KVO batch with edge cases"""
-        # Create small test dataset
+        
         test_size = 20
         high = np.random.randn(test_size) + 100
         low = high - np.abs(np.random.randn(test_size))
         close = (high + low) / 2 + np.random.randn(test_size) * 0.1
         volume = np.abs(np.random.randn(test_size)) * 1000
         
-        # Test 1: Single combination (step = 0)
+        
         result = ta_indicators.kvo_batch(
             high, low, close, volume,
             short_range=(2, 2, 0),
@@ -295,29 +295,29 @@ class TestKvo:
         assert result['shorts'][0] == 2
         assert result['longs'][0] == 5
         
-        # Test 2: Step larger than range
+        
         result = ta_indicators.kvo_batch(
             high, low, close, volume,
-            short_range=(2, 3, 10),  # Step > range
+            short_range=(2, 3, 10),  
             long_range=(5, 6, 10)
         )
-        # Should only have the start values
+        
         assert result['values'].shape == (1, test_size)
         assert result['shorts'][0] == 2
         assert result['longs'][0] == 5
         
-        # Test 3: Multiple combinations with metadata check
+        
         result = ta_indicators.kvo_batch(
             high, low, close, volume,
-            short_range=(2, 4, 1),  # 2, 3, 4
-            long_range=(5, 7, 2)     # 5, 7 (note: 6 skipped due to step=2)
+            short_range=(2, 4, 1),  
+            long_range=(5, 7, 2)     
         )
-        # Should have 3 * 2 = 6 combinations
+        
         assert result['values'].shape == (6, test_size)
         assert len(result['shorts']) == 6
         assert len(result['longs']) == 6
         
-        # Verify parameter combinations
+        
         expected_shorts = [2, 2, 3, 3, 4, 4]
         expected_longs = [5, 7, 5, 7, 5, 7]
         np.testing.assert_array_equal(result['shorts'], expected_shorts)

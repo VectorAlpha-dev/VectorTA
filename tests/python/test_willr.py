@@ -8,7 +8,7 @@ the same results as the Rust implementation.
 import pytest
 import numpy as np
 from typing import Dict, List, Tuple
-import my_project as ta  # Import the actual module name
+import my_project as ta  
 
 from test_utils import (
     load_test_data,
@@ -33,11 +33,11 @@ class TestWillr:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default period (14)
+        
         result = ta.willr(high, low, close, 14)
         
         assert len(result) == len(close)
-        assert np.isnan(result[0])  # First values should be NaN due to warmup
+        assert np.isnan(result[0])  
     
     def test_willr_accuracy(self, test_data):
         """Test WILLR calculation accuracy against expected values."""
@@ -47,7 +47,7 @@ class TestWillr:
         
         result = ta.willr(high, low, close, 14)
         
-        # Expected last 5 values from Rust tests
+        
         expected_last_five = [
             -58.72876391329818,
             -61.77504393673111,
@@ -68,13 +68,13 @@ class TestWillr:
         result = ta.willr(high, low, close, 2)
         assert len(result) == 4
         
-        # First value should be NaN (warmup)
+        
         assert np.isnan(result[0])
         
-        # Check calculated values
-        # For period=2: %R = (HH - Close) / (HH - LL) * -100
-        # At index 1: HH=2.0, LL=0.5, Close=1.75
-        # %R = (2.0 - 1.75) / (2.0 - 0.5) * -100 = 0.25 / 1.5 * -100 = -16.67
+        
+        
+        
+        
         assert abs(result[1] - (-16.666666666666668)) < 1e-8
     
     def test_willr_zero_period(self, test_data):
@@ -106,7 +106,7 @@ class TestWillr:
     
     def test_willr_not_enough_valid_data(self):
         """Test WILLR fails with not enough valid data (period <= len but insufficient valid span)."""
-        # len = 3, period = 3, first_valid = 2 -> valid span = 1 < 3
+        
         high = np.array([np.nan, np.nan, 2.0])
         low = np.array([np.nan, np.nan, 1.0])
         close = np.array([np.nan, np.nan, 1.5])
@@ -117,10 +117,10 @@ class TestWillr:
     def test_willr_mismatched_lengths(self):
         """Test WILLR fails with mismatched input lengths."""
         high = np.array([1.0, 2.0, 3.0])
-        low = np.array([0.5, 1.5])  # Different length
+        low = np.array([0.5, 1.5])  
         close = np.array([1.0, 2.0, 3.0])
         
-        # The error might come from numpy broadcasting or from the Rust side
+        
         with pytest.raises((ValueError, RuntimeError)):
             ta.willr(high, low, close, 2)
     
@@ -128,7 +128,7 @@ class TestWillr:
         """Test WILLR streaming functionality."""
         stream = ta.WillrStream(14)
         
-        # Add values one by one
+        
         values = [
             (10.0, 8.0, 9.0),
             (11.0, 8.5, 10.0),
@@ -152,35 +152,35 @@ class TestWillr:
             result = stream.update(high, low, close)
             results.append(result)
         
-        # First 13 values should be None (warmup period)
+        
         assert all(r is None for r in results[:13])
         
-        # After warmup, should get values
+        
         assert results[13] is not None
         assert results[14] is not None
     
     def test_willr_batch(self, test_data):
         """Test WILLR batch processing."""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test batch with multiple periods
+        
         result = ta.willr_batch(high, low, close, (10, 20, 2))
         
-        # Should return a dict with 'values' and 'periods'
+        
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 6 combinations: periods 10, 12, 14, 16, 18, 20
+        
         expected_periods = [10, 12, 14, 16, 18, 20]
         assert len(result['periods']) == 6
         assert list(result['periods']) == expected_periods
         
-        # Values should be shaped (6, 100)
+        
         assert result['values'].shape == (6, 100)
         
-        # Verify first row matches single calculation for period=10
+        
         single_result = ta.willr(high, low, close, 10)
         np.testing.assert_array_almost_equal(result['values'][0], single_result, decimal=10)
     
@@ -190,41 +190,41 @@ class TestWillr:
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Test different kernels produce same results
+        
         result_auto = ta.willr(high, low, close, 14, kernel='auto')
         result_scalar = ta.willr(high, low, close, 14, kernel='scalar')
         
-        # Results should be identical
+        
         np.testing.assert_array_almost_equal(result_auto, result_scalar, decimal=10)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta.willr(high, low, close, 14, kernel='invalid')
     
     def test_willr_edge_cases(self):
         """Test WILLR with edge cases."""
-        # Case 1: All prices the same (zero range)
+        
         high = np.array([10.0, 10.0, 10.0, 10.0])
         low = np.array([10.0, 10.0, 10.0, 10.0])
         close = np.array([10.0, 10.0, 10.0, 10.0])
         
         result = ta.willr(high, low, close, 2)
-        # When HH == LL, the result should be 0
+        
         assert result[1] == 0.0
         
-        # Case 2: Close at highest high
+        
         high = np.array([10.0, 20.0, 15.0])
         low = np.array([5.0, 10.0, 12.0])
         close = np.array([8.0, 20.0, 15.0])
         
         result = ta.willr(high, low, close, 2)
-        # When close == HH, %R should be 0
-        assert abs(result[1]) < 1e-10  # Should be very close to 0
         
-        # Case 3: Close at lowest low
-        close = np.array([8.0, 5.0, 12.0])  # Close at LL (5.0 matches low[0])
+        assert abs(result[1]) < 1e-10  
+        
+        
+        close = np.array([8.0, 5.0, 12.0])  
         result = ta.willr(high, low, close, 2)
-        # When close == LL, %R should be -100
+        
         assert abs(result[1] - (-100.0)) < 1e-10
     
     def test_willr_batch_empty_range(self, test_data):
@@ -233,7 +233,7 @@ class TestWillr:
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Single period value
+        
         result = ta.willr_batch(high, low, close, (14, 14, 1))
         
         assert len(result['periods']) == 1
@@ -246,17 +246,17 @@ class TestWillr:
         low = test_data['low'][:50].copy()
         close = test_data['close'][:50].copy()
         
-        # Insert some NaN values
+        
         high[10:15] = np.nan
         low[10:15] = np.nan
         close[10:15] = np.nan
         
         result = ta.willr(high, low, close, 14)
         
-        # Result should still have correct length
+        
         assert len(result) == 50
         
-        # Values around NaN period should be NaN
+        
         assert np.isnan(result[10])
         assert np.isnan(result[14])
 

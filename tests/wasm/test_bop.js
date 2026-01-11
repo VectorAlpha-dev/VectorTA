@@ -6,6 +6,7 @@ import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { 
     loadTestData, 
     assertArrayClose, 
@@ -25,7 +26,7 @@ let testData;
 
 test.before(async () => {
     
-    const pkgPath = path.join(__dirname, '../../pkg/my_project.js');
+    const pkgPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const pkgImport = process.platform === 'win32'
         ? 'file:///' + pkgPath.replace(/\\/g, '/')
         : pkgPath;
@@ -41,19 +42,8 @@ test.before(async () => {
     try {
         wasm = await tryImport(pkgImport);
     } catch (esmErr) {
-        
-        try {
-            const cjsPath = path.join(__dirname, 'my_project.js');
-            const cjsImport = process.platform === 'win32'
-                ? 'file:///' + cjsPath.replace(/\\/g, '/')
-                : cjsPath;
-            wasm = await tryImport(cjsImport);
-            console.warn('Loaded fallback CJS wrapper for WASM tests (pkg ESM import failed).');
-        } catch (cjsErr) {
-            console.error('Failed to load WASM module from pkg and fallback CJS.');
-            console.error('Tip: run "wasm-pack build --features wasm --target nodejs" to regenerate pkg/.');
-            throw esmErr;
-        }
+        const require = createRequire(import.meta.url);
+        wasm = require(pkgPath);
     }
 
     testData = loadTestData();

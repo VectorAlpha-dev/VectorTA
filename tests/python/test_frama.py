@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,18 +31,18 @@ class TestFrama:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default params
+        
         result = ta_indicators.frama(high, low, close, 10, 300, 1)
         assert len(result) == len(close)
         
-        # Test with partial custom parameters
-        result = ta_indicators.frama(high, low, close, 14, 300, 1)  # Custom window
+        
+        result = ta_indicators.frama(high, low, close, 14, 300, 1)  
         assert len(result) == len(close)
         
-        result = ta_indicators.frama(high, low, close, 10, 200, 1)  # Custom sc
+        result = ta_indicators.frama(high, low, close, 10, 200, 1)  
         assert len(result) == len(close)
         
-        result = ta_indicators.frama(high, low, close, 10, 300, 2)  # Custom fc
+        result = ta_indicators.frama(high, low, close, 10, 300, 2)  
         assert len(result) == len(close)
     
     def test_frama_accuracy(self, test_data):
@@ -52,7 +52,7 @@ class TestFrama:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['frama']
         
-        # Using default parameters
+        
         result = ta_indicators.frama(
             high, low, close,
             window=expected['default_params']['window'],
@@ -62,16 +62,16 @@ class TestFrama:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
             rtol=0,
-            atol=0.1,  # Using 1e-1 tolerance as in Rust test
+            atol=0.1,  
             msg="FRAMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('frama', result, 'high,low,close', expected['default_params'])
     
     def test_frama_default_candles(self, test_data):
@@ -80,7 +80,7 @@ class TestFrama:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: window=10, sc=300, fc=1
+        
         result = ta_indicators.frama(high, low, close, 10, 300, 1)
         assert len(result) == len(close)
     
@@ -143,11 +143,11 @@ class TestFrama:
         result = ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First evenized_window-1 values should be NaN (window 10 is already even, so warmup is 9)
+        
         assert np.all(np.isnan(result[:9])), "Expected NaN in warmup period"
     
     def test_frama_streaming(self, test_data):
@@ -159,10 +159,10 @@ class TestFrama:
         sc = 300
         fc = 1
         
-        # Batch calculation
+        
         batch_result = ta_indicators.frama(high, low, close, window=window, sc=sc, fc=fc)
         
-        # Streaming calculation
+        
         stream = ta_indicators.FramaStream(window=window, sc=sc, fc=fc)
         stream_values = []
         
@@ -172,10 +172,10 @@ class TestFrama:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -190,9 +190,9 @@ class TestFrama:
         
         result = ta_indicators.frama_batch(
             high, low, close,
-            window_range=(10, 10, 0),  # Default window only
-            sc_range=(300, 300, 0),    # Default sc only
-            fc_range=(1, 1, 0)         # Default fc only
+            window_range=(10, 10, 0),  
+            sc_range=(300, 300, 0),    
+            fc_range=(1, 1, 0)         
         )
         
         assert 'values' in result
@@ -200,15 +200,15 @@ class TestFrama:
         assert 'scs' in result
         assert 'fcs' in result
         
-        # Should have 1 combination
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['frama']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -225,21 +225,21 @@ class TestFrama:
         
         result = ta_indicators.frama_batch(
             high, low, close,
-            window_range=(8, 12, 2),    # windows: 8, 10, 12
-            sc_range=(200, 300, 100),   # scs: 200, 300
-            fc_range=(1, 2, 1)          # fcs: 1, 2
+            window_range=(8, 12, 2),    
+            sc_range=(200, 300, 100),   
+            fc_range=(1, 2, 1)          
         )
         
-        # Should have 3 windows x 2 scs x 2 fcs = 12 combinations
+        
         assert result['values'].shape[0] == 12
         assert result['values'].shape[1] == 100
         
-        # Verify metadata
+        
         assert len(result['windows']) == 12
         assert len(result['scs']) == 12
         assert len(result['fcs']) == 12
         
-        # Check first combination (window=8, sc=200, fc=1)
+        
         single_result = ta_indicators.frama(high, low, close, window=8, sc=200, fc=1)
         assert_close(
             result['values'][0],
@@ -256,20 +256,20 @@ class TestFrama:
         
         result = ta_indicators.frama_batch(
             high, low, close,
-            window_range=(6, 10, 4),    # windows: 6, 10
-            sc_range=(300, 300, 0),     # sc: 300
-            fc_range=(1, 1, 0)          # fc: 1
+            window_range=(6, 10, 4),    
+            sc_range=(300, 300, 0),     
+            fc_range=(1, 1, 0)          
         )
         
-        # Should have 2 windows x 1 sc x 1 fc = 2 rows
+        
         assert result['values'].shape == (2, 50)
         
-        # Check warmup periods for each combination
-        # Row 0: window=6, warmup=5
+        
+        
         assert np.all(np.isnan(result['values'][0][:5]))
         assert not np.any(np.isnan(result['values'][0][5:]))
         
-        # Row 1: window=10, warmup=9
+        
         assert np.all(np.isnan(result['values'][1][:9]))
         assert not np.any(np.isnan(result['values'][1][9:]))
     
@@ -279,16 +279,16 @@ class TestFrama:
         low = np.array([np.nan, np.nan, 5.0, 15.0, 25.0])
         close = np.array([np.nan, np.nan, 7.0, 17.0, 27.0])
         
-        # With window=10 and data length=5, it will fail with "Invalid window"
+        
         with pytest.raises(ValueError, match="Invalid window"):
             ta_indicators.frama(high, low, close, window=10, sc=300, fc=1)
         
-        # Test case where window is valid but not enough data after NaN
+        
         high2 = np.array([np.nan, np.nan, np.nan, np.nan, np.nan, 10.0, 20.0, 30.0, 40.0, 50.0])
         low2 = np.array([np.nan, np.nan, np.nan, np.nan, np.nan, 5.0, 15.0, 25.0, 35.0, 45.0])
         close2 = np.array([np.nan, np.nan, np.nan, np.nan, np.nan, 7.0, 17.0, 27.0, 37.0, 47.0])
         
-        # With window=10 and only 5 valid values after NaN
+        
         with pytest.raises(ValueError, match="Not enough valid data"):
             ta_indicators.frama(high2, low2, close2, window=10, sc=300, fc=1)
 

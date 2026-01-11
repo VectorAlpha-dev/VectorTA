@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -28,8 +28,8 @@ class TestWma:
         """Test WMA with partial parameters (None values) - mirrors check_wma_partial_params"""
         close = test_data['close']
         
-        # Test with default params (period=30)
-        result = ta_indicators.wma(close, 30)  # Using default
+        
+        result = ta_indicators.wma(close, 30)  
         assert len(result) == len(close)
     
     def test_wma_accuracy(self, test_data):
@@ -44,22 +44,22 @@ class TestWma:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-6,  # Using 1e-6 as per Rust test
+            rtol=1e-6,  
             msg="WMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('wma', result, 'close', expected['default_params'])
     
     def test_wma_default_candles(self, test_data):
         """Test WMA with default parameters - mirrors check_wma_default_candles"""
         close = test_data['close']
         
-        # Default params: period=30
+        
         result = ta_indicators.wma(close, 30)
         assert len(result) == len(close)
     
@@ -95,15 +95,15 @@ class TestWma:
         """Test WMA applied twice (re-input) - mirrors check_wma_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.wma(close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass - apply WMA to WMA output
+        
         second_result = ta_indicators.wma(first_result, period=5)
         assert len(second_result) == len(first_result)
         
-        # Check that values after warmup are not NaN
+        
         if len(second_result) > 50:
             for i in range(50, len(second_result)):
                 assert not np.isnan(second_result[i])
@@ -115,13 +115,13 @@ class TestWma:
         result = ta_indicators.wma(close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period, no NaN values should exist
+        
         if len(result) > 50:
             assert not np.any(np.isnan(result[50:])), "Found unexpected NaN after warmup period"
         
-        # The warmup period for WMA is first + period - 1
-        # Since the test data has no leading NaNs (first = 0), warmup = 0 + 14 - 1 = 13
-        # So indices 0-12 should be NaN, index 13 should be the first valid value
+        
+        
+        
         assert np.all(np.isnan(result[:13])), "Expected NaN in warmup period (indices 0-12)"
         assert not np.isnan(result[13]), "Expected first valid value at index 13"
     
@@ -130,10 +130,10 @@ class TestWma:
         close = test_data['close']
         period = 30
         
-        # Batch calculation
+        
         batch_result = ta_indicators.wma(close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.WmaStream(period=period)
         stream_values = []
         
@@ -143,10 +143,10 @@ class TestWma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -159,25 +159,25 @@ class TestWma:
         
         result = ta_indicators.wma_batch(
             close,
-            period_range=(30, 30, 0)  # Default period only
+            period_range=(30, 30, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
-        assert 'rows' in result  # Check for rows metadata
-        assert 'cols' in result  # Check for cols metadata
+        assert 'rows' in result  
+        assert 'cols' in result  
         
-        # Should have 1 combination (default params)
+        
         assert result['rows'] == 1
         assert result['cols'] == len(close)
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['wma']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -194,9 +194,9 @@ class TestWma:
     
     def test_wma_kernel_selection(self, test_data):
         """Test WMA with different kernel selections"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Test different kernels
+        
         kernels = ['auto', 'scalar', 'avx2', 'avx512']
         results = {}
         
@@ -208,11 +208,11 @@ class TestWma:
                     kernel=kernel
                 )
             except ValueError as e:
-                # Some kernels might not be available on all systems
+                
                 if "Unknown kernel" not in str(e) and "not available on this CPU" not in str(e) and "not compiled in this build" not in str(e):
                     raise
         
-        # All available kernels should produce similar results
+        
         if 'scalar' in results:
             for kernel, result in results.items():
                 if kernel != 'scalar':

@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError as exc:  # pragma: no cover - benchmark helper
+except ImportError as exc:  
     raise SystemExit(
         "CuPy is required for CUDA benchmarks. Install with `pip install cupy-cuda12x`."
     ) from exc
@@ -19,18 +19,18 @@ except ImportError as exc:  # pragma: no cover - benchmark helper
 
 def _import_module():
     try:
-        import ta_indicators as mod  # type: ignore
+        import ta_indicators as mod  
     except Exception:
         try:
-            import my_project as mod  # type: ignore
-        except Exception as inner:  # pragma: no cover - import helper
+            import my_project as mod  
+        except Exception as inner:  
             raise SystemExit(
                 "Module not built. Run: maturin develop --features \"python,cuda\" --release"
             ) from inner
     if not hasattr(mod, 'highpass_cuda_batch_dev'):
         for alt in ('my_project', 'ta_indicators'):
             try:
-                candidate = __import__(alt)  # type: ignore
+                candidate = __import__(alt)  
             except Exception:
                 continue
             if hasattr(candidate, 'highpass_cuda_batch_dev'):

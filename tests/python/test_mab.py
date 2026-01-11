@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestMab:
         """Test MAB with default parameters - mirrors check_mab_partial_params"""
         close = test_data['close']
         
-        # Test with default params
+        
         upper, middle, lower = ta_indicators.mab(close, 10, 50)
         assert len(upper) == len(close)
         assert len(middle) == len(close)
@@ -53,7 +53,7 @@ class TestMab:
         assert len(middle) == len(close)
         assert len(lower) == len(close)
         
-        # Expected values from Rust unit tests
+        
         expected_upper_last_five = [
             64002.843463352016,
             63976.62699738246,
@@ -76,8 +76,8 @@ class TestMab:
             59070.11628271853,
         ]
         
-        # Check last 5 values match expected
-        # Match Rust tolerance: abs diff <= 1e-4 (do not exceed)
+        
+        
         assert_close(
             upper[-5:],
             expected_upper_last_five,
@@ -100,14 +100,14 @@ class TestMab:
             msg="MAB lower band last 5 values mismatch"
         )
         
-        # Note: MAB returns three separate arrays, not handled by compare_with_rust
-        # The expected values above serve as the reference
+        
+        
     
     def test_mab_default_candles(self, test_data):
         """Test MAB with default parameters - mirrors check_mab_default_candles"""
         close = test_data['close']
         
-        # Default params: fast=10, slow=50, devup=1.0, devdn=1.0, types="sma"
+        
         upper, middle, lower = ta_indicators.mab(close, 10, 50)
         assert len(upper) == len(close)
         assert len(middle) == len(close)
@@ -156,27 +156,27 @@ class TestMab:
         
         upper, middle, lower = ta_indicators.mab(close, fast_period=fast_period, slow_period=slow_period)
         
-        # MAB warmup behavior (after fix):
-        # - NaN values from 0 to 58 (inclusive)
-        # - Real values start at 59
-        # Calculation: warmup = first + max(fast, slow) + fast - 2
-        #              warmup = 0 + 50 + 10 - 2 = 58
-        warmup_last_nan = max(fast_period, slow_period) + fast_period - 2  # 58
-        real_values_start = warmup_last_nan + 1  # 59
         
-        # Check NaN values up to index 58 (inclusive)
+        
+        
+        
+        
+        warmup_last_nan = max(fast_period, slow_period) + fast_period - 2  
+        real_values_start = warmup_last_nan + 1  
+        
+        
         for i in range(min(real_values_start, len(upper))):
             assert np.isnan(upper[i]), f"Expected NaN at index {i}"
             assert np.isnan(middle[i]), f"Expected NaN at index {i}"
             assert np.isnan(lower[i]), f"Expected NaN at index {i}"
         
-        # After index 59, should have real non-zero values
+        
         if len(upper) > real_values_start:
             for i in range(real_values_start, min(real_values_start + 10, len(upper))):
                 assert not np.isnan(upper[i]), f"Unexpected NaN at index {i}"
                 assert not np.isnan(middle[i]), f"Unexpected NaN at index {i}"
                 assert not np.isnan(lower[i]), f"Unexpected NaN at index {i}"
-                # Verify they're not zero (real values)
+                
                 assert abs(upper[i]) > 1e-10, f"Expected non-zero value at index {i}"
                 assert abs(middle[i]) > 1e-10, f"Expected non-zero value at index {i}"
                 assert abs(lower[i]) > 1e-10, f"Expected non-zero value at index {i}"
@@ -186,7 +186,7 @@ class TestMab:
         """Test MAB streaming interface - mirrors check_mab_streaming"""
         close = test_data['close']
         
-        # Batch calculation
+        
         batch_upper, batch_middle, batch_lower = ta_indicators.mab(
             close, 
             fast_period=10, 
@@ -197,7 +197,7 @@ class TestMab:
             slow_ma_type="sma"
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.MabStream(
             fast_period=10,
             slow_period=50,
@@ -223,25 +223,25 @@ class TestMab:
                 stream_middle.append(middle)
                 stream_lower.append(lower)
         
-        # Compare results
+        
         assert len(batch_upper) == len(stream_upper)
         assert len(batch_middle) == len(stream_middle)
         assert len(batch_lower) == len(stream_lower)
         
-        # Calculate MAB real values start: max(fast, slow) + fast - 1 = 59
-        # Note: Streaming produces its first value at index 58, batch at 59
-        # We compare starting from where batch has real values (59)
-        real_values_start = max(10, 50) + 10 - 1  # = 59
         
-        # After real values start, values should match closely
-        # Note: MAB streaming implementation has known differences from batch
-        # due to different calculation methods during warmup that can persist
+        
+        
+        real_values_start = max(10, 50) + 10 - 1  
+        
+        
+        
+        
         for i in range(real_values_start, len(batch_upper)):
-            # MAB streaming can have up to ~20% differences from batch implementation
-            # TODO: CRITICAL - Investigate why streaming has such large differences from batch
-            # This likely indicates a bug in the MAB streaming implementation that needs fixing
-            # The tolerance should be much lower (< 1%) for properly functioning streaming
-            tol = 2e-1  # 20% tolerance - THIS IS TOO HIGH AND INDICATES A BUG
+            
+            
+            
+            
+            tol = 2e-1  
             
             assert_close(
                 batch_upper[i], stream_upper[i], 
@@ -263,7 +263,7 @@ class TestMab:
         """Test MAB batch with default parameters - mirrors check_batch_default_row"""
         close = test_data['close']
         
-        # Test batch with single parameter combination
+        
         result = ta_indicators.mab_batch(
             close,
             fast_period_range=(10, 10, 0),
@@ -282,11 +282,11 @@ class TestMab:
         middle_values = result['middlebands']
         lower_values = result['lowerbands']
         
-        # Should have 1 row
+        
         assert upper_values.shape[0] == 1
         assert upper_values.shape[1] == len(close)
         
-        # Check last 5 values match expected
+        
         expected_upper = [
             64002.843463352016,
             63976.62699738246,
@@ -309,7 +309,7 @@ class TestMab:
             59070.11628271853,
         ]
         
-        # Match Rust tolerance: abs diff <= 1e-4 (do not exceed)
+        
         assert_close(
             upper_values[0, -5:],
             expected_upper,
@@ -336,13 +336,13 @@ class TestMab:
         """Test MAB batch with multiple periods"""
         close = test_data['close']
         
-        # Test batch with multiple fast periods
+        
         result = ta_indicators.mab_batch(
             close,
-            fast_period_range=(10, 15, 5),  # 10, 15
-            slow_period_range=(50, 50, 0),  # 50
-            devup_range=(1.0, 2.0, 0.5),    # 1.0, 1.5, 2.0
-            devdn_range=(1.0, 1.0, 0)       # 1.0
+            fast_period_range=(10, 15, 5),  
+            slow_period_range=(50, 50, 0),  
+            devup_range=(1.0, 2.0, 0.5),    
+            devdn_range=(1.0, 1.0, 0)       
         )
         
         assert 'upperbands' in result
@@ -355,24 +355,24 @@ class TestMab:
         fast_periods = result['fast_periods']
         devups = result['devups']
         
-        # Should have 2 * 1 * 3 * 1 = 6 rows
+        
         assert upper_values.shape[0] == 6
         assert upper_values.shape[1] == len(close)
         assert len(fast_periods) == 6
         assert len(devups) == 6
         
-        # Verify each row has appropriate NaN prefix
+        
         for i in range(upper_values.shape[0]):
             fast_p = fast_periods[i]
             slow_p = result['slow_periods'][i]
-            # After fix: NaN values up to max(fast, slow) + fast - 2
-            # First non-NaN appears at max(fast, slow) + fast - 1
+            
+            
             first_non_nan = max(fast_p, slow_p) + fast_p - 1
             
-            # Find first non-NaN value in upper band
+            
             first_valid = np.where(~np.isnan(upper_values[i]))[0]
             if len(first_valid) > 0:
-                # Should have NaN values before first_non_nan
+                
                 assert first_valid[0] == first_non_nan, \
                     f"Row {i}: first non-NaN at {first_valid[0]}, expected {first_non_nan} (fast={fast_p}, slow={slow_p})"
     
@@ -380,19 +380,19 @@ class TestMab:
         """Test MAB with different kernel parameters"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         upper_scalar, middle_scalar, lower_scalar = ta_indicators.mab(
             close, fast_period=10, slow_period=50, kernel='scalar'
         )
         assert len(upper_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         upper_auto, middle_auto, lower_auto = ta_indicators.mab(
             close, fast_period=10, slow_period=50, kernel='auto'
         )
         assert len(upper_auto) == len(close)
         
-        # Test invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.mab(close, fast_period=10, slow_period=50, kernel='invalid')
     
@@ -400,7 +400,7 @@ class TestMab:
         """Test MAB with different moving average types"""
         close = test_data['close']
         
-        # Test with EMA
+        
         upper_ema, middle_ema, lower_ema = ta_indicators.mab(
             close, 
             fast_period=10, 
@@ -410,7 +410,7 @@ class TestMab:
         )
         assert len(upper_ema) == len(close)
         
-        # Test with mixed types
+        
         upper_mixed, middle_mixed, lower_mixed = ta_indicators.mab(
             close, 
             fast_period=10, 
@@ -420,8 +420,8 @@ class TestMab:
         )
         assert len(upper_mixed) == len(close)
         
-        # Results should be different
-        # Check a few values after warmup
+        
+        
         for i in range(100, 110):
             assert abs(upper_ema[i] - upper_mixed[i]) > 1e-10, f"Expected different values at index {i}"
     
@@ -429,48 +429,48 @@ class TestMab:
         """Test MAB with boundary values for devup/devdn parameters"""
         close = test_data['close']
         
-        # Test with zero deviations
+        
         upper_zero, middle_zero, lower_zero = ta_indicators.mab(
             close, fast_period=10, slow_period=50, devup=0.0, devdn=0.0
         )
         assert len(upper_zero) == len(close)
-        # With zero deviations, upper and lower should both equal each other (fast MA)
-        # They collapse to the fast MA, not the middle (slow MA)
-        for i in range(100, 110):  # Check after warmup
+        
+        
+        for i in range(100, 110):  
             if not np.isnan(upper_zero[i]):
                 assert_close(upper_zero[i], lower_zero[i], rtol=1e-10, 
                            msg=f"Upper should equal lower with devup=devdn=0 at index {i}")
-                # Verify they are different from middle (slow MA)
+                
                 assert abs(upper_zero[i] - middle_zero[i]) > 1e-10, \
                     f"Upper/lower should NOT equal middle at index {i}"
         
-        # Test with large deviations
+        
         upper_large, middle_large, lower_large = ta_indicators.mab(
             close, fast_period=10, slow_period=50, devup=5.0, devdn=5.0
         )
         assert len(upper_large) == len(close)
         
-        # Test with normal deviations for comparison
+        
         upper_normal, middle_normal, lower_normal = ta_indicators.mab(
             close, fast_period=10, slow_period=50, devup=1.0, devdn=1.0
         )
         
-        # Bands should be proportionally wider
+        
         for i in range(100, 110):
             if not np.isnan(upper_large[i]) and not np.isnan(upper_normal[i]):
                 band_width_large = upper_large[i] - lower_large[i]
                 band_width_normal = upper_normal[i] - lower_normal[i]
-                # Should be approximately 5x wider
+                
                 ratio = band_width_large / band_width_normal if band_width_normal > 0 else 0
                 assert 4.9 < ratio < 5.1, \
                     f"Large deviation should create 5x wider bands at index {i}, got ratio {ratio}"
         
-        # Test with negative deviations (should work, creates inverted bands)
+        
         upper_neg, middle_neg, lower_neg = ta_indicators.mab(
             close, fast_period=10, slow_period=50, devup=-1.0, devdn=-1.0
         )
         assert len(upper_neg) == len(close)
-        # Upper band should be below middle, lower band above middle
+        
         for i in range(100, 110):
             if not np.isnan(upper_neg[i]):
                 assert upper_neg[i] < middle_neg[i], \

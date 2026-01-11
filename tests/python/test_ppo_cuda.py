@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -28,7 +28,7 @@ def _cuda_available() -> bool:
         handle, _meta = ti.ppo_cuda_batch_dev(arr, (5, 5, 0), (10, 10, 0), "sma")
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - probing path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -53,7 +53,7 @@ class TestPpoCuda:
         assert_close(gpu, cpu, rtol=2e-3, atol=2e-3, msg="CUDA PPO SMA batch mismatch")
 
     def test_ppo_cuda_many_series_one_param_matches_cpu_ema(self, series):
-        # Build small time-major matrix
+        
         T = 2048
         N = 4
         base = series[:T]
@@ -61,7 +61,7 @@ class TestPpoCuda:
         for j in range(N):
             data_tm[:, j] = base * (1.0 + 0.01 * j)
         fast, slow = 10, 21
-        # CPU baseline per series
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.ppo(data_tm[:, j], fast, slow, "ema")

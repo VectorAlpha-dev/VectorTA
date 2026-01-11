@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestZlema:
         """Test ZLEMA with default parameters - mirrors check_zlema_partial_params"""
         data = test_data['close']
         
-        # Test with default period (None maps to 14)
+        
         result = ta_indicators.zlema(data, period=14)
         assert len(result) == len(data)
     
@@ -45,16 +45,16 @@ class TestZlema:
         
         assert len(result) == len(data)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=0.0,      # Match Rust: absolute tolerance only
-            atol=1e-1,     # Rust test uses |diff| < 1e-1
+            rtol=0.0,      
+            atol=1e-1,     
             msg="ZLEMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('zlema', result, 'close', expected['default_params'])
     
     def test_zlema_zero_period(self):
@@ -89,7 +89,7 @@ class TestZlema:
         """Test ZLEMA with default parameters - mirrors check_zlema_default_candles"""
         close = test_data['close']
         
-        # Default period is 14
+        
         result = ta_indicators.zlema(close, period=14)
         assert len(result) == len(close)
     
@@ -97,17 +97,17 @@ class TestZlema:
         """Test ZLEMA re-input behavior - mirrors check_zlema_reinput"""
         data = test_data['close']
         
-        # First pass with period 21
+        
         first_result = ta_indicators.zlema(data, period=21)
         
-        # Second pass with period 14 on first result
+        
         second_result = ta_indicators.zlema(first_result, period=14)
         
         assert len(second_result) == len(first_result)
         
-        # First result has warmup at index 20 (period 21 - 1)
-        # So second calculation starts from index 20 and has warmup at 20 + 14 - 1 = 33
-        # Values should be valid from index 34 onwards
+        
+        
+        
         for idx, val in enumerate(second_result[34:], start=34):
             assert np.isfinite(val), f"NaN found at index {idx}"
     
@@ -119,10 +119,10 @@ class TestZlema:
         result = ta_indicators.zlema(data, period=period)
         assert len(result) == len(data)
         
-        # First period-1 values should be NaN (warmup period)
+        
         assert np.all(np.isnan(result[:period-1])), f"Expected NaN in warmup period [0:{period-1}]"
         
-        # After warmup period, no NaN values should exist
+        
         if len(result) > period:
             assert not np.any(np.isnan(result[period:])), f"Found unexpected NaN after warmup period at index {period}"
     
@@ -130,10 +130,10 @@ class TestZlema:
         """Test ZLEMA streaming functionality"""
         data = test_data['close']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.zlema(data, period=14)
         
-        # Streaming calculation
+        
         stream = ta_indicators.ZlemaStream(period=14)
         stream_values = []
         
@@ -143,16 +143,16 @@ class TestZlema:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         valid_mask = ~np.isnan(batch_result) & ~np.isnan(stream_values)
         assert_close(
             batch_result[valid_mask], 
             stream_values[valid_mask], 
             rtol=0.0,
-            atol=1e-9,  # Match Rust streaming test tolerance
+            atol=1e-9,  
             msg="ZLEMA streaming mismatch"
         )
     
@@ -162,22 +162,22 @@ class TestZlema:
         
         result = ta_indicators.zlema_batch(
             data,
-            period_range=(14, 40, 1)  # Default batch range from Rust
+            period_range=(14, 40, 1)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 27 combinations: 14, 15, ..., 40
+        
         assert result['values'].shape[0] == 27
         assert result['values'].shape[1] == len(data)
         assert len(result['periods']) == 27
         
-        # Verify periods are correct
+        
         expected_periods = list(range(14, 41))
         assert list(result['periods']) == expected_periods, "Periods mismatch in batch result"
         
-        # Check that period 14 row matches single ZLEMA calculation
+        
         idx_14 = list(result['periods']).index(14)
         single_zlema = ta_indicators.zlema(data, period=14)
         assert_close(
@@ -187,12 +187,12 @@ class TestZlema:
             msg="ZLEMA batch period 14 row mismatch"
         )
         
-        # Verify warmup periods for each row
+        
         for i, period in enumerate(result['periods']):
             row = result['values'][i]
-            # First period-1 values should be NaN
+            
             assert np.all(np.isnan(row[:period-1])), f"Expected NaN in warmup for period {period}"
-            # After warmup should have values (if data is long enough)
+            
             if len(row) > period:
                 assert np.isfinite(row[period]), f"Expected finite value after warmup for period {period}"
     
@@ -200,22 +200,22 @@ class TestZlema:
         """Test ZLEMA batch with single period"""
         data = test_data['close']
         
-        # Test batch with single period (start == end)
+        
         result = ta_indicators.zlema_batch(
             data,
-            period_range=(14, 14, 0)  # Single period
+            period_range=(14, 14, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have only 1 combination
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(data)
         assert len(result['periods']) == 1
         assert result['periods'][0] == 14
         
-        # Should match single ZLEMA calculation
+        
         single_zlema = ta_indicators.zlema(data, period=14)
         assert_close(
             result['values'][0],
@@ -226,28 +226,28 @@ class TestZlema:
     
     def test_zlema_batch_edge_cases(self, test_data):
         """Test ZLEMA batch edge cases"""
-        data = test_data['close'][:100]  # Use smaller dataset for speed
+        data = test_data['close'][:100]  
         
-        # Test with step larger than range
+        
         result = ta_indicators.zlema_batch(
             data,
-            period_range=(10, 15, 10)  # Step larger than range
+            period_range=(10, 15, 10)  
         )
         
-        # Should only have period=10
+        
         assert result['values'].shape[0] == 1
         assert result['periods'][0] == 10
         
-        # Test with multiple periods
+        
         result = ta_indicators.zlema_batch(
             data,
-            period_range=(10, 20, 5)  # 10, 15, 20
+            period_range=(10, 20, 5)  
         )
         
         assert result['values'].shape[0] == 3
         assert list(result['periods']) == [10, 15, 20]
         
-        # Verify each row matches individual calculation
+        
         for i, period in enumerate(result['periods']):
             single_result = ta_indicators.zlema(data, period=period)
             assert_close(
@@ -261,13 +261,13 @@ class TestZlema:
         """Test ZLEMA with different kernel selections"""
         data = test_data['close']
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.zlema(data, period=14)
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.zlema(data, period=14, kernel="scalar")
         
-        # Results should be identical (within tolerance) since AVX2/AVX512 are stubs
+        
         assert_close(
             result_auto,
             result_scalar,
@@ -275,7 +275,7 @@ class TestZlema:
             msg="ZLEMA kernel results mismatch"
         )
         
-        # Test with invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.zlema(data, period=14, kernel="invalid_kernel")
     

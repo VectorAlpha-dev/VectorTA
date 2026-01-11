@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -28,7 +28,7 @@ def _cuda_available() -> bool:
         handle = ti.reflex_cuda_batch_dev(sample, (5, 5, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - defensive skip path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False

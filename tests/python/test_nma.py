@@ -7,7 +7,7 @@ import numpy as np
 from test_utils import load_test_data, assert_close, EXPECTED_OUTPUTS
 from rust_comparison import compare_with_rust
 
-# Import NMA functions - they'll be available after building with maturin
+
 try:
     from my_project import (
         nma, 
@@ -27,7 +27,7 @@ class TestNma:
         """Test NMA with default parameters - mirrors check_nma_partial_params"""
         close = np.array(test_data['close'], dtype=np.float64)
         
-        # Test with default parameter (40)
+        
         result = nma(close, 40)
         assert isinstance(result, np.ndarray)
         assert len(result) == len(close)
@@ -37,29 +37,29 @@ class TestNma:
         close = np.array(test_data['close'], dtype=np.float64)
         expected = EXPECTED_OUTPUTS['nma']
         
-        # Test with default period=40
+        
         result = nma(close, expected['default_params']['period'])
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         actual_last_five = result[-5:]
         
         assert_close(
             actual_last_five,
             expected['last_5_values'],
-            rtol=1e-3,  # Use same tolerance as Rust tests
+            rtol=1e-3,  
             msg="NMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('nma', result, 'close', expected['default_params'])
     
     def test_nma_default_candles(self, test_data):
         """Test NMA with default parameters - mirrors check_nma_default_candles"""
         close = np.array(test_data['close'], dtype=np.float64)
         
-        # Default period: 40
+        
         result = nma(close, 40)
         assert len(result) == len(close)
     
@@ -99,11 +99,11 @@ class TestNma:
         
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period values should be NaN
+        
         first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
         warmup = first_valid + 40
         assert np.all(np.isnan(result[:warmup])), "Expected NaN in warmup period"
@@ -120,11 +120,11 @@ class TestNma:
         close = test_data['close']
         period = 40
         
-        # Batch calculation
+        
         close_array = np.array(close, dtype=np.float64)
         batch_result = nma(close_array, period)
         
-        # Streaming calculation
+        
         stream = NmaStream(period)
         stream_values = []
         
@@ -134,25 +134,25 @@ class TestNma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
-        # Note: NMA stream uses a fast SOE approximation for the numerator.
-        # It is designed to be numerically close (not bit-identical) to the
-        # batch implementation. Keep tolerance tight but realistic.
+        
+        
+        
+        
         first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
         warmup = first_valid + period
 
-        # Compute relative error after warmup where both are finite
+        
         mask = ~np.isnan(batch_result) & ~np.isnan(stream_values)
         rel = np.abs(batch_result - stream_values) / np.maximum(np.abs(batch_result), 1.0)
         max_rel = np.nanmax(rel[warmup:]) if np.any(mask[warmup:]) else 0.0
 
-        # Accept small approximation error from SOE-based streaming (<0.3%)
+        
         assert max_rel <= 3e-3, f"NMA streaming rel error too high: {max_rel:.6f}"
 
-        # Also verify the tail is very close (last 5 values <0.01% rel error)
+        
         tail_rel = rel[-5:]
         assert np.all(tail_rel <= 1e-4), f"NMA streaming tail rel error too high: {tail_rel}"
     
@@ -161,27 +161,27 @@ class TestNma:
         close = np.array(test_data['close'], dtype=np.float64)
         expected = EXPECTED_OUTPUTS['nma']
         
-        # Test with default period only
+        
         result = nma_batch(
             close,
-            (40, 40, 0)  # Default period only
+            (40, 40, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         
-        # Check last 5 values match expected
+        
         assert_close(
             default_row[-5:],
             expected['batch_default_row'],
-            rtol=1e-3,  # Same tolerance as Rust
+            rtol=1e-3,  
             msg="NMA batch default row mismatch"
         )
     
@@ -189,28 +189,28 @@ class TestNma:
         """Test NMA batch with multiple period values"""
         close = np.array(test_data['close'], dtype=np.float64)
         
-        # Test multiple periods
+        
         batch_result = nma_batch(
             close,
-            (20, 60, 20)  # periods: 20, 40, 60
+            (20, 60, 20)  
         )
         
         assert 'values' in batch_result
         assert 'periods' in batch_result
         
-        # Should have 3 period combinations
+        
         assert batch_result['values'].shape == (3, len(close))
         assert len(batch_result['periods']) == 3
         assert batch_result['periods'][0] == 20
         assert batch_result['periods'][1] == 40
         assert batch_result['periods'][2] == 60
         
-        # Verify each combination matches individual calculation
+        
         for i, period in enumerate(batch_result['periods']):
             individual_result = nma(close, int(period))
             batch_row = batch_result['values'][i]
             
-            # Compare after warmup period
+            
             first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
             warmup = int(first_valid + period)
             
@@ -224,36 +224,36 @@ class TestNma:
     
     def test_nma_batch_error_handling(self):
         """Test NMA batch error handling"""
-        # Test with all NaN data
+        
         all_nan = np.full(100, np.nan, dtype=np.float64)
         with pytest.raises(ValueError, match="nma: All values are NaN"):
             nma_batch(all_nan, (20, 40, 10))
         
-        # Test with insufficient data
+        
         small_data = np.array([1.0, 2.0, 3.0], dtype=np.float64)
         with pytest.raises(ValueError, match="nma: Invalid period|Not enough valid data"):
             nma_batch(small_data, (10, 20, 10))
         
-        # Test with invalid period range (start > end)
+        
         data = np.arange(100, dtype=np.float64)
         with pytest.raises(ValueError, match="nma:"):
             nma_batch(data, (50, 20, 10))
     
     def test_nma_stream_error_handling(self):
         """Test NMA stream error handling"""
-        # Test with invalid period
+        
         with pytest.raises(ValueError, match="nma: Invalid period"):
             NmaStream(0)
         
-        # Test that stream properly handles warmup
+        
         stream = NmaStream(10)
         
-        # First 10 updates should return None
+        
         for i in range(10):
             result = stream.update(float(i + 1))
             assert result is None, f"Expected None during warmup at index {i}"
         
-        # 11th update should return a value
+        
         result = stream.update(11.0)
         assert result is not None
         assert isinstance(result, float)
@@ -265,14 +265,14 @@ class TestNma:
         period = 40
         result = nma(close, period)
         
-        # Find first non-NaN value in input
+        
         first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
         warmup = first_valid + period
         
-        # Values before warmup should be NaN
+        
         assert np.all(np.isnan(result[:warmup])), "Expected NaN during warmup period"
         
-        # Values after warmup should be finite
+        
         if warmup < len(result):
             assert np.all(np.isfinite(result[warmup:])), "Expected finite values after warmup"
     
@@ -280,14 +280,14 @@ class TestNma:
         """Test NMA with various period values"""
         close = np.array(test_data['close'], dtype=np.float64)
         
-        # Test various period values
+        
         test_periods = [10, 20, 40, 80]
         
         for period in test_periods:
             result = nma(close, period)
             assert len(result) == len(close)
             
-            # After warmup, all values should be finite
+            
             first_valid = np.where(~np.isnan(close))[0][0] if np.any(~np.isnan(close)) else 0
             warmup = first_valid + period
             if warmup < len(result):
@@ -295,19 +295,19 @@ class TestNma:
     
     def test_nma_edge_cases(self):
         """Test NMA with edge case inputs"""
-        # Test with monotonically increasing data
+        
         data = np.arange(1.0, 101.0, dtype=np.float64)
         result = nma(data, 10)
         assert len(result) == len(data)
         assert np.all(np.isfinite(result[10:]))
         
-        # Test with constant values
+        
         data = np.full(100, 50.0, dtype=np.float64)
         result = nma(data, 10)
         assert len(result) == len(data)
         assert np.all(np.isfinite(result[10:]))
         
-        # Test with oscillating values
+        
         data = np.array([10.0, 20.0, 10.0, 20.0] * 25, dtype=np.float64)
         result = nma(data, 10)
         assert len(result) == len(data)
@@ -324,23 +324,23 @@ class TestNma:
     
     def test_nma_formula_verification(self):
         """Verify NMA formula implementation with simple data"""
-        # Create simple test data
+        
         data = np.array([10.0, 12.0, 11.0, 13.0, 15.0, 14.0], dtype=np.float64)
         period = 3
         
         result = nma(data, period)
         
-        # The formula is complex, but we can verify:
-        # 1. Result length matches input
+        
+        
         assert len(result) == len(data)
         
-        # 2. Warmup period is respected
+        
         assert np.all(np.isnan(result[:period]))
         
-        # 3. Values after warmup are reasonable
+        
         assert np.all(np.isfinite(result[period:]))
         
-        # 4. Values are within reasonable range of input
+        
         valid_results = result[period:]
         assert np.all(valid_results >= data.min() * 0.5)
         assert np.all(valid_results <= data.max() * 1.5)
@@ -349,13 +349,13 @@ class TestNma:
         """Verify NMA uses zero-copy operations"""
         close = np.array(test_data['close'][:100], dtype=np.float64)
         
-        # The result should be computed directly without intermediate copies
+        
         result = nma(close, 40)
         assert len(result) == len(close)
         
-        # Batch should also use zero-copy
+        
         batch_result = nma_batch(close, (20, 40, 20))
-        assert batch_result['values'].shape[0] == 2  # 20, 40
+        assert batch_result['values'].shape[0] == 2  
         assert batch_result['values'].shape[1] == len(close)
 
 

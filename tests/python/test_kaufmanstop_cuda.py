@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA tests
+except ImportError:  
     cp = None
 
 try:
@@ -23,7 +23,7 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, 'kaufmanstop_cuda_batch_dev'):
         return False
-    # smoke probe
+    
     try:
         high = np.array([np.nan, 2.0, 3.0, 4.0], dtype=np.float32)
         low = np.array([np.nan, 1.0, 1.5, 2.5], dtype=np.float32)
@@ -54,10 +54,10 @@ class TestKaufmanstopCuda:
         direction = 'long'
         ma_type = 'sma'
 
-        # CPU
+        
         cpu = ti.kaufmanstop(high, low, period=period, mult=mult, direction=direction, ma_type=ma_type)
 
-        # CUDA single-combo batch
+        
         handle = ti.kaufmanstop_cuda_batch_dev(
             high.astype(np.float32),
             low.astype(np.float32),

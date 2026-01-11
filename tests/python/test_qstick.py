@@ -7,7 +7,7 @@ import numpy as np
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import the built module
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'target/wheels'))
 
 try:
@@ -29,34 +29,34 @@ class TestQstick:
         close_data = test_data['close']
         period = 5
         
-        # Calculate QSTICK
+        
         result = ta_indicators.qstick(open_data, close_data, period)
         
-        # Expected values from Rust tests
+        
         expected_last_five = [219.4, 61.6, -51.8, -53.4, -123.2]
         
-        # Check last 5 values
+        
         for i, expected in enumerate(expected_last_five):
             actual = result[-(5-i)]
-            # Match Rust tolerance: absolute 1e-1 (no relaxed relative tol)
+            
             assert_close(actual, expected, rtol=0.0, atol=1e-1,
                          msg=f"QSTICK mismatch at index {i}: expected {expected}, got {actual}")
     
     def test_qstick_errors(self):
         """Test error handling"""
-        # Test zero period
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.qstick(np.array([10.0, 20.0]), np.array([15.0, 25.0]), 0)
         
-        # Test period exceeds length
+        
         with pytest.raises(ValueError, match="Invalid period|Not enough"):
             ta_indicators.qstick(np.array([10.0, 20.0]), np.array([15.0, 25.0]), 10)
         
-        # Test mismatched lengths (period > min length)
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.qstick(np.array([10.0, 20.0, 30.0]), np.array([15.0, 25.0]), 5)
         
-        # Test empty data
+        
         with pytest.raises(ValueError):
             ta_indicators.qstick(np.array([]), np.array([]), 5)
     
@@ -65,16 +65,16 @@ class TestQstick:
         open_data = test_data['open']
         close_data = test_data['close']
         
-        # Test batch with period range
+        
         result = ta_indicators.qstick_batch(open_data, close_data, (5, 20, 5))
         
         assert 'values' in result
         assert 'periods' in result
-        assert result['values'].shape[0] == 4  # (5, 10, 15, 20)
+        assert result['values'].shape[0] == 4  
         assert result['values'].shape[1] == len(open_data)
         assert len(result['periods']) == 4
         
-        # First row should match single calculation with period=5
+        
         single_result = ta_indicators.qstick(open_data, close_data, 5)
         np.testing.assert_array_almost_equal(result['values'][0], single_result, decimal=10)
     
@@ -82,7 +82,7 @@ class TestQstick:
         """Test streaming functionality"""
         stream = ta_indicators.QstickStream(5)
         
-        # Add some test data
+        
         test_data = [
             (10.0, 15.0),
             (15.0, 20.0),
@@ -97,15 +97,15 @@ class TestQstick:
             result = stream.update(open_val, close_val)
             results.append(result)
         
-        # First 4 updates should return None (warmup period)
+        
         assert all(r is None for r in results[:4])
         
-        # After warmup, should get values
+        
         assert results[4] is not None
         assert results[5] is not None
         
-        # Verify the calculation
-        # Qstick = average(close - open) over period
+        
+        
         diffs = [close - open for open, close in test_data[:5]]
         expected = sum(diffs) / 5
         assert_close(results[4], expected, 1e-10)

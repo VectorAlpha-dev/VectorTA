@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA tests
+except ImportError:  
     cp = None
 
 try:
@@ -23,13 +23,13 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, "linearreg_angle_cuda_batch_dev"):
         return False
-    # Probe minimal call
+    
     try:
         x = np.linspace(0.0, 1.0, 128, dtype=np.float32)
         handle = ti.linearreg_angle_cuda_batch_dev(x, period_range=(8, 8, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as e:  # defensive skip
+    except Exception as e:  
         msg = str(e).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -48,7 +48,7 @@ class TestLinearregAngleCuda:
         handle = ti.linearreg_angle_cuda_batch_dev(series.astype(np.float32), (period, period, 0))
         gpu = cp.asnumpy(cp.asarray(handle))[0].astype(np.float64)
 
-        # Compare from warm onward
+        
         warm = period - 1
         mask = ~np.isnan(cpu)
         assert_close(gpu[mask], cpu[mask], rtol=1e-4, atol=5e-4,
@@ -65,7 +65,7 @@ class TestLinearregAngleCuda:
         handle = ti.linearreg_angle_cuda_many_series_one_param_dev(tm.astype(np.float32), cols, rows, period)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 
-        # Compare where CPU is not NaN
+        
         mask = ~np.isnan(cpu_tm)
         assert_close(gpu_tm[mask], cpu_tm[mask], rtol=1e-4, atol=5e-4,
                      msg="LRA CUDA many-series mismatch vs CPU baseline")

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,8 +30,8 @@ class TestStoch:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with all default params
-        k, d = ta_indicators.stoch(high, low, close)  # Using defaults
+        
+        k, d = ta_indicators.stoch(high, low, close)  
         assert len(k) == len(close)
         assert len(d) == len(close)
     
@@ -41,7 +41,7 @@ class TestStoch:
         low = test_data['low']
         close = test_data['close']
         
-        # Expected values from Rust test
+        
         expected_k = [
             42.51122827572717,
             40.13864479593807,
@@ -57,8 +57,8 @@ class TestStoch:
             37.15049846604803,
         ]
         
-        # Using default parameters: fastk_period=14, slowk_period=3, slowk_ma_type="sma", 
-        # slowd_period=3, slowd_ma_type="sma"
+        
+        
         k, d = ta_indicators.stoch(
             high, low, close,
             fastk_period=14,
@@ -71,7 +71,7 @@ class TestStoch:
         assert len(k) == len(close)
         assert len(d) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             k[-5:], 
             expected_k,
@@ -92,8 +92,8 @@ class TestStoch:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: fastk_period=14, slowk_period=3, slowk_ma_type="sma", 
-        # slowd_period=3, slowd_ma_type="sma"
+        
+        
         k, d = ta_indicators.stoch(high, low, close)
         assert len(k) == len(close)
         assert len(d) == len(close)
@@ -118,7 +118,7 @@ class TestStoch:
     
     def test_stoch_all_nan(self):
         """Test Stoch fails with all NaN values - mirrors check_stoch_all_nan"""
-        # Create longer arrays to pass period check but all NaN
+        
         nan_data = np.array([float('nan')] * 20)
         
         with pytest.raises(ValueError, match="All values are NaN"):
@@ -134,7 +134,7 @@ class TestStoch:
     def test_stoch_mismatched_lengths(self):
         """Test Stoch fails with mismatched input lengths"""
         high = np.array([10.0, 11.0, 12.0])
-        low = np.array([9.0, 9.5])  # Different length
+        low = np.array([9.0, 9.5])  
         close = np.array([9.5, 10.6, 11.5])
         
         with pytest.raises(ValueError, match="Mismatched length"):
@@ -150,23 +150,23 @@ class TestStoch:
         assert len(k) == len(close)
         assert len(d) == len(close)
         
-        # After warmup period, no NaN values should exist
-        # Warmup is fastk_period + slowk_period + slowd_period - 3
-        warmup = 14 + 3 + 3 - 3  # 17
+        
+        
+        warmup = 14 + 3 + 3 - 3  
         if len(k) > warmup + 100:
             assert not np.any(np.isnan(k[warmup + 100:])), "Found unexpected NaN in K after warmup period"
             assert not np.any(np.isnan(d[warmup + 100:])), "Found unexpected NaN in D after warmup period"
     
     def test_stoch_streaming(self, test_data):
         """Test Stoch streaming matches batch calculation - mirrors check_stoch_streaming"""
-        high = test_data['high'][:100]  # Use smaller dataset for streaming test
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Batch calculation with default params
+        
         batch_k, batch_d = ta_indicators.stoch(high, low, close)
         
-        # Streaming calculation
+        
         stream = ta_indicators.StochStream(
             fastk_period=14,
             slowk_period=3,
@@ -191,11 +191,11 @@ class TestStoch:
         stream_k = np.array(stream_k_values)
         stream_d = np.array(stream_d_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_k) == len(stream_k)
         assert len(batch_d) == len(stream_d)
         
-        # Compare K values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_k, stream_k)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -203,7 +203,7 @@ class TestStoch:
                 assert_close(b, s, rtol=1e-9, atol=1e-9, 
                             msg=f"Stoch K streaming mismatch at index {i}")
         
-        # Compare D values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_d, stream_d)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -217,14 +217,14 @@ class TestStoch:
         low = test_data['low'] 
         close = test_data['close']
         
-        # Test with single parameter set (default values)
+        
         result = ta_indicators.stoch_batch(
             high, low, close,
-            fastk_range=(14, 14, 0),  # Default fastk_period only
-            slowk_range=(3, 3, 0),    # Default slowk_period only
-            slowk_ma_type="sma",      # Default slowk_ma_type
-            slowd_range=(3, 3, 0),    # Default slowd_period only
-            slowd_ma_type="sma"       # Default slowd_ma_type
+            fastk_range=(14, 14, 0),  
+            slowk_range=(3, 3, 0),    
+            slowk_ma_type="sma",      
+            slowd_range=(3, 3, 0),    
+            slowd_ma_type="sma"       
         )
         
         assert 'k' in result
@@ -235,13 +235,13 @@ class TestStoch:
         assert 'slowd_periods' in result
         assert 'slowd_types' in result
         
-        # Should have 1 row (single parameter set)
+        
         assert result['k'].shape[0] == 1
         assert result['d'].shape[0] == 1
         assert result['k'].shape[1] == len(close)
         assert result['d'].shape[1] == len(close)
         
-        # Verify values match single calculation
+        
         single_k, single_d = ta_indicators.stoch(high, low, close)
         
         assert_close(
@@ -260,28 +260,28 @@ class TestStoch:
     
     def test_stoch_batch_multiple_params(self, test_data):
         """Test Stoch batch processing with multiple parameter sets"""
-        high = test_data['high'][:100]  # Use smaller dataset for faster test
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with parameter sweep
+        
         result = ta_indicators.stoch_batch(
             high, low, close,
-            fastk_range=(10, 20, 5),  # 10, 15, 20
-            slowk_range=(2, 4, 1),    # 2, 3, 4
+            fastk_range=(10, 20, 5),  
+            slowk_range=(2, 4, 1),    
             slowk_ma_type="sma",
-            slowd_range=(2, 4, 1),    # 2, 3, 4
+            slowd_range=(2, 4, 1),    
             slowd_ma_type="sma"
         )
         
-        # Should have 3 * 3 * 3 = 27 parameter combinations
+        
         expected_combos = 3 * 3 * 3
         assert result['k'].shape[0] == expected_combos
         assert result['d'].shape[0] == expected_combos
         assert result['k'].shape[1] == len(close)
         assert result['d'].shape[1] == len(close)
         
-        # Verify parameter arrays
+        
         assert len(result['fastk_periods']) == expected_combos
         assert len(result['slowk_periods']) == expected_combos
         assert len(result['slowd_periods']) == expected_combos
@@ -292,19 +292,19 @@ class TestStoch:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with scalar kernel
+        
         k_scalar, d_scalar = ta_indicators.stoch(
             high, low, close,
             kernel="scalar"
         )
         
-        # Test with auto kernel (default)
+        
         k_auto, d_auto = ta_indicators.stoch(
             high, low, close,
             kernel=None
         )
         
-        # Results should be very close regardless of kernel
+        
         assert_close(k_scalar, k_auto, rtol=1e-9, 
                     msg="K values differ between scalar and auto kernel")
         assert_close(d_scalar, d_auto, rtol=1e-9,
@@ -316,29 +316,29 @@ class TestStoch:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with SMA (default)
+        
         k_sma, d_sma = ta_indicators.stoch(
             high, low, close,
             slowk_ma_type="sma",
             slowd_ma_type="sma"
         )
         
-        # Test with EMA
+        
         k_ema, d_ema = ta_indicators.stoch(
             high, low, close,
             slowk_ma_type="ema",
             slowd_ma_type="ema"
         )
         
-        # Results should be different
+        
         assert len(k_sma) == len(k_ema)
         assert len(d_sma) == len(d_ema)
         
-        # Values should differ after warmup
+        
         warmup = 20
         k_diff = np.abs(k_sma[warmup:] - k_ema[warmup:])
         d_diff = np.abs(d_sma[warmup:] - d_ema[warmup:])
         
-        # At least some values should be different
+        
         assert np.any(k_diff > 1e-6), "K values should differ between SMA and EMA"
         assert np.any(d_diff > 1e-6), "D values should differ between SMA and EMA"

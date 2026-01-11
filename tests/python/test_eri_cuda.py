@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional
+except ImportError:  
     cp = None
 
 try:
@@ -56,10 +56,10 @@ class TestEriCuda:
         period = 13
         ma_type = "ema"
 
-        # CPU baseline
+        
         bull_cpu, bear_cpu = ti.eri(high, low, close, period=period, ma_type=ma_type)
 
-        # CUDA single-combo batch
+        
         bull_dev, bear_dev = ti.eri_cuda_batch_dev(
             high.astype(np.float32),
             low.astype(np.float32),
@@ -71,7 +71,7 @@ class TestEriCuda:
         bull_gpu = cp.asnumpy(cp.asarray(bull_dev))[0]
         bear_gpu = cp.asnumpy(cp.asarray(bear_dev))[0]
 
-        # FP32 vs FP64 tolerance
+        
         assert_close(bull_gpu, bull_cpu, rtol=1e-4, atol=1e-5, msg="ERI bull: CUDA batch vs CPU mismatch")
         assert_close(bear_gpu, bear_cpu, rtol=1e-4, atol=1e-5, msg="ERI bear: CUDA batch vs CPU mismatch")
 
@@ -82,7 +82,7 @@ class TestEriCuda:
         low = test_data['low'][:T].astype(np.float64)
         close = test_data['close'][:T].astype(np.float64)
 
-        # Build small time-major (T,N)
+        
         high_tm = np.zeros((T, N), dtype=np.float64)
         low_tm = np.zeros((T, N), dtype=np.float64)
         close_tm = np.zeros((T, N), dtype=np.float64)
@@ -94,7 +94,7 @@ class TestEriCuda:
         period = 14
         ma_type = "ema"
 
-        # CPU baseline
+        
         bull_cpu = np.zeros_like(close_tm)
         bear_cpu = np.zeros_like(close_tm)
         for j in range(N):
@@ -102,7 +102,7 @@ class TestEriCuda:
             bull_cpu[:, j] = bull
             bear_cpu[:, j] = bear
 
-        # CUDA
+        
         bull_dev, bear_dev = ti.eri_cuda_many_series_one_param_dev(
             high_tm.astype(np.float32).ravel(),
             low_tm.astype(np.float32).ravel(),

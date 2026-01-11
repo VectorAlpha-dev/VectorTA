@@ -315,11 +315,13 @@ pub fn ehlers_itrend_scalar_tail(
         prev_re = re_smooth;
         prev_im = im_smooth;
 
-        let mut new_mesa = if re_smooth != 0.0 && im_smooth != 0.0 {
-            2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan()
-        } else {
-            0.0
-        };
+        let mut new_mesa = 0.0;
+        if re_smooth != 0.0 && im_smooth != 0.0 {
+            let angle = im_smooth.atan2(re_smooth);
+            if angle != 0.0 {
+                new_mesa = (2.0 * core::f64::consts::PI) / angle;
+            }
+        }
         let up_lim = 1.5 * prev_mesa;
         if new_mesa > up_lim {
             new_mesa = up_lim;
@@ -539,7 +541,10 @@ fn ehlers_itrend_safe_scalar(src: &[f64], warmup_bars: usize, max_dc: usize, out
 
         let mut new_mesa = 0.0;
         if re_smooth != 0.0 && im_smooth != 0.0 {
-            new_mesa = 2.0 * PI / (im_smooth / re_smooth).atan();
+            let angle = im_smooth.atan2(re_smooth);
+            if angle != 0.0 {
+                new_mesa = (2.0 * PI) / angle;
+            }
         }
         let up_lim = 1.5 * prev_mesa;
         if new_mesa > up_lim {
@@ -949,7 +954,12 @@ impl EhlersITrendStream {
 
         
         let mut new_mesa = if re_smooth != 0.0 && im_smooth != 0.0 {
-            2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan()
+            let angle = im_smooth.atan2(re_smooth);
+            if angle != 0.0 {
+                (2.0 * core::f64::consts::PI) / angle
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -971,32 +981,24 @@ impl EhlersITrendStream {
         self.prev_smooth = sp_val;
 
         
-        let mut dcp = (sp_val + 0.5).floor() as usize;
-        if dcp == 0 {
-            dcp = 1;
-        } else if dcp > self.max_dc {
-            dcp = self.max_dc;
+        let mut dcp_i = (sp_val + 0.5).floor() as i32;
+        if dcp_i < 1 {
+            dcp_i = 1;
         }
+        if dcp_i as usize > self.max_dc {
+            dcp_i = self.max_dc as i32;
+        }
+        let dcp = dcp_i as usize;
 
         
         
-        let n = self.max_dc + 1;
-        let next = if self.cum_idx + 1 == n {
-            0
-        } else {
-            self.cum_idx + 1
-        };
-        let cur_sum = self.cum_ring[self.cum_idx] + x0;
-        self.cum_ring[next] = cur_sum;
-        self.cum_idx = next;
-
-        
-        let back = if self.cum_idx >= dcp {
-            self.cum_idx - dcp
-        } else {
-            self.cum_idx + n - dcp
-        };
-        let it_val = (cur_sum - self.cum_ring[back]) / dcp as f64;
+        let mut sum_src = 0.0;
+        let mut idx2 = self.sum_idx;
+        for _ in 0..dcp {
+            idx2 = if idx2 == 0 { self.max_dc - 1 } else { idx2 - 1 };
+            sum_src += self.sum_ring[idx2];
+        }
+        let it_val = sum_src / dcp as f64;
 
         
         let eit_val = if self.bar < self.warmup_bars {
@@ -1468,7 +1470,10 @@ fn ehlers_itrend_row_scalar_tail_with_fir(
 
         let mut new_mesa = 0.0;
         if re_smooth != 0.0 && im_smooth != 0.0 {
-            new_mesa = 2.0 * core::f64::consts::PI / (im_smooth / re_smooth).atan();
+            let angle = im_smooth.atan2(re_smooth);
+            if angle != 0.0 {
+                new_mesa = (2.0 * core::f64::consts::PI) / angle;
+            }
         }
         let up_lim = 1.5 * prev_mesa;
         if new_mesa > up_lim {

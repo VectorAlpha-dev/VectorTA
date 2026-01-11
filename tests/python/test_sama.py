@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,20 +29,20 @@ class TestSama:
         """Test SAMA with partial parameters - mirrors check_sama_partial_params"""
         close = test_data['close']
         
-        # Test with required params
-        result = ta_indicators.sama(close, 200, 14, 6)  # Using defaults
+        
+        result = ta_indicators.sama(close, 200, 14, 6)  
         assert len(result) == len(close)
         
-        # Test with different params
+        
         result2 = ta_indicators.sama(close, 50, 14, 6)
         assert len(result2) == len(close)
     
     def test_sama_accuracy(self, test_data):
         """Test SAMA matches expected values from Rust tests - mirrors check_sama_accuracy"""
-        close = test_data['close'][:300]  # Use first 300 values like in extraction
+        close = test_data['close'][:300]  
         expected = EXPECTED_OUTPUTS['sama']
         
-        # Test with default params
+        
         result = ta_indicators.sama(
             close,
             length=expected['default_params']['length'],
@@ -52,7 +52,7 @@ class TestSama:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected (for default params with length=200)
+        
         valid_values = result[~np.isnan(result)]
         if len(valid_values) >= 5:
             assert_close(
@@ -62,7 +62,7 @@ class TestSama:
                 msg="SAMA last 5 values mismatch (default params)"
             )
         
-        # Test with smaller params to get more valid values
+        
         result2 = ta_indicators.sama(
             close,
             length=expected['test_params']['length'],
@@ -83,27 +83,27 @@ class TestSama:
         """Test SAMA with default parameters - mirrors check_sama_default_candles"""
         close = test_data['close']
         
-        # Default params: length=200, maj_length=14, min_length=6
+        
         result = ta_indicators.sama(close, 200, 14, 6)
         assert len(result) == len(close)
         
-        # Pine Script compatibility: Now starts computing immediately
-        # So we should have values from the start, not NaN warmup
+        
+        
         assert not np.all(np.isnan(result[:200])), "Should have computed values, not all NaN"
     
     def test_sama_zero_period(self):
         """Test SAMA fails with zero period - mirrors check_sama_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
         
-        # Test with zero length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.sama(input_data, length=0, maj_length=14, min_length=6)
         
-        # Test with zero maj_length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.sama(input_data, length=10, maj_length=0, min_length=6)
         
-        # Test with zero min_length
+        
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.sama(input_data, length=10, maj_length=14, min_length=0)
     
@@ -137,10 +137,10 @@ class TestSama:
     
     def test_sama_reinput(self, test_data):
         """Test SAMA applied twice (re-input) - mirrors check_sama_reinput"""
-        close = test_data['close'][:300]  # Use first 300 values
+        close = test_data['close'][:300]  
         expected = EXPECTED_OUTPUTS['sama']
         
-        # First pass with test params for more valid values
+        
         first_result = ta_indicators.sama(
             close, 
             length=expected['test_params']['length'],
@@ -149,7 +149,7 @@ class TestSama:
         )
         assert len(first_result) == len(close)
         
-        # Second pass - apply SAMA to SAMA output
+        
         second_result = ta_indicators.sama(
             first_result,
             length=expected['test_params']['length'],
@@ -158,7 +158,7 @@ class TestSama:
         )
         assert len(second_result) == len(first_result)
         
-        # Check last 5 values match expected
+        
         valid_reinput = second_result[~np.isnan(second_result)]
         assert len(valid_reinput) >= 5, "Should have at least 5 valid reinput values"
         assert_close(
@@ -172,33 +172,33 @@ class TestSama:
         """Test SAMA handles NaN values correctly - mirrors check_sama_nan_handling"""
         close = test_data['close']
         
-        # Test with test params to get more valid values
+        
         result = ta_indicators.sama(close, length=50, maj_length=14, min_length=6)
         assert len(result) == len(close)
         
-        # Pine Script compatibility: Now starts computing immediately
-        # So we check that we have values right from the first valid input
+        
+        
         first_valid = np.where(~np.isnan(close))[0]
         if len(first_valid) > 0:
             first_valid_idx = first_valid[0]
             
-            # Should have computed values starting from first valid input
+            
             if first_valid_idx < len(result) - 10:
-                # Check we have some valid values starting immediately
+                
                 initial_values = result[first_valid_idx:first_valid_idx+10]
                 assert not np.all(np.isnan(initial_values)), "Should have valid values from first valid input"
     
     def test_sama_streaming(self, test_data):
         """Test SAMA streaming matches batch calculation - mirrors check_sama_streaming"""
-        close = test_data['close'][:300]  # Use smaller dataset for speed
+        close = test_data['close'][:300]  
         length = 50
         maj_length = 14
         min_length = 6
         
-        # Batch calculation
+        
         batch_result = ta_indicators.sama(close, length=length, maj_length=maj_length, min_length=min_length)
         
-        # Streaming calculation with new simplified API
+        
         stream = ta_indicators.SamaStream(length=length, maj_length=maj_length, min_length=min_length)
         stream_values = []
         
@@ -208,10 +208,10 @@ class TestSama:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -225,9 +225,9 @@ class TestSama:
         
         result = ta_indicators.sama_batch(
             close,
-            length_range=(200, 200, 0),  # Default length only
-            maj_length_range=(14, 14, 0),  # Default maj_length only
-            min_length_range=(6, 6, 0)  # Default min_length only
+            length_range=(200, 200, 0),  
+            maj_length_range=(14, 14, 0),  
+            min_length_range=(6, 6, 0)  
         )
         
         assert 'values' in result
@@ -235,15 +235,15 @@ class TestSama:
         assert 'maj_lengths' in result
         assert 'min_lengths' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         valid_values = default_row[~np.isnan(default_row)]
         
-        # Check last 5 values match expected
+        
         if len(valid_values) >= 5:
             assert_close(
                 valid_values[-5:],
@@ -254,31 +254,31 @@ class TestSama:
     
     def test_sama_batch_sweep(self, test_data):
         """Test SAMA batch processing with parameter sweep - mirrors check_batch_sweep"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
         result = ta_indicators.sama_batch(
             close,
-            length_range=(40, 50, 5),  # 40, 45, 50
-            maj_length_range=(12, 14, 1),  # 12, 13, 14
-            min_length_range=(4, 6, 1)  # 4, 5, 6
+            length_range=(40, 50, 5),  
+            maj_length_range=(12, 14, 1),  
+            min_length_range=(4, 6, 1)  
         )
         
-        # Should have 3 * 3 * 3 = 27 results
+        
         expected_count = 3 * 3 * 3
         assert result['values'].shape[0] == expected_count, f"Expected {expected_count} batch results"
         assert result['values'].shape[1] == len(close), "Should have columns equal to data length"
         
-        # Verify parameter arrays
+        
         assert len(result['lengths']) == expected_count
         assert len(result['maj_lengths']) == expected_count
         assert len(result['min_lengths']) == expected_count
         
-        # Check first combination
+        
         assert result['lengths'][0] == 40
         assert result['maj_lengths'][0] == 12
         assert result['min_lengths'][0] == 4
         
-        # Check last combination
+        
         assert result['lengths'][-1] == 50
         assert result['maj_lengths'][-1] == 14
         assert result['min_lengths'][-1] == 6
@@ -287,10 +287,10 @@ class TestSama:
         """Test batch result matches single calculation for same parameters"""
         close = test_data['close'][:100]
         
-        # Single calculation
+        
         single_result = ta_indicators.sama(close, length=45, maj_length=13, min_length=5)
         
-        # Batch with same single parameter
+        
         batch_result = ta_indicators.sama_batch(
             close,
             length_range=(45, 45, 0),
@@ -298,7 +298,7 @@ class TestSama:
             min_length_range=(5, 5, 0)
         )
         
-        # Should match exactly
+        
         assert_close(
             batch_result['values'][0],
             single_result,

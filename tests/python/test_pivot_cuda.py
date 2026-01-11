@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 
 try:
-    import cupy as cp  # optional; used to wrap DeviceArrayF32Py
-except ImportError:  # pragma: no cover
+    import cupy as cp  
+except ImportError:  
     cp = None
 
 try:
@@ -21,18 +21,18 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, 'pivot_cuda_batch_dev'):
         return False
-    # Smoke check: try creating a tiny handle
+    
     try:
         x = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float32)
-        # Construct simple OHLC (valid from index 1)
+        
         h = x + 0.6
         l = x - 0.4
         c = x
         o = x + 0.1
         handle, meta = ti.pivot_cuda_batch_dev(h, l, c, o, (3, 3, 1))
-        _ = cp.asarray(handle)  # ensure CuPy can wrap
+        _ = cp.asarray(handle)  
         return True
-    except Exception as e:  # pragma: no cover - environment dependent
+    except Exception as e:  
         msg = str(e).lower()
         if 'cuda not available' in msg or 'no cuda device' in msg or 'ptx' in msg:
             return False
@@ -43,7 +43,7 @@ def _cuda_available() -> bool:
 class TestPivotCuda:
     def test_pivot_cuda_batch_matches_cpu(self):
         n = 2048
-        # synth OHLC with warmup
+        
         x = np.arange(n, dtype=np.float64)
         base = np.sin(x * 0.01) + 0.001 * x
         rng = 0.2 + 0.05 * np.abs(np.cos(x * 0.02))
@@ -56,10 +56,10 @@ class TestPivotCuda:
         c[5:] = base[5:]
         o[5:] = base[5:] + 0.01 * np.sin(x[5:] * 0.03)
 
-        # CPU baseline for Camarilla
+        
         r4, r3, r2, r1, pp, s1, s2, s3, s4 = ti.pivot(h, l, c, o, mode=3)
 
-        # CUDA single combo (mode=3)
+        
         handle, meta = ti.pivot_cuda_batch_dev(
             h.astype(np.float32),
             l.astype(np.float32),
@@ -67,12 +67,12 @@ class TestPivotCuda:
             o.astype(np.float32),
             (3, 3, 1),
         )
-        gpu = cp.asnumpy(cp.asarray(handle))  # shape (9, n)
+        gpu = cp.asnumpy(cp.asarray(handle))  
         assert gpu.shape == (9, n)
 
-        # Compare two representative levels to keep runtime small
-        np.testing.assert_allclose(gpu[4], pp, rtol=5e-4, atol=5e-6)  # pp
-        np.testing.assert_allclose(gpu[0], r4, rtol=5e-4, atol=5e-6)  # r4
+        
+        np.testing.assert_allclose(gpu[4], pp, rtol=5e-4, atol=5e-6)  
+        np.testing.assert_allclose(gpu[0], r4, rtol=5e-4, atol=5e-6)  
 
     def test_pivot_cuda_many_series_one_param_matches_cpu(self):
         rows = 1024
@@ -90,7 +90,7 @@ class TestPivotCuda:
             c_tm[3:, s] = base[3:]
             o_tm[3:, s] = base[3:] + 0.01 * np.sin(x[3:] * 0.03)
 
-        # CPU baseline per series (mode 3)
+        
         cpu_pp = np.zeros_like(c_tm)
         for s in range(cols):
             r4, r3, r2, r1, pp, s1, s2, s3, s4 = ti.pivot(
@@ -107,7 +107,7 @@ class TestPivotCuda:
             rows,
             3,
         )
-        gpu = cp.asnumpy(cp.asarray(handle))  # shape (9*rows, cols)
+        gpu = cp.asnumpy(cp.asarray(handle))  
         assert gpu.shape == (9 * rows, cols)
         gpu_pp = gpu[4 * rows : 5 * rows, :]
         np.testing.assert_allclose(gpu_pp, cpu_pp, rtol=5e-4, atol=5e-6)

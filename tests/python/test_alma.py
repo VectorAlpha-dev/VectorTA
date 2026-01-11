@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestAlma:
         """Test ALMA with partial parameters (None values) - mirrors check_alma_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.alma(close, 9, 0.85, 6.0)  # Using defaults
+        
+        result = ta_indicators.alma(close, 9, 0.85, 6.0)  
         assert len(result) == len(close)
     
     def test_alma_accuracy(self, test_data):
@@ -47,7 +47,7 @@ class TestAlma:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -55,14 +55,14 @@ class TestAlma:
             msg="ALMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('alma', result, 'close', expected['default_params'])
     
     def test_alma_default_candles(self, test_data):
         """Test ALMA with default parameters - mirrors check_alma_default_candles"""
         close = test_data['close']
         
-        # Default params: period=9, offset=0.85, sigma=6.0
+        
         result = ta_indicators.alma(close, 9, 0.85, 6.0)
         assert len(result) == len(close)
     
@@ -108,11 +108,11 @@ class TestAlma:
         """Test ALMA fails with invalid offset - mirrors check_alma_invalid_offset"""
         data = np.array([1.0, 2.0, 3.0])
         
-        # Test with NaN offset
+        
         with pytest.raises(ValueError, match="Invalid offset"):
             ta_indicators.alma(data, period=2, offset=float('nan'), sigma=6.0)
         
-        # Test with offset outside [0, 1]
+        
         with pytest.raises(ValueError, match="Invalid offset"):
             ta_indicators.alma(data, period=2, offset=1.5, sigma=6.0)
         
@@ -124,15 +124,15 @@ class TestAlma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['alma']
         
-        # First pass
+        
         first_result = ta_indicators.alma(close, period=9, offset=0.85, sigma=6.0)
         assert len(first_result) == len(close)
         
-        # Second pass - apply ALMA to ALMA output
+        
         second_result = ta_indicators.alma(first_result, period=9, offset=0.85, sigma=6.0)
         assert len(second_result) == len(first_result)
         
-        # Check last 5 values match expected
+        
         assert_close(
             second_result[-5:],
             expected['reinput_last_5'],
@@ -147,11 +147,11 @@ class TestAlma:
         result = ta_indicators.alma(close, period=9, offset=0.85, sigma=6.0)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First period-1 values should be NaN
+        
         assert np.all(np.isnan(result[:8])), "Expected NaN in warmup period"
     
     def test_alma_streaming(self, test_data):
@@ -161,10 +161,10 @@ class TestAlma:
         offset = 0.85
         sigma = 6.0
         
-        # Batch calculation
+        
         batch_result = ta_indicators.alma(close, period=period, offset=offset, sigma=sigma)
         
-        # Streaming calculation
+        
         stream = ta_indicators.AlmaStream(period=period, offset=offset, sigma=sigma)
         stream_values = []
         
@@ -174,10 +174,10 @@ class TestAlma:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -190,9 +190,9 @@ class TestAlma:
         
         result = ta_indicators.alma_batch(
             close,
-            period_range=(9, 9, 0),  # Default period only
-            offset_range=(0.85, 0.85, 0.0),  # Default offset only
-            sigma_range=(6.0, 6.0, 0.0)  # Default sigma only
+            period_range=(9, 9, 0),  
+            offset_range=(0.85, 0.85, 0.0),  
+            sigma_range=(6.0, 6.0, 0.0)  
         )
         
         assert 'values' in result
@@ -200,15 +200,15 @@ class TestAlma:
         assert 'offsets' in result
         assert 'sigmas' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['alma']['last_5_values']
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected,

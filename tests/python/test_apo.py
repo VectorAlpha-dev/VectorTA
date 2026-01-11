@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,8 +29,8 @@ class TestApo:
         """Test APO with partial parameters - mirrors check_apo_partial_params"""
         close = test_data['close']
         
-        # Test with default params
-        result = ta_indicators.apo(close, 10, 20)  # Using defaults
+        
+        result = ta_indicators.apo(close, 10, 20)  
         assert len(result) == len(close)
     
     def test_apo_accuracy(self, test_data):
@@ -46,7 +46,7 @@ class TestApo:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected with 1e-1 tolerance (as in Rust tests)
+        
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -55,14 +55,14 @@ class TestApo:
             msg="APO last 5 values mismatch"
         )
         
-        # Also run full comparison with Rust
+        
         compare_with_rust('apo', result)
     
     def test_apo_default_params(self, test_data):
         """Test APO with default parameters"""
         close = test_data['close']
         
-        result = ta_indicators.apo(close)  # Should use defaults: short=10, long=20
+        result = ta_indicators.apo(close)  
         assert len(result) == len(close)
     
     def test_apo_zero_period(self):
@@ -93,11 +93,11 @@ class TestApo:
         """Test APO applied twice (re-input) - mirrors check_apo_reinput"""
         close = test_data['close']
         
-        # First pass with specific parameters
+        
         first_result = ta_indicators.apo(close, short_period=10, long_period=20)
         assert len(first_result) == len(close)
         
-        # Second pass with different parameters using first result as input
+        
         second_result = ta_indicators.apo(first_result, short_period=5, long_period=15)
         assert len(second_result) == len(first_result)
     
@@ -108,7 +108,7 @@ class TestApo:
         result = ta_indicators.apo(close, short_period=10, long_period=20)
         assert len(result) == len(close)
         
-        # After index 30, no NaN values should exist
+        
         if len(result) > 30:
             assert not np.any(np.isnan(result[30:])), "Found unexpected NaN after index 30"
     
@@ -123,75 +123,75 @@ class TestApo:
         """Test APO with different kernel selections"""
         close = test_data['close']
         
-        # Test with explicit kernel selection
-        result_auto = ta_indicators.apo(close, kernel=None)  # Auto-detect
+        
+        result_auto = ta_indicators.apo(close, kernel=None)  
         result_scalar = ta_indicators.apo(close, kernel='scalar')
         
         assert len(result_auto) == len(close)
         assert len(result_scalar) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_auto, result_scalar, rtol=1e-10)
     
     def test_apo_streaming(self, test_data):
         """Test APO streaming functionality"""
         close = test_data['close']
         
-        # Create stream
+        
         stream = ta_indicators.ApoStream(short_period=10, long_period=20)
         
-        # Process values one by one
+        
         stream_results = []
         for price in close:
             result = stream.update(price)
             stream_results.append(result)
         
-        # Convert None to NaN for comparison
+        
         stream_results = [np.nan if x is None else x for x in stream_results]
         
-        # Compare with batch calculation
+        
         batch_results = ta_indicators.apo(close, short_period=10, long_period=20)
         
-        # Results should match closely
+        
         assert_close(stream_results, batch_results, rtol=1e-10)
     
     def test_apo_batch_single_parameter_set(self, test_data):
         """Test batch processing with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set: short=10, long=20
+        
         batch_result = ta_indicators.apo_batch(
             close,
             short_period_range=(10, 10, 0),
             long_period_range=(20, 20, 0)
         )
         
-        # Should return a dict with values and parameters
+        
         assert 'values' in batch_result
         assert 'short_periods' in batch_result
         assert 'long_periods' in batch_result
         
-        # Should have shape (1, len(close))
+        
         assert batch_result['values'].shape == (1, len(close))
         assert len(batch_result['short_periods']) == 1
         assert len(batch_result['long_periods']) == 1
         
-        # Should match single calculation
+        
         single_result = ta_indicators.apo(close, short_period=10, long_period=20)
         assert_close(batch_result['values'][0], single_result, rtol=1e-10)
     
     def test_apo_batch_multiple_parameters(self, test_data):
         """Test batch processing with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple parameter combinations
+        
         batch_result = ta_indicators.apo_batch(
             close,
-            short_period_range=(5, 15, 5),  # 5, 10, 15
-            long_period_range=(20, 30, 10)  # 20, 30
+            short_period_range=(5, 15, 5),  
+            long_period_range=(20, 30, 10)  
         )
         
-        # Should have 3 * 2 = 6 valid combinations
+        
         expected_combos = [
             (5, 20), (5, 30),
             (10, 20), (10, 30),
@@ -203,7 +203,7 @@ class TestApo:
         assert len(batch_result['short_periods']) == len(expected_combos)
         assert len(batch_result['long_periods']) == len(expected_combos)
         
-        # Verify each row matches individual calculation
+        
         for i, (short, long) in enumerate(expected_combos):
             single_result = ta_indicators.apo(close, short_period=short, long_period=long)
             assert_close(
@@ -217,19 +217,19 @@ class TestApo:
         """Test batch processing filters out invalid combinations"""
         close = test_data['close'][:50]
         
-        # This range would include invalid combos where short >= long
+        
         batch_result = ta_indicators.apo_batch(
             close,
-            short_period_range=(10, 30, 10),  # 10, 20, 30
-            long_period_range=(15, 25, 10)   # 15, 25
+            short_period_range=(10, 30, 10),  
+            long_period_range=(15, 25, 10)   
         )
         
-        # Only valid combinations should be included:
-        # (10, 15), (10, 25), (20, 25)
-        # Invalid: (20, 15), (30, 15), (30, 25)
+        
+        
+        
         assert batch_result['values'].shape[0] == 3
         
-        # Check the actual parameter combinations
+        
         params = list(zip(batch_result['short_periods'], batch_result['long_periods']))
         assert (10, 15) in params
         assert (10, 25) in params
@@ -239,7 +239,7 @@ class TestApo:
         """Test batch processing with no valid combinations"""
         close = np.random.rand(50)
         
-        # All combinations would have short >= long
+        
         with pytest.raises(ValueError):
             ta_indicators.apo_batch(
                 close,
@@ -249,13 +249,13 @@ class TestApo:
     
     def test_apo_edge_cases(self):
         """Test APO with edge case inputs"""
-        # Minimum valid data
-        min_data = np.array([1.0] * 20)  # Exactly long_period length
+        
+        min_data = np.array([1.0] * 20)  
         result = ta_indicators.apo(min_data, short_period=10, long_period=20)
         assert len(result) == len(min_data)
         
-        # First value should be 0.0 (short_ema - long_ema at initialization)
+        
         assert result[0] == 0.0
         
-        # With constant prices, APO should converge to 0
+        
         assert abs(result[-1]) < 1e-10

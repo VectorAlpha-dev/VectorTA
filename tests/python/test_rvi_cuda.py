@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for CUDA path
+except ImportError:  
     cp = None
 
 try:
@@ -51,10 +51,10 @@ class TestRviCuda:
         close = test_data['close']
         period, ma_len, matype, devtype = 10, 14, 1, 0
 
-        # CPU baseline
+        
         cpu = ti.rvi(close, period, ma_len, matype, devtype)
 
-        # CUDA single-combo batch
+        
         handle, meta = ti.rvi_cuda_batch_dev(
             close.astype(np.float32),
             period_range=(period, period, 0),
@@ -66,7 +66,7 @@ class TestRviCuda:
         gpu = cp.asarray(handle)
         gpu_first = cp.asnumpy(gpu)[0]
 
-        # Compare entire row with modest tolerance (fp32 vs fp64)
+        
         assert_close(gpu_first, cpu, rtol=1e-4, atol=2e-5, msg="CUDA batch vs CPU mismatch")
 
     def test_rvi_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -79,12 +79,12 @@ class TestRviCuda:
 
         period, ma_len, matype, devtype = 10, 14, 1, 0
 
-        # CPU baseline per series
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.rvi(data_tm[:, j], period, ma_len, matype, devtype)
 
-        # CUDA
+        
         handle = ti.rvi_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32).ravel(), data_tm.shape[1], data_tm.shape[0], period, ma_len, matype, devtype
         )

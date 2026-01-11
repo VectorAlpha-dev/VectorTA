@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -27,13 +27,13 @@ def _cuda_available() -> bool:
         n = 64
         tp = np.linspace(100.0, 101.0, n, dtype=np.float32)
         vol = np.linspace(900.0, 1100.0, n, dtype=np.float32)
-        # seed some NaNs early to simulate warmup
+        
         tp[:4] = np.nan
         vol[:4] = np.nan
         handle = ti.mfi_cuda_batch_dev(tp, vol, (14, 14, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # availability probe only
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -51,7 +51,7 @@ class TestMfiCuda:
         vol = data["volume"].astype(np.float64)
 
         sweep = (5, 25, 5)
-        # CPU baseline with f32-rounded inputs to mirror GPU math
+        
         tp_f32 = tp.astype(np.float32).astype(np.float64)
         vol_f32 = vol.astype(np.float32).astype(np.float64)
         cpu = ti.mfi_batch(tp_f32, vol_f32, sweep)

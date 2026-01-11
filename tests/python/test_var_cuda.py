@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # optional dependency for wrapping device handles
+except ImportError:  
     cp = None
 
 try:
@@ -45,10 +45,10 @@ class TestVarCuda:
         close = test_data['close']
         period, nbdev = 14, 1.5
 
-        # CPU baseline (f64)
+        
         cpu = ti.var(close, period, nbdev)
 
-        # CUDA single-combo batch -> DeviceArrayF32 (rows=1, cols=N)
+        
         handle = ti.var_cuda_batch_dev(
             close.astype(np.float32),
             period_range=(period, period, 0),
@@ -57,7 +57,7 @@ class TestVarCuda:
         gpu = cp.asarray(handle)
         gpu_first = cp.asnumpy(gpu)[0]
 
-        # Allow modest fp32 vs fp64 tolerance
+        
         assert_close(gpu_first, cpu, rtol=5e-4, atol=1e-5, msg="VAR CUDA batch vs CPU mismatch")
 
     def test_var_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -69,12 +69,12 @@ class TestVarCuda:
 
         period, nbdev = 14, 1.0
 
-        # CPU baseline per column
+        
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.var(data_tm[:, j], period, nbdev)
 
-        # CUDA many-series (time-major)
+        
         handle = ti.var_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32).ravel(), cols=N, rows=T, period=period, nbdev=nbdev
         )

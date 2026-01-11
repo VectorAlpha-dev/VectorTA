@@ -1707,8 +1707,10 @@ fn buff_averages_batch_inner_into_parallel(
         other => return Err(BuffAveragesError::InvalidKernelForBatch(other)),
     }
 
+    // Keep `Kernel::Auto` consistent with the single-series API for this indicator:
+    // prefer scalar unless the caller explicitly requests a SIMD batch kernel.
     let simd = match match kern {
-        Kernel::Auto => detect_best_batch_kernel(),
+        Kernel::Auto => Kernel::ScalarBatch,
         k => k,
     } {
         Kernel::ScalarBatch => Kernel::Scalar,

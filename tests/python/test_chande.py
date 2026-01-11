@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,7 +31,7 @@ class TestChande:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default params
+        
         result = ta_indicators.chande(high, low, close, 22, 3.0, 'long')
         assert len(result) == len(close)
     
@@ -51,7 +51,7 @@ class TestChande:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -59,12 +59,12 @@ class TestChande:
             msg="Chande last 5 values mismatch"
         )
         
-        # Verify exact warmup period
+        
         warmup_period = expected['warmup_period']
         assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in warmup period (first {warmup_period} values)"
         assert not np.isnan(result[warmup_period]), f"Expected valid value at index {warmup_period} (after warmup)"
         
-        # Compare full output with Rust
+        
         compare_with_rust('chande', result, 'candles', expected['default_params'])
     
     def test_chande_zero_period(self):
@@ -123,17 +123,17 @@ class TestChande:
         low = np.array([5.0, 15.0, 25.0, 35.0, 45.0])
         close = np.array([8.0, 18.0, 28.0, 38.0, 48.0])
         
-        # Test long direction
+        
         result_long = ta_indicators.chande(high, low, close, period=3, mult=2.0, direction='long')
         assert len(result_long) == len(close)
-        assert np.all(np.isnan(result_long[:2]))  # First period-1 values should be NaN
+        assert np.all(np.isnan(result_long[:2]))  
         
-        # Test short direction
+        
         result_short = ta_indicators.chande(high, low, close, period=3, mult=2.0, direction='short')
         assert len(result_short) == len(close)
-        assert np.all(np.isnan(result_short[:2]))  # First period-1 values should be NaN
+        assert np.all(np.isnan(result_short[:2]))  
         
-        # Results should be different for long vs short
+        
         assert not np.allclose(result_long[2:], result_short[2:], equal_nan=True)
     
     def test_chande_nan_handling(self, test_data):
@@ -151,11 +151,11 @@ class TestChande:
         )
         assert len(result) == len(close)
         
-        # Verify exact warmup period
+        
         warmup_period = expected['warmup_period']
         assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in warmup period (first {warmup_period} values)"
         
-        # After warmup period, all values should be valid
+        
         if len(result) > warmup_period:
             assert not np.any(np.isnan(result[warmup_period:])), f"Found unexpected NaN after warmup period (index {warmup_period}+)"
     
@@ -165,10 +165,10 @@ class TestChande:
         low = test_data['low']
         close = test_data['close']
         
-        # Batch result
+        
         batch_result = ta_indicators.chande(high, low, close, period=22, mult=3.0, direction='long')
         
-        # Streaming result
+        
         stream = ta_indicators.ChandeStream(period=22, mult=3.0, direction='long')
         stream_result = []
         
@@ -178,7 +178,7 @@ class TestChande:
         
         stream_result = np.array(stream_result)
         
-        # Results should match
+        
         assert_close(
             batch_result, 
             stream_result,
@@ -188,11 +188,11 @@ class TestChande:
     
     def test_chande_batch_single_params(self, test_data):
         """Test Chande batch with single parameter set"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Single parameter set
+        
         result = ta_indicators.chande_batch(
             high, low, close,
             period_range=(22, 22, 0),
@@ -200,11 +200,11 @@ class TestChande:
             direction='long'
         )
         
-        # Should have exactly one row
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == 100
         
-        # Values should match single calculation
+        
         single_result = ta_indicators.chande(high, low, close, 22, 3.0, 'long')
         assert_close(
             result['values'][0], 
@@ -213,7 +213,7 @@ class TestChande:
             msg="Batch vs single mismatch"
         )
         
-        # Check parameter arrays
+        
         assert len(result['periods']) == 1
         assert result['periods'][0] == 22
         assert len(result['mults']) == 1
@@ -223,31 +223,31 @@ class TestChande:
     
     def test_chande_batch_multiple_params(self, test_data):
         """Test Chande batch with multiple parameter combinations"""
-        high = test_data['high'][:50]  # Use smaller dataset for speed
+        high = test_data['high'][:50]  
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Multiple parameters
+        
         result = ta_indicators.chande_batch(
             high, low, close,
-            period_range=(10, 20, 10),    # 10, 20
-            mult_range=(2.0, 3.0, 0.5),    # 2.0, 2.5, 3.0
+            period_range=(10, 20, 10),    
+            mult_range=(2.0, 3.0, 0.5),    
             direction='short'
         )
         
-        # Should have 2 * 3 = 6 rows
+        
         assert result['values'].shape[0] == 6
         assert result['values'].shape[1] == 50
         
-        # Check parameter arrays
+        
         assert len(result['periods']) == 6
         assert len(result['mults']) == 6
         assert len(result['directions']) == 6
         
-        # All directions should be 'short'
+        
         assert all(d == 'short' for d in result['directions'])
         
-        # Verify each row matches individual calculation
+        
         expected_params = [
             (10, 2.0), (10, 2.5), (10, 3.0),
             (20, 2.0), (20, 2.5), (20, 3.0)
@@ -268,28 +268,28 @@ class TestChande:
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Test batch with multiple parameters
+        
         result = ta_indicators.chande_batch(
             high, low, close,
-            period_range=(10, 20, 5),      # 10, 15, 20
-            mult_range=(2.0, 3.0, 0.5),    # 2.0, 2.5, 3.0
+            period_range=(10, 20, 5),      
+            mult_range=(2.0, 3.0, 0.5),    
             direction='long'
         )
         
-        # Verify result structure
+        
         assert 'values' in result
         assert 'periods' in result
         assert 'mults' in result
         assert 'directions' in result
         
-        # Should have 3 * 3 = 9 combinations
+        
         expected_combos = 9
         assert result['values'].shape[0] == expected_combos
         assert len(result['periods']) == expected_combos
         assert len(result['mults']) == expected_combos
         assert len(result['directions']) == expected_combos
         
-        # Verify parameter combinations are correct
+        
         expected_periods = [10, 10, 10, 15, 15, 15, 20, 20, 20]
         expected_mults = [2.0, 2.5, 3.0] * 3
         
@@ -303,11 +303,11 @@ class TestChande:
         low = test_data['low'][:30]
         close = test_data['close'][:30]
         
-        # Test with step larger than range - should only have one combination
+        
         result = ta_indicators.chande_batch(
             high, low, close,
-            period_range=(10, 12, 5),      # Step > range, should only get 10
-            mult_range=(2.0, 2.0, 0.0),    # Single value
+            period_range=(10, 12, 5),      
+            mult_range=(2.0, 2.0, 0.0),    
             direction='short'
         )
         
@@ -316,15 +316,15 @@ class TestChande:
         assert result['mults'][0] == 2.0
         assert result['directions'][0] == 'short'
         
-        # Test with exact range match
+        
         result2 = ta_indicators.chande_batch(
             high, low, close,
-            period_range=(10, 15, 5),      # Should get 10, 15
-            mult_range=(2.0, 2.5, 0.5),    # Should get 2.0, 2.5
+            period_range=(10, 15, 5),      
+            mult_range=(2.0, 2.5, 0.5),    
             direction='long'
         )
         
-        assert result2['values'].shape[0] == 4  # 2 * 2 combinations
+        assert result2['values'].shape[0] == 4  
         assert len(result2['periods']) == 4
         
     def test_chande_warmup_validation(self, test_data):
@@ -340,11 +340,11 @@ class TestChande:
             
             expected_warmup = period - 1
             
-            # Check NaN values in warmup period
+            
             for i in range(expected_warmup):
                 assert np.isnan(result[i]), f"Expected NaN at index {i} for period {period}"
             
-            # Check first valid value after warmup
+            
             if expected_warmup < len(result):
                 assert not np.isnan(result[expected_warmup]), f"Expected valid value at index {expected_warmup} for period {period}"
     
@@ -354,7 +354,7 @@ class TestChande:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with different kernels
+        
         kernels = ['auto', 'scalar', 'avx2', 'avx512']
         results = []
         
@@ -367,8 +367,8 @@ class TestChande:
                 )
                 results.append((kernel, result))
             except ValueError as e:
-                # Some kernels might not be available or compiled in this build.
-                # Accept and skip these cases rather than failing the binding test.
+                
+                
                 msg = str(e).lower()
                 allowed = (
                     "invalid kernel" in msg
@@ -380,7 +380,7 @@ class TestChande:
                 if not allowed:
                     raise
         
-        # All available kernels should produce identical results
+        
         if len(results) > 1:
             base_kernel, base_result = results[0]
             for kernel, result in results[1:]:

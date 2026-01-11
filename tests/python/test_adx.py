@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,7 +31,7 @@ class TestAdx:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default params (period=14)
+        
         result = ta_indicators.adx(high, low, close, 14)
         assert len(result) == len(close)
     
@@ -51,8 +51,8 @@ class TestAdx:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
-        # Match Rust tolerance: absolute 1e-1 (not a 10% relative window)
+        
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -61,7 +61,7 @@ class TestAdx:
             msg="ADX last 5 values mismatch"
         )
         
-        # Compare full output with Rust
+        
         compare_with_rust('adx', result, 'ohlc', expected['default_params'])
     
     def test_adx_default_candles(self, test_data):
@@ -70,7 +70,7 @@ class TestAdx:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: period=14
+        
         result = ta_indicators.adx(high, low, close, 14)
         assert len(result) == len(close)
     
@@ -104,7 +104,7 @@ class TestAdx:
     def test_adx_input_length_mismatch(self):
         """Test ADX fails when input arrays have different lengths"""
         high = np.array([10.0, 20.0, 30.0])
-        low = np.array([5.0, 15.0])  # Different length
+        low = np.array([5.0, 15.0])  
         close = np.array([9.0, 19.0, 29.0])
         
         with pytest.raises(ValueError, match="Input arrays must have the same length"):
@@ -127,13 +127,13 @@ class TestAdx:
         result = ta_indicators.adx(high, low, close, period=14)
         assert len(result) == len(close)
         
-        # ADX warmup period is 2 * period - 1 = 27 for period=14
+        
         warmup_period = 2 * 14 - 1
         
-        # First warmup_period values should be NaN
+        
         assert np.all(np.isnan(result[:warmup_period])), f"Expected NaN in first {warmup_period} values"
         
-        # After warmup + buffer, no NaN values should exist
+        
         if len(result) > warmup_period + 10:
             assert not np.any(np.isnan(result[warmup_period + 10:])), "Found unexpected NaN after warmup period"
     
@@ -144,10 +144,10 @@ class TestAdx:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.adx(high, low, close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.AdxStream(period=period)
         stream_values = []
         
@@ -157,10 +157,10 @@ class TestAdx:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Compare values where both are not NaN
+        
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
@@ -177,22 +177,22 @@ class TestAdx:
             high,
             low,
             close,
-            period_range=(14, 14, 0)  # Default period only
+            period_range=(14, 14, 0)  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['adx']['last_5_values']
         
-        # Check last 5 values match
-        # Match Rust tolerance: absolute 1e-1
+        
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -203,11 +203,11 @@ class TestAdx:
     
     def test_adx_batch_multiple_periods(self, test_data):
         """Test ADX batch with multiple period values"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Multiple periods: 10, 14, 18
+        
         result = ta_indicators.adx_batch(
             high,
             low,
@@ -215,18 +215,18 @@ class TestAdx:
             period_range=(10, 18, 4)
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert result['values'].shape == (3, 100)
         assert len(result['periods']) == 3
         assert list(result['periods']) == [10, 14, 18]
         
-        # Verify each row matches individual calculation
+        
         periods = [10, 14, 18]
         for i, period in enumerate(periods):
             row_data = result['values'][i]
             single_result = ta_indicators.adx(high, low, close, period=period)
             
-            # Compare where both are not NaN
+            
             for j in range(len(row_data)):
                 if np.isnan(row_data[j]) and np.isnan(single_result[j]):
                     continue
@@ -244,7 +244,7 @@ class TestAdx:
         low = test_data['low'][:100].copy()
         close = test_data['close'][:100].copy()
         
-        # Add some NaN values at the beginning
+        
         high[:5] = np.nan
         low[:5] = np.nan
         close[:5] = np.nan
@@ -252,8 +252,8 @@ class TestAdx:
         result = ta_indicators.adx(high, low, close, period=14)
         assert len(result) == len(close)
         
-        # Should handle leading NaN values properly
-        # Warmup will be extended by the NaN values
+        
+        
         assert np.all(np.isnan(result[:5])), "Expected NaN where input has NaN"
     
     def test_adx_batch_empty_input(self):
@@ -272,7 +272,7 @@ class TestAdx:
         low = test_data['low'][:50]
         close = test_data['close'][:50]
         
-        # Period exceeds data length
+        
         with pytest.raises(ValueError):
             ta_indicators.adx_batch(
                 high, low, close,
@@ -288,22 +288,22 @@ class TestAdx:
         
         result = ta_indicators.adx(high, low, close, period=period)
         
-        # ADX needs:
-        # - period bars for initial ATR
-        # - period more bars for DX calculation
-        # - first ADX appears at 2*period bars
-        warmup_period = 2 * period - 1  # 27 for period=14
         
-        # All values before warmup_period should be NaN
+        
+        
+        
+        warmup_period = 2 * period - 1  
+        
+        
         assert np.all(np.isnan(result[:warmup_period])), \
             f"Expected NaN for indices 0 to {warmup_period-1}"
         
-        # Should have first valid value at warmup_period index
+        
         if len(result) > warmup_period:
             assert not np.isnan(result[warmup_period]), \
                 f"Expected first valid value at index {warmup_period}"
         
-        # Check that we have consistent non-NaN values after warmup
+        
         if len(result) > warmup_period + 5:
             assert not np.any(np.isnan(result[warmup_period:])), \
                 "Expected all non-NaN values after warmup period"

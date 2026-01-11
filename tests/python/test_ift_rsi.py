@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -28,7 +28,7 @@ class TestIftRsi:
         """Test IFT RSI with partial parameters - mirrors check_ift_rsi_partial_params"""
         close = test_data['close']
         
-        # Test with defaults (rsi_period=5, wma_period=9)
+        
         result = ta_indicators.ift_rsi(close, 5, 9)
         assert len(result) == len(close)
     
@@ -37,7 +37,7 @@ class TestIftRsi:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['ift_rsi']
         
-        # Default params
+        
         result = ta_indicators.ift_rsi(
             close,
             rsi_period=expected['default_params']['rsi_period'],
@@ -46,7 +46,7 @@ class TestIftRsi:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
@@ -86,11 +86,11 @@ class TestIftRsi:
         """Test IFT RSI applied twice (re-input) - mirrors check_ift_rsi_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.ift_rsi(close, 5, 9)
         assert len(first_result) == len(close)
         
-        # Second pass - apply IFT RSI to IFT RSI output
+        
         second_result = ta_indicators.ift_rsi(first_result, 5, 9)
         assert len(second_result) == len(first_result)
     
@@ -101,7 +101,7 @@ class TestIftRsi:
         result = ta_indicators.ift_rsi(close, 5, 9)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             non_nan_count = np.count_nonzero(~np.isnan(result[240:]))
             assert non_nan_count == len(result[240:]), "Found unexpected NaN values after warmup"
@@ -124,15 +124,15 @@ class TestIftRsi:
         """Test IFT RSI with different kernel options"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.ift_rsi(close, 5, 9, kernel="scalar")
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.ift_rsi(close, 5, 9, kernel=None)
         assert len(result_auto) == len(close)
         
-        # Results should be very close regardless of kernel
+        
         assert_close(result_scalar, result_auto, rtol=1e-10)
 
 
@@ -145,39 +145,39 @@ class TestIftRsiBatch:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set
+        
         result = ta_indicators.ift_rsi_batch(
             close,
             rsi_period_range=(5, 5, 0),
             wma_period_range=(9, 9, 0)
         )
         
-        # Should have shape and values
+        
         assert 'values' in result
         assert 'rsi_periods' in result
         assert 'wma_periods' in result
         
-        # Values should match single calculation
+        
         single_result = ta_indicators.ift_rsi(close, 5, 9)
         assert_close(result['values'][0], single_result, rtol=1e-10)
     
     def test_ift_rsi_batch_multiple_parameters(self, test_data):
         """Test batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple parameters
+        
         result = ta_indicators.ift_rsi_batch(
             close,
-            rsi_period_range=(5, 7, 1),    # 5, 6, 7
-            wma_period_range=(9, 10, 1)     # 9, 10
+            rsi_period_range=(5, 7, 1),    
+            wma_period_range=(9, 10, 1)     
         )
         
-        # Should have 3 * 2 = 6 combinations
+        
         assert result['values'].shape == (6, 100)
         assert len(result['rsi_periods']) == 6
         assert len(result['wma_periods']) == 6
         
-        # Verify first combination
+        
         assert result['rsi_periods'][0] == 5
         assert result['wma_periods'][0] == 9
 
@@ -189,10 +189,10 @@ class TestIftRsiStream:
     
     def test_ift_rsi_stream_basic(self):
         """Test IFT RSI streaming functionality"""
-        # Create stream
+        
         stream = ta_indicators.IftRsiStream(rsi_period=5, wma_period=9)
         
-        # Generate test data
+        
         test_data = [100.0 + i * 0.1 for i in range(50)]
         
         results = []
@@ -200,28 +200,28 @@ class TestIftRsiStream:
             result = stream.update(value)
             results.append(result)
         
-        # First several values should be None due to warmup
+        
         assert results[0] is None
         assert results[1] is None
         
-        # After warmup, should get values
+        
         non_none_count = sum(1 for r in results if r is not None)
         assert non_none_count > 0
         
-        # Values should be bounded between -1 and 1 (IFT output range)
+        
         for r in results:
             if r is not None:
                 assert -1.0 <= r <= 1.0
     
     def test_ift_rsi_stream_consistency(self):
         """Test that streaming produces same results as batch calculation"""
-        # Generate test data
+        
         test_data = np.array([100.0 + i * 0.1 + np.sin(i * 0.1) for i in range(100)])
         
-        # Batch calculation
+        
         batch_result = ta_indicators.ift_rsi(test_data, 5, 9)
         
-        # Streaming calculation
+        
         stream = ta_indicators.IftRsiStream(rsi_period=5, wma_period=9)
         stream_results = []
         
@@ -229,7 +229,7 @@ class TestIftRsiStream:
             result = stream.update(value)
             stream_results.append(result if result is not None else np.nan)
         
-        # Compare results where both have values
+        
         valid_indices = ~np.isnan(batch_result) & ~np.isnan(stream_results)
         if np.any(valid_indices):
             assert_close(
@@ -250,35 +250,35 @@ class TestIftRsiStream:
             wma_period=expected['default_params']['wma_period']
         )
         
-        # Check warmup period
-        # The warmup should be first + rsi_period + wma_period - 1
-        # For data starting at index 0, warmup = 0 + 5 + 9 - 1 = 13
+        
+        
+        
         warmup = expected['warmup_period']
         
-        # All values before warmup should be NaN
+        
         for i in range(min(warmup, len(result))):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup, got {result[i]}"
         
-        # First non-NaN should be at warmup index
+        
         if warmup < len(result):
             assert not np.isnan(result[warmup]), f"Expected valid value at index {warmup}, got NaN"
     
     def test_ift_rsi_boundary_values(self):
         """Test IFT RSI with boundary parameter values"""
-        # Minimum valid data for rsi_period=2, wma_period=2
+        
         min_data = np.array([100.0, 101.0, 102.0, 103.0, 104.0])
         
-        # Test minimum periods
+        
         result = ta_indicators.ift_rsi(min_data, rsi_period=2, wma_period=2)
         assert len(result) == len(min_data)
         
-        # Test with larger periods but still valid
+        
         large_data = np.random.randn(200) * 10 + 100
         result = ta_indicators.ift_rsi(large_data, rsi_period=50, wma_period=50)
         assert len(result) == len(large_data)
         
-        # Check warmup for large periods
-        warmup = 0 + 50 + 50 - 1  # 99
+        
+        warmup = 0 + 50 + 50 - 1  
         for i in range(min(warmup, len(result))):
             assert np.isnan(result[i]), f"Expected NaN during warmup at {i}"
     
@@ -286,7 +286,7 @@ class TestIftRsiStream:
         """Test IFT RSI output is bounded to [-1, 1] range"""
         close = test_data['close']
         
-        # Test various parameter combinations
+        
         for params in EXPECTED_OUTPUTS['ift_rsi']['parameter_combinations']:
             result = ta_indicators.ift_rsi(
                 close,
@@ -294,7 +294,7 @@ class TestIftRsiStream:
                 wma_period=params['wma_period']
             )
             
-            # Check all non-NaN values are in [-1, 1]
+            
             valid_values = result[~np.isnan(result)]
             assert np.all(valid_values >= -1.0), f"Found values < -1 with params {params}"
             assert np.all(valid_values <= 1.0), f"Found values > 1 with params {params}"
@@ -303,7 +303,7 @@ class TestIftRsiStream:
         """Test for uninitialized memory patterns (poison values)"""
         close = test_data['close']
         
-        # Test multiple parameter combinations
+        
         for params in EXPECTED_OUTPUTS['ift_rsi']['parameter_combinations']:
             result = ta_indicators.ift_rsi(
                 close,
@@ -311,42 +311,42 @@ class TestIftRsiStream:
                 wma_period=params['wma_period']
             )
             
-            # Check for poison patterns
+            
             for i, val in enumerate(result):
                 if not np.isnan(val):
                     bits = np.float64(val).view(np.uint64)
                     
-                    # Check for common poison patterns
+                    
                     assert bits != 0x1111111111111111, f"Found poison value at {i} with params {params}"
                     assert bits != 0x2222222222222222, f"Found poison value at {i} with params {params}"
                     assert bits != 0x3333333333333333, f"Found poison value at {i} with params {params}"
     
     def test_ift_rsi_nan_injection(self, test_data):
         """Test IFT RSI handles NaN injection correctly"""
-        # This test verifies that the indicator can handle data with NaN values
-        # The exact behavior depends on the implementation's NaN handling strategy
         
-        # Create test data with NaN values
-        close = np.array([100.0 + i for i in range(50)])  # First 50 values
-        close = np.append(close, [np.nan] * 5)            # 5 NaN values
-        close = np.append(close, [150.0 + i for i in range(45)])  # Last 45 values
         
-        # The indicator should handle this without crashing
+        
+        
+        close = np.array([100.0 + i for i in range(50)])  
+        close = np.append(close, [np.nan] * 5)            
+        close = np.append(close, [150.0 + i for i in range(45)])  
+        
+        
         try:
             result = ta_indicators.ift_rsi(close, rsi_period=5, wma_period=9)
             assert len(result) == len(close), "Output length should match input"
             
-            # Check that we have some valid values in the output
+            
             valid_count = np.sum(~np.isnan(result))
             assert valid_count > 0, "Should have some valid output values"
             
-            # Check that all valid values are in the expected range [-1, 1]
+            
             valid_values = result[~np.isnan(result)]
             if len(valid_values) > 0:
                 assert np.all(valid_values >= -1.0), "Valid values should be >= -1"
                 assert np.all(valid_values <= 1.0), "Valid values should be <= 1"
         except ValueError:
-            # It's also acceptable if the indicator rejects data with NaN values
+            
             pass
 
 
@@ -359,39 +359,39 @@ class TestIftRsiBatch:
         """Test batch with single parameter combination"""
         close = test_data['close']
         
-        # Single parameter set
+        
         result = ta_indicators.ift_rsi_batch(
             close,
             rsi_period_range=(5, 5, 0),
             wma_period_range=(9, 9, 0)
         )
         
-        # Should have shape and values
+        
         assert 'values' in result
         assert 'rsi_periods' in result
         assert 'wma_periods' in result
         
-        # Values should match single calculation
+        
         single_result = ta_indicators.ift_rsi(close, 5, 9)
         assert_close(result['values'][0], single_result, rtol=1e-10)
     
     def test_ift_rsi_batch_multiple_parameters(self, test_data):
         """Test batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  # Use smaller dataset for speed
+        close = test_data['close'][:100]  
         
-        # Multiple parameters
+        
         result = ta_indicators.ift_rsi_batch(
             close,
-            rsi_period_range=(5, 7, 1),    # 5, 6, 7
-            wma_period_range=(9, 10, 1)     # 9, 10
+            rsi_period_range=(5, 7, 1),    
+            wma_period_range=(9, 10, 1)     
         )
         
-        # Should have 3 * 2 = 6 combinations
+        
         assert result['values'].shape == (6, 100)
         assert len(result['rsi_periods']) == 6
         assert len(result['wma_periods']) == 6
         
-        # Verify first combination
+        
         assert result['rsi_periods'][0] == 5
         assert result['wma_periods'][0] == 9
     
@@ -401,23 +401,23 @@ class TestIftRsiBatch:
         
         result = ta_indicators.ift_rsi_batch(
             close,
-            rsi_period_range=(3, 5, 1),    # 3, 4, 5
-            wma_period_range=(7, 9, 1)      # 7, 8, 9
+            rsi_period_range=(3, 5, 1),    
+            wma_period_range=(7, 9, 1)      
         )
         
-        # Check each combination has correct warmup
+        
         for idx in range(len(result['rsi_periods'])):
             rsi_p = result['rsi_periods'][idx]
             wma_p = result['wma_periods'][idx]
-            warmup = 0 + rsi_p + wma_p - 1  # first=0 for clean data
+            warmup = 0 + rsi_p + wma_p - 1  
             
             row = result['values'][idx]
             
-            # Check NaN pattern matches warmup
+            
             for i in range(min(warmup, len(row))):
                 assert np.isnan(row[i]), f"Expected NaN at {i} for combo {idx} (rsi={rsi_p}, wma={wma_p})"
             
-            # First valid should be at warmup index
+            
             if warmup < len(row):
                 assert not np.isnan(row[warmup]), f"Expected valid at {warmup} for combo {idx}"
     
@@ -427,11 +427,11 @@ class TestIftRsiBatch:
         
         result = ta_indicators.ift_rsi_batch(
             close,
-            rsi_period_range=(2, 10, 2),    # 2, 4, 6, 8, 10
-            wma_period_range=(5, 15, 5)     # 5, 10, 15
+            rsi_period_range=(2, 10, 2),    
+            wma_period_range=(5, 15, 5)     
         )
         
-        # Check all values are bounded
+        
         all_values = result['values'].flatten()
         valid_values = all_values[~np.isnan(all_values)]
         

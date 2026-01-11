@@ -16,8 +16,8 @@ const __dirname = path.dirname(__filename);
 
 function checkWasmBuilt() {
     const pkgDir = path.join(__dirname, '../../pkg');
-    const wasmFile = path.join(pkgDir, 'my_project_bg.wasm');
-    const jsFile = path.join(pkgDir, 'my_project.js');
+    const wasmFile = path.join(pkgDir, 'vector_ta_bg.wasm');
+    const jsFile = path.join(pkgDir, 'vector_ta.js');
     
     if (!fs.existsSync(wasmFile) || !fs.existsSync(jsFile)) {
         console.error('ERROR: WASM module not built!');

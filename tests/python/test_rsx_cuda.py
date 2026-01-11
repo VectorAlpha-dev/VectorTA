@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover
+except ImportError:  
     cp = None
 
 try:
@@ -25,7 +25,7 @@ def _cuda_available() -> bool:
         return False
     try:
         x = np.arange(0, 128, dtype=np.float32)
-        x[:16] = np.nan  # warmup
+        x[:16] = np.nan  
         handle = ti.rsx_cuda_batch_dev(x, (14, 14, 0))
         _ = cp.asarray(handle)
         return True

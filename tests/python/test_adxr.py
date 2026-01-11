@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -31,8 +31,8 @@ class TestAdxr:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default params (period=14)
-        result = ta_indicators.adxr(high, low, close, 14)  # Using default
+        
+        result = ta_indicators.adxr(high, low, close, 14)  
         assert len(result) == len(close)
     
     def test_adxr_accuracy(self, test_data):
@@ -49,23 +49,23 @@ class TestAdxr:
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected (with tolerance for ADXR calculation)
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
-            rtol=1e-1,  # ADXR uses 1e-1 tolerance in Rust tests
+            rtol=1e-1,  
             msg="ADXR last 5 values mismatch"
         )
         
-        # Compare full output with Rust
-        # Note: ADXR has different warmup periods in Python vs Rust bindings
-        # So we only compare where both have valid values
+        
+        
+        
         try:
             compare_with_rust('adxr', result, 'hlc', expected['default_params'])
         except AssertionError as e:
             if "nan location mismatch" in str(e):
-                # This is expected due to different warmup calculations
-                # Just verify the actual values match where both are valid
+                
+                
                 pass
             else:
                 raise
@@ -76,7 +76,7 @@ class TestAdxr:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: period=14
+        
         result = ta_indicators.adxr(high, low, close, 14)
         assert len(result) == len(close)
     
@@ -117,7 +117,7 @@ class TestAdxr:
     def test_adxr_mismatched_lengths(self):
         """Test ADXR fails with mismatched input lengths"""
         high = np.array([10.0, 20.0, 30.0])
-        low = np.array([9.0, 19.0])  # Different length
+        low = np.array([9.0, 19.0])  
         close = np.array([9.5, 19.5, 29.5])
         
         with pytest.raises(ValueError, match="HLC data length mismatch"):
@@ -129,11 +129,11 @@ class TestAdxr:
         low = test_data['low']
         close = test_data['close']
         
-        # First pass with period=14
+        
         first_result = ta_indicators.adxr(high, low, close, period=14)
         assert len(first_result) == len(close)
         
-        # Second pass with period=5
+        
         second_result = ta_indicators.adxr(high, low, close, period=5)
         assert len(second_result) == len(close)
     
@@ -146,13 +146,13 @@ class TestAdxr:
         result = ta_indicators.adxr(high, low, close, period=14)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
         
-        # First 2*period values should be NaN (period for ADX + period for ADXR)
-        # ADXR needs ADX values from period bars ago, so warmup is longer
-        expected_warmup = 2 * 14  # 28 for period=14
+        
+        
+        expected_warmup = 2 * 14  
         assert np.all(np.isnan(result[:expected_warmup])), "Expected NaN in warmup period"
     
     def test_adxr_streaming(self, test_data):
@@ -162,10 +162,10 @@ class TestAdxr:
         close = test_data['close']
         period = 14
         
-        # Batch calculation
+        
         batch_result = ta_indicators.adxr(high, low, close, period=period)
         
-        # Streaming calculation
+        
         stream = ta_indicators.AdxrStream(period=period)
         stream_values = []
         
@@ -175,12 +175,12 @@ class TestAdxr:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Note: ADXR streaming is simplified and may not produce exact values
-        # due to the complexity of maintaining full ADX history.
-        # This test verifies the API works but doesn't check exact value matching.
+        
+        
+        
     
     def test_adxr_batch(self, test_data):
         """Test ADXR batch processing - mirrors check_batch_default_row"""
@@ -190,21 +190,21 @@ class TestAdxr:
         
         result = ta_indicators.adxr_batch(
             high, low, close,
-            period_range=(14, 14, 0),  # Default period only
+            period_range=(14, 14, 0),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['adxr']['last_5_values']
         
-        # Check last 5 values match (with ADXR tolerance)
+        
         assert_close(
             default_row[-5:],
             expected,
@@ -221,33 +221,33 @@ class TestAdxr:
     
     def test_adxr_batch_multiple_periods(self, test_data):
         """Test ADXR batch with multiple periods"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
         result = ta_indicators.adxr_batch(
             high, low, close,
-            period_range=(10, 20, 5),  # periods: 10, 15, 20
+            period_range=(10, 20, 5),  
         )
         
         assert 'values' in result
         assert 'periods' in result
         
-        # Should have 3 combinations
+        
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
         
-        # Check periods array
+        
         assert len(result['periods']) == 3
         assert list(result['periods']) == [10, 15, 20]
         
-        # Verify each row has proper warmup
+        
         for i, period in enumerate([10, 15, 20]):
             row = result['values'][i]
             expected_warmup = 2 * period
-            # Check warmup NaNs
+            
             assert np.all(np.isnan(row[:expected_warmup-1])), f"Expected NaN in warmup for period {period}"
-            # Check we have values after warmup
+            
             if expected_warmup < 100:
                 assert not np.all(np.isnan(row[expected_warmup:])), f"Expected values after warmup for period {period}"
     
@@ -257,19 +257,19 @@ class TestAdxr:
         low = test_data['low'][:100]
         close = test_data['close'][:100]
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.adxr(high, low, close, period=14, kernel="scalar")
         assert len(result_scalar) == 100
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.adxr(high, low, close, period=14)
         assert len(result_auto) == 100
         
-        # Results should be very close regardless of kernel
-        # Skip NaN values and check for reasonable values (ADXR should be between 0 and 100)
+        
+        
         mask = ~(np.isnan(result_scalar) | np.isnan(result_auto))
         
-        # Filter out any uninitialized memory values (extremely large or small)
+        
         reasonable_mask = mask & (np.abs(result_scalar) < 1e10) & (np.abs(result_auto) < 1e10)
         reasonable_mask = reasonable_mask & (result_scalar >= 0) & (result_scalar <= 100)
         reasonable_mask = reasonable_mask & (result_auto >= 0) & (result_auto <= 100)

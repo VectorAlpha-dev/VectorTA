@@ -26,7 +26,7 @@ let testData;
 
 test.before(async () => {
     
-    const esmPath = path.join(__dirname, '../../pkg/my_project.js');
+    const esmPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const esmImportPath = process.platform === 'win32'
         ? 'file:///' + esmPath.replace(/\\/g, '/')
         : esmPath;
@@ -36,11 +36,9 @@ test.before(async () => {
     } catch (error) {
         
         
-        const cjsPath = path.join(__dirname, './my_project.cjs');
         const { createRequire } = await import('node:module');
         const require = createRequire(import.meta.url);
-        const cjs = require(cjsPath);
-        wasm = cjs && cjs.default ? cjs.default : cjs;
+        wasm = require(path.join(__dirname, '../../pkg/vector_ta.js'));
         usingFallback = true;
     }
 

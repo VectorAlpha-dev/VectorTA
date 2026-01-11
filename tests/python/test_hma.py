@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,7 +29,7 @@ class TestHma:
         """Test HMA with partial parameters - mirrors check_hma_partial_params"""
         close = test_data['close']
         
-        # Test with default params: period=5
+        
         result = ta_indicators.hma(close, 5)
         assert len(result) == len(close)
     
@@ -38,34 +38,34 @@ class TestHma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['hma']
         
-        # Using period=5
+        
         result = ta_indicators.hma(close, expected['default_params']['period'])
         
         assert len(result) == len(close)
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected['last_5_values'],
             rtol=1e-12,
-            atol=1e-3,  # Match Rust absolute tolerance (< 1e-3)
+            atol=1e-3,  
             msg="HMA last 5 values mismatch"
         )
         
-        # Compare full output with Rust
-        # compare_with_rust('hma', result, 'close', expected['default_params'])
+        
+        
     
     def test_hma_default_candles(self, test_data):
         """Test HMA with default parameters - mirrors check_hma_default_candles"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['hma']
         
-        # Default params: period=5
+        
         result = ta_indicators.hma(close, expected['default_params']['period'])
         assert len(result) == len(close)
         
-        # Compare with Rust
-        # compare_with_rust('hma', result, 'close', expected['default_params'])
+        
+        
     
     def test_hma_zero_period(self):
         """Test HMA fails with zero period - mirrors check_hma_zero_period"""
@@ -111,11 +111,11 @@ class TestHma:
         
         assert len(result) == len(close)
         
-        # Calculate expected warmup period
+        
         sqrt_period = int(np.sqrt(period))
         warmup_period = period + sqrt_period - 2
         
-        # After warmup period, no NaN values should exist
+        
         if len(result) > warmup_period:
             for i in range(warmup_period, len(result)):
                 assert not np.isnan(result[i]), f"Unexpected NaN at index {i}"
@@ -125,25 +125,25 @@ class TestHma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['hma']
         
-        # Test various period values and check warmup
+        
         test_cases = [
-            {'period': 3, 'expected_warmup': 3 + 1 - 2},  # sqrt(3) = 1, warmup = 2
-            {'period': 5, 'expected_warmup': 5 + 2 - 2},  # sqrt(5) = 2, warmup = 5
-            {'period': 10, 'expected_warmup': 10 + 3 - 2}, # sqrt(10) = 3, warmup = 11
-            {'period': 16, 'expected_warmup': 16 + 4 - 2}, # sqrt(16) = 4, warmup = 18
+            {'period': 3, 'expected_warmup': 3 + 1 - 2},  
+            {'period': 5, 'expected_warmup': 5 + 2 - 2},  
+            {'period': 10, 'expected_warmup': 10 + 3 - 2}, 
+            {'period': 16, 'expected_warmup': 16 + 4 - 2}, 
         ]
         
         for test_case in test_cases:
             period = test_case['period']
             expected_warmup = test_case['expected_warmup']
             
-            result = ta_indicators.hma(close[:50], period)  # Use subset for speed
+            result = ta_indicators.hma(close[:50], period)  
             
-            # Check NaN values up to warmup period
+            
             for i in range(min(expected_warmup, len(result))):
                 assert np.isnan(result[i]), f"Expected NaN at index {i} for period={period}"
             
-            # Check valid values after warmup
+            
             if expected_warmup < len(result):
                 assert not np.isnan(result[expected_warmup]), \
                     f"Expected valid value at index {expected_warmup} for period={period}"
@@ -152,8 +152,8 @@ class TestHma:
         """Test HMA batch computation."""
         close = test_data['close']
         
-        # Test period range 3-9 step 2
-        period_range = (3, 9, 2)  # periods: 3, 5, 7, 9
+        
+        period_range = (3, 9, 2)  
         
         result = ta_indicators.hma_batch(close, period_range)
         
@@ -167,9 +167,9 @@ class TestHma:
         expected_periods = [3, 5, 7, 9]
         
         assert list(periods) == expected_periods
-        assert values.shape == (4, len(close))  # 4 periods
+        assert values.shape == (4, len(close))  
         
-        # Check each row corresponds to individual HMA calculation
+        
         row_idx = 0
         for period in [3, 5, 7, 9]:
             individual_result = ta_indicators.hma(close, period)
@@ -186,7 +186,7 @@ class TestHma:
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['hma']
         
-        # Single period batch
+        
         period_range = (5, 5, 0)
         
         batch_result = ta_indicators.hma_batch(close, period_range)
@@ -202,12 +202,12 @@ class TestHma:
             err_msg="Batch single period mismatch"
         )
         
-        # Check matches expected values
+        
         assert_close(
             batch_result['values'][0, -5:],
             expected['last_5_values'],
             rtol=1e-12,
-            atol=1e-3,  # Match Rust absolute tolerance (< 1e-3)
+            atol=1e-3,  
             msg="HMA batch last 5 values mismatch"
         )
     
@@ -215,16 +215,16 @@ class TestHma:
         """Test HMA with different period values."""
         close = test_data['close']
         
-        # Test various period values
+        
         for period in [3, 5, 10, 20]:
             result = ta_indicators.hma(close, period)
             assert len(result) == len(close)
             
-            # Calculate expected warmup period
+            
             sqrt_period = int(np.sqrt(period))
             warmup = period + sqrt_period - 2
             
-            # Verify no NaN after warmup period
+            
             for i in range(warmup, len(result)):
                 assert not np.isnan(result[i]), f"Unexpected NaN at index {i} for period={period}"
     
@@ -232,21 +232,21 @@ class TestHma:
         """Test HMA fails when period/2 is zero"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # Period=1 would result in half=0
+        
         with pytest.raises(ValueError, match="Cannot calculate half of period|Invalid period|Zero"):
             ta_indicators.hma(data, period=1)
     
     def test_hma_zero_sqrt_period(self):
         """Test HMA with period where sqrt(period) < 1"""
-        # This is actually not possible since minimum valid period is 2
-        # and sqrt(2) > 1, so this test just verifies small periods work
+        
+        
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
         
-        # Period=2 should work (sqrt(2) ≈ 1.4 → 1)
+        
         result = ta_indicators.hma(data, period=2)
         assert len(result) == len(data)
         
-        # Check warmup: period=2, sqrt=1, warmup = 2 + 1 - 2 = 1
+        
         assert np.isnan(result[0])
         assert not np.isnan(result[1])
     
@@ -254,36 +254,36 @@ class TestHma:
         """Test HMA with insufficient valid data after NaN prefix"""
         data = np.array([np.nan, np.nan, 1.0, 2.0, 3.0])
         
-        # With period=4, needs at least 4 valid values after NaN prefix
-        # We have 3 valid values, so should fail
+        
+        
         with pytest.raises(ValueError, match="Not enough valid data"):
             ta_indicators.hma(data, period=4)
     
     def test_hma_batch_edge_cases(self, test_data):
         """Test HMA batch processing edge cases"""
-        close = test_data['close'][:100]  # Use subset
+        close = test_data['close'][:100]  
         
-        # Test step larger than range (should get single period)
+        
         result = ta_indicators.hma_batch(close, (5, 7, 10))
-        assert result['values'].shape[0] == 1  # Only period=5
+        assert result['values'].shape[0] == 1  
         assert list(result['periods']) == [5]
         
-        # Test step = 0 (should get single period)
+        
         result = ta_indicators.hma_batch(close, (5, 5, 0))
         assert result['values'].shape[0] == 1
         assert list(result['periods']) == [5]
     
     def test_hma_consistency_across_periods(self, test_data):
         """Test that HMA produces consistent results for different periods"""
-        # HMA is designed to reduce lag while maintaining smoothness
-        # Due to its unique calculation method, variance relationships may differ from simple moving averages
-        close = test_data['close'][:200]  # Use more data for better statistics
+        
+        
+        close = test_data['close'][:200]  
         
         hma5 = ta_indicators.hma(close, 5)
         hma10 = ta_indicators.hma(close, 10)
         hma20 = ta_indicators.hma(close, 20)
         
-        # Calculate mean absolute difference from previous value (measures responsiveness)
+        
         def responsiveness(arr):
             valid_diffs = []
             for i in range(1, len(arr)):
@@ -295,13 +295,13 @@ class TestHma:
         resp10 = responsiveness(hma10)
         resp20 = responsiveness(hma20)
         
-        # Smaller period should be more responsive (larger average change)
+        
         assert resp5 > resp10, \
             f"HMA(5) responsiveness {resp5} should be > HMA(10) responsiveness {resp10}"
         assert resp10 > resp20, \
             f"HMA(10) responsiveness {resp10} should be > HMA(20) responsiveness {resp20}"
         
-        # Also verify all produce valid results
+        
         assert np.sum(~np.isnan(hma5)) > 0, "HMA(5) should produce valid values"
         assert np.sum(~np.isnan(hma10)) > 0, "HMA(10) should produce valid values"
         assert np.sum(~np.isnan(hma20)) > 0, "HMA(20) should produce valid values"
@@ -309,30 +309,30 @@ class TestHma:
     def test_hma_with_specific_data_patterns(self):
         """Test HMA with specific data patterns"""
         
-        # Test with constant data - HMA should equal the constant
+        
         constant_data = np.full(50, 100.0)
         result = ta_indicators.hma(constant_data, 5)
         valid_result = result[~np.isnan(result)]
         np.testing.assert_allclose(valid_result, 100.0, rtol=1e-10,
                                   err_msg="HMA of constant data should equal the constant")
         
-        # Test with linear trend
+        
         linear_data = np.arange(1.0, 51.0)
         result = ta_indicators.hma(linear_data, 5)
-        # HMA should closely follow the trend after warmup
-        # Can't check exact values without complex calculation, just ensure no errors
+        
+        
         assert len(result) == len(linear_data)
     
     def test_hma_error_messages(self):
         """Test that HMA produces appropriate error messages"""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         
-        # Test various error conditions with specific message checking
+        
         test_cases = [
             ([], 5, "No data provided"),
             ([np.nan] * 5, 3, "All values are NaN"),
             (data, 0, "Invalid period"),
-            (data, 10, "Invalid period"),  # period > length
+            (data, 10, "Invalid period"),  
             ([42.0], 5, "Not enough valid data|Invalid period"),
         ]
         

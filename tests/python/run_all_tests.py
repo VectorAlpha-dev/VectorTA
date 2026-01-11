@@ -30,40 +30,40 @@ def run_tests():
         
     start_time = time.time()
     
-    # Get all test files
+    
     test_dir = Path(__file__).parent
     test_files = sorted(test_dir.glob('test_*.py'))
     test_files = [f for f in test_files if f.name != 'test_utils.py']
     
     print(f"Running {len(test_files)} indicator test files...")
     
-    # Run pytest with options similar to cargo test
+    
     cmd = [
         sys.executable, '-m', 'pytest',
-        '--tb=short',           # Short traceback format
-        '--quiet',              # Less verbose by default
-        '--color=yes',          # Colored output
-        '--durations=10',       # Show 10 slowest tests
+        '--tb=short',           
+        '--quiet',              
+        '--color=yes',          
+        '--durations=10',       
     ]
 
-    # Add parallel flag only if xdist is available
+    
     try:
-        import pytest_xdist  # noqa: F401
+        import pytest_xdist  
         cmd.extend(['-n', 'auto'])
     except Exception:
-        # xdist not installed; run tests serially
+        
         pass
     
-    # Add coverage if requested
+    
     if '--coverage' in sys.argv:
         cmd.extend(['--cov=my_project', '--cov-report=html'])
     
-    # Add verbose if requested
+    
     if '-v' in sys.argv or '--verbose' in sys.argv:
         cmd.remove('--quiet')
         cmd.append('-v')
     
-    # Add specific test pattern if provided
+    
     test_pattern = None
     for arg in sys.argv[1:]:
         if not arg.startswith('-'):
@@ -71,20 +71,20 @@ def run_tests():
             break
     
     if test_pattern:
-        # Check if it's a specific test file
+        
         test_file = test_dir / f"test_{test_pattern}.py"
         if test_file.exists():
             cmd.append(str(test_file))
             print(f"Running specific test file: {test_file.name}")
         else:
-            # Otherwise use as pattern
+            
             cmd.extend(['-k', test_pattern])
             print(f"Running tests matching pattern: {test_pattern}")
     else:
-        # Run all tests
+        
         cmd.append(str(test_dir))
     
-    # Run the tests
+    
     try:
         result = subprocess.run(cmd, check=True)
         success = True

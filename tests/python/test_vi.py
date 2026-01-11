@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -30,8 +30,8 @@ class TestVI:
         low = test_data['low']
         close = test_data['close']
         
-        # Test with default params (period=14)
-        result = ta_indicators.vi(high, low, close, 14)  # Using default
+        
+        result = ta_indicators.vi(high, low, close, 14)  
         assert 'plus' in result
         assert 'minus' in result
         assert len(result['plus']) == len(high)
@@ -43,12 +43,12 @@ class TestVI:
         low = test_data['low']
         close = test_data['close']
         
-        result = ta_indicators.vi(high, low, close, 14)  # Default period
+        result = ta_indicators.vi(high, low, close, 14)  
         
         assert len(result['plus']) == len(high)
         assert len(result['minus']) == len(high)
         
-        # Expected values from Rust tests
+        
         expected_last_five_plus = [
             0.9970238095238095,
             0.9871071716357775,
@@ -64,7 +64,7 @@ class TestVI:
             1.1894672506875827,
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result['plus'][-5:], 
             expected_last_five_plus,
@@ -86,7 +86,7 @@ class TestVI:
         low = test_data['low']
         close = test_data['close']
         
-        # Default params: period=14
+        
         result = ta_indicators.vi(high, low, close, 14)
         assert len(result['plus']) == len(high)
         assert len(result['minus']) == len(high)
@@ -128,12 +128,12 @@ class TestVI:
         assert len(result['plus']) == len(high)
         assert len(result['minus']) == len(high)
         
-        # Check that NaN values are handled (should not crash)
-        # First few values should be NaN due to warmup period
+        
+        
         assert np.isnan(result['plus'][0]), 'First plus value should be NaN'
         assert np.isnan(result['minus'][0]), 'First minus value should be NaN'
         
-        # After warmup period (14-1=13), values should not be NaN
+        
         if len(result['plus']) > 20:
             for i in range(20, min(len(result['plus']), 240)):
                 assert not np.isnan(result['plus'][i]), f'Found unexpected NaN in plus at index {i}'
@@ -151,7 +151,7 @@ class TestVI:
     def test_vi_mismatched_lengths(self):
         """Test VI fails with mismatched input lengths"""
         high = np.array([10.0, 11.0, 12.0])
-        low = np.array([9.0, 10.0])  # Different length
+        low = np.array([9.0, 10.0])  
         close = np.array([9.5, 10.5, 11.5])
         
         with pytest.raises(ValueError, match="Input data length mismatch"):
@@ -159,35 +159,35 @@ class TestVI:
     
     def test_vi_batch(self, test_data):
         """Test VI batch operations"""
-        high = test_data['high'][:1000]  # Use smaller dataset for speed
+        high = test_data['high'][:1000]  
         low = test_data['low'][:1000]
         close = test_data['close'][:1000]
         
-        # Test batch with period range
+        
         result = ta_indicators.vi_batch(
             high, low, close,
-            period_range=(10, 20, 2)  # periods: 10, 12, 14, 16, 18, 20
+            period_range=(10, 20, 2)  
         )
         
         assert 'plus' in result
         assert 'minus' in result
         assert 'periods' in result
         
-        # Should have 6 parameter combinations
+        
         assert result['plus'].shape == (6, 1000)
         assert result['minus'].shape == (6, 1000)
         assert len(result['periods']) == 6
         
-        # Check that periods are correct
+        
         expected_periods = [10, 12, 14, 16, 18, 20]
         assert list(result['periods']) == expected_periods
     
     def test_vi_streaming(self):
         """Test VI streaming functionality"""
-        # Create stream with period=3 (small enough for our 8 test values)
+        
         stream = ta_indicators.ViStream(3)
         
-        # Test data
+        
         high_values = [100.0, 102.0, 101.5, 103.0, 102.5, 104.0, 103.5, 105.0]
         low_values = [99.0, 100.0, 99.5, 101.0, 100.5, 102.0, 101.5, 103.0]
         close_values = [99.5, 101.0, 100.5, 102.0, 101.5, 103.0, 102.5, 104.0]
@@ -197,11 +197,11 @@ class TestVI:
             result = stream.update(h, l, c)
             results.append(result)
         
-        # First value should return None (no previous values)
+        
         assert results[0] is None
         
-        # Should start returning values once enough data is accumulated
-        # The exact index depends on the period and implementation
+        
+        
         none_count = sum(1 for r in results if r is None)
         assert none_count > 0, "Should have some None values during warmup"
         assert none_count < len(results), "Should eventually produce values"

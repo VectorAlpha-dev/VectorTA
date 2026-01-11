@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -40,7 +40,7 @@ class TestKaufmanstop:
         
         assert len(result) == len(test_data['high'])
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:],
             expected['last_5_values'],
@@ -48,8 +48,8 @@ class TestKaufmanstop:
             msg="KAUFMANSTOP last 5 values mismatch"
         )
         
-        # Compare full output with Rust - skip for now as generate_references doesn't have kaufmanstop yet
-        # compare_with_rust('kaufmanstop', result, 'high,low', expected['default_params'])
+        
+        
     
     def test_kaufmanstop_zero_period(self):
         """Test that kaufmanstop fails with zero period"""
@@ -79,12 +79,12 @@ class TestKaufmanstop:
         """Test KaufmanstopStream class"""
         stream = ta_indicators.KaufmanstopStream(period=22, mult=2.0, direction="long", ma_type="sma")
         
-        # Test that update returns None until enough data
+        
         for i in range(21):
             result = stream.update(100.0 + i, 95.0 + i)
             assert result is None
         
-        # 22nd value should return a result
+        
         result = stream.update(122.0, 117.0)
         assert result is not None
         assert isinstance(result, float)
@@ -94,13 +94,13 @@ class TestKaufmanstop:
         result = ta_indicators.kaufmanstop_batch(
             test_data['high'],
             test_data['low'],
-            period_range=(20, 24, 2),  # 20, 22, 24
-            mult_range=(1.5, 2.5, 0.5),  # 1.5, 2.0, 2.5
+            period_range=(20, 24, 2),  
+            mult_range=(1.5, 2.5, 0.5),  
             direction="long",
             ma_type="sma"
         )
         
-        # Check structure - columnar format like ALMA
+        
         assert 'values' in result
         assert 'periods' in result
         assert 'mults' in result
@@ -109,12 +109,12 @@ class TestKaufmanstop:
         assert 'rows' in result
         assert 'cols' in result
         
-        # Should have 3 periods × 3 mults = 9 rows
+        
         assert result['rows'] == 9
         assert result['cols'] == len(test_data['high'])
         assert result['values'].shape == (9, len(test_data['high']))
         
-        # Verify columnar metadata
+        
         assert len(result['periods']) == 9
         assert len(result['mults']) == 9
         assert len(result['directions']) == 9
@@ -133,7 +133,7 @@ class TestKaufmanstop:
             )
             results.append(result)
         
-        # All kernel options should produce the same results
+        
         for i in range(1, len(results)):
             np.testing.assert_allclose(results[0], results[i], rtol=1e-10)
     
@@ -151,19 +151,19 @@ class TestKaufmanstop:
             direction="short"
         )
         
-        # Results should be different
+        
         assert not np.allclose(result_long, result_short, equal_nan=True)
         
-        # After warmup period, verify difference
-        warmup = 21  # 0 + 22 - 1
+        
+        warmup = 21  
         for i in range(warmup, min(warmup + 10, 100)):
             if not np.isnan(result_long[i]) and not np.isnan(result_short[i]):
-                # They should be different
+                
                 assert result_long[i] != result_short[i], f"Long and short should differ at index {i}"
     
     def test_kaufmanstop_partial_params(self, test_data):
         """Test KAUFMANSTOP with partial parameters - mirrors check_kaufmanstop_partial_params"""
-        # Test with default params
+        
         result = ta_indicators.kaufmanstop(
             test_data['high'],
             test_data['low']
@@ -172,7 +172,7 @@ class TestKaufmanstop:
     
     def test_kaufmanstop_default_candles(self, test_data):
         """Test KAUFMANSTOP with default parameters - mirrors check_kaufmanstop_default_candles"""
-        # Default params from EXPECTED_OUTPUTS
+        
         expected = EXPECTED_OUTPUTS['kaufmanstop']
         result = ta_indicators.kaufmanstop(
             test_data['high'],
@@ -218,12 +218,12 @@ class TestKaufmanstop:
         )
         assert len(result) == len(test_data['high'])
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after index 240"
         
-        # Check warmup period - first + period - 1 values should be NaN
-        warmup = expected['warmup_period']  # 43
+        
+        warmup = expected['warmup_period']  
         assert np.all(np.isnan(result[:warmup])), f"Expected NaN in warmup period (first {warmup} values)"
     
     def test_kaufmanstop_streaming(self, test_data):
@@ -234,7 +234,7 @@ class TestKaufmanstop:
         direction = expected['default_params']['direction']
         ma_type = expected['default_params']['ma_type']
         
-        # Batch calculation
+        
         batch_result = ta_indicators.kaufmanstop(
             test_data['high'],
             test_data['low'],
@@ -244,7 +244,7 @@ class TestKaufmanstop:
             ma_type=ma_type
         )
         
-        # Streaming calculation
+        
         stream = ta_indicators.KaufmanstopStream(
             period=period,
             mult=mult,
@@ -259,7 +259,7 @@ class TestKaufmanstop:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming after warmup
+        
         assert len(batch_result) == len(stream_values)
         
         warmup = expected['warmup_period']
@@ -276,8 +276,8 @@ class TestKaufmanstop:
         result = ta_indicators.kaufmanstop_batch(
             test_data['high'],
             test_data['low'],
-            period_range=(22, 22, 0),  # Single period
-            mult_range=(2.0, 2.0, 0.0),  # Single mult
+            period_range=(22, 22, 0),  
+            mult_range=(2.0, 2.0, 0.0),  
             direction="long",
             ma_type="sma"
         )
@@ -285,7 +285,7 @@ class TestKaufmanstop:
         assert 'values' in result
         assert result['values'].shape == (1, len(test_data['high']))
         
-        # Extract single row and compare with expected
+        
         single_row = result['values'][0]
         assert_close(
             single_row[-5:],
@@ -296,23 +296,23 @@ class TestKaufmanstop:
     
     def test_kaufmanstop_batch_multiple_periods(self, test_data):
         """Test batch with multiple period values"""
-        high = test_data['high'][:100]  # Use smaller dataset for speed
+        high = test_data['high'][:100]  
         low = test_data['low'][:100]
         
         result = ta_indicators.kaufmanstop_batch(
             high, low,
-            period_range=(20, 24, 2),  # 20, 22, 24
+            period_range=(20, 24, 2),  
             mult_range=(2.0, 2.0, 0.0),
             direction="long",
             ma_type="sma"
         )
         
-        # Should have 3 rows * 100 cols
+        
         assert result['values'].shape == (3, 100)
         assert result['rows'] == 3
         assert result['cols'] == 100
         
-        # Verify each row matches individual calculation
+        
         periods = [20, 22, 24]
         for i, period in enumerate(periods):
             row_data = result['values'][i]
@@ -332,25 +332,25 @@ class TestKaufmanstop:
         
         result = ta_indicators.kaufmanstop_batch(
             high, low,
-            period_range=(20, 22, 2),  # 2 periods
-            mult_range=(1.5, 2.0, 0.5),  # 2 mults
+            period_range=(20, 22, 2),  
+            mult_range=(1.5, 2.0, 0.5),  
             direction="long",
             ma_type="sma"
         )
         
-        # Should have 2 * 2 = 4 combinations
+        
         assert result['rows'] == 4
         assert result['cols'] == 50
         assert len(result['periods']) == 4
         assert len(result['mults']) == 4
         
-        # Check metadata values
+        
         assert list(result['periods']) == [20, 20, 22, 22]
         assert list(result['mults']) == [1.5, 2.0, 1.5, 2.0]
     
     def test_kaufmanstop_different_ma_types(self, test_data):
         """Test various MA types"""
-        # Only test known supported MA types based on the Rust code
+        
         ma_types = ["sma", "ema", "wma", "smma"]
         results = []
         
@@ -363,14 +363,14 @@ class TestKaufmanstop:
                 )
                 results.append((ma_type, result))
             except ValueError:
-                # Some MA types might not be supported
+                
                 pass
         
-        # At least SMA should work
+        
         assert len(results) >= 1
         
-        # Different MA types should produce different results (except when they fall back to SMA)
-        # Note: Some MA types might default to SMA if not supported
+        
+        
         unique_results = []
         for ma_type, result in results:
             is_unique = True
@@ -381,7 +381,7 @@ class TestKaufmanstop:
             if is_unique:
                 unique_results.append((ma_type, result))
         
-        # We should have at least one unique result
+        
         assert len(unique_results) >= 1, "At least one MA type should produce results"
 
 

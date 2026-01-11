@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  # pragma: no cover - optional dependency
+except ImportError:  
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         handle = ti.natr_cuda_batch_dev(high, low, close, period_range=(14, 14, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  # pragma: no cover - detection path
+    except Exception as exc:  
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
@@ -76,7 +76,7 @@ class TestNatrCuda:
         low = dataset["low"].astype(np.float32)
         close = dataset["close"].astype(np.float32)
 
-        # Build small time-major matrix: 6 series × 512 rows
+        
         cols = 6
         rows = 512
         high_tm = np.full((rows, cols), np.nan, dtype=np.float32)
@@ -85,7 +85,7 @@ class TestNatrCuda:
         for s in range(cols):
             for t in range(s, rows):
                 idx = min(t, len(high) - 1)
-                # Synthesize plausible H/L around close
+                
                 base = close[idx]
                 high_tm[t, s] = base + 0.6
                 low_tm[t, s] = base - 0.55
@@ -93,9 +93,9 @@ class TestNatrCuda:
 
         period = 14
         handle = ti.natr_cuda_many_series_one_param_dev(high_tm, low_tm, close_tm, period)
-        gpu_tm = cp.asnumpy(cp.asarray(handle))  # time-major (rows, cols)
+        gpu_tm = cp.asnumpy(cp.asarray(handle))  
 
-        # CPU baseline per series
+        
         for s in range(cols):
             cpu = ti.natr(high_tm[:, s].astype(np.float64),
                           low_tm[:, s].astype(np.float64),

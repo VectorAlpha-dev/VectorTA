@@ -7,7 +7,7 @@ import numpy as np
 import sys
 import os
 
-# Add project path for imports
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 try:
@@ -33,7 +33,7 @@ class TestEhma:
     
     def test_ehma_accuracy(self, expected):
         """Test EHMA calculation produces consistent values"""
-        # Use test data from expected outputs
+        
         data = np.array(expected.get('test_data', [
             59500.0, 59450.0, 59420.0, 59380.0, 59350.0, 
             59320.0, 59310.0, 59300.0, 59280.0, 59260.0,
@@ -41,22 +41,22 @@ class TestEhma:
             59200.0, 59190.0, 59180.0,
         ]))
         
-        # Calculate EHMA with default period of 14
+        
         result = my_project.ehma(data, period=14)
         
         assert len(result) == len(data), "Result length should match input length"
         
-        # Check first 13 values are NaN (warmup period)
+        
         for i in range(13):
             assert np.isnan(result[i]), f"Value at index {i} should be NaN"
         
-        # Check values from index 13 onwards are valid
+        
         for i in range(13, len(result)):
             assert not np.isnan(result[i]), f"Value at index {i} should not be NaN"
             assert np.isfinite(result[i]), f"Value at index {i} should be finite"
         
-        # Verify specific calculation for consistency
-        # The value at index 13 should be approximately 59309.748
+        
+        
         expected_value_at_13 = expected.get('expected_value_at_13', 59309.748)
         actual_13 = result[13]
         assert_close(
@@ -66,7 +66,7 @@ class TestEhma:
             msg=f"Value at index 13 should be approximately {expected_value_at_13}"
         )
         
-        # Check that values are within reasonable range
+        
         min_val = np.min(data)
         max_val = np.max(data)
         tolerance = (max_val - min_val) * 0.1
@@ -93,17 +93,17 @@ class TestEhma:
         """Test EHMA fails with invalid period"""
         data = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
         
-        # Period zero
+        
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.ehma(data, period=0)
         
-        # Period larger than data
+        
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.ehma(data, period=10)
     
     def test_ehma_not_enough_data(self):
         """Test EHMA fails when not enough valid data"""
-        # First 10 values are NaN, only 5 valid values for period=14
+        
         data = np.concatenate([np.full(10, np.nan), np.array([1.0, 2.0, 3.0, 4.0, 5.0])])
         
         with pytest.raises(ValueError, match="Not enough valid data"):
@@ -114,12 +114,12 @@ class TestEhma:
         close = test_data['close'][:100]
         default_period = expected.get('default_params', {}).get('period', 14)
         
-        # Use default period
+        
         result = my_project.ehma(close, default_period)
         
         assert len(result) == len(close)
         
-        # Verify warmup period
+        
         warmup = expected.get('warmup_period', default_period - 1)
         assert np.all(np.isnan(result[:warmup])), f"First {warmup} values should be NaN"
         assert np.all(~np.isnan(result[warmup:])), f"Values from index {warmup} onwards should be valid"
@@ -128,25 +128,25 @@ class TestEhma:
         """Test EHMA with different period values"""
         close = test_data['close'][:100]
         
-        # Use batch periods from expected outputs
+        
         batch_periods = expected.get('batch_periods', [10, 14, 20, 28])
         
         results = {}
         for period in batch_periods:
             results[period] = my_project.ehma(close, period=period)
         
-        # All should have same length as input
+        
         for period, result in results.items():
             assert len(result) == len(close), f"Result for period {period} has wrong length"
             
-            # Check warmup period
+            
             warmup = period - 1
             assert np.all(np.isnan(result[:warmup])), f"Period {period}: First {warmup} values should be NaN"
             assert np.all(~np.isnan(result[warmup:])), f"Period {period}: Values from index {warmup} should be valid"
         
-        # Results should be different with different periods
+        
         if len(batch_periods) >= 2:
-            # Compare after all warmup periods
+            
             max_warmup = max(batch_periods) - 1
             for i in range(len(batch_periods) - 1):
                 p1, p2 = batch_periods[i], batch_periods[i + 1]
@@ -167,8 +167,8 @@ class TestEhma:
         result = my_project.ehma(data, period=10)
         
         assert len(result) == len(data)
-        # Should handle leading NaNs and start calculating when enough valid data
-        # First valid index is 2, so warmup ends at 2 + 10 - 1 = 11
+        
+        
         assert np.all(np.isnan(result[:11]))
         assert np.all(~np.isnan(result[11:]))
     
@@ -176,34 +176,34 @@ class TestEhma:
         """Test EHMA batch processing with multiple periods"""
         close = test_data['close'][:100]
         
-        # Use batch range from expected outputs
+        
         batch_range = expected.get('batch_range', [10, 30, 10])
         
-        # Test batch processing
+        
         batch_result = my_project.ehma_batch(
             close,
             period_range=tuple(batch_range)
         )
         
-        # Verify structure
+        
         assert 'periods' in batch_result, "Batch result should have 'periods' key"
         assert 'values' in batch_result, "Batch result should have 'values' key"
         
-        # Check periods
+        
         expected_periods = list(range(batch_range[0], batch_range[1] + 1, batch_range[2]))
         assert np.array_equal(batch_result['periods'], expected_periods), \
             f"Expected periods {expected_periods}, got {batch_result['periods']}"
         
-        # Check shape
+        
         num_periods = len(expected_periods)
         assert batch_result['values'].shape == (num_periods, len(close)), \
             f"Expected shape ({num_periods}, {len(close)}), got {batch_result['values'].shape}"
         
-        # Verify each row has proper warmup
+        
         for i, period in enumerate(expected_periods):
             row = batch_result['values'][i]
             warmup = period - 1
-            # Check NaN pattern
+            
             assert np.all(np.isnan(row[:warmup])), \
                 f"Period {period}: First {warmup} values should be NaN"
             assert np.all(~np.isnan(row[warmup:])), \
@@ -218,21 +218,21 @@ class TestEhma:
             59200.0, 59190.0, 59180.0,
         ])
         
-        # Create stream with period 14
+        
         stream = my_project.EhmaStream(period=14)
         
-        # Process data through stream
+        
         stream_results = []
         for value in data:
             stream_results.append(stream.update(value))
         
-        # Compare with batch calculation
+        
         batch_result = my_project.ehma(data, period=14)
         
-        # Convert None to NaN for comparison
+        
         stream_results_np = np.array([v if v is not None else np.nan for v in stream_results])
         
-        # Results should match
+        
         assert_close(
             stream_results_np,
             batch_result,
@@ -244,7 +244,7 @@ class TestEhma:
         """Test EHMA with real market data"""
         close = test_data['close'][:500]
             
-        # Test with different periods
+        
         batch_periods = expected.get('batch_periods', [10, 14, 20, 28])
         
         for period in batch_periods:
@@ -252,14 +252,14 @@ class TestEhma:
             
             assert len(result) == len(close), f"Period {period}: Result length mismatch"
             
-            # EHMA should smooth the data
-            # Check that the indicator produces reasonable values
+            
+            
             valid_values = result[~np.isnan(result)]
             
             assert len(valid_values) > 0, f"Period {period}: No valid values produced"
             assert np.all(np.isfinite(valid_values)), f"Period {period}: Found infinite values"
             
-            # Values should be within reasonable range of input
+            
             min_val = np.min(close)
             max_val = np.max(close)
             tolerance = (max_val - min_val) * 0.1
@@ -275,12 +275,12 @@ class TestEhma:
         close = test_data['close'][:100]
         period = expected.get('default_params', {}).get('period', 14)
         
-        # Run EHMA multiple times
+        
         result1 = my_project.ehma(close, period=period)
         result2 = my_project.ehma(close, period=period)
         result3 = my_project.ehma(close, period=period)
         
-        # All results should be identical
+        
         assert_close(
             result1, result2, 
             rtol=1e-15, atol=1e-15,
@@ -297,25 +297,25 @@ class TestEhma:
         close = test_data['close'][:200]
         period = expected.get('default_params', {}).get('period', 14)
         
-        # First pass
+        
         first_result = my_project.ehma(close, period=period)
         assert len(first_result) == len(close)
         
-        # Second pass - apply EHMA to EHMA output
+        
         second_result = my_project.ehma(first_result, period=period)
         assert len(second_result) == len(first_result)
         
-        # Check that warmup period compounds
+        
         first_warmup = period - 1
         second_warmup = first_warmup + period - 1
         
-        # First pass should have NaN only in first warmup period
+        
         assert np.all(np.isnan(first_result[:first_warmup]))
         
-        # Second pass should have extended warmup
+        
         assert np.all(np.isnan(second_result[:second_warmup]))
         
-        # Values after warmup should be valid
+        
         assert np.all(~np.isnan(second_result[second_warmup:]))
 
 

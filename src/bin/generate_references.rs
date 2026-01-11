@@ -1,3 +1,5 @@
+extern crate vector_ta as my_project;
+
 use my_project::indicators::acosc::{acosc, AcoscData, AcoscInput, AcoscParams};
 use my_project::indicators::ad::{ad, AdData, AdInput, AdParams};
 use my_project::indicators::adosc::{adosc, AdoscData, AdoscInput, AdoscParams};

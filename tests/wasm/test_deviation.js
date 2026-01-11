@@ -25,7 +25,7 @@ let testData;
 test.before(async () => {
     
     try {
-        const wasmPath = path.join(__dirname, '../../pkg/my_project.js');
+        const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
         const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
@@ -39,11 +39,10 @@ test.before(async () => {
             const { createRequire } = await import('node:module');
             const require = createRequire(import.meta.url);
             
-            
-            wasm = require(path.join(__dirname, 'my_project.cjs'));
+            wasm = require(path.join(__dirname, '../../pkg/vector_ta.js'));
         } catch (fallbackErr) {
             console.error('Failed to load WASM module via pkg and local wrapper.');
-            console.error('Hint: run `wasm-pack build --features wasm --target nodejs` and ensure Node >=18.');
+            console.error('Hint: run `wasm-pack build --target nodejs --out-name vector_ta --features wasm` and ensure Node >=18.');
             throw fallbackErr;
         }
     }

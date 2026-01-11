@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    # If not in virtual environment, try to import from installed location
+    
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -29,11 +29,11 @@ class TestDecycler:
         """Test Decycler with partial parameters (None values) - mirrors check_decycler_partial_params"""
         close = test_data['close']
         
-        # Test with all default params (None)
-        result = ta_indicators.decycler(close)  # Using defaults
+        
+        result = ta_indicators.decycler(close)  
         assert len(result) == len(close)
         
-        # Test with partial params
+        
         result = ta_indicators.decycler(close, hp_period=50)
         assert len(result) == len(close)
         
@@ -47,12 +47,12 @@ class TestDecycler:
         result = ta_indicators.decycler(
             close,
             hp_period=125,
-            k=None  # Default k=0.707
+            k=None  
         )
         
         assert len(result) == len(close)
         
-        # Expected values from Rust tests
+        
         expected_last_5 = [
             60289.96384058519,
             60204.010366691065,
@@ -61,7 +61,7 @@ class TestDecycler:
             59934.26876964316
         ]
         
-        # Check last 5 values match expected
+        
         assert_close(
             result[-5:], 
             expected_last_5,
@@ -73,7 +73,7 @@ class TestDecycler:
         """Test Decycler with default parameters"""
         close = test_data['close']
         
-        # Default params: hp_period=125, k=0.707
+        
         result = ta_indicators.decycler(close)
         assert len(result) == len(close)
     
@@ -122,11 +122,11 @@ class TestDecycler:
         """Test Decycler applied twice (re-input) - mirrors check_decycler_reinput"""
         close = test_data['close']
         
-        # First pass
+        
         first_result = ta_indicators.decycler(close, hp_period=30)
         assert len(first_result) == len(close)
         
-        # Second pass - apply Decycler to Decycler output
+        
         second_result = ta_indicators.decycler(first_result, hp_period=30)
         assert len(second_result) == len(first_result)
     
@@ -137,7 +137,7 @@ class TestDecycler:
         result = ta_indicators.decycler(close, hp_period=125)
         assert len(result) == len(close)
         
-        # After warmup period (240), no NaN values should exist
+        
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
     
@@ -148,57 +148,57 @@ class TestDecycler:
         
         result = ta_indicators.decycler(close, hp_period=hp_period)
         
-        # Find first non-NaN index
+        
         first_non_nan = np.where(~np.isnan(result))[0]
         if len(first_non_nan) > 0:
             first_idx = first_non_nan[0]
-            # According to Rust implementation, warmup is first + 2
-            # where first is the first non-NaN in input data
+            
+            
             first_input = np.where(~np.isnan(close))[0][0]
             expected_warmup = first_input + 2
             
             assert first_idx == expected_warmup, f"Warmup period mismatch: expected {expected_warmup}, got {first_idx}"
             
-            # Verify all values before warmup are NaN
+            
             assert np.all(np.isnan(result[:expected_warmup])), "Expected NaN values during warmup period"
     
     def test_decycler_partial_nan_input(self, test_data):
         """Test Decycler with data containing some NaN values"""
-        # Create simple test data without NaN
-        data = np.arange(1.0, 101.0)  # 100 points
         
-        # Inject a few NaN values
+        data = np.arange(1.0, 101.0)  
+        
+        
         data_with_nan = data.copy()
         data_with_nan[10] = np.nan
         data_with_nan[11] = np.nan
         
-        # Run decycler - it should handle the NaN values
+        
         result = ta_indicators.decycler(data_with_nan, hp_period=5)
         assert len(result) == len(data_with_nan)
         
-        # The test verifies that the indicator can be called with data containing NaN
-        # The actual behavior with NaN in the middle might vary - 
-        # it could propagate NaN or restart calculation after the gap
+        
+        
+        
     
     def test_decycler_edge_case_k_values(self):
         """Test Decycler with edge case k values"""
-        data = np.arange(1.0, 101.0)  # 100 data points
+        data = np.arange(1.0, 101.0)  
         
-        # Test very small positive k (just above 0)
+        
         result_small = ta_indicators.decycler(data, hp_period=10, k=0.001)
         assert len(result_small) == len(data)
         
-        # Test k = 0.707 (default critical damping)
+        
         result_default = ta_indicators.decycler(data, hp_period=10, k=0.707)
         assert len(result_default) == len(data)
         
-        # Test large k value
+        
         result_large = ta_indicators.decycler(data, hp_period=10, k=10.0)
         assert len(result_large) == len(data)
         
-        # Results should differ based on k value
-        # After warmup, check that different k values produce different results
-        warmup_end = 12  # first + 2 where first=0 for this data
+        
+        
+        warmup_end = 12  
         if len(data) > warmup_end + 10:
             check_idx = warmup_end + 5
             assert result_small[check_idx] != result_default[check_idx], "Different k values should produce different results"
@@ -206,24 +206,24 @@ class TestDecycler:
     
     def test_decycler_input_types(self, test_data):
         """Test Decycler with different input types"""
-        close = test_data['close'][:100]  # Use smaller dataset
+        close = test_data['close'][:100]  
         
-        # Test with Python list - convert to numpy array first
+        
         close_list = list(close)
         result_list = ta_indicators.decycler(np.array(close_list), hp_period=30)
         assert len(result_list) == len(close)
         
-        # Test with numpy float64 (default and expected type)
+        
         close_f64 = np.array(close, dtype=np.float64)
         result_f64 = ta_indicators.decycler(close_f64, hp_period=30)
         assert len(result_f64) == len(close)
         
-        # Test with numpy float32 - convert to float64 first as the binding expects float64
+        
         close_f32 = np.array(close, dtype=np.float32)
         result_f32 = ta_indicators.decycler(close_f32.astype(np.float64), hp_period=30)
         assert len(result_f32) == len(close)
         
-        # Both should produce very similar results (minor differences due to float32->float64 conversion)
+        
         assert_close(result_f32, result_f64, rtol=1e-6, msg="Results should be very similar after conversion")
     
     def test_decycler_streaming(self, test_data):
@@ -232,10 +232,10 @@ class TestDecycler:
         hp_period = 125
         k = 0.707
         
-        # Batch calculation
+        
         batch_result = ta_indicators.decycler(close, hp_period=hp_period, k=k)
         
-        # Streaming calculation
+        
         stream = ta_indicators.DecyclerStream(hp_period=hp_period, k=k)
         stream_values = []
         
@@ -245,25 +245,25 @@ class TestDecycler:
         
         stream_values = np.array(stream_values)
         
-        # Compare batch vs streaming
+        
         assert len(batch_result) == len(stream_values)
         
-        # Both batch and streaming should have same warmup behavior
-        # According to the fix, warmup is first + 2 where first is first non-NaN input
+        
+        
         first_input = np.where(~np.isnan(close))[0][0]
         expected_warmup = first_input + 2
         
-        # Check warmup period for both
+        
         for i in range(expected_warmup):
             assert np.isnan(batch_result[i]), f"Expected NaN in batch during warmup at index {i}"
             assert np.isnan(stream_values[i]), f"Expected NaN in stream during warmup at index {i}"
         
-        # After warmup, compare values where both are valid
+        
         for i in range(expected_warmup, len(batch_result)):
             if np.isnan(batch_result[i]) and np.isnan(stream_values[i]):
                 continue
             if np.isnan(batch_result[i]) or np.isnan(stream_values[i]):
-                # One is NaN but not both - this might be OK for edge cases
+                
                 continue
             assert_close(batch_result[i], stream_values[i], rtol=1e-9, atol=1e-9, 
                         msg=f"Decycler streaming mismatch at index {i}")
@@ -274,8 +274,8 @@ class TestDecycler:
         
         result = ta_indicators.decycler_batch(
             close,
-            hp_period_range=(125, 125, 0),  # Default period only
-            k_range=(0.707, 0.707, 0.0)  # Default k only
+            hp_period_range=(125, 125, 0),  
+            k_range=(0.707, 0.707, 0.0)  
         )
         
         assert 'values' in result
@@ -284,11 +284,11 @@ class TestDecycler:
         assert 'rows' in result
         assert 'cols' in result
         
-        # Should have 1 combination (default params)
+        
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
         
-        # Extract the single row
+        
         default_row = result['values'][0]
         expected_last_5 = [
             60289.96384058519,
@@ -298,7 +298,7 @@ class TestDecycler:
             59934.26876964316
         ]
         
-        # Check last 5 values match
+        
         assert_close(
             default_row[-5:],
             expected_last_5,
@@ -312,17 +312,17 @@ class TestDecycler:
         
         result = ta_indicators.decycler_batch(
             close,
-            hp_period_range=(100, 150, 25),  # 100, 125, 150
-            k_range=(0.5, 0.7, 0.1)  # 0.5, 0.6, 0.7
+            hp_period_range=(100, 150, 25),  
+            k_range=(0.5, 0.7, 0.1)  
         )
         
-        # Should have 3 * 3 = 9 combinations
+        
         assert result['values'].shape[0] == 9
         assert result['values'].shape[1] == len(close)
         assert len(result['hp_periods']) == 9
         assert len(result['ks']) == 9
         
-        # Verify parameter combinations are correct
+        
         expected_hp_periods = [100, 100, 100, 125, 125, 125, 150, 150, 150]
         expected_ks = [0.5, 0.6, 0.7, 0.5, 0.6, 0.7, 0.5, 0.6, 0.7]
         
@@ -330,8 +330,8 @@ class TestDecycler:
             assert result['hp_periods'][i] == hp, f"hp_period mismatch at index {i}"
             assert_close(result['ks'][i], k, rtol=1e-9, msg=f"k value mismatch at index {i}")
         
-        # Verify each row matches individual calculation for spot checks
-        # Check row 4 (hp_period=125, k=0.6)
+        
+        
         row_idx = 4
         single_result = ta_indicators.decycler(close, hp_period=125, k=0.6)
         assert_close(
@@ -346,21 +346,21 @@ class TestDecycler:
         all_nan = np.full(100, np.nan)
         
         with pytest.raises(ValueError, match="decycler: All values are NaN"):
-            ta_indicators.decycler(all_nan, hp_period=50)  # Use period < length to test NaN check
+            ta_indicators.decycler(all_nan, hp_period=50)  
     
     def test_decycler_kernel_parameter(self, test_data):
         """Test Decycler with different kernel parameters"""
         close = test_data['close']
         
-        # Test with scalar kernel
+        
         result_scalar = ta_indicators.decycler(close, kernel="scalar")
         assert len(result_scalar) == len(close)
         
-        # Test with auto kernel (default)
+        
         result_auto = ta_indicators.decycler(close, kernel=None)
         assert len(result_auto) == len(close)
         
-        # Test with invalid kernel
+        
         with pytest.raises(ValueError, match="Unknown kernel"):
             ta_indicators.decycler(close, kernel="invalid")
 

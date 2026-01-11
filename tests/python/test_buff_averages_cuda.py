@@ -7,14 +7,14 @@ import pytest
 
 try:
     import cupy as cp
-except Exception:  # pragma: no cover
-    # Be resilient to environments where CuPy is installed but broken or mismatched
-    # (e.g., NumPy/SciPy binary ABI issues). Treat as unavailable and skip.
+except Exception:  
+    
+    
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  # pragma: no cover
+except ImportError:  
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -40,7 +40,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(fast_handle)
         _ = cp.asarray(slow_handle)
         return True
-    except Exception as exc:  # pragma: no cover - conservative guard
+    except Exception as exc:  
         message = str(exc).lower()
         if "cuda not available" in message or "ptx" in message or "nvcc" in message:
             return False
